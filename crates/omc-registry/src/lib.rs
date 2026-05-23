@@ -556,6 +556,7 @@ pub struct LinkOptions {
     pub pypi_find_links: Vec<String>,
     pub pypi_no_index: bool,
     pub pypi_require_hashes: bool,
+    pub python_target_dir: Option<PathBuf>,
     pub npm_local_paths: Vec<PathBuf>,
     pub python_local_paths: Vec<PathBuf>,
     pub python_vcs_requirements: Vec<PythonVcsRequirement>,
@@ -583,6 +584,7 @@ impl LinkOptions {
             pypi_find_links: Vec::new(),
             pypi_no_index: false,
             pypi_require_hashes: false,
+            python_target_dir: None,
             npm_local_paths: Vec::new(),
             python_local_paths: Vec::new(),
             python_vcs_requirements: Vec::new(),
@@ -930,7 +932,11 @@ pub fn install_project(options: &LinkOptions) -> Result<InstallReport> {
     let mut options = options.clone();
     lock_project_options(&mut options)?;
     let lock = read_lockfile(options.project_dir.join(LOCKFILE))?;
-    let mut report = install_lock(&options.project_dir, &lock)?;
+    let mut report = install_lock_with_python_target(
+        &options.project_dir,
+        &lock,
+        options.python_target_dir.as_deref(),
+    )?;
     report.npm_bins += install_npm_project_links(
         &options.project_dir,
         &report.node_modules,
@@ -991,7 +997,11 @@ pub fn install_locked_project(options: &LinkOptions) -> Result<InstallReport> {
         .packages
         .retain(|package| retained.contains(&locked_package_key(package)));
 
-    let mut report = install_lock(&options.project_dir, &selected)?;
+    let mut report = install_lock_with_python_target(
+        &options.project_dir,
+        &selected,
+        options.python_target_dir.as_deref(),
+    )?;
     report.npm_bins += install_npm_project_links(
         &options.project_dir,
         &report.node_modules,
@@ -5646,19 +5656,37 @@ pub fn install_locked_packages(project_dir: impl AsRef<Path>) -> Result<InstallR
 }
 
 fn install_lock(project_dir: &Path, lock: &OmcLock) -> Result<InstallReport> {
+    install_lock_with_python_target(project_dir, lock, None)
+}
+
+fn install_lock_with_python_target(
+    project_dir: &Path,
+    lock: &OmcLock,
+    python_target_dir: Option<&Path>,
+) -> Result<InstallReport> {
     let node_modules = project_dir.join("node_modules");
     let npm_bin_dir = node_modules.join(".bin");
-    let python_site_packages = project_dir
+    let default_python_site_packages = project_dir
         .join(".omc")
         .join("python")
         .join("site-packages");
-    let python_bin_dir = project_dir.join(".omc").join("python").join("bin");
+    let python_site_packages = match python_target_dir {
+        Some(path) if path.is_absolute() => path.to_path_buf(),
+        Some(path) => project_dir.join(path),
+        None => default_python_site_packages,
+    };
+    let python_bin_dir = match python_target_dir {
+        Some(_) => python_site_packages.join("bin"),
+        None => project_dir.join(".omc").join("python").join("bin"),
+    };
     let python_sdists_dir = project_dir.join(".omc").join("python").join("sdists");
-    let python_local_paths = python_local_paths_file(project_dir);
+    let python_local_paths = python_local_paths_file_for_site_packages(&python_site_packages)?;
 
     remove_path_if_exists(&node_modules)?;
-    remove_path_if_exists(&python_site_packages)?;
-    remove_path_if_exists(&python_bin_dir)?;
+    if python_target_dir.is_none() {
+        remove_path_if_exists(&python_site_packages)?;
+        remove_path_if_exists(&python_bin_dir)?;
+    }
     remove_path_if_exists(&python_sdists_dir)?;
     remove_path_if_exists(&python_local_paths)?;
 
@@ -5755,12 +5783,7 @@ fn install_python_local_paths(
         return Ok(0);
     }
 
-    let local_paths_file = site_packages
-        .parent()
-        .map(|python_dir| python_dir.join("local-paths"))
-        .ok_or_else(|| {
-            OmcRegistryError::UnsupportedSpec("missing python install directory".to_owned())
-        })?;
+    let local_paths_file = python_local_paths_file_for_site_packages(site_packages)?;
     fs::write(
         local_paths_file,
         format!("{}\n", lines.into_iter().collect::<Vec<_>>().join("\n")),
@@ -5768,8 +5791,15 @@ fn install_python_local_paths(
     install_python_entry_point_scripts(&entry_points, bin_dir)
 }
 
-fn python_local_paths_file(project_dir: &Path) -> PathBuf {
-    project_dir.join(".omc").join("python").join("local-paths")
+fn python_local_paths_file_for_site_packages(site_packages: &Path) -> Result<PathBuf> {
+    let parent = site_packages.parent().ok_or_else(|| {
+        OmcRegistryError::UnsupportedSpec("missing python install directory".to_owned())
+    })?;
+    if site_packages.file_name().and_then(|name| name.to_str()) == Some("site-packages") {
+        Ok(parent.join("local-paths"))
+    } else {
+        Ok(site_packages.join(".omc-local-paths"))
+    }
 }
 
 fn read_locked_archive(project_dir: &Path, package: &LockedPackage) -> Result<Vec<u8>> {
@@ -6792,10 +6822,13 @@ import re
 import sys
 
 _python_dir = Path(__file__).resolve().parents[1]
-_site_packages = str(_python_dir / "site-packages")
+_site_packages_dir = _python_dir / "site-packages"
+_site_packages = str(_site_packages_dir if _site_packages_dir.exists() else _python_dir)
 _project_paths = [_site_packages]
-_local_paths = _python_dir / "local-paths"
-if _local_paths.exists():
+_local_paths_files = [_python_dir / "local-paths", _python_dir / ".omc-local-paths"]
+for _local_paths in _local_paths_files:
+    if not _local_paths.exists():
+        continue
     _project_paths.extend(
         line.strip()
         for line in _local_paths.read_text().splitlines()
@@ -12761,6 +12794,72 @@ packages:
             .unwrap();
         assert!(output.status.success());
         assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "sdist-ok");
+    }
+
+    #[test]
+    fn installs_pure_python_archives_into_target_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let bytes = python_sdist_for_test(&[
+            (
+                "pyproject.toml",
+                r#"
+                [project]
+                name = "pure-target"
+                version = "1.0.0"
+
+                [project.scripts]
+                pure-target-cli = "puretarget.cli:main"
+                "#,
+            ),
+            ("src/puretarget/__init__.py", "VALUE = 'target-ok'\n"),
+            (
+                "src/puretarget/cli.py",
+                "from puretarget import VALUE\n\ndef main():\n    print(VALUE)\n",
+            ),
+        ]);
+        let archive = dir
+            .path()
+            .join(".omc")
+            .join("cache")
+            .join("pure-target-1.0.0.tar.gz");
+        fs::create_dir_all(archive.parent().unwrap()).unwrap();
+        fs::write(&archive, &bytes).unwrap();
+
+        let mut package = locked_package_for_test(Ecosystem::Pypi, "pure-target", "1.0.0");
+        package.source_url = "https://example.invalid/pure-target-1.0.0.tar.gz".to_owned();
+        package.archive = relative_path(dir.path(), &archive);
+        package.sha256 = sha256_hex(&bytes);
+        write_signed_artifact_for_test(dir.path(), &package);
+
+        let target = dir.path().join("vendor");
+        fs::create_dir_all(&target).unwrap();
+        fs::write(target.join("keep.txt"), "keep\n").unwrap();
+
+        let report = install_lock_with_python_target(
+            dir.path(),
+            &OmcLock {
+                version: 1,
+                packages: vec![package],
+                python_vcs: Vec::new(),
+            },
+            Some(&target),
+        )
+        .unwrap();
+        assert_eq!(report.pypi_packages, 1);
+        assert_eq!(report.python_site_packages, target);
+        assert!(dir
+            .path()
+            .join("vendor")
+            .join("puretarget")
+            .join("__init__.py")
+            .exists());
+        assert!(dir.path().join("vendor").join("keep.txt").exists());
+
+        let output = Command::new(dir.path().join("vendor/bin/pure-target-cli"))
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "target-ok");
     }
 
     #[test]

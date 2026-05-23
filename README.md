@@ -120,6 +120,7 @@ cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm bin
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip install -r requirements.txt -c constraints.txt
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip install requests==2.32.3 --allow-all-host
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip install -e ../local-package
+cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip install --target vendor ./dist/local_pkg-1.0.0.tar.gz
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip install ./dist/local_pkg-1.0.0-py3-none-any.whl
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip freeze
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip show requests
@@ -384,11 +385,11 @@ Supported now:
 - `omc pip` compatibility commands for common `install`, `uninstall`, `freeze`,
   `check`, `show`, and `list --format=columns|freeze|json` flows, including
   `-r`, index URL, constraints, extra-index, find-links, no-index,
-  require-hashes, trusted-host, and binary-policy install flags without
-  delegating to pip; direct `pip install -e PATH` and `pip install ./path`
-  local directory installs; direct `pip install ./archive.whl`,
-  `./archive.tar.gz`, and HTTPS archive URL installs; and a direct `pip`
-  compatibility binary
+  require-hashes, target-directory, trusted-host, and binary-policy install
+  flags without delegating to pip; direct `pip install -e PATH` and
+  `pip install ./path` local directory installs; direct
+  `pip install ./archive.whl`, `./archive.tar.gz`, and HTTPS archive URL
+  installs; and a direct `pip` compatibility binary
 - isolated `omc python` execution that uses OMC site-packages without ambient
   user/global Python site-packages or startup/hook environment variables
 - isolated Node execution wrappers that remove ambient `NODE_PATH` module
