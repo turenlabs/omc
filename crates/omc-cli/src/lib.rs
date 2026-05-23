@@ -1,5 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
-use std::io::Read as _;
+use std::io::{self, Read as _};
 use std::net::Ipv4Addr;
 use std::path::{Path, PathBuf};
 use std::process::{Command as ProcessCommand, ExitCode};
@@ -271,6 +271,9 @@ enum NpmCompatAction {
     Init {
         action: NpmInitAction,
     },
+    Create {
+        action: NpmCreateAction,
+    },
     PackageVersion {
         action: NpmVersionAction,
     },
@@ -500,6 +503,15 @@ struct NpmInitAction {
     scope: Option<String>,
     private: bool,
     package_type: Option<String>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct NpmCreateAction {
+    initializer: String,
+    args: Vec<String>,
+    npm_registry: Option<String>,
+    allow: Vec<String>,
+    allow_all_host: bool,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -1545,13 +1557,7 @@ struct TempOmcProject {
 
 impl TempOmcProject {
     fn new(prefix: &str, source_project_dir: &Path) -> Result<Self, OmcRegistryError> {
-        let nonce = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_err(|error| OmcRegistryError::UnsupportedSpec(error.to_string()))?
-            .as_nanos();
-        let path = env::temp_dir().join(format!("omc-{prefix}-{}-{nonce}", std::process::id()));
-        let _ = fs::remove_dir_all(&path);
-        fs::create_dir_all(&path)?;
+        let path = Self::create_path(prefix)?;
         for file in [
             "omc.toml",
             "package.json",
@@ -1566,6 +1572,23 @@ impl TempOmcProject {
             }
         }
         Ok(Self { path })
+    }
+
+    fn empty(prefix: &str) -> Result<Self, OmcRegistryError> {
+        Ok(Self {
+            path: Self::create_path(prefix)?,
+        })
+    }
+
+    fn create_path(prefix: &str) -> Result<PathBuf, OmcRegistryError> {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|error| OmcRegistryError::UnsupportedSpec(error.to_string()))?
+            .as_nanos();
+        let path = env::temp_dir().join(format!("omc-{prefix}-{}-{nonce}", std::process::id()));
+        let _ = fs::remove_dir_all(&path);
+        fs::create_dir_all(&path)?;
+        Ok(path)
     }
 
     fn path(&self) -> &Path {
@@ -1981,6 +2004,30 @@ fn run_project_command(
     Ok(exit_code(status.code()))
 }
 
+fn run_npm_create(
+    project_dir: &Path,
+    action: NpmCreateAction,
+) -> Result<ExitCode, OmcRegistryError> {
+    let package_spec = npm_create_package_spec(&action.initializer)?;
+    let spec = parse_package_spec(&package_spec, Some(Ecosystem::Npm))?;
+    let temp_project = TempOmcProject::empty("npm-create")?;
+
+    let mut options = LinkOptions::new(temp_project.path());
+    options.allowed_capabilities = parse_grants(&action.allow, action.allow_all_host)?;
+    options.npm_registry_url = action.npm_registry;
+    options.discover_project_requirements = false;
+    options.save_manifest_dependency = true;
+
+    add_package_graph(&spec, &options)?;
+    install_project(&options)?;
+
+    let command = npm_create_bin_name(temp_project.path(), &spec.name)?;
+    let mut process = ProcessCommand::new(command);
+    apply_project_runtime_env_for_cwd(&mut process, temp_project.path(), project_dir)?;
+    let status = process.args(action.args).status()?;
+    Ok(exit_code(status.code()))
+}
+
 #[derive(Debug)]
 struct NpmInstallCompatRequest {
     specs: Vec<String>,
@@ -2373,6 +2420,7 @@ fn run_npm_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
         NpmCompatAction::Help { topic } => print_npm_help(topic.as_deref()),
         NpmCompatAction::Version => println!("{}", env!("CARGO_PKG_VERSION")),
         NpmCompatAction::Init { action } => print_npm_init(project_dir, action)?,
+        NpmCompatAction::Create { action } => return run_npm_create(project_dir, action),
         NpmCompatAction::PackageVersion { action } => print_npm_version(project_dir, action)?,
         NpmCompatAction::Link { action } => return run_npm_link_compat(project_dir, action),
         NpmCompatAction::Install {
@@ -3513,8 +3561,12 @@ fn npm_help_text(topic: Option<&str>) -> String {
             &["Read or bump package.json version. Supports --json, --preid, --allow-same-version, and --no-git-tag-version."],
         ),
         Some("init") => npm_command_help(
-            "npm init -y",
-            &["Create or update package.json with npm-compatible defaults."],
+            "npm init [-y] [<initializer>] [-- <args>...]",
+            &[
+                "Create or update package.json with npm-compatible defaults.",
+                "With an initializer, OMC resolves and installs the matching create-* package in an isolated temp project, then runs its bin with the current project as cwd.",
+                "Aliases: create, innit. Supports --registry, --allow, and --allow-all-host for initializer package resolution.",
+            ],
         ),
         Some("path") => npm_command_help(
             "npm <bin|root|prefix>",
@@ -3532,7 +3584,7 @@ fn npm_general_help_text() -> String {
         "npm <command>",
         &[
             "OMC npm compatibility runs supported npm workflows through OMC's verifier, lockfile, cache, and project-local runtime paths.",
-            "Supported commands: install, link, install-test, ci, install-ci-test, remove, run, test, start, stop, restart, exec, list, query, explain, audit, outdated, fund, prune, dedupe, rebuild, cache, pkg, version, pack, publish, unpublish, deprecate, undeprecate, diff, search, star, unstar, stars, ping, whoami, login, adduser, logout, token, profile, owner, access, org, team, dist-tag, sbom, view, docs, repo, bugs, home, config, init, bin, root, prefix.",
+            "Supported commands: install, link, install-test, ci, install-ci-test, remove, run, test, start, stop, restart, exec, list, query, explain, audit, outdated, fund, prune, dedupe, rebuild, cache, pkg, version, pack, publish, unpublish, deprecate, undeprecate, diff, search, star, unstar, stars, ping, whoami, login, adduser, logout, token, profile, owner, access, org, team, dist-tag, sbom, view, docs, repo, bugs, home, config, init, create, bin, root, prefix.",
             "Use `npm help <command>` for focused OMC compatibility notes.",
         ],
     )
@@ -3596,7 +3648,7 @@ fn npm_help_topic(topic: &str) -> Option<&'static str> {
         "cache" => Some("cache"),
         "pkg" => Some("pkg"),
         "version" => Some("version"),
-        "init" => Some("init"),
+        "init" | "create" | "innit" => Some("init"),
         "bin" | "root" | "prefix" => Some("path"),
         _ => Some("unknown"),
     }
@@ -10978,6 +11030,106 @@ fn npm_package_bin_name(package_name: &str) -> &str {
         .map_or(package_name, |(_, name)| name)
 }
 
+fn npm_create_package_spec(initializer: &str) -> Result<String, OmcRegistryError> {
+    let initializer = initializer.trim();
+    if initializer.is_empty() {
+        return Err(OmcRegistryError::UnsupportedSpec(
+            "npm create needs an initializer package".to_owned(),
+        ));
+    }
+
+    let (name, version) = npm_create_split_version(initializer)?;
+    let package = if let Some(scoped) = name.strip_prefix('@') {
+        if scoped.is_empty() {
+            return Err(OmcRegistryError::UnsupportedSpec(format!(
+                "invalid npm create initializer `{initializer}`"
+            )));
+        }
+        if let Some((scope, package)) = scoped.split_once('/') {
+            if scope.is_empty() || package.is_empty() {
+                return Err(OmcRegistryError::UnsupportedSpec(format!(
+                    "invalid npm create initializer `{initializer}`"
+                )));
+            }
+            format!("@{scope}/create-{package}")
+        } else {
+            format!("@{scoped}/create")
+        }
+    } else {
+        format!("create-{name}")
+    };
+
+    Ok(match version {
+        Some(version) => format!("{package}@{version}"),
+        None => package,
+    })
+}
+
+fn npm_create_split_version(initializer: &str) -> Result<(&str, Option<&str>), OmcRegistryError> {
+    let version_at = if let Some(scoped) = initializer.strip_prefix('@') {
+        if let Some(slash_index) = scoped.find('/') {
+            let absolute_slash_index = slash_index + 1;
+            initializer
+                .rfind('@')
+                .filter(|index| *index > absolute_slash_index)
+        } else {
+            initializer.rfind('@').filter(|index| *index > 0)
+        }
+    } else {
+        initializer.rfind('@').filter(|index| *index > 0)
+    };
+
+    let (name, version) = match version_at {
+        Some(index) => (&initializer[..index], Some(&initializer[index + 1..])),
+        None => (initializer, None),
+    };
+    if name.is_empty() || version == Some("") {
+        return Err(OmcRegistryError::UnsupportedSpec(format!(
+            "invalid npm create initializer `{initializer}`"
+        )));
+    }
+    Ok((name, version))
+}
+
+fn npm_create_bin_name(project_dir: &Path, package_name: &str) -> Result<String, OmcRegistryError> {
+    let bin_dir = project_dir.join("node_modules").join(".bin");
+    let default = npm_package_bin_name(package_name).to_owned();
+    if bin_dir.join(&default).exists() {
+        return Ok(default);
+    }
+
+    let bins = npm_create_bin_names(&bin_dir)?;
+    match bins.as_slice() {
+        [bin] => Ok(bin.clone()),
+        [] => Err(OmcRegistryError::UnsupportedSpec(format!(
+            "npm create initializer `{package_name}` did not install an executable bin"
+        ))),
+        _ => Err(OmcRegistryError::UnsupportedSpec(format!(
+            "npm create initializer `{package_name}` installed multiple bins: {}",
+            bins.join(", ")
+        ))),
+    }
+}
+
+fn npm_create_bin_names(bin_dir: &Path) -> Result<Vec<String>, OmcRegistryError> {
+    let entries = match fs::read_dir(bin_dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(error.into()),
+    };
+    let mut names = Vec::new();
+    for entry in entries {
+        let entry = entry?;
+        if entry.path().is_dir() {
+            continue;
+        }
+        names.push(entry.file_name().to_string_lossy().into_owned());
+    }
+    names.sort();
+    names.dedup();
+    Ok(names)
+}
+
 fn collect_npm_package_config_env(
     prefix: &str,
     value: &serde_json::Value,
@@ -11137,7 +11289,7 @@ fn parse_npm_compat_action(args: &[String]) -> Result<NpmCompatAction, OmcRegist
 
     match command {
         "--version" | "-v" => Ok(NpmCompatAction::Version),
-        "init" => parse_npm_init_args(&args[1..]),
+        "init" | "create" | "innit" => parse_npm_init_args(command, &args[1..]),
         "version" => parse_npm_version_args(&args[1..]),
         "link" | "ln" => parse_npm_link_args(&args[1..]),
         "install-test" | "it" => parse_npm_install_test_args(command, false, &args[1..]),
@@ -11433,6 +11585,9 @@ fn npm_global_arg_supported_by_command(command: &str, arg: &str) -> bool {
                 | "ln"
                 | "install-test"
                 | "it"
+                | "init"
+                | "create"
+                | "innit"
                 | "ci"
                 | "outdated"
                 | "pack"
@@ -12074,7 +12229,10 @@ fn npm_rebuild_equals_value_flag(arg: &str) -> bool {
     .any(|prefix| arg.starts_with(prefix))
 }
 
-fn parse_npm_init_args(args: &[String]) -> Result<NpmCompatAction, OmcRegistryError> {
+fn parse_npm_init_args(
+    command: &str,
+    args: &[String],
+) -> Result<NpmCompatAction, OmcRegistryError> {
     let mut action = NpmInitAction {
         name: None,
         version: None,
@@ -12086,10 +12244,17 @@ fn parse_npm_init_args(args: &[String]) -> Result<NpmCompatAction, OmcRegistryEr
         package_type: None,
     };
     let mut positionals = Vec::new();
+    let mut create_args = Vec::new();
+    let mut npm_registry = None;
+    let mut allow = Vec::new();
+    let mut allow_all_host = false;
     let mut index = 0;
     while index < args.len() {
         let arg = &args[index];
-        if matches!(arg.as_str(), "-y" | "--yes" | "--force") {
+        if arg == "--" {
+            create_args.extend(args[index + 1..].iter().cloned());
+            break;
+        } else if matches!(arg.as_str(), "-y" | "--yes" | "--force") {
         } else if arg == "--private" {
             action.private = true;
         } else if arg == "--name" {
@@ -12120,6 +12285,16 @@ fn parse_npm_init_args(args: &[String]) -> Result<NpmCompatAction, OmcRegistryEr
             action.package_type = Some(npm_init_flag_value(args, &mut index, arg)?);
         } else if let Some(value) = arg.strip_prefix("--type=") {
             action.package_type = Some(value.to_owned());
+        } else if arg == "--registry" {
+            npm_registry = Some(npm_init_flag_value(args, &mut index, arg)?);
+        } else if let Some(value) = arg.strip_prefix("--registry=") {
+            npm_registry = Some(value.to_owned());
+        } else if arg == "--allow" {
+            allow.push(npm_init_flag_value(args, &mut index, arg)?);
+        } else if let Some(value) = arg.strip_prefix("--allow=") {
+            allow.push(value.to_owned());
+        } else if arg == "--allow-all-host" {
+            allow_all_host = true;
         } else if matches!(arg.as_str(), "--silent" | "-s") {
         } else if npm_init_ignored_value_flag(arg) {
             index += 1;
@@ -12136,10 +12311,26 @@ fn parse_npm_init_args(args: &[String]) -> Result<NpmCompatAction, OmcRegistryEr
         }
         index += 1;
     }
-    if !positionals.is_empty() {
+    if let Some(initializer) = positionals.first() {
+        create_args.splice(0..0, positionals[1..].iter().cloned());
+        return Ok(NpmCompatAction::Create {
+            action: NpmCreateAction {
+                initializer: initializer.clone(),
+                args: create_args,
+                npm_registry,
+                allow,
+                allow_all_host,
+            },
+        });
+    }
+    if command != "init" && (npm_registry.is_some() || !allow.is_empty() || allow_all_host) {
         return Err(OmcRegistryError::UnsupportedSpec(format!(
-            "npm init package initializer `{}` is not supported by OMC compatibility yet",
-            positionals[0]
+            "npm {command} capability and registry flags need an initializer package"
+        )));
+    }
+    if !create_args.is_empty() {
+        return Err(OmcRegistryError::UnsupportedSpec(format!(
+            "npm {command} arguments after -- need an initializer package"
         )));
     }
     Ok(NpmCompatAction::Init { action })
@@ -12157,14 +12348,11 @@ fn npm_init_flag_value(
 }
 
 fn npm_init_ignored_value_flag(arg: &str) -> bool {
-    matches!(
-        arg,
-        "--cache" | "--registry" | "--userconfig" | "--loglevel"
-    )
+    matches!(arg, "--cache" | "--userconfig" | "--loglevel")
 }
 
 fn npm_init_ignored_equals_flag(arg: &str) -> bool {
-    ["--cache=", "--registry=", "--userconfig=", "--loglevel="]
+    ["--cache=", "--userconfig=", "--loglevel="]
         .iter()
         .any(|prefix| arg.starts_with(prefix))
 }
@@ -18625,7 +18813,46 @@ mod tests {
                 },
             }
         );
-        assert!(parse_npm_compat_action(&args(&["init", "react-app"])).is_err());
+        assert_eq!(
+            parse_npm_compat_action(&args(&["init", "react-app"])).unwrap(),
+            NpmCompatAction::Create {
+                action: NpmCreateAction {
+                    initializer: "react-app".to_owned(),
+                    args: Vec::new(),
+                    npm_registry: None,
+                    allow: Vec::new(),
+                    allow_all_host: false,
+                },
+            }
+        );
+        assert_eq!(
+            parse_npm_compat_action(&args(&[
+                "--registry",
+                "https://registry.example.invalid/npm",
+                "create",
+                "vite@latest",
+                "my-app",
+                "--allow=fs.write:*",
+                "--allow-all-host",
+                "--",
+                "--template",
+                "react",
+            ]))
+            .unwrap(),
+            NpmCompatAction::Create {
+                action: NpmCreateAction {
+                    initializer: "vite@latest".to_owned(),
+                    args: vec![
+                        "my-app".to_owned(),
+                        "--template".to_owned(),
+                        "react".to_owned(),
+                    ],
+                    npm_registry: Some("https://registry.example.invalid/npm".to_owned()),
+                    allow: vec!["fs.write:*".to_owned()],
+                    allow_all_host: true,
+                },
+            }
+        );
         assert_eq!(
             parse_npm_compat_action(&args(&["version", "--json"])).unwrap(),
             NpmCompatAction::PackageVersion {
@@ -20466,6 +20693,53 @@ mod tests {
                 npm_registry: None,
                 userconfig: None,
             }
+        );
+    }
+
+    #[test]
+    fn maps_npm_create_initializers_to_packages() {
+        assert_eq!(
+            npm_create_package_spec("vite@latest").unwrap(),
+            "create-vite@latest"
+        );
+        assert_eq!(
+            npm_create_package_spec("react-app").unwrap(),
+            "create-react-app"
+        );
+        assert_eq!(
+            npm_create_package_spec("@vitejs").unwrap(),
+            "@vitejs/create"
+        );
+        assert_eq!(
+            npm_create_package_spec("@vitejs@latest").unwrap(),
+            "@vitejs/create@latest"
+        );
+        assert_eq!(
+            npm_create_package_spec("@scope/tool@2.0.0").unwrap(),
+            "@scope/create-tool@2.0.0"
+        );
+        assert!(npm_create_package_spec("@scope/").is_err());
+        assert!(npm_create_package_spec("vite@").is_err());
+    }
+
+    #[test]
+    fn selects_npm_create_initializer_bin() {
+        let dir = test_dir("npm-create-bin");
+        let bin_dir = dir.join("node_modules/.bin");
+        fs::create_dir_all(&bin_dir).unwrap();
+        fs::write(bin_dir.join("vite"), "#!/bin/sh\n").unwrap();
+        assert_eq!(
+            npm_create_bin_name(&dir, "create-vite").unwrap(),
+            "vite".to_owned()
+        );
+
+        let scoped = test_dir("npm-create-bin-scoped");
+        let scoped_bin_dir = scoped.join("node_modules/.bin");
+        fs::create_dir_all(&scoped_bin_dir).unwrap();
+        fs::write(scoped_bin_dir.join("only-bin"), "#!/bin/sh\n").unwrap();
+        assert_eq!(
+            npm_create_bin_name(&scoped, "@scope/create-tool").unwrap(),
+            "only-bin".to_owned()
         );
     }
 

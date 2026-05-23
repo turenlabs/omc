@@ -114,6 +114,7 @@ cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo install --locked
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo ci
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo run normalizer --version
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm init -y
+cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm create vite@latest my-app --allow-all-host -- --template react
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm help install
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm install left-pad@1.3.0
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm install --registry https://registry.npmjs.org left-pad@1.3.0
