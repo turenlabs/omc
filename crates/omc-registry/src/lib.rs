@@ -1933,8 +1933,18 @@ fn parse_console_scripts(content: &str) -> Vec<PythonEntryPoint> {
 fn python_entry_point_script(entry: &PythonEntryPoint) -> String {
     format!(
         r#"#!/usr/bin/env python3
+from pathlib import Path
 import re
 import sys
+
+_site_packages = str(Path(__file__).resolve().parents[1] / "site-packages")
+sys.path = [_site_packages] + [
+    path for path in sys.path
+    if path != _site_packages
+    and "site-packages" not in path
+    and "dist-packages" not in path
+]
+
 from {module} import {function}
 
 if __name__ == "__main__":
@@ -4671,6 +4681,19 @@ mod tests {
                 function: "cli_detect".to_owned(),
             }]
         );
+    }
+
+    #[test]
+    fn python_entry_points_strip_global_site_packages() {
+        let script = python_entry_point_script(&PythonEntryPoint {
+            name: "normalizer".to_owned(),
+            module: "charset_normalizer.cli.normalizer".to_owned(),
+            function: "cli_detect".to_owned(),
+        });
+
+        assert!(script.contains("Path(__file__).resolve().parents[1] / \"site-packages\""));
+        assert!(script.contains("\"site-packages\" not in path"));
+        assert!(script.contains("\"dist-packages\" not in path"));
     }
 
     #[test]

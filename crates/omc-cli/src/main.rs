@@ -322,10 +322,12 @@ fn run_node(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRegistry
 
 fn run_python(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRegistryError> {
     let status = ProcessCommand::new("python3")
+        .arg("-S")
         .args(args)
         .current_dir(project_dir)
         .env("PATH", project_path(project_dir)?)
         .env("PYTHONPATH", project_python_path(project_dir)?)
+        .env("PYTHONNOUSERSITE", "1")
         .status()?;
     Ok(exit_code(status.code()))
 }
@@ -352,6 +354,7 @@ fn run_package_script(
         .current_dir(project_dir)
         .env("PATH", project_path(project_dir)?)
         .env("PYTHONPATH", project_python_path(project_dir)?)
+        .env("PYTHONNOUSERSITE", "1")
         .status()?;
     Ok(exit_code(status.code()))
 }
@@ -366,6 +369,7 @@ fn run_project_command(
         .current_dir(project_dir)
         .env("PATH", project_path(project_dir)?)
         .env("PYTHONPATH", project_python_path(project_dir)?)
+        .env("PYTHONNOUSERSITE", "1")
         .status()?;
     Ok(exit_code(status.code()))
 }
@@ -382,16 +386,11 @@ fn project_path(project_dir: &Path) -> Result<OsString, OmcRegistryError> {
 }
 
 fn project_python_path(project_dir: &Path) -> Result<OsString, OmcRegistryError> {
-    let site_packages = project_dir
+    env::join_paths([project_dir
         .join(".omc")
         .join("python")
-        .join("site-packages");
-    let mut python_paths = vec![site_packages];
-    if let Some(existing) = env::var_os("PYTHONPATH") {
-        python_paths.extend(env::split_paths(&existing));
-    }
-    env::join_paths(python_paths)
-        .map_err(|error| OmcRegistryError::UnsupportedSpec(error.to_string()))
+        .join("site-packages")])
+    .map_err(|error| OmcRegistryError::UnsupportedSpec(error.to_string()))
 }
 
 #[cfg(unix)]

@@ -237,6 +237,8 @@ Supported now:
   native-extension policy exist
 - npm bin links and Python console script shims
 - `omc node`, `omc python`, `omc script`, and `omc run` wrappers
+- isolated `omc python` execution that uses OMC site-packages without ambient
+  user/global Python site-packages
 - runtime source profiling into capability findings
 - explicit CLI grants for accepted host authority
 
