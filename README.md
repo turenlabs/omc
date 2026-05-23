@@ -166,6 +166,7 @@ install npm package bins, including root project bins, into node_modules/.bin
 link npm workspace/local directory packages into node_modules and node_modules/.bin
 clone Python git/VCS dependencies into .omc/python/vcs and install them as isolated local imports
 record resolved Python git/VCS commits in omc.lock and reuse those commits for --locked/ci installs
+cache pinned Python git/VCS checkout archives under .omc/cache/python-vcs for locked restore
 install Python console_scripts/gui_scripts from wheels, the root Python project, and pyproject/setup.cfg/setup.py local path packages into .omc/python/bin
 prune stale lockfile entries and installed packages during install
 ```
@@ -318,6 +319,8 @@ Supported now:
   against current project manifests without registry resolution
 - Python git/VCS dependency lock entries that pin the resolved commit used by
   `omc install --locked` and `omc ci`
+- Python git/VCS source archive cache used to restore pinned locked checkouts
+  when the live checkout is missing
 - `omc ci` as a lockfile-only install command for clean/CI workflows
 - install-time sha256 verification for cached archives before package extraction
 - text and JSON `omc list` output for locked packages
@@ -358,7 +361,6 @@ Not implemented yet:
   hash, marker, include, constraint, index, and find-links handling
 - Poetry dependency forms beyond direct wheel/sdist URLs, git dependencies,
   local wheel/sdist files, and local path directories
-- offline source archive cache for Python git/VCS dependencies on clean machines
 - Python sdist build isolation and native extension policy beyond pure source
   extraction
 - execution of package code inside OMC cells for real applications

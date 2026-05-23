@@ -415,6 +415,10 @@ pub struct LockedPythonVcsDependency {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reference: Option<String>,
     pub resolved_commit: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub archive: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub sha256: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub subdirectory: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -916,22 +920,34 @@ fn resolve_python_vcs_requirement(
             requirement.name, requirement.url
         )));
     }
-    let checkout_reference = locked_dependency
+    let restored_from_cache = locked_dependency
         .as_ref()
-        .map(|dependency| dependency.resolved_commit.as_str())
-        .or(requirement.reference.as_deref());
-    checkout_python_vcs_dependency(
-        &checkout_dir,
-        requirement,
-        checkout_reference,
-        locked.is_some(),
-    )?;
-    let resolved_commit = git_rev_parse_head(&checkout_dir, &requirement.name)?;
+        .map(|dependency| restore_python_vcs_archive(project_dir, &checkout_dir, dependency))
+        .transpose()?
+        .unwrap_or(false);
+    let resolved_commit = if restored_from_cache {
+        locked_dependency
+            .as_ref()
+            .map(|dependency| dependency.resolved_commit.clone())
+            .unwrap_or_default()
+    } else {
+        let checkout_reference = locked_dependency
+            .as_ref()
+            .map(|dependency| dependency.resolved_commit.as_str())
+            .or(requirement.reference.as_deref());
+        checkout_python_vcs_dependency(
+            &checkout_dir,
+            requirement,
+            checkout_reference,
+            locked.is_some(),
+        )?;
+        git_rev_parse_head(&checkout_dir, &requirement.name)?
+    };
 
     let package_dir = if let Some(subdirectory) = requirement.subdirectory.as_deref() {
         checked_join(&checkout_dir, subdirectory)?
     } else {
-        checkout_dir
+        checkout_dir.clone()
     };
     if !package_dir.is_dir() {
         return Err(OmcRegistryError::UnsupportedRequirement(format!(
@@ -943,7 +959,24 @@ fn resolve_python_vcs_requirement(
 
     let mut resolved = read_python_source_requirements(&package_dir, &requirement.extras)?;
     push_python_local_path(&mut resolved, package_dir);
-    let lock = locked_python_vcs_dependency(requirement, resolved_commit);
+    let mut lock = locked_python_vcs_dependency(requirement, resolved_commit);
+    if let Some(existing) = locked_dependency {
+        lock.archive = existing.archive;
+        lock.sha256 = existing.sha256;
+    }
+    if lock.archive.is_empty()
+        || lock.sha256.is_empty()
+        || !project_dir.join(&lock.archive).exists()
+    {
+        let (archive, sha256) = cache_python_vcs_checkout(
+            project_dir,
+            &checkout_dir,
+            requirement,
+            &lock.resolved_commit,
+        )?;
+        lock.archive = archive;
+        lock.sha256 = sha256;
+    }
     Ok((resolved, lock))
 }
 
@@ -973,6 +1006,122 @@ fn python_vcs_checkout_dir(project_dir: &Path, requirement: &PythonVcsRequiremen
         .join("vcs")
         .join(safe_name(&requirement.name))
         .join(&digest[..16])
+}
+
+fn cache_python_vcs_checkout(
+    project_dir: &Path,
+    checkout_dir: &Path,
+    requirement: &PythonVcsRequirement,
+    resolved_commit: &str,
+) -> Result<(String, String)> {
+    let archive_path = python_vcs_archive_path(project_dir, requirement, resolved_commit);
+    if !archive_path.exists() {
+        write_python_vcs_archive(checkout_dir, &archive_path)?;
+    }
+    let bytes = fs::read(&archive_path)?;
+    let sha256 = sha256_hex(&bytes);
+    Ok((relative_path(project_dir, &archive_path), sha256))
+}
+
+fn python_vcs_archive_path(
+    project_dir: &Path,
+    requirement: &PythonVcsRequirement,
+    resolved_commit: &str,
+) -> PathBuf {
+    let source = format!(
+        "{}\0{}\0{}",
+        requirement.name, requirement.url, resolved_commit
+    );
+    let source_hash = sha256_hex(source.as_bytes());
+    project_dir
+        .join(".omc")
+        .join("cache")
+        .join("python-vcs")
+        .join(safe_name(&requirement.name))
+        .join(&source_hash[..16])
+        .join(format!("{resolved_commit}.tar.gz"))
+}
+
+fn write_python_vcs_archive(checkout_dir: &Path, archive_path: &Path) -> Result<()> {
+    if let Some(parent) = archive_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let file = fs::File::create(archive_path)?;
+    let encoder = flate2::write::GzEncoder::new(file, flate2::Compression::default());
+    let mut archive = tar::Builder::new(encoder);
+
+    for entry in WalkDir::new(checkout_dir)
+        .into_iter()
+        .filter_entry(|entry| entry.file_name() != ".git")
+    {
+        let entry =
+            entry.map_err(|error| OmcRegistryError::UnsupportedRequirement(error.to_string()))?;
+        let path = entry.path();
+        let relative = path
+            .strip_prefix(checkout_dir)
+            .map_err(|error| OmcRegistryError::UnsupportedRequirement(error.to_string()))?;
+        if relative.as_os_str().is_empty() {
+            continue;
+        }
+        if entry.file_type().is_dir() {
+            archive.append_dir(relative, path)?;
+        } else if entry.file_type().is_file() {
+            archive.append_path_with_name(path, relative)?;
+        }
+    }
+
+    archive.finish()?;
+    Ok(())
+}
+
+fn restore_python_vcs_archive(
+    project_dir: &Path,
+    checkout_dir: &Path,
+    dependency: &LockedPythonVcsDependency,
+) -> Result<bool> {
+    if dependency.archive.is_empty() {
+        return Ok(false);
+    }
+    let archive_path = project_dir.join(&dependency.archive);
+    if !archive_path.exists() {
+        return Ok(false);
+    }
+    let bytes = fs::read(&archive_path)?;
+    if !dependency.sha256.is_empty() {
+        let actual = sha256_hex(&bytes);
+        if !dependency.sha256.eq_ignore_ascii_case(&actual) {
+            return Err(OmcRegistryError::DigestMismatch {
+                name: dependency.name.clone(),
+                expected: format!("sha256:{}", dependency.sha256),
+                actual: format!("sha256:{actual}"),
+            });
+        }
+    }
+
+    remove_path_if_exists(checkout_dir)?;
+    fs::create_dir_all(checkout_dir)?;
+    let decoder = GzDecoder::new(Cursor::new(bytes));
+    let mut archive = Archive::new(decoder);
+    for entry in archive.entries()? {
+        let mut entry = entry?;
+        let relative = entry.path()?.into_owned();
+        let output = checked_join(checkout_dir, &relative)?;
+        if entry.header().entry_type().is_dir() {
+            fs::create_dir_all(output)?;
+            continue;
+        }
+        if !entry.header().entry_type().is_file() {
+            return Err(OmcRegistryError::UnsupportedRequirement(format!(
+                "python VCS cache archive contains unsupported entry type for `{}`",
+                relative.display()
+            )));
+        }
+        if let Some(parent) = output.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        entry.unpack(output)?;
+    }
+    Ok(true)
 }
 
 fn checkout_python_vcs_dependency(
@@ -1066,6 +1215,8 @@ fn locked_python_vcs_dependency(
         url: requirement.url.clone(),
         reference: requirement.reference.clone(),
         resolved_commit,
+        archive: String::new(),
+        sha256: String::new(),
         subdirectory: python_vcs_subdirectory_string(requirement.subdirectory.as_deref()),
         extras: requirement.extras.iter().cloned().collect(),
     }
@@ -11798,6 +11949,9 @@ packages:
         assert_eq!(lock.python_vcs[0].name, "gitpkg");
         assert_eq!(lock.python_vcs[0].reference.as_deref(), Some("HEAD"));
         assert!(is_git_commit_hash(&lock.python_vcs[0].resolved_commit));
+        assert!(lock.python_vcs[0].archive.ends_with(".tar.gz"));
+        assert!(project.join(&lock.python_vcs[0].archive).exists());
+        assert_eq!(lock.python_vcs[0].sha256.len(), 64);
         let local_paths = fs::read_to_string(project.join(".omc/python/local-paths")).unwrap();
         assert!(local_paths.contains(".omc/python/vcs/gitpkg/"));
 
@@ -11870,6 +12024,7 @@ packages:
             .unwrap()
             .success());
         assert_ne!(git_rev_parse_head(&repo, "gitpkg").unwrap(), first_commit);
+        remove_path_if_exists(&repo).unwrap();
         remove_path_if_exists(&project.join(".omc/python/vcs")).unwrap();
 
         install_locked_project(&LinkOptions::new(&project)).unwrap();
