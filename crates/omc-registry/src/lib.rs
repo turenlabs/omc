@@ -967,6 +967,9 @@ fn discover_project_requirements_with_options(
         project.specs.extend(requirements.specs);
         project.constraints.extend(requirements.constraints);
         project.hashes.extend(requirements.hashes);
+        project
+            .python_local_paths
+            .extend(requirements.python_local_paths);
     }
 
     let uv_lock = project_dir.join("uv.lock");
@@ -975,6 +978,9 @@ fn discover_project_requirements_with_options(
         project.specs.extend(requirements.specs);
         project.constraints.extend(requirements.constraints);
         project.hashes.extend(requirements.hashes);
+        project
+            .python_local_paths
+            .extend(requirements.python_local_paths);
     }
 
     for pylock_name in ["pylock.omc.toml", "pylock.toml"] {
@@ -2524,11 +2530,12 @@ fn read_pipfile_lock_requirements(
     include_dev_dependencies: bool,
 ) -> Result<ProjectRequirements> {
     let lock = serde_json::from_str::<PipfileLock>(&fs::read_to_string(path)?)?;
+    let base_dir = path.parent().unwrap_or_else(|| Path::new("."));
     let mut requirements = ProjectRequirements::default();
 
-    collect_pipfile_locked_packages(lock.default, &mut requirements);
+    collect_pipfile_locked_packages(lock.default, base_dir, &mut requirements)?;
     if include_dev_dependencies {
-        collect_pipfile_locked_packages(lock.develop, &mut requirements);
+        collect_pipfile_locked_packages(lock.develop, base_dir, &mut requirements)?;
     }
 
     Ok(requirements)
@@ -2536,8 +2543,9 @@ fn read_pipfile_lock_requirements(
 
 fn collect_pipfile_locked_packages(
     packages: BTreeMap<String, PipfileLockedPackage>,
+    base_dir: &Path,
     requirements: &mut ProjectRequirements,
-) {
+) -> Result<()> {
     for (name, package) in packages {
         if package
             .markers
@@ -2545,6 +2553,18 @@ fn collect_pipfile_locked_packages(
             .map(|marker| !pypi_marker_applies(marker, &BTreeSet::new()))
             .unwrap_or(false)
         {
+            continue;
+        }
+
+        if let Some(path) = package.path.as_deref() {
+            let path = resolved_local_path(path, base_dir);
+            if !path.is_dir() {
+                return Err(OmcRegistryError::UnsupportedRequirement(format!(
+                    "Pipfile.lock local path `{}` must point to an existing directory",
+                    path.display()
+                )));
+            }
+            push_python_local_path(requirements, path);
             continue;
         }
 
@@ -2578,6 +2598,7 @@ fn collect_pipfile_locked_packages(
             }
         }
     }
+    Ok(())
 }
 
 fn pipfile_locked_version(version: &str) -> Option<String> {
@@ -8158,6 +8179,7 @@ struct PipfileLock {
 #[derive(Debug, Default, Deserialize)]
 struct PipfileLockedPackage {
     version: Option<String>,
+    path: Option<String>,
     #[serde(default)]
     hashes: Vec<String>,
     #[serde(default)]
@@ -9858,6 +9880,10 @@ packages:
     fn reads_pipfile_lock_specs_constraints_and_hashes() {
         let dir = tempfile::tempdir().unwrap();
         let pipfile_lock = dir.path().join("Pipfile.lock");
+        let editable_local = dir.path().join("editable-local");
+        let dev_local = dir.path().join("dev-local");
+        fs::create_dir_all(&editable_local).unwrap();
+        fs::create_dir_all(&dev_local).unwrap();
         let hash = "a".repeat(64);
         fs::write(
             &pipfile_lock,
@@ -9877,11 +9903,17 @@ packages:
                         }},
                         "editable-local": {{
                             "path": "."
+                        }},
+                        "local-dir": {{
+                            "path": "editable-local"
                         }}
                     }},
                     "develop": {{
                         "pytest": {{
                             "version": "==8.2.0"
+                        }},
+                        "dev-local": {{
+                            "path": "dev-local"
                         }}
                     }}
                 }}"#
@@ -9921,23 +9953,33 @@ packages:
             .specs
             .iter()
             .any(|spec| spec.name == "editable-local"));
+        assert_eq!(
+            production.python_local_paths,
+            vec![dir.path().join("."), editable_local.clone()]
+        );
 
         let dev = read_pipfile_lock_requirements(&pipfile_lock, true).unwrap();
         assert!(dev
             .specs
             .iter()
             .any(|spec| spec.name == "pytest" && spec.version.as_deref() == Some("8.2.0")));
+        assert_eq!(
+            dev.python_local_paths,
+            vec![dir.path().join("."), editable_local, dev_local]
+        );
     }
 
     #[test]
     fn discovers_pipfile_lock_requirements() {
         let dir = tempfile::tempdir().unwrap();
+        fs::create_dir_all(dir.path().join("localpkg")).unwrap();
         fs::write(
             dir.path().join("Pipfile.lock"),
             r#"{
                 "_meta": {},
                 "default": {
-                    "idna": { "version": "==3.7" }
+                    "idna": { "version": "==3.7" },
+                    "localpkg": { "path": "localpkg" }
                 },
                 "develop": {
                     "pytest": { "version": "==8.2.0" }
@@ -9953,6 +9995,10 @@ packages:
             .specs
             .iter()
             .any(|spec| spec.name == "idna" && spec.version.as_deref() == Some("3.7")));
+        assert_eq!(
+            production.python_local_paths,
+            vec![dir.path().join("localpkg")]
+        );
         assert!(!production.specs.iter().any(|spec| spec.name == "pytest"));
 
         let dev = discover_project_requirements(dir.path()).unwrap();
@@ -9960,6 +10006,24 @@ packages:
             .specs
             .iter()
             .any(|spec| spec.name == "pytest" && spec.version.as_deref() == Some("8.2.0")));
+    }
+
+    #[test]
+    fn rejects_missing_pipfile_lock_local_paths() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(
+            dir.path().join("Pipfile.lock"),
+            r#"{
+                "_meta": {},
+                "default": {
+                    "local": { "path": "missing" }
+                }
+            }"#,
+        )
+        .unwrap();
+
+        let error = discover_project_requirements(dir.path()).unwrap_err();
+        assert!(error.to_string().contains("Pipfile.lock local path"));
     }
 
     #[test]
@@ -10078,6 +10142,7 @@ dev = [
     #[test]
     fn discovers_uv_lock_requirements() {
         let dir = tempfile::tempdir().unwrap();
+        fs::create_dir_all(dir.path().join("vendor/localpkg")).unwrap();
         fs::write(
             dir.path().join("uv.lock"),
             r#"version = 1
@@ -10093,12 +10158,20 @@ wheels = [
 ]
 
 [[package]]
+name = "localpkg"
+version = "0.1.0"
+source = { directory = "vendor/localpkg" }
+
+[[package]]
 name = "omc-uv-demo"
 version = "0.1.0"
 source = { virtual = "." }
 
 [package.metadata]
-requires-dist = [{ name = "idna", specifier = "==3.7" }]
+requires-dist = [
+  { name = "idna", specifier = "==3.7" },
+  { name = "localpkg" },
+]
 "#,
         )
         .unwrap();
@@ -10111,6 +10184,10 @@ requires-dist = [{ name = "idna", specifier = "==3.7" }]
         assert_eq!(
             discovered.constraints.get("pypi:idna").map(String::as_str),
             Some("3.7")
+        );
+        assert_eq!(
+            discovered.python_local_paths,
+            vec![dir.path().join("vendor/localpkg")]
         );
         assert_eq!(
             discovered
