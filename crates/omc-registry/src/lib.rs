@@ -4904,7 +4904,7 @@ fn read_python_local_entry_points(package_dir: &Path) -> Result<Vec<PythonEntryP
             collect_python_script_entries(project.gui_scripts, &mut entries);
         }
         if let Some(poetry) = pyproject.tool.and_then(|tool| tool.poetry) {
-            collect_python_script_entries(poetry.scripts, &mut entries);
+            collect_poetry_script_entries(poetry.scripts, &mut entries);
         }
     }
 
@@ -4975,6 +4975,22 @@ fn collect_python_script_entries(
         scripts
             .into_iter()
             .filter_map(|(name, target)| python_entry_point_from_script(&name, &target)),
+    );
+}
+
+fn collect_poetry_script_entries(
+    scripts: BTreeMap<String, PoetryScript>,
+    entries: &mut Vec<PythonEntryPoint>,
+) {
+    entries.extend(
+        scripts
+            .into_iter()
+            .filter_map(|(name, script)| match script {
+                PoetryScript::Target(target) => python_entry_point_from_script(&name, &target),
+                PoetryScript::Table { callable } => {
+                    callable.and_then(|target| python_entry_point_from_script(&name, &target))
+                }
+            }),
     );
 }
 
@@ -8196,9 +8212,16 @@ struct PoetryProject {
     #[serde(default)]
     extras: BTreeMap<String, Vec<String>>,
     #[serde(default)]
-    scripts: BTreeMap<String, String>,
+    scripts: BTreeMap<String, PoetryScript>,
     #[serde(default)]
     group: BTreeMap<String, PoetryGroup>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum PoetryScript {
+    Target(String),
+    Table { callable: Option<String> },
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -10053,6 +10076,52 @@ packages:
         assert_eq!(
             String::from_utf8_lossy(&output.stdout).trim(),
             "setup-cfg-cli-ok"
+        );
+    }
+
+    #[test]
+    fn installs_poetry_table_python_local_entry_points() {
+        let dir = tempfile::tempdir().unwrap();
+        let local = dir.path().join("poetrypkg");
+        let src = local.join("src");
+        fs::create_dir_all(src.join("poetrypkg")).unwrap();
+        let site_packages = dir.path().join(".omc").join("python").join("site-packages");
+        let bin_dir = dir.path().join(".omc").join("python").join("bin");
+        fs::create_dir_all(&site_packages).unwrap();
+        fs::write(src.join("poetrypkg").join("__init__.py"), "").unwrap();
+        fs::write(
+            src.join("poetrypkg").join("cli.py"),
+            "def main():\n    print('poetry-table-cli-ok')\n",
+        )
+        .unwrap();
+        fs::write(
+            local.join("pyproject.toml"),
+            r#"
+            [tool.poetry]
+            name = "poetrypkg"
+            version = "0.1.0"
+
+            [tool.poetry.scripts]
+            poetry-cli = { callable = "poetrypkg.cli:main" }
+            ignored-file = { reference = "scripts/run.py", type = "file" }
+            "#,
+        )
+        .unwrap();
+
+        let scripts =
+            install_python_local_paths(std::slice::from_ref(&local), &site_packages, &bin_dir)
+                .unwrap();
+        assert_eq!(scripts, 1);
+
+        let script = fs::read_to_string(bin_dir.join("poetry-cli")).unwrap();
+        assert!(script.contains("from poetrypkg.cli import main"));
+        assert!(!bin_dir.join("ignored-file").exists());
+
+        let output = Command::new(bin_dir.join("poetry-cli")).output().unwrap();
+        assert!(output.status.success());
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout).trim(),
+            "poetry-table-cli-ok"
         );
     }
 
