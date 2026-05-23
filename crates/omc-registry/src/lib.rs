@@ -7514,6 +7514,27 @@ pub struct NpmAccessMutationResult {
     pub response: serde_json::Value,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct NpmTeamListResult {
+    pub registry: String,
+    pub scope: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub team: Option<String>,
+    pub items: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct NpmTeamMutationResult {
+    pub registry: String,
+    pub action: String,
+    pub scope: String,
+    pub team: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user: Option<String>,
+    pub status: u16,
+    pub response: serde_json::Value,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct NpmDeprecateResult {
     pub registry: String,
@@ -9078,6 +9099,356 @@ fn npm_access_permission_text(value: &str) -> String {
         "write" => "read-write".to_owned(),
         other => other.to_owned(),
     }
+}
+
+pub fn create_npm_team(
+    project_dir: &Path,
+    entity: &str,
+    registry_override: Option<&str>,
+    userconfig_override: Option<&Path>,
+    otp: Option<&str>,
+) -> Result<NpmTeamMutationResult> {
+    let (scope, team) = npm_team_entity(entity)?;
+    let body = serde_json::json!({ "name": team, "description": null });
+    let (registry, status, response) = npm_team_request(
+        project_dir,
+        NpmTeamRequest {
+            scope: &scope,
+            team: Some(&team),
+            action: "create",
+            method: "PUT",
+            body,
+            registry_override,
+            userconfig_override,
+            otp,
+        },
+    )?;
+    Ok(NpmTeamMutationResult {
+        registry,
+        action: "create".to_owned(),
+        scope,
+        team,
+        user: None,
+        status,
+        response,
+    })
+}
+
+pub fn destroy_npm_team(
+    project_dir: &Path,
+    entity: &str,
+    registry_override: Option<&str>,
+    userconfig_override: Option<&Path>,
+    otp: Option<&str>,
+) -> Result<NpmTeamMutationResult> {
+    let (scope, team) = npm_team_entity(entity)?;
+    let (registry, status, response) = npm_team_request(
+        project_dir,
+        NpmTeamRequest {
+            scope: &scope,
+            team: Some(&team),
+            action: "destroy",
+            method: "DELETE",
+            body: serde_json::Value::Null,
+            registry_override,
+            userconfig_override,
+            otp,
+        },
+    )?;
+    Ok(NpmTeamMutationResult {
+        registry,
+        action: "destroy".to_owned(),
+        scope,
+        team,
+        user: None,
+        status,
+        response,
+    })
+}
+
+pub fn add_npm_team_user(
+    project_dir: &Path,
+    entity: &str,
+    user: &str,
+    registry_override: Option<&str>,
+    userconfig_override: Option<&Path>,
+    otp: Option<&str>,
+) -> Result<NpmTeamMutationResult> {
+    let (scope, team) = npm_team_entity(entity)?;
+    let user = npm_team_user(user)?;
+    let (registry, status, response) = npm_team_request(
+        project_dir,
+        NpmTeamRequest {
+            scope: &scope,
+            team: Some(&team),
+            action: "add",
+            method: "PUT",
+            body: serde_json::json!({ "user": user }),
+            registry_override,
+            userconfig_override,
+            otp,
+        },
+    )?;
+    Ok(NpmTeamMutationResult {
+        registry,
+        action: "add".to_owned(),
+        scope,
+        team,
+        user: Some(user),
+        status,
+        response,
+    })
+}
+
+pub fn remove_npm_team_user(
+    project_dir: &Path,
+    entity: &str,
+    user: &str,
+    registry_override: Option<&str>,
+    userconfig_override: Option<&Path>,
+    otp: Option<&str>,
+) -> Result<NpmTeamMutationResult> {
+    let (scope, team) = npm_team_entity(entity)?;
+    let user = npm_team_user(user)?;
+    let (registry, status, response) = npm_team_request(
+        project_dir,
+        NpmTeamRequest {
+            scope: &scope,
+            team: Some(&team),
+            action: "rm",
+            method: "DELETE",
+            body: serde_json::json!({ "user": user }),
+            registry_override,
+            userconfig_override,
+            otp,
+        },
+    )?;
+    Ok(NpmTeamMutationResult {
+        registry,
+        action: "rm".to_owned(),
+        scope,
+        team,
+        user: Some(user),
+        status,
+        response,
+    })
+}
+
+pub fn read_npm_teams(
+    project_dir: &Path,
+    scope: &str,
+    registry_override: Option<&str>,
+    userconfig_override: Option<&Path>,
+) -> Result<NpmTeamListResult> {
+    let scope = npm_team_scope(scope)?;
+    let client = Client::new();
+    let npm_config =
+        read_npm_config_with_overrides(project_dir, registry_override, userconfig_override)?;
+    let registry = ensure_trailing_slash(&npm_config.registry);
+    let url = format!(
+        "{}-/org/{}/team?format=cli",
+        registry,
+        urlencoding::encode(&scope)
+    );
+    let value = npm_get(&client, &url, &npm_config)
+        .send()?
+        .error_for_status()?
+        .json::<serde_json::Value>()?;
+    Ok(NpmTeamListResult {
+        registry,
+        scope,
+        team: None,
+        items: npm_team_list_items(&value)?,
+    })
+}
+
+pub fn read_npm_team_users(
+    project_dir: &Path,
+    entity: &str,
+    registry_override: Option<&str>,
+    userconfig_override: Option<&Path>,
+) -> Result<NpmTeamListResult> {
+    let (scope, team) = npm_team_entity(entity)?;
+    let client = Client::new();
+    let npm_config =
+        read_npm_config_with_overrides(project_dir, registry_override, userconfig_override)?;
+    let registry = ensure_trailing_slash(&npm_config.registry);
+    let url = format!(
+        "{}-/team/{}/{}/user?format=cli",
+        registry,
+        urlencoding::encode(&scope),
+        urlencoding::encode(&team)
+    );
+    let value = npm_get(&client, &url, &npm_config)
+        .send()?
+        .error_for_status()?
+        .json::<serde_json::Value>()?;
+    Ok(NpmTeamListResult {
+        registry,
+        scope,
+        team: Some(team),
+        items: npm_team_list_items(&value)?,
+    })
+}
+
+struct NpmTeamRequest<'a> {
+    scope: &'a str,
+    team: Option<&'a str>,
+    action: &'a str,
+    method: &'a str,
+    body: serde_json::Value,
+    registry_override: Option<&'a str>,
+    userconfig_override: Option<&'a Path>,
+    otp: Option<&'a str>,
+}
+
+fn npm_team_request(
+    project_dir: &Path,
+    request: NpmTeamRequest<'_>,
+) -> Result<(String, u16, serde_json::Value)> {
+    let client = Client::new();
+    let npm_config = read_npm_config_with_overrides(
+        project_dir,
+        request.registry_override,
+        request.userconfig_override,
+    )?;
+    let registry = ensure_trailing_slash(&npm_config.registry);
+    let url = match request.action {
+        "create" => format!(
+            "{}-/org/{}/team",
+            registry,
+            urlencoding::encode(request.scope)
+        ),
+        "destroy" => format!(
+            "{}-/team/{}/{}",
+            registry,
+            urlencoding::encode(request.scope),
+            urlencoding::encode(request.team.unwrap_or_default())
+        ),
+        "add" | "rm" => format!(
+            "{}-/team/{}/{}/user",
+            registry,
+            urlencoding::encode(request.scope),
+            urlencoding::encode(request.team.unwrap_or_default())
+        ),
+        _ => {
+            return Err(OmcRegistryError::UnsupportedSpec(format!(
+                "unsupported npm team action `{}`",
+                request.action
+            )))
+        }
+    };
+    if npm_config.auth_token_for_url(&url).is_none() {
+        return Err(OmcRegistryError::UnsupportedSpec(
+            "npm team needs authentication; run npm login or configure a registry _authToken"
+                .to_owned(),
+        ));
+    }
+    let mut http_request = match request.method {
+        "DELETE" => {
+            if request.body.is_null() {
+                npm_delete(&client, &url, &npm_config)
+            } else {
+                npm_delete(&client, &url, &npm_config).json(&request.body)
+            }
+        }
+        "PUT" => npm_put(&client, &url, &npm_config).json(&request.body),
+        other => {
+            return Err(OmcRegistryError::UnsupportedSpec(format!(
+                "unsupported npm team HTTP method `{other}`"
+            )))
+        }
+    };
+    if let Some(otp) = request.otp.map(str::trim).filter(|otp| !otp.is_empty()) {
+        http_request = http_request.header("npm-otp", otp);
+    }
+    let response = http_request.send()?;
+    response.error_for_status_ref()?;
+    let status = response.status().as_u16();
+    let response = npm_optional_json_response(response)?;
+    Ok((registry, status, response))
+}
+
+fn npm_team_scope(value: &str) -> Result<String> {
+    let scope = value.trim().trim_start_matches('@');
+    if scope.is_empty() || scope.contains(':') {
+        return Err(OmcRegistryError::UnsupportedSpec(format!(
+            "invalid npm team scope `{value}`"
+        )));
+    }
+    Ok(scope.to_owned())
+}
+
+fn npm_team_entity(value: &str) -> Result<(String, String)> {
+    let (scope, team) = npm_access_scope_team(value)?;
+    let Some(team) = team else {
+        return Err(OmcRegistryError::UnsupportedSpec(
+            "team must be in format `scope:team`".to_owned(),
+        ));
+    };
+    Ok((scope, team))
+}
+
+fn npm_team_user(value: &str) -> Result<String> {
+    let user = value.trim();
+    if user.is_empty() {
+        return Err(OmcRegistryError::UnsupportedSpec(
+            "npm team user cannot be empty".to_owned(),
+        ));
+    }
+    Ok(user.to_owned())
+}
+
+fn npm_team_list_items(value: &serde_json::Value) -> Result<Vec<String>> {
+    let mut items = Vec::new();
+    if let Some(array) = value.as_array() {
+        for item in array {
+            if let Some(text) = npm_team_item_text(item) {
+                items.push(text);
+            }
+        }
+    } else if let Some(object) = value.as_object() {
+        for (key, value) in object {
+            if let Some(text) = value.as_str() {
+                items.push(text.to_owned());
+            } else if let Some(text) = npm_team_item_text(value) {
+                items.push(text);
+            } else {
+                items.push(key.clone());
+            }
+        }
+    } else {
+        return Err(OmcRegistryError::UnsupportedSpec(
+            "npm team response was not a list or object".to_owned(),
+        ));
+    }
+    items.sort();
+    items.dedup();
+    Ok(items)
+}
+
+fn npm_team_item_text(value: &serde_json::Value) -> Option<String> {
+    value
+        .as_str()
+        .map(str::to_owned)
+        .or_else(|| {
+            value
+                .get("name")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned)
+        })
+        .or_else(|| {
+            value
+                .get("team")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned)
+        })
+        .or_else(|| {
+            value
+                .get("user")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned)
+        })
 }
 
 fn npm_dist_tag_url(registry: &str, package: &str, tag: &str) -> String {
@@ -19289,6 +19660,182 @@ wheels = [
         .unwrap();
         assert_eq!(revoke.action, "revoke");
         assert_eq!(revoke.status, 204);
+        handle.join().unwrap();
+    }
+
+    #[test]
+    fn manages_npm_teams_with_userconfig_auth_and_otp() {
+        use std::io::Write as _;
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let handle = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let buffer = read_http_request_bytes(&mut stream);
+            let body_start = http_body_start(&buffer).unwrap();
+            let headers = String::from_utf8_lossy(&buffer[..body_start]);
+            assert!(headers.starts_with("PUT /-/org/demo/team "));
+            let lower = headers.to_ascii_lowercase();
+            assert!(lower.contains("authorization: bearer registry-token"));
+            assert!(lower.contains("npm-otp: 123456"));
+            let body: serde_json::Value = serde_json::from_slice(&buffer[body_start..]).unwrap();
+            assert_eq!(body["name"], "publishers");
+            assert!(body["description"].is_null());
+            let response_body = r#"{"ok":true}"#;
+            let response = format!(
+                "HTTP/1.1 201 Created\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                response_body.len(),
+                response_body
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+
+            let (mut stream, _) = listener.accept().unwrap();
+            let buffer = read_http_request_bytes(&mut stream);
+            let body_start = http_body_start(&buffer).unwrap();
+            let headers = String::from_utf8_lossy(&buffer[..body_start]);
+            assert!(headers.starts_with("PUT /-/team/demo/publishers/user "));
+            let lower = headers.to_ascii_lowercase();
+            assert!(lower.contains("authorization: bearer registry-token"));
+            assert!(lower.contains("npm-otp: 123456"));
+            let body: serde_json::Value = serde_json::from_slice(&buffer[body_start..]).unwrap();
+            assert_eq!(body, serde_json::json!({"user": "alice"}));
+            let response_body = r#"{"ok":true}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                response_body.len(),
+                response_body
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+
+            let (mut stream, _) = listener.accept().unwrap();
+            let buffer = read_http_request_bytes(&mut stream);
+            let body_start = http_body_start(&buffer).unwrap();
+            let headers = String::from_utf8_lossy(&buffer[..body_start]);
+            assert!(headers.starts_with("GET /-/org/demo/team?format=cli "));
+            assert!(headers
+                .to_ascii_lowercase()
+                .contains("authorization: bearer registry-token"));
+            let body = r#"["publishers","readers"]"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+
+            let (mut stream, _) = listener.accept().unwrap();
+            let buffer = read_http_request_bytes(&mut stream);
+            let body_start = http_body_start(&buffer).unwrap();
+            let headers = String::from_utf8_lossy(&buffer[..body_start]);
+            assert!(headers.starts_with("GET /-/team/demo/publishers/user?format=cli "));
+            assert!(headers
+                .to_ascii_lowercase()
+                .contains("authorization: bearer registry-token"));
+            let body = r#"[{"name":"alice"},{"name":"bob"}]"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+
+            let (mut stream, _) = listener.accept().unwrap();
+            let buffer = read_http_request_bytes(&mut stream);
+            let body_start = http_body_start(&buffer).unwrap();
+            let headers = String::from_utf8_lossy(&buffer[..body_start]);
+            assert!(headers.starts_with("DELETE /-/team/demo/publishers/user "));
+            let lower = headers.to_ascii_lowercase();
+            assert!(lower.contains("authorization: bearer registry-token"));
+            assert!(lower.contains("npm-otp: 123456"));
+            let body: serde_json::Value = serde_json::from_slice(&buffer[body_start..]).unwrap();
+            assert_eq!(body, serde_json::json!({"user": "alice"}));
+            let response =
+                "HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+            stream.write_all(response.as_bytes()).unwrap();
+
+            let (mut stream, _) = listener.accept().unwrap();
+            let buffer = read_http_request_bytes(&mut stream);
+            let body_start = http_body_start(&buffer).unwrap();
+            let headers = String::from_utf8_lossy(&buffer[..body_start]);
+            assert!(headers.starts_with("DELETE /-/team/demo/publishers "));
+            let lower = headers.to_ascii_lowercase();
+            assert!(lower.contains("authorization: bearer registry-token"));
+            assert!(lower.contains("npm-otp: 123456"));
+            let response =
+                "HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+            stream.write_all(response.as_bytes()).unwrap();
+        });
+
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(
+            dir.path().join("ci.npmrc"),
+            format!("registry=http://{addr}/\n//{addr}/:_authToken=registry-token\n"),
+        )
+        .unwrap();
+
+        let created = create_npm_team(
+            dir.path(),
+            "@demo:publishers",
+            None,
+            Some(Path::new("ci.npmrc")),
+            Some("123456"),
+        )
+        .unwrap();
+        assert_eq!(created.registry, format!("http://{addr}/"));
+        assert_eq!(created.scope, "demo");
+        assert_eq!(created.team, "publishers");
+        assert_eq!(created.action, "create");
+        assert_eq!(created.status, 201);
+
+        let added = add_npm_team_user(
+            dir.path(),
+            "@demo:publishers",
+            "alice",
+            None,
+            Some(Path::new("ci.npmrc")),
+            Some("123456"),
+        )
+        .unwrap();
+        assert_eq!(added.user.as_deref(), Some("alice"));
+        assert_eq!(added.action, "add");
+        assert_eq!(added.status, 200);
+
+        let teams = read_npm_teams(dir.path(), "@demo", None, Some(Path::new("ci.npmrc"))).unwrap();
+        assert_eq!(teams.scope, "demo");
+        assert_eq!(teams.items, vec!["publishers", "readers"]);
+
+        let users = read_npm_team_users(
+            dir.path(),
+            "@demo:publishers",
+            None,
+            Some(Path::new("ci.npmrc")),
+        )
+        .unwrap();
+        assert_eq!(users.team.as_deref(), Some("publishers"));
+        assert_eq!(users.items, vec!["alice", "bob"]);
+
+        let removed = remove_npm_team_user(
+            dir.path(),
+            "@demo:publishers",
+            "alice",
+            None,
+            Some(Path::new("ci.npmrc")),
+            Some("123456"),
+        )
+        .unwrap();
+        assert_eq!(removed.action, "rm");
+        assert_eq!(removed.status, 204);
+
+        let destroyed = destroy_npm_team(
+            dir.path(),
+            "@demo:publishers",
+            None,
+            Some(Path::new("ci.npmrc")),
+            Some("123456"),
+        )
+        .unwrap();
+        assert_eq!(destroyed.action, "destroy");
+        assert_eq!(destroyed.status, 204);
         handle.join().unwrap();
     }
 

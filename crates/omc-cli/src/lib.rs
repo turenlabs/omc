@@ -11,27 +11,29 @@ use flate2::write::GzEncoder;
 use flate2::Compression;
 use omc_cap::Capability;
 use omc_registry::{
-    add_manifest_npm_local_paths, add_manifest_policy_grants, add_npm_dist_tag, add_package_graph,
-    apply_pypi_binary_option, check_pypi_lock, compare_npm_versions, compare_pypi_versions,
-    create_npm_token, deprecate_npm_package, grant_npm_access, init_project,
-    install_locked_packages, install_locked_project, install_project, lock_project,
-    mutate_npm_package_owner, parse_capability_grant, parse_npm_direct_archive_reference,
+    add_manifest_npm_local_paths, add_manifest_policy_grants, add_npm_dist_tag, add_npm_team_user,
+    add_package_graph, apply_pypi_binary_option, check_pypi_lock, compare_npm_versions,
+    compare_pypi_versions, create_npm_team, create_npm_token, deprecate_npm_package,
+    destroy_npm_team, grant_npm_access, init_project, install_locked_packages,
+    install_locked_project, install_project, lock_project, mutate_npm_package_owner,
+    parse_capability_grant, parse_npm_direct_archive_reference,
     parse_pypi_direct_archive_reference, parse_pypi_vcs_requirement, publish_npm_package,
     read_constraint_files, read_lockfile, read_manifest, read_npm_access_collaborators,
     read_npm_access_packages, read_npm_access_status, read_npm_config_snapshot,
     read_npm_package_metadata, read_npm_package_metadata_with_userconfig, read_npm_package_owners,
-    read_npm_ping_with_userconfig, read_npm_search, read_npm_token_list, read_npm_whoami,
-    read_npm_workspace_packages, read_package_scripts, read_pip_config_snapshot,
-    read_pypi_available_versions, read_requirements_files, remove_manifest_dependency,
-    remove_npm_dist_tag, revoke_npm_access, revoke_npm_token, set_npm_access_mfa,
-    set_npm_access_status, unpublish_npm_package, upload_pypi_distribution, Behavior, Ecosystem,
-    InstallReport, LinkOptions, LockedPackage, LockedPythonVcsDependency, NpmAccessMapResult,
-    NpmAccessMutationResult, NpmAccessStatusResult, NpmAccessToken, NpmDeprecateResult,
-    NpmDistTagMutationResult, NpmOwnerListResult, NpmOwnerMutationResult, NpmPingResult,
-    NpmPublishPackage, NpmPublishResult, NpmSearchPackage, NpmTokenCreateOptions,
-    NpmTokenCreateResult, NpmTokenListResult, NpmTokenRevokeResult, NpmUnpublishResult,
-    NpmWhoamiResult, NpmWorkspacePackage, OmcRegistryError, PackageSpec, ProjectRequirements,
-    PypiBinaryMode, PypiCheckIssue, PypiUploadOptions, PypiUploadResult, PythonLocalRequirement,
+    read_npm_ping_with_userconfig, read_npm_search, read_npm_team_users, read_npm_teams,
+    read_npm_token_list, read_npm_whoami, read_npm_workspace_packages, read_package_scripts,
+    read_pip_config_snapshot, read_pypi_available_versions, read_requirements_files,
+    remove_manifest_dependency, remove_npm_dist_tag, remove_npm_team_user, revoke_npm_access,
+    revoke_npm_token, set_npm_access_mfa, set_npm_access_status, unpublish_npm_package,
+    upload_pypi_distribution, Behavior, Ecosystem, InstallReport, LinkOptions, LockedPackage,
+    LockedPythonVcsDependency, NpmAccessMapResult, NpmAccessMutationResult, NpmAccessStatusResult,
+    NpmAccessToken, NpmDeprecateResult, NpmDistTagMutationResult, NpmOwnerListResult,
+    NpmOwnerMutationResult, NpmPingResult, NpmPublishPackage, NpmPublishResult, NpmSearchPackage,
+    NpmTeamListResult, NpmTeamMutationResult, NpmTokenCreateOptions, NpmTokenCreateResult,
+    NpmTokenListResult, NpmTokenRevokeResult, NpmUnpublishResult, NpmWhoamiResult,
+    NpmWorkspacePackage, OmcRegistryError, PackageSpec, ProjectRequirements, PypiBinaryMode,
+    PypiCheckIssue, PypiUploadOptions, PypiUploadResult, PythonLocalRequirement,
     PythonVcsRequirement, Verdict,
 };
 use sha2::{Digest, Sha256, Sha384, Sha512};
@@ -381,6 +383,9 @@ enum NpmCompatAction {
     Access {
         action: NpmAccessAction,
     },
+    Team {
+        action: NpmTeamAction,
+    },
     DistTag {
         action: NpmDistTagAction,
     },
@@ -572,6 +577,51 @@ enum NpmAccessAction {
         npm_registry: Option<String>,
         userconfig: Option<PathBuf>,
         otp: Option<String>,
+    },
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum NpmTeamAction {
+    Create {
+        scope_team: String,
+        json: bool,
+        parseable: bool,
+        npm_registry: Option<String>,
+        userconfig: Option<PathBuf>,
+        otp: Option<String>,
+    },
+    Destroy {
+        scope_team: String,
+        json: bool,
+        parseable: bool,
+        npm_registry: Option<String>,
+        userconfig: Option<PathBuf>,
+        otp: Option<String>,
+    },
+    Add {
+        scope_team: String,
+        user: String,
+        json: bool,
+        parseable: bool,
+        npm_registry: Option<String>,
+        userconfig: Option<PathBuf>,
+        otp: Option<String>,
+    },
+    Remove {
+        scope_team: String,
+        user: String,
+        json: bool,
+        parseable: bool,
+        npm_registry: Option<String>,
+        userconfig: Option<PathBuf>,
+        otp: Option<String>,
+    },
+    List {
+        scope_or_team: String,
+        json: bool,
+        parseable: bool,
+        npm_registry: Option<String>,
+        userconfig: Option<PathBuf>,
     },
 }
 
@@ -2185,6 +2235,7 @@ fn run_npm_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
         NpmCompatAction::Token { action } => print_npm_token(project_dir, action)?,
         NpmCompatAction::Owner { action } => print_npm_owner(project_dir, action)?,
         NpmCompatAction::Access { action } => print_npm_access(project_dir, action)?,
+        NpmCompatAction::Team { action } => print_npm_team(project_dir, action)?,
         NpmCompatAction::DistTag { action } => print_npm_dist_tag(project_dir, action)?,
         NpmCompatAction::Sbom { action } => print_npm_sbom(project_dir, action)?,
         NpmCompatAction::Config {
@@ -2977,6 +3028,14 @@ fn npm_help_text(topic: Option<&str>) -> String {
                 "Supports --json, --registry, --userconfig, and --otp for mutations.",
             ],
         ),
+        Some("team") => npm_command_help(
+            "npm team <create|destroy|add|rm|ls> ...",
+            &[
+                "Manage npm organization teams and team membership through the configured registry.",
+                "Supports create <scope:team>, destroy <scope:team>, add <scope:team> <user>, rm <scope:team> <user>, and ls <scope|scope:team>.",
+                "Supports --json, --parseable, --registry, --userconfig, and --otp for mutations.",
+            ],
+        ),
         Some("dist-tag") => npm_command_help(
             "npm dist-tag <add|rm|ls> ...",
             &[
@@ -3042,7 +3101,7 @@ fn npm_general_help_text() -> String {
         "npm <command>",
         &[
             "OMC npm compatibility runs supported npm workflows through OMC's verifier, lockfile, cache, and project-local runtime paths.",
-            "Supported commands: install, install-test, ci, install-ci-test, remove, run, test, start, stop, restart, exec, list, explain, audit, outdated, fund, prune, dedupe, rebuild, cache, pkg, version, pack, publish, unpublish, deprecate, undeprecate, search, ping, whoami, login, adduser, logout, token, owner, access, dist-tag, sbom, view, docs, repo, bugs, home, config, init, bin, root, prefix.",
+            "Supported commands: install, install-test, ci, install-ci-test, remove, run, test, start, stop, restart, exec, list, explain, audit, outdated, fund, prune, dedupe, rebuild, cache, pkg, version, pack, publish, unpublish, deprecate, undeprecate, search, ping, whoami, login, adduser, logout, token, owner, access, team, dist-tag, sbom, view, docs, repo, bugs, home, config, init, bin, root, prefix.",
             "Use `npm help <command>` for focused OMC compatibility notes.",
         ],
     )
@@ -3089,6 +3148,7 @@ fn npm_help_topic(topic: &str) -> Option<&'static str> {
         "token" => Some("token"),
         "owner" => Some("owner"),
         "access" => Some("access"),
+        "team" => Some("team"),
         "dist-tag" | "dist-tags" => Some("dist-tag"),
         "sbom" => Some("sbom"),
         "view" | "info" | "show" | "v" => Some("view"),
@@ -4281,6 +4341,209 @@ fn npm_access_package_arg(
     }
     let package = read_npm_pkg_json(&project_dir.join("package.json"))?;
     npm_package_json_name(&package)
+}
+
+fn print_npm_team(project_dir: &Path, action: NpmTeamAction) -> Result<(), OmcRegistryError> {
+    match action {
+        NpmTeamAction::Create {
+            scope_team,
+            json,
+            parseable,
+            npm_registry,
+            userconfig,
+            otp,
+        } => {
+            let result = create_npm_team(
+                project_dir,
+                &scope_team,
+                npm_registry.as_deref(),
+                userconfig.as_deref(),
+                otp.as_deref(),
+            )?;
+            print_npm_team_mutation(result, json, parseable)?;
+        }
+        NpmTeamAction::Destroy {
+            scope_team,
+            json,
+            parseable,
+            npm_registry,
+            userconfig,
+            otp,
+        } => {
+            let result = destroy_npm_team(
+                project_dir,
+                &scope_team,
+                npm_registry.as_deref(),
+                userconfig.as_deref(),
+                otp.as_deref(),
+            )?;
+            print_npm_team_mutation(result, json, parseable)?;
+        }
+        NpmTeamAction::Add {
+            scope_team,
+            user,
+            json,
+            parseable,
+            npm_registry,
+            userconfig,
+            otp,
+        } => {
+            let result = add_npm_team_user(
+                project_dir,
+                &scope_team,
+                &user,
+                npm_registry.as_deref(),
+                userconfig.as_deref(),
+                otp.as_deref(),
+            )?;
+            print_npm_team_mutation(result, json, parseable)?;
+        }
+        NpmTeamAction::Remove {
+            scope_team,
+            user,
+            json,
+            parseable,
+            npm_registry,
+            userconfig,
+            otp,
+        } => {
+            let result = remove_npm_team_user(
+                project_dir,
+                &scope_team,
+                &user,
+                npm_registry.as_deref(),
+                userconfig.as_deref(),
+                otp.as_deref(),
+            )?;
+            print_npm_team_mutation(result, json, parseable)?;
+        }
+        NpmTeamAction::List {
+            scope_or_team,
+            json,
+            parseable,
+            npm_registry,
+            userconfig,
+        } => {
+            let result = if scope_or_team.contains(':') {
+                read_npm_team_users(
+                    project_dir,
+                    &scope_or_team,
+                    npm_registry.as_deref(),
+                    userconfig.as_deref(),
+                )?
+            } else {
+                read_npm_teams(
+                    project_dir,
+                    &scope_or_team,
+                    npm_registry.as_deref(),
+                    userconfig.as_deref(),
+                )?
+            };
+            print_npm_team_list(result, json, parseable)?;
+        }
+    }
+    Ok(())
+}
+
+fn print_npm_team_list(
+    result: NpmTeamListResult,
+    json: bool,
+    parseable: bool,
+) -> Result<(), OmcRegistryError> {
+    if json {
+        println!("{}", serde_json::to_string_pretty(&result.items)?);
+    } else if parseable {
+        for item in result.items {
+            println!("{item}");
+        }
+    } else if let Some(team) = result.team.as_deref() {
+        let plural = if result.items.len() == 1 { "" } else { "s" };
+        let more = if result.items.is_empty() { "" } else { ":" };
+        println!(
+            "@{}:{} has {} user{}{}",
+            result.scope,
+            team,
+            result.items.len(),
+            plural,
+            more
+        );
+        for item in result.items {
+            println!("{item}");
+        }
+    } else {
+        let plural = if result.items.len() == 1 { "" } else { "s" };
+        let more = if result.items.is_empty() { "" } else { ":" };
+        println!(
+            "@{} has {} team{}{}",
+            result.scope,
+            result.items.len(),
+            plural,
+            more
+        );
+        for item in result.items {
+            println!("@{item}");
+        }
+    }
+    Ok(())
+}
+
+fn print_npm_team_mutation(
+    result: NpmTeamMutationResult,
+    json: bool,
+    parseable: bool,
+) -> Result<(), OmcRegistryError> {
+    let entity = format!("{}:{}", result.scope, result.team);
+    if json {
+        let value = match result.action.as_str() {
+            "create" => serde_json::json!({ "created": true, "team": entity }),
+            "destroy" => serde_json::json!({ "deleted": true, "team": entity }),
+            "add" => serde_json::json!({
+                "added": true,
+                "team": entity,
+                "user": result.user.as_deref().unwrap_or_default(),
+            }),
+            "rm" => serde_json::json!({
+                "removed": true,
+                "team": entity,
+                "user": result.user.as_deref().unwrap_or_default(),
+            }),
+            _ => serde_json::to_value(&result)?,
+        };
+        println!("{}", serde_json::to_string_pretty(&value)?);
+    } else if parseable {
+        match result.action.as_str() {
+            "create" => println!("{entity}\tcreated"),
+            "destroy" => println!("{entity}\tdeleted"),
+            "add" => println!(
+                "{}\t{}\tadded",
+                result.user.as_deref().unwrap_or_default(),
+                entity
+            ),
+            "rm" => println!(
+                "{}\t{}\tremoved",
+                result.user.as_deref().unwrap_or_default(),
+                entity
+            ),
+            action => println!("{entity}\t{action}"),
+        }
+    } else {
+        match result.action.as_str() {
+            "create" => println!("+@{entity}"),
+            "destroy" => println!("-@{entity}"),
+            "add" => println!(
+                "{} added to @{}",
+                result.user.as_deref().unwrap_or_default(),
+                entity
+            ),
+            "rm" => println!(
+                "{} removed from @{}",
+                result.user.as_deref().unwrap_or_default(),
+                entity
+            ),
+            action => println!("{action} @{entity}"),
+        }
+    }
+    Ok(())
 }
 
 fn print_npm_owner(project_dir: &Path, action: NpmOwnerAction) -> Result<(), OmcRegistryError> {
@@ -9146,6 +9409,7 @@ fn parse_npm_compat_action(args: &[String]) -> Result<NpmCompatAction, OmcRegist
         "token" => parse_npm_token_args(&args[1..]),
         "owner" => parse_npm_owner_args(&args[1..]),
         "access" => parse_npm_access_args(&args[1..]),
+        "team" => parse_npm_team_args(&args[1..]),
         "dist-tag" | "dist-tags" => parse_npm_dist_tag_args(&args[1..]),
         "sbom" => parse_npm_sbom_args(&args[1..]),
         "view" | "info" | "show" | "v" => parse_npm_view_args(&args[1..]),
@@ -9308,6 +9572,7 @@ fn npm_global_arg_supported_by_command(command: &str, arg: &str) -> bool {
                 | "token"
                 | "owner"
                 | "access"
+                | "team"
                 | "dist-tag"
                 | "dist-tags"
                 | "sbom"
@@ -9333,6 +9598,7 @@ fn npm_global_arg_supported_by_command(command: &str, arg: &str) -> bool {
                 | "token"
                 | "owner"
                 | "access"
+                | "team"
                 | "dist-tag"
                 | "dist-tags"
         );
@@ -9435,6 +9701,7 @@ fn npm_global_arg_supported_by_command(command: &str, arg: &str) -> bool {
                 | "token"
                 | "owner"
                 | "access"
+                | "team"
                 | "dist-tag"
                 | "dist-tags"
         );
@@ -9514,6 +9781,7 @@ fn npm_global_arg_supported_by_command(command: &str, arg: &str) -> bool {
                 | "token"
                 | "owner"
                 | "access"
+                | "team"
                 | "dist-tag"
                 | "dist-tags"
                 | "view"
@@ -12108,6 +12376,181 @@ fn npm_access_ignored_equals_flag(arg: &str) -> bool {
 }
 
 fn npm_access_flag_value(
+    args: &[String],
+    index: usize,
+    flag: &str,
+) -> Result<String, OmcRegistryError> {
+    args.get(index)
+        .cloned()
+        .ok_or_else(|| OmcRegistryError::UnsupportedSpec(format!("{flag} needs a value")))
+}
+
+fn parse_npm_team_args(args: &[String]) -> Result<NpmCompatAction, OmcRegistryError> {
+    let mut positionals = Vec::new();
+    let mut json = false;
+    let mut parseable = false;
+    let mut npm_registry = None;
+    let mut userconfig = None;
+    let mut otp = None;
+    let mut index = 0;
+    while index < args.len() {
+        let arg = &args[index];
+        if arg == "--json" || arg == "--json=true" {
+            json = true;
+        } else if arg == "--json=false" {
+            json = false;
+        } else if matches!(arg.as_str(), "--parseable" | "-p" | "--parseable=true") {
+            parseable = true;
+        } else if matches!(arg.as_str(), "--parseable=false" | "--no-parseable") {
+            parseable = false;
+        } else if arg == "--registry" {
+            index += 1;
+            npm_registry = Some(npm_team_flag_value(args, index, arg)?);
+        } else if let Some(value) = arg.strip_prefix("--registry=") {
+            npm_registry = Some(value.to_owned());
+        } else if arg == "--userconfig" {
+            index += 1;
+            userconfig = Some(PathBuf::from(npm_team_flag_value(args, index, arg)?));
+        } else if let Some(value) = arg.strip_prefix("--userconfig=") {
+            userconfig = Some(PathBuf::from(value));
+        } else if arg == "--otp" {
+            index += 1;
+            otp = Some(npm_team_flag_value(args, index, arg)?);
+        } else if let Some(value) = arg.strip_prefix("--otp=") {
+            otp = Some(value.to_owned());
+        } else if matches!(
+            arg.as_str(),
+            "--silent" | "-s" | "--workspaces" | "--include-workspace-root"
+        ) || npm_team_ignored_equals_flag(arg)
+        {
+        } else if matches!(
+            arg.as_str(),
+            "--loglevel" | "--cache" | "--workspace" | "-w"
+        ) {
+            index += 1;
+            let _ = npm_team_flag_value(args, index, arg)?;
+        } else if arg.starts_with('-') {
+            return Err(unsupported_compat_arg("npm team", arg));
+        } else {
+            positionals.push(arg.clone());
+        }
+        index += 1;
+    }
+
+    let Some(command) = positionals.first().map(String::as_str) else {
+        return Err(OmcRegistryError::UnsupportedSpec(
+            "npm team needs a command".to_owned(),
+        ));
+    };
+    match command {
+        "create" => {
+            if positionals.len() != 2 {
+                return Err(OmcRegistryError::UnsupportedSpec(
+                    "npm team create needs exactly one scope:team".to_owned(),
+                ));
+            }
+            Ok(NpmCompatAction::Team {
+                action: NpmTeamAction::Create {
+                    scope_team: positionals[1].clone(),
+                    json,
+                    parseable,
+                    npm_registry,
+                    userconfig,
+                    otp,
+                },
+            })
+        }
+        "destroy" | "delete" | "del" => {
+            if positionals.len() != 2 {
+                return Err(OmcRegistryError::UnsupportedSpec(
+                    "npm team destroy needs exactly one scope:team".to_owned(),
+                ));
+            }
+            Ok(NpmCompatAction::Team {
+                action: NpmTeamAction::Destroy {
+                    scope_team: positionals[1].clone(),
+                    json,
+                    parseable,
+                    npm_registry,
+                    userconfig,
+                    otp,
+                },
+            })
+        }
+        "add" => {
+            if positionals.len() != 3 {
+                return Err(OmcRegistryError::UnsupportedSpec(
+                    "npm team add needs a scope:team and username".to_owned(),
+                ));
+            }
+            Ok(NpmCompatAction::Team {
+                action: NpmTeamAction::Add {
+                    scope_team: positionals[1].clone(),
+                    user: positionals[2].clone(),
+                    json,
+                    parseable,
+                    npm_registry,
+                    userconfig,
+                    otp,
+                },
+            })
+        }
+        "rm" | "remove" => {
+            if positionals.len() != 3 {
+                return Err(OmcRegistryError::UnsupportedSpec(
+                    "npm team rm needs a scope:team and username".to_owned(),
+                ));
+            }
+            Ok(NpmCompatAction::Team {
+                action: NpmTeamAction::Remove {
+                    scope_team: positionals[1].clone(),
+                    user: positionals[2].clone(),
+                    json,
+                    parseable,
+                    npm_registry,
+                    userconfig,
+                    otp,
+                },
+            })
+        }
+        "ls" | "list" => {
+            if positionals.len() != 2 {
+                return Err(OmcRegistryError::UnsupportedSpec(
+                    "npm team ls needs a scope or scope:team".to_owned(),
+                ));
+            }
+            Ok(NpmCompatAction::Team {
+                action: NpmTeamAction::List {
+                    scope_or_team: positionals[1].clone(),
+                    json,
+                    parseable,
+                    npm_registry,
+                    userconfig,
+                },
+            })
+        }
+        other => Err(OmcRegistryError::UnsupportedSpec(format!(
+            "unsupported npm team command `{other}`"
+        ))),
+    }
+}
+
+fn npm_team_ignored_equals_flag(arg: &str) -> bool {
+    [
+        "--json=",
+        "--loglevel=",
+        "--cache=",
+        "--parseable=",
+        "--workspace=",
+        "-w=",
+        "--workspaces=",
+        "--include-workspace-root=",
+    ]
+    .iter()
+    .any(|prefix| arg.starts_with(prefix))
+}
+
+fn npm_team_flag_value(
     args: &[String],
     index: usize,
     flag: &str,
@@ -16590,6 +17033,77 @@ mod tests {
             }
         );
         assert!(parse_npm_compat_action(&args(&["access", "grant", "write"])).is_err());
+        assert_eq!(
+            parse_npm_compat_action(&args(&[
+                "--json",
+                "--registry=https://registry.example.invalid/npm",
+                "--userconfig=ci.npmrc",
+                "--otp",
+                "123456",
+                "team",
+                "create",
+                "@demo:publishers",
+            ]))
+            .unwrap(),
+            NpmCompatAction::Team {
+                action: NpmTeamAction::Create {
+                    scope_team: "@demo:publishers".to_owned(),
+                    json: true,
+                    parseable: false,
+                    npm_registry: Some("https://registry.example.invalid/npm".to_owned()),
+                    userconfig: Some(PathBuf::from("ci.npmrc")),
+                    otp: Some("123456".to_owned()),
+                },
+            }
+        );
+        assert_eq!(
+            parse_npm_compat_action(&args(&[
+                "team",
+                "add",
+                "@demo:publishers",
+                "alice",
+                "--parseable",
+            ]))
+            .unwrap(),
+            NpmCompatAction::Team {
+                action: NpmTeamAction::Add {
+                    scope_team: "@demo:publishers".to_owned(),
+                    user: "alice".to_owned(),
+                    json: false,
+                    parseable: true,
+                    npm_registry: None,
+                    userconfig: None,
+                    otp: None,
+                },
+            }
+        );
+        assert_eq!(
+            parse_npm_compat_action(&args(&["team", "rm", "@demo:publishers", "alice"])).unwrap(),
+            NpmCompatAction::Team {
+                action: NpmTeamAction::Remove {
+                    scope_team: "@demo:publishers".to_owned(),
+                    user: "alice".to_owned(),
+                    json: false,
+                    parseable: false,
+                    npm_registry: None,
+                    userconfig: None,
+                    otp: None,
+                },
+            }
+        );
+        assert_eq!(
+            parse_npm_compat_action(&args(&["team", "ls", "@demo:publishers"])).unwrap(),
+            NpmCompatAction::Team {
+                action: NpmTeamAction::List {
+                    scope_or_team: "@demo:publishers".to_owned(),
+                    json: false,
+                    parseable: false,
+                    npm_registry: None,
+                    userconfig: None,
+                },
+            }
+        );
+        assert!(parse_npm_compat_action(&args(&["team", "add", "@demo:publishers"])).is_err());
         assert_eq!(
             parse_npm_compat_action(&args(&[
                 "--registry",
