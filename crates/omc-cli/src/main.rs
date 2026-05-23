@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 use std::process::{Command as ProcessCommand, ExitCode};
-use std::{env, ffi::OsString};
+use std::{env, ffi::OsString, fs};
 
 use clap::{Parser, Subcommand};
 use omc_cap::Capability;
@@ -392,11 +392,21 @@ fn project_path(project_dir: &Path) -> Result<OsString, OmcRegistryError> {
 }
 
 fn project_python_path(project_dir: &Path) -> Result<OsString, OmcRegistryError> {
-    env::join_paths([project_dir
+    let mut paths = vec![project_dir
         .join(".omc")
         .join("python")
-        .join("site-packages")])
-    .map_err(|error| OmcRegistryError::UnsupportedSpec(error.to_string()))
+        .join("site-packages")];
+    let local_paths_file = project_dir.join(".omc").join("python").join("local-paths");
+    if let Ok(content) = fs::read_to_string(local_paths_file) {
+        paths.extend(
+            content
+                .lines()
+                .map(str::trim)
+                .filter(|line| !line.is_empty())
+                .map(PathBuf::from),
+        );
+    }
+    env::join_paths(paths).map_err(|error| OmcRegistryError::UnsupportedSpec(error.to_string()))
 }
 
 #[cfg(unix)]

@@ -469,6 +469,7 @@ pub struct LinkOptions {
     pub pypi_extra_index_urls: Vec<String>,
     pub pypi_find_links: Vec<String>,
     pub pypi_no_index: bool,
+    pub python_local_paths: Vec<PathBuf>,
     pub project_extras: BTreeSet<String>,
     pub include_dev_dependencies: bool,
     pub save_dev_dependency: bool,
@@ -488,6 +489,7 @@ impl LinkOptions {
             pypi_extra_index_urls: Vec::new(),
             pypi_find_links: Vec::new(),
             pypi_no_index: false,
+            python_local_paths: Vec::new(),
             project_extras: BTreeSet::new(),
             include_dev_dependencies: true,
             save_dev_dependency: false,
@@ -526,6 +528,7 @@ pub struct ProjectRequirements {
     pub pypi_extra_index_urls: Vec<String>,
     pub pypi_find_links: Vec<String>,
     pub pypi_no_index: bool,
+    pub python_local_paths: Vec<PathBuf>,
 }
 
 #[derive(Debug, Clone)]
@@ -671,7 +674,9 @@ pub fn install_project(options: &LinkOptions) -> Result<InstallReport> {
     }
 
     prune_lockfile(&options.project_dir, &retained)?;
-    install_locked_packages(&options.project_dir)
+    let report = install_locked_packages(&options.project_dir)?;
+    install_python_local_paths(&options.python_local_paths, &report.python_site_packages)?;
+    Ok(report)
 }
 
 pub fn install_locked_project(options: &LinkOptions) -> Result<InstallReport> {
@@ -686,7 +691,9 @@ pub fn install_locked_project(options: &LinkOptions) -> Result<InstallReport> {
         .packages
         .retain(|package| retained.contains(&locked_package_key(package)));
 
-    install_lock(&options.project_dir, &selected)
+    let report = install_lock(&options.project_dir, &selected)?;
+    install_python_local_paths(&options.python_local_paths, &report.python_site_packages)?;
+    Ok(report)
 }
 
 fn project_requested_specs(options: &mut LinkOptions) -> Result<Vec<PackageSpec>> {
@@ -719,6 +726,9 @@ fn project_requested_specs(options: &mut LinkOptions) -> Result<Vec<PackageSpec>
         .extend(discovered.pypi_extra_index_urls);
     options.pypi_find_links.extend(discovered.pypi_find_links);
     options.pypi_no_index |= discovered.pypi_no_index;
+    options
+        .python_local_paths
+        .extend(discovered.python_local_paths);
 
     let mut seen = BTreeSet::new();
     specs.retain(|spec| seen.insert(spec.requested()));
@@ -925,6 +935,9 @@ fn discover_project_requirements_with_options(
             .extend(requirements.pypi_extra_index_urls);
         project.pypi_find_links.extend(requirements.pypi_find_links);
         project.pypi_no_index |= requirements.pypi_no_index;
+        project
+            .python_local_paths
+            .extend(requirements.python_local_paths);
     }
 
     let pipfile_lock = project_dir.join("Pipfile.lock");
@@ -2217,6 +2230,7 @@ fn npm_requirements_from_lock_maps(
         pypi_extra_index_urls: Vec::new(),
         pypi_find_links: Vec::new(),
         pypi_no_index: false,
+        python_local_paths: Vec::new(),
     }
 }
 
@@ -3357,6 +3371,16 @@ fn read_requirements_file_inner(
             continue;
         }
 
+        if let Some(editable) = parse_requirements_editable_value(line) {
+            if mode == RequirementsMode::Constraint {
+                return Err(OmcRegistryError::UnsupportedRequirement(line.to_owned()));
+            }
+            discovered
+                .python_local_paths
+                .push(normalize_requirements_editable_path(&editable, base_dir)?);
+            continue;
+        }
+
         if line.starts_with('-') {
             return Err(OmcRegistryError::UnsupportedRequirement(line.to_owned()));
         }
@@ -3579,10 +3603,12 @@ fn install_lock(project_dir: &Path, lock: &OmcLock) -> Result<InstallReport> {
         .join("python")
         .join("site-packages");
     let python_bin_dir = project_dir.join(".omc").join("python").join("bin");
+    let python_local_paths = python_local_paths_file(project_dir);
 
     remove_path_if_exists(&node_modules)?;
     remove_path_if_exists(&python_site_packages)?;
     remove_path_if_exists(&python_bin_dir)?;
+    remove_path_if_exists(&python_local_paths)?;
 
     fs::create_dir_all(&node_modules)?;
     fs::create_dir_all(&npm_bin_dir)?;
@@ -3633,6 +3659,57 @@ fn install_lock(project_dir: &Path, lock: &OmcLock) -> Result<InstallReport> {
     install_nested_npm_dependencies(project_dir, lock, &report.node_modules)?;
 
     Ok(report)
+}
+
+fn install_python_local_paths(local_paths: &[PathBuf], site_packages: &Path) -> Result<()> {
+    let mut lines = BTreeSet::new();
+    for path in local_paths {
+        let path = fs::canonicalize(path).map_err(|error| {
+            OmcRegistryError::UnsupportedRequirement(format!(
+                "editable path `{}` could not be resolved: {error}",
+                path.display()
+            ))
+        })?;
+        if !path.is_dir() {
+            return Err(OmcRegistryError::UnsupportedRequirement(format!(
+                "editable path `{}` must be a directory",
+                path.display()
+            )));
+        }
+        let import_path = if path.join("src").is_dir() {
+            path.join("src")
+        } else {
+            path
+        };
+        let line = import_path.to_string_lossy();
+        if line.contains('\n') || line.contains('\r') {
+            return Err(OmcRegistryError::UnsupportedRequirement(format!(
+                "editable path `{}` contains a newline",
+                import_path.display()
+            )));
+        }
+        lines.insert(line.into_owned());
+    }
+
+    if lines.is_empty() {
+        return Ok(());
+    }
+
+    let local_paths_file = site_packages
+        .parent()
+        .map(|python_dir| python_dir.join("local-paths"))
+        .ok_or_else(|| {
+            OmcRegistryError::UnsupportedSpec("missing python install directory".to_owned())
+        })?;
+    fs::write(
+        local_paths_file,
+        format!("{}\n", lines.into_iter().collect::<Vec<_>>().join("\n")),
+    )?;
+    Ok(())
+}
+
+fn python_local_paths_file(project_dir: &Path) -> PathBuf {
+    project_dir.join(".omc").join("python").join("local-paths")
 }
 
 fn read_locked_archive(project_dir: &Path, package: &LockedPackage) -> Result<Vec<u8>> {
@@ -5917,6 +5994,25 @@ fn parse_requirements_find_links(line: &str, base_dir: &Path) -> Option<String> 
 
 fn parse_requirements_no_index(line: &str) -> bool {
     line == "--no-index"
+}
+
+fn parse_requirements_editable_value(line: &str) -> Option<String> {
+    parse_requirements_option_value(line, &["--editable=", "--editable", "-e"])
+}
+
+fn normalize_requirements_editable_path(value: &str, base_dir: &Path) -> Result<PathBuf> {
+    let path = value.split_once('[').map(|(path, _)| path).unwrap_or(value);
+    if path.contains("://") || path.starts_with("git+") {
+        return Err(OmcRegistryError::UnsupportedRequirement(format!(
+            "editable requirement `{value}` must be a local path"
+        )));
+    }
+    let path = PathBuf::from(path);
+    if path.is_absolute() {
+        Ok(path)
+    } else {
+        Ok(base_dir.join(path))
+    }
 }
 
 fn parse_requirements_option_value(line: &str, prefixes: &[&str]) -> Option<String> {
@@ -8336,6 +8432,54 @@ packages:
                 .map(String::as_str),
             Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
         );
+    }
+
+    #[test]
+    fn reads_requirements_local_editable_paths() {
+        let dir = tempfile::tempdir().unwrap();
+        let requirements = dir.path().join("requirements.txt");
+        fs::write(&requirements, "-e .\n--editable ./vendor/pkg[dev]\n").unwrap();
+
+        let discovered = read_requirements_file(&requirements).unwrap();
+        assert_eq!(
+            discovered.python_local_paths,
+            vec![dir.path().join("."), dir.path().join("./vendor/pkg")]
+        );
+
+        let project = discover_project_requirements(dir.path()).unwrap();
+        assert_eq!(project.python_local_paths, discovered.python_local_paths);
+    }
+
+    #[test]
+    fn rejects_editable_vcs_requirements() {
+        let dir = tempfile::tempdir().unwrap();
+        let requirements = dir.path().join("requirements.txt");
+        fs::write(
+            &requirements,
+            "-e git+https://example.invalid/repo.git#egg=demo\n",
+        )
+        .unwrap();
+        let error = read_requirements_file(&requirements).unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("editable requirement `git+https://example.invalid/repo.git#egg=demo`"));
+    }
+
+    #[test]
+    fn installs_editable_python_local_paths_preferring_src_layout() {
+        let dir = tempfile::tempdir().unwrap();
+        let local = dir.path().join("localpkg");
+        let src = local.join("src");
+        fs::create_dir_all(src.join("localpkg")).unwrap();
+        let site_packages = dir.path().join(".omc").join("python").join("site-packages");
+        fs::create_dir_all(&site_packages).unwrap();
+
+        install_python_local_paths(std::slice::from_ref(&local), &site_packages).unwrap();
+
+        let expected = fs::canonicalize(src).unwrap();
+        let content =
+            fs::read_to_string(dir.path().join(".omc").join("python").join("local-paths")).unwrap();
+        assert_eq!(content.trim(), expected.to_string_lossy());
     }
 
     #[test]

@@ -125,7 +125,7 @@ npm-shrinkwrap.json exact versions, resolved tarball URLs, and integrity hashes 
 yarn.lock          Yarn Classic exact versions, resolved tarball URLs, and integrity hashes for uniquely locked npm packages
 pnpm-lock.yaml     pnpm importer dependencies, exact versions, resolved tarball URLs, and integrity hashes
 pip.conf           PyPI index-url, extra-index-url, find-links, and no-index configuration
-requirements.txt  PyPI requirements, direct wheel URLs, hashes, extras, -r includes, -c constraints, markers, simple indexes, find-links wheelhouses
+requirements.txt  PyPI requirements, direct wheel URLs, hashes, extras, local editable paths, -r includes, -c constraints, markers, simple indexes, find-links wheelhouses
 Pipfile.lock      Pipenv default/develop package pins, extras, markers, and sha256 hashes
 uv.lock           uv project requirements, dev requirements, exact package pins, and hashes
 pylock.toml       standardized Python lock package pins, markers, and hashes
@@ -256,10 +256,10 @@ Supported now:
 - `requirements.txt` ingestion with hashes, line continuations, extras,
   direct wheel URLs, recursive `-r` includes, `-c` constraints,
   `--index-url` / `--extra-index-url` simple indexes, `--find-links` / `-f`
-  local wheelhouses or HTML pages, `--no-index`, and common Python environment
-  markers
-- unsupported requirements entries such as editable installs, VCS URLs, and
-  non-wheel direct URLs fail closed instead of being silently ignored
+  local wheelhouses or HTML pages, `--no-index`, local editable paths, and
+  common Python environment markers
+- unsupported requirements entries such as VCS URLs and non-wheel direct URLs
+  fail closed instead of being silently ignored
 - `Pipfile.lock` ingestion for Pipenv default/develop package pins, extras,
   markers, and sha256 hashes
 - `uv.lock` ingestion for uv project requirements, dev requirements,
@@ -318,8 +318,8 @@ Not implemented yet:
 - imports/linking across package cells
 - native/Wasm/Cranelift backend
 - full npm peer placement semantics beyond current required-peer handling
-- advanced requirements-file semantics such as editable installs, VCS URLs,
-  non-wheel direct URLs, and finder/link options beyond fail-closed rejection
+- advanced requirements-file semantics such as VCS URLs, non-wheel direct URLs,
+  and finder/link options beyond fail-closed rejection
 - Poetry git/path/url/file dependencies beyond direct wheel URLs and local
   wheel files
 - Python sdist build isolation and native extension policy beyond fail-closed
