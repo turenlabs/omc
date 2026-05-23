@@ -676,16 +676,66 @@ fn run_package_script_with_npm_command(
     args: &[String],
 ) -> Result<ExitCode, OmcRegistryError> {
     let scripts = read_package_scripts(project_dir)?;
-    let script = scripts.get(name).ok_or_else(|| {
+    let lifecycle = package_script_lifecycle_order(&scripts, name)?;
+
+    for lifecycle_name in lifecycle {
+        let script = scripts.get(&lifecycle_name).ok_or_else(|| {
+            OmcRegistryError::UnsupportedSpec(format!("missing project script `{lifecycle_name}`"))
+        })?;
+        let script_args = if lifecycle_name == name {
+            args
+        } else {
+            &[] as &[String]
+        };
+        let status = run_single_package_script(
+            project_dir,
+            npm_command,
+            &lifecycle_name,
+            script,
+            script_args,
+        )?;
+        if status != ExitCode::SUCCESS {
+            return Ok(status);
+        }
+    }
+
+    Ok(ExitCode::SUCCESS)
+}
+
+fn package_script_lifecycle_order(
+    scripts: &BTreeMap<String, String>,
+    name: &str,
+) -> Result<Vec<String>, OmcRegistryError> {
+    if !scripts.contains_key(name) {
         let available = scripts.keys().cloned().collect::<Vec<_>>().join(", ");
         let detail = if available.is_empty() {
             format!("missing project script `{name}`")
         } else {
             format!("missing project script `{name}`; available scripts: {available}")
         };
-        OmcRegistryError::UnsupportedSpec(detail)
-    })?;
+        return Err(OmcRegistryError::UnsupportedSpec(detail));
+    }
 
+    let mut lifecycle = Vec::new();
+    let pre = format!("pre{name}");
+    if scripts.contains_key(&pre) {
+        lifecycle.push(pre);
+    }
+    lifecycle.push(name.to_owned());
+    let post = format!("post{name}");
+    if scripts.contains_key(&post) {
+        lifecycle.push(post);
+    }
+    Ok(lifecycle)
+}
+
+fn run_single_package_script(
+    project_dir: &Path,
+    npm_command: &str,
+    name: &str,
+    script: &str,
+    args: &[String],
+) -> Result<ExitCode, OmcRegistryError> {
     let mut command = package_script_command(script);
     apply_project_runtime_env(&mut command, project_dir)?;
     apply_npm_lifecycle_env(&mut command, project_dir, npm_command, name, script)?;
@@ -2801,6 +2851,29 @@ mod tests {
         );
 
         let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn orders_npm_pre_and_post_lifecycle_scripts() {
+        let scripts = BTreeMap::from([
+            ("check".to_owned(), "node check.js".to_owned()),
+            ("precheck".to_owned(), "node pre.js".to_owned()),
+            ("postcheck".to_owned(), "node post.js".to_owned()),
+            ("prepare".to_owned(), "node prepare.js".to_owned()),
+        ]);
+
+        assert_eq!(
+            package_script_lifecycle_order(&scripts, "check").unwrap(),
+            vec![
+                "precheck".to_owned(),
+                "check".to_owned(),
+                "postcheck".to_owned()
+            ]
+        );
+        assert_eq!(
+            package_script_lifecycle_order(&scripts, "prepare").unwrap(),
+            vec!["prepare".to_owned()]
+        );
     }
 
     #[test]

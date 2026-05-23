@@ -391,7 +391,8 @@ Supported now:
   lifecycle/package environment variables such as `npm_lifecycle_event`,
   `npm_lifecycle_script`, `npm_package_name`, `npm_package_version`,
   `npm_package_config_*`, `npm_package_bin_*`, `npm_package_json`,
-  `npm_config_user_agent`, and `INIT_CWD`
+  `npm_config_user_agent`, and `INIT_CWD`, and `pre<script>` / `post<script>`
+  lifecycle hooks are executed around the requested script
 - `omc pip` compatibility commands for common `install`, `uninstall`, `freeze`,
   `check`, `show`, and `list --format=columns|freeze|json` flows, including
   `-r`, index URL, constraints, extra-index, find-links, no-index,
