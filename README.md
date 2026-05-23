@@ -210,6 +210,7 @@ cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip install --targ
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip install ./dist/local_pkg-1.0.0-py3-none-any.whl
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip download -r requirements.txt -d wheelhouse
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip wheel -r requirements.txt -w wheelhouse
+cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip wheel --no-binary=:all: ./dist/local_pkg-1.0.0.tar.gz -w wheelhouse
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo python -m pip install -e ../local-package
 cargo run -p omc-cli --bin pip3 -- --omc-project-dir /tmp/omc-demo freeze
 cargo run -p omc-cli --bin python3 -- --omc-project-dir /tmp/omc-demo -m pip freeze
@@ -430,6 +431,10 @@ Supported now:
   archives or HTML pages, `--no-index`, `--trusted-host`, `--only-binary`,
   `--no-binary`, `--prefer-binary`, enforced `--require-hashes`, local editable/direct/bare
   directory paths with selected extras, and common Python environment markers
+- `pip download` and `pip wheel` compatibility for registry requirements,
+  requirement files, hashes, direct wheel archives, and direct source
+  distributions; `pip wheel` populates the wheelhouse with safe source
+  distributions when a build would otherwise be required
 - unsupported requirements entries and unsupported direct archive formats fail
   closed instead of being silently ignored
 - `Pipfile` ingestion for Pipenv packages/dev-packages, source indexes, extras,
