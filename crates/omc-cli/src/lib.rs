@@ -268,6 +268,9 @@ enum NpmCompatAction {
         topic: Option<String>,
     },
     Version,
+    Completion {
+        words: Option<Vec<String>>,
+    },
     Init {
         action: NpmInitAction,
     },
@@ -949,6 +952,9 @@ enum PipCompatAction {
         topic: Option<String>,
     },
     Version,
+    Completion {
+        shell: Option<PipCompletionShell>,
+    },
     Install(Box<PipInstallAction>),
     Download(Box<PipDownloadAction>),
     Wheel(Box<PipDownloadAction>),
@@ -994,6 +1000,13 @@ enum PipCompatAction {
     Config {
         action: PipConfigAction,
     },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PipCompletionShell {
+    Bash,
+    Zsh,
+    Fish,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -2466,6 +2479,7 @@ fn run_npm_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
     match parse_npm_compat_action(args)? {
         NpmCompatAction::Help { topic } => print_npm_help(topic.as_deref()),
         NpmCompatAction::Version => println!("{}", env!("CARGO_PKG_VERSION")),
+        NpmCompatAction::Completion { words } => print_npm_completion(project_dir, words)?,
         NpmCompatAction::Init { action } => print_npm_init(project_dir, action)?,
         NpmCompatAction::Create { action } => return run_npm_create(project_dir, action),
         NpmCompatAction::PackageVersion { action } => print_npm_version(project_dir, action)?,
@@ -2703,9 +2717,15 @@ fn run_npm_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
 }
 
 fn run_pip_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRegistryError> {
+    if pip_auto_complete_requested() {
+        print_pip_auto_completion(project_dir)?;
+        return Ok(ExitCode::SUCCESS);
+    }
+
     match parse_pip_compat_action(args)? {
         PipCompatAction::Help { topic } => print_pip_help(topic.as_deref()),
         PipCompatAction::Version => println!("pip {} from OMC", env!("CARGO_PKG_VERSION")),
+        PipCompatAction::Completion { shell } => print_pip_completion(shell),
         PipCompatAction::Install(action) => {
             let action = *action;
             if action.dry_run {
@@ -3375,6 +3395,13 @@ fn npm_help_text(topic: Option<&str>) -> String {
                 "Aliases: x, npx. Common flags: --yes, --package, --cache, --registry.",
             ],
         ),
+        Some("completion") => npm_command_help(
+            "npm completion",
+            &[
+                "Print an OMC npm shell-completion script.",
+                "The generated script asks `npm completion -- ...` for command, script, and locked package suggestions.",
+            ],
+        ),
         Some("explore") => npm_command_help(
             "npm explore <package> [-- <command> [args...]]",
             &[
@@ -3640,7 +3667,7 @@ fn npm_general_help_text() -> String {
         "npm <command>",
         &[
             "OMC npm compatibility runs supported npm workflows through OMC's verifier, lockfile, cache, and project-local runtime paths.",
-            "Supported commands: install, link, install-test, ci, install-ci-test, remove, run, test, start, stop, restart, exec, explore, list, query, explain, audit, outdated, fund, prune, dedupe, rebuild, cache, pkg, version, pack, publish, unpublish, deprecate, undeprecate, diff, search, star, unstar, stars, ping, whoami, login, adduser, logout, token, profile, owner, access, org, team, dist-tag, sbom, view, docs, repo, bugs, home, config, init, create, bin, root, prefix.",
+            "Supported commands: install, link, install-test, ci, install-ci-test, remove, run, test, start, stop, restart, exec, explore, completion, list, query, explain, audit, outdated, fund, prune, dedupe, rebuild, cache, pkg, version, pack, publish, unpublish, deprecate, undeprecate, diff, search, star, unstar, stars, ping, whoami, login, adduser, logout, token, profile, owner, access, org, team, dist-tag, sbom, view, docs, repo, bugs, home, config, init, create, bin, root, prefix.",
             "Use `npm help <command>` for focused OMC compatibility notes.",
         ],
     )
@@ -3668,6 +3695,7 @@ fn npm_help_topic(topic: &str) -> Option<&'static str> {
         "install-ci-test" | "cit" => Some("install-ci-test"),
         "run" | "run-script" | "test" | "start" | "stop" | "restart" => Some("run"),
         "exec" | "x" | "npx" => Some("exec"),
+        "completion" => Some("completion"),
         "explore" => Some("explore"),
         "remove" | "uninstall" | "rm" | "un" => Some("remove"),
         "list" | "ls" | "ll" | "la" => Some("list"),
@@ -3711,6 +3739,236 @@ fn npm_help_topic(topic: &str) -> Option<&'static str> {
     }
 }
 
+const NPM_COMPLETION_COMMANDS: &[&str] = &[
+    "access",
+    "add",
+    "adduser",
+    "audit",
+    "bin",
+    "bugs",
+    "cache",
+    "ci",
+    "completion",
+    "config",
+    "create",
+    "dedupe",
+    "deprecate",
+    "diff",
+    "dist-tag",
+    "docs",
+    "exec",
+    "explain",
+    "explore",
+    "fund",
+    "help",
+    "home",
+    "init",
+    "install",
+    "link",
+    "list",
+    "login",
+    "logout",
+    "npx",
+    "org",
+    "outdated",
+    "owner",
+    "pack",
+    "ping",
+    "pkg",
+    "prefix",
+    "profile",
+    "publish",
+    "query",
+    "rebuild",
+    "remove",
+    "repo",
+    "root",
+    "run",
+    "sbom",
+    "search",
+    "star",
+    "stars",
+    "start",
+    "stop",
+    "team",
+    "test",
+    "token",
+    "uninstall",
+    "unpublish",
+    "unstar",
+    "update",
+    "version",
+    "view",
+    "whoami",
+];
+
+const NPM_COMPLETION_OPTIONS: &[&str] = &[
+    "--help",
+    "--json",
+    "--registry",
+    "--userconfig",
+    "--workspace",
+    "--workspaces",
+    "--include-workspace-root",
+    "--omit",
+    "--include",
+    "--allow",
+    "--allow-all-host",
+];
+
+const NPM_COMPLETION_PACKAGE_COMMANDS: &[&str] = &[
+    "access",
+    "deprecate",
+    "diff",
+    "explain",
+    "explore",
+    "fund",
+    "outdated",
+    "owner",
+    "remove",
+    "star",
+    "uninstall",
+    "unpublish",
+    "unstar",
+    "view",
+];
+
+fn print_npm_completion(
+    project_dir: &Path,
+    words: Option<Vec<String>>,
+) -> Result<(), OmcRegistryError> {
+    if let Some(words) = words {
+        for suggestion in npm_completion_suggestions(project_dir, &words) {
+            println!("{suggestion}");
+        }
+    } else {
+        print!("{}", npm_completion_script());
+    }
+    Ok(())
+}
+
+fn npm_completion_script() -> &'static str {
+    r#"###-begin-omc-npm-completion-###
+if type complete >/dev/null 2>&1; then
+  _omc_npm_completion() {
+    local words cword
+    if type _get_comp_words_by_ref >/dev/null 2>&1; then
+      _get_comp_words_by_ref -n = -n @ -n : -w words -i cword
+    else
+      cword="$COMP_CWORD"
+      words=("${COMP_WORDS[@]}")
+    fi
+    local old_ifs="$IFS"
+    IFS=$'\n'
+    COMPREPLY=( $(COMP_CWORD="$cword" npm completion -- "${words[@]}" 2>/dev/null) )
+    IFS="$old_ifs"
+  }
+  complete -o default -F _omc_npm_completion npm npx
+elif type compdef >/dev/null 2>&1; then
+  _omc_npm_completion() {
+    local old_ifs="$IFS"
+    IFS=$'\n'
+    compadd -- $(COMP_CWORD=$((CURRENT-1)) npm completion -- "${words[@]}" 2>/dev/null)
+    IFS="$old_ifs"
+  }
+  compdef _omc_npm_completion npm npx
+fi
+###-end-omc-npm-completion-###
+"#
+}
+
+fn npm_completion_suggestions(project_dir: &Path, words: &[String]) -> Vec<String> {
+    let original_len = words.len();
+    let words = completion_words_without_program(words, &["npm", "npx"]);
+    let cword = env::var("COMP_CWORD")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok());
+    let adjusted_cword = cword.map(|cword| {
+        if words.len() != original_len {
+            cword.saturating_sub(1)
+        } else {
+            cword
+        }
+    });
+    let current = adjusted_cword
+        .and_then(|index| words.get(index).map(String::as_str))
+        .or_else(|| {
+            if adjusted_cword.is_some_and(|index| index >= words.len()) {
+                Some("")
+            } else {
+                words.last().map(String::as_str)
+            }
+        })
+        .unwrap_or("");
+    if words.is_empty() || adjusted_cword.unwrap_or_else(|| words.len().saturating_sub(1)) == 0 {
+        return filter_completion_values(NPM_COMPLETION_COMMANDS, current);
+    }
+    if current.starts_with('-') {
+        return filter_completion_values(NPM_COMPLETION_OPTIONS, current);
+    }
+
+    let command = words.first().map(String::as_str).unwrap_or("");
+    if command == "run" {
+        return completion_filter_owned(npm_completion_script_names(project_dir), current);
+    }
+    if NPM_COMPLETION_PACKAGE_COMMANDS.contains(&command) {
+        return completion_filter_owned(
+            completion_locked_package_names(project_dir, Ecosystem::Npm),
+            current,
+        );
+    }
+    Vec::new()
+}
+
+fn npm_completion_script_names(project_dir: &Path) -> Vec<String> {
+    let Ok(package) = read_npm_pkg_json(&project_dir.join("package.json")) else {
+        return Vec::new();
+    };
+    package
+        .get("scripts")
+        .and_then(serde_json::Value::as_object)
+        .map(|scripts| scripts.keys().cloned().collect::<Vec<_>>())
+        .unwrap_or_default()
+}
+
+fn completion_words_without_program<'a>(words: &'a [String], programs: &[&str]) -> &'a [String] {
+    match words.first().map(String::as_str) {
+        Some(program) if programs.iter().any(|name| program.ends_with(name)) => &words[1..],
+        _ => words,
+    }
+}
+
+fn filter_completion_values(values: &[&str], prefix: &str) -> Vec<String> {
+    values
+        .iter()
+        .copied()
+        .filter(|value| value.starts_with(prefix))
+        .map(str::to_owned)
+        .collect()
+}
+
+fn completion_filter_owned(mut values: Vec<String>, prefix: &str) -> Vec<String> {
+    values.retain(|value| value.starts_with(prefix));
+    values.sort();
+    values.dedup();
+    values
+}
+
+fn completion_locked_package_names(project_dir: &Path, ecosystem: Ecosystem) -> Vec<String> {
+    let Ok(lock) = read_lockfile(project_dir.join("omc.lock")) else {
+        return Vec::new();
+    };
+    let mut names = lock
+        .packages
+        .into_iter()
+        .filter(|package| package.ecosystem == ecosystem)
+        .map(|package| package.name)
+        .collect::<Vec<_>>();
+    names.sort();
+    names.dedup();
+    names
+}
+
 fn print_pip_help(topic: Option<&str>) {
     print!("{}", pip_help_text(topic));
 }
@@ -3718,6 +3976,10 @@ fn print_pip_help(topic: Option<&str>) {
 fn pip_help_text(topic: Option<&str>) -> String {
     match topic.and_then(pip_help_topic) {
         None => pip_general_help_text(),
+        Some("completion") => pip_command_help(
+            "pip completion --bash|--zsh|--fish",
+            &["Print an OMC pip shell-completion script for bash, zsh, or fish."],
+        ),
         Some("install") => pip_command_help(
             "pip install [<requirement>...]",
             &[
@@ -3789,7 +4051,7 @@ fn pip_general_help_text() -> String {
         "pip <command>",
         &[
             "OMC pip compatibility runs supported pip workflows through OMC's resolver, verifier, lockfile, cache, and isolated Python site-packages.",
-            "Supported commands: install, download, wheel, uninstall, freeze, list, show, check, inspect, debug, hash, cache, index versions, config.",
+            "Supported commands: install, download, wheel, uninstall, freeze, list, show, check, inspect, debug, hash, cache, index versions, config, completion.",
             "Use `pip help <command>` for focused OMC compatibility notes.",
         ],
     )
@@ -3810,6 +4072,7 @@ fn pip_command_help(usage: &str, lines: &[&str]) -> String {
 fn pip_help_topic(topic: &str) -> Option<&'static str> {
     match topic {
         "help" | "--help" | "-h" => None,
+        "completion" => Some("completion"),
         "install" => Some("install"),
         "download" => Some("download"),
         "wheel" => Some("wheel"),
@@ -3826,6 +4089,158 @@ fn pip_help_topic(topic: &str) -> Option<&'static str> {
         "config" => Some("config"),
         _ => Some("unknown"),
     }
+}
+
+const PIP_COMPLETION_COMMANDS: &[&str] = &[
+    "cache",
+    "check",
+    "completion",
+    "config",
+    "debug",
+    "download",
+    "freeze",
+    "hash",
+    "help",
+    "index",
+    "inspect",
+    "install",
+    "list",
+    "search",
+    "show",
+    "uninstall",
+    "wheel",
+];
+
+const PIP_COMPLETION_OPTIONS: &[&str] = &[
+    "--help",
+    "--isolated",
+    "--require-virtualenv",
+    "--verbose",
+    "--quiet",
+    "--log",
+    "--proxy",
+    "--retries",
+    "--timeout",
+    "--exists-action",
+    "--trusted-host",
+    "--cert",
+    "--client-cert",
+    "--cache-dir",
+    "--no-cache-dir",
+    "--disable-pip-version-check",
+    "--allow",
+    "--allow-all-host",
+];
+
+const PIP_COMPLETION_PACKAGE_COMMANDS: &[&str] = &["show", "uninstall"];
+
+fn pip_auto_complete_requested() -> bool {
+    env::var_os("PIP_AUTO_COMPLETE").is_some()
+}
+
+fn print_pip_completion(shell: Option<PipCompletionShell>) {
+    match shell {
+        Some(PipCompletionShell::Bash) => print!("{}", pip_bash_completion_script()),
+        Some(PipCompletionShell::Zsh) => print!("{}", pip_zsh_completion_script()),
+        Some(PipCompletionShell::Fish) => print!("{}", pip_fish_completion_script()),
+        None => println!("ERROR: You must pass --bash or --fish or --zsh"),
+    }
+}
+
+fn print_pip_auto_completion(project_dir: &Path) -> Result<(), OmcRegistryError> {
+    let words = pip_completion_words_from_env();
+    let cword = env::var("COMP_CWORD")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or_else(|| words.len().saturating_sub(1));
+    for suggestion in pip_completion_suggestions(project_dir, &words, cword) {
+        println!("{suggestion}");
+    }
+    Ok(())
+}
+
+fn pip_completion_words_from_env() -> Vec<String> {
+    env::var("COMP_WORDS")
+        .unwrap_or_default()
+        .split_whitespace()
+        .map(str::to_owned)
+        .collect()
+}
+
+fn pip_completion_suggestions(project_dir: &Path, words: &[String], cword: usize) -> Vec<String> {
+    let original_len = words.len();
+    let words = completion_words_without_program(words, &["pip", "pip3"]);
+    let adjusted_cword = if words.len() != original_len {
+        cword.saturating_sub(1)
+    } else {
+        cword
+    };
+    let current = words
+        .get(adjusted_cword)
+        .or_else(|| {
+            (adjusted_cword < words.len())
+                .then(|| words.last())
+                .flatten()
+        })
+        .map(String::as_str)
+        .unwrap_or("");
+    if words.is_empty() || adjusted_cword == 0 {
+        return filter_completion_values(PIP_COMPLETION_COMMANDS, current);
+    }
+    if current.starts_with('-') {
+        return filter_completion_values(PIP_COMPLETION_OPTIONS, current);
+    }
+
+    let command = words.first().map(String::as_str).unwrap_or("");
+    if PIP_COMPLETION_PACKAGE_COMMANDS.contains(&command) {
+        return completion_filter_owned(
+            completion_locked_package_names(project_dir, Ecosystem::Pypi),
+            current,
+        );
+    }
+    Vec::new()
+}
+
+fn pip_bash_completion_script() -> &'static str {
+    r#"# omc pip bash completion start
+_omc_pip_completion()
+{
+    COMPREPLY=( $( COMP_WORDS="${COMP_WORDS[*]}" \
+                   COMP_CWORD=$COMP_CWORD \
+                   PIP_AUTO_COMPLETE=1 pip 2>/dev/null ) )
+}
+complete -o default -F _omc_pip_completion pip pip3
+# omc pip bash completion end
+"#
+}
+
+fn pip_zsh_completion_script() -> &'static str {
+    r#"# omc pip zsh completion start
+function _omc_pip_completion {
+  local words cword
+  read -Ac words
+  read -cn cword
+  reply=( $( COMP_WORDS="$words[*]" \
+             COMP_CWORD=$(( cword-1 )) \
+             PIP_AUTO_COMPLETE=1 pip 2>/dev/null ))
+}
+compctl -K _omc_pip_completion pip pip3
+# omc pip zsh completion end
+"#
+}
+
+fn pip_fish_completion_script() -> &'static str {
+    r#"# omc pip fish completion start
+function __fish_complete_omc_pip
+    set -lx COMP_WORDS (commandline -o) ""
+    set -lx COMP_CWORD (math (contains -i -- (commandline -t) $COMP_WORDS)-1)
+    set -lx PIP_AUTO_COMPLETE 1
+    string split \n -- (pip)
+end
+complete -fa "(__fish_complete_omc_pip)" -c pip
+complete -fa "(__fish_complete_omc_pip)" -c pip3
+# omc pip fish completion end
+"#
 }
 
 fn print_twine_help(topic: Option<&str>) {
@@ -11384,6 +11799,7 @@ fn parse_npm_compat_action(args: &[String]) -> Result<NpmCompatAction, OmcRegist
 
     match command {
         "--version" | "-v" => Ok(NpmCompatAction::Version),
+        "completion" => parse_npm_completion_args(&args[1..]),
         "init" | "create" | "innit" => parse_npm_init_args(command, &args[1..]),
         "version" => parse_npm_version_args(&args[1..]),
         "link" | "ln" => parse_npm_link_args(&args[1..]),
@@ -12329,6 +12745,49 @@ fn npm_rebuild_equals_value_flag(arg: &str) -> bool {
     ]
     .iter()
     .any(|prefix| arg.starts_with(prefix))
+}
+
+fn parse_npm_completion_args(args: &[String]) -> Result<NpmCompatAction, OmcRegistryError> {
+    if args.is_empty() {
+        return Ok(NpmCompatAction::Completion { words: None });
+    }
+    let mut filtered = Vec::new();
+    let mut index = 0;
+    while index < args.len() {
+        let arg = &args[index];
+        if arg == "--" {
+            return Ok(NpmCompatAction::Completion {
+                words: Some(args[index + 1..].to_vec()),
+            });
+        } else if matches!(arg.as_str(), "--silent" | "-s") {
+        } else if matches!(arg.as_str(), "--loglevel" | "--cache") {
+            index += 1;
+            if args.get(index).is_none() {
+                return Err(OmcRegistryError::UnsupportedSpec(format!(
+                    "{arg} needs a value"
+                )));
+            }
+        } else if npm_completion_ignored_equals_flag(arg) {
+        } else if arg.starts_with('-') {
+            return Err(unsupported_compat_arg("npm completion", arg));
+        } else {
+            filtered.push(arg.clone());
+        }
+        index += 1;
+    }
+    if filtered.is_empty() {
+        Ok(NpmCompatAction::Completion { words: None })
+    } else {
+        Ok(NpmCompatAction::Completion {
+            words: Some(filtered),
+        })
+    }
+}
+
+fn npm_completion_ignored_equals_flag(arg: &str) -> bool {
+    ["--loglevel=", "--cache="]
+        .iter()
+        .any(|prefix| arg.starts_with(prefix))
 }
 
 fn parse_npm_init_args(
@@ -16436,6 +16895,7 @@ fn parse_pip_compat_action(args: &[String]) -> Result<PipCompatAction, OmcRegist
 
     match command {
         "--version" | "-V" => Ok(PipCompatAction::Version),
+        "completion" => parse_pip_completion_args(&args[1..]),
         "install" => parse_pip_install_args(&args[1..]),
         "download" => parse_pip_download_args(&args[1..]),
         "wheel" => parse_pip_wheel_args(&args[1..]),
@@ -16693,6 +17153,46 @@ fn parse_pip_help_request(args: &[String]) -> Option<PipCompatAction> {
 
 fn pip_help_flag(arg: &str) -> bool {
     matches!(arg, "--help" | "-h")
+}
+
+fn parse_pip_completion_args(args: &[String]) -> Result<PipCompatAction, OmcRegistryError> {
+    let mut shell = None;
+    let mut index = 0;
+    while index < args.len() {
+        let arg = &args[index];
+        if arg == "--bash" {
+            shell = Some(PipCompletionShell::Bash);
+        } else if arg == "--zsh" {
+            shell = Some(PipCompletionShell::Zsh);
+        } else if arg == "--fish" {
+            shell = Some(PipCompletionShell::Fish);
+        } else if matches!(
+            arg.as_str(),
+            "--disable-pip-version-check" | "--no-color" | "--no-input" | "--isolated"
+        ) {
+        } else if matches!(
+            arg.as_str(),
+            "--log" | "--proxy" | "--retries" | "--timeout"
+        ) {
+            index += 1;
+            if args.get(index).is_none() {
+                return Err(OmcRegistryError::UnsupportedSpec(format!(
+                    "{arg} needs a value"
+                )));
+            }
+        } else if pip_completion_ignored_equals_flag(arg) {
+        } else {
+            return Err(unsupported_compat_arg("pip completion", arg));
+        }
+        index += 1;
+    }
+    Ok(PipCompatAction::Completion { shell })
+}
+
+fn pip_completion_ignored_equals_flag(arg: &str) -> bool {
+    ["--log=", "--proxy=", "--retries=", "--timeout="]
+        .iter()
+        .any(|prefix| arg.starts_with(prefix))
 }
 
 fn normalize_pip_global_args(args: &[String]) -> Result<Vec<String>, OmcRegistryError> {
@@ -18902,6 +19402,16 @@ mod tests {
                 topic: Some("install".to_owned()),
             }
         );
+        assert_eq!(
+            parse_npm_compat_action(&args(&["completion"])).unwrap(),
+            NpmCompatAction::Completion { words: None }
+        );
+        assert_eq!(
+            parse_npm_compat_action(&args(&["completion", "--", "npm", "expl"])).unwrap(),
+            NpmCompatAction::Completion {
+                words: Some(vec!["npm".to_owned(), "expl".to_owned()]),
+            }
+        );
         assert!(npm_help_text(None).contains("Supported commands: install"));
         assert!(npm_help_text(Some("fund")).contains("npm fund [<package-spec>]"));
         assert!(npm_help_text(Some("install-test")).contains("npm install-test"));
@@ -20950,6 +21460,66 @@ mod tests {
     }
 
     #[test]
+    fn completes_npm_and_pip_commands_and_locked_packages() {
+        let dir = test_dir("compat-completion");
+        fs::write(
+            dir.join("package.json"),
+            r#"{ "scripts": { "build": "echo build" } }"#,
+        )
+        .unwrap();
+        fs::write(
+            dir.join("omc.lock"),
+            r#"
+version = 1
+
+[[packages]]
+ecosystem = "npm"
+name = "left-pad"
+version = "1.3.0"
+source_url = ""
+archive = ""
+artifact = ""
+sha256 = ""
+behavior = "pure"
+verdict = "accepted"
+
+[[packages]]
+ecosystem = "pypi"
+name = "requests"
+version = "2.32.3"
+source_url = ""
+archive = ""
+artifact = ""
+sha256 = ""
+behavior = "pure"
+verdict = "accepted"
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            npm_completion_suggestions(&dir, &args(&["npm", "explo"])),
+            vec!["explore".to_owned()]
+        );
+        assert_eq!(
+            npm_completion_suggestions(&dir, &args(&["npm", "run", "b"])),
+            vec!["build".to_owned()]
+        );
+        assert_eq!(
+            npm_completion_suggestions(&dir, &args(&["npm", "explore", "left"])),
+            vec!["left-pad".to_owned()]
+        );
+        assert_eq!(
+            pip_completion_suggestions(&dir, &args(&["pip", "sho"]), 1),
+            vec!["show".to_owned()]
+        );
+        assert_eq!(
+            pip_completion_suggestions(&dir, &args(&["pip", "show", "req"]), 2),
+            vec!["requests".to_owned()]
+        );
+    }
+
+    #[test]
     fn writes_npm_config_set_and_delete() {
         let dir = test_dir("npm-config-set-delete");
         fs::write(
@@ -22369,6 +22939,16 @@ verdict = "accepted"
             PipCompatAction::Help {
                 topic: Some("install".to_owned()),
             }
+        );
+        assert_eq!(
+            parse_pip_compat_action(&args(&["completion", "--bash"])).unwrap(),
+            PipCompatAction::Completion {
+                shell: Some(PipCompletionShell::Bash),
+            }
+        );
+        assert_eq!(
+            parse_pip_compat_action(&args(&["completion"])).unwrap(),
+            PipCompatAction::Completion { shell: None }
         );
         assert!(pip_help_text(None).contains("Supported commands: install"));
         assert!(pip_help_text(Some("debug")).contains("pip debug"));

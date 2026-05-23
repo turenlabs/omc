@@ -115,6 +115,7 @@ cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo ci
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo run normalizer --version
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm init -y
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm create vite@latest my-app --allow-all-host -- --template react
+cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm completion
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm help install
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm install left-pad@1.3.0
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm install --registry https://registry.npmjs.org left-pad@1.3.0
@@ -189,6 +190,7 @@ cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm root
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm bin
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip install -r requirements.txt -c constraints.txt
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip help install
+cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip completion --bash
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip install --dry-run --report install-report.json requests==2.32.3
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip install requests==2.32.3 --report install-report.json --allow-all-host
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip install requests==2.32.3 --allow-all-host
