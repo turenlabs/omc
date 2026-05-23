@@ -848,6 +848,13 @@ fn discover_project_requirements_with_options(
         project.specs.extend(requirements.specs);
     }
 
+    let poetry_lock = project_dir.join("poetry.lock");
+    if poetry_lock.exists() {
+        let requirements = read_poetry_lock_requirements(&poetry_lock)?;
+        project.constraints.extend(requirements.constraints);
+        project.hashes.extend(requirements.hashes);
+    }
+
     Ok(project)
 }
 
@@ -1428,6 +1435,43 @@ fn read_poetry_dependencies(
     }
 
     Ok(specs)
+}
+
+fn read_poetry_lock_requirements(path: &Path) -> Result<ProjectRequirements> {
+    let lock = toml::from_str::<PoetryLock>(&fs::read_to_string(path)?)?;
+    let mut requirements = ProjectRequirements::default();
+
+    for package in lock.package {
+        let name = normalize_pypi_name(&package.name);
+        let key = format!("pypi:{name}");
+        requirements
+            .constraints
+            .insert(key.clone(), package.version);
+        for file in package.files {
+            if let Some(hash) = normalize_sha256_hash(&file.hash) {
+                requirements
+                    .hashes
+                    .entry(key.clone())
+                    .or_default()
+                    .insert(hash);
+            }
+        }
+    }
+
+    for (name, files) in lock.metadata.files {
+        let key = format!("pypi:{}", normalize_pypi_name(&name));
+        for file in files {
+            if let Some(hash) = normalize_sha256_hash(&file.hash) {
+                requirements
+                    .hashes
+                    .entry(key.clone())
+                    .or_default()
+                    .insert(hash);
+            }
+        }
+    }
+
+    Ok(requirements)
 }
 
 fn poetry_dependency_optional(dependency: &PoetryDependency) -> bool {
@@ -4223,6 +4267,35 @@ struct PoetryDependencyTable {
     file: Option<String>,
 }
 
+#[derive(Debug, Default, Deserialize)]
+struct PoetryLock {
+    #[serde(default)]
+    package: Vec<PoetryLockedPackage>,
+    #[serde(default)]
+    metadata: PoetryLockMetadata,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct PoetryLockMetadata {
+    #[serde(default)]
+    files: BTreeMap<String, Vec<PoetryLockedFile>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct PoetryLockedPackage {
+    name: String,
+    version: String,
+    #[serde(default)]
+    files: Vec<PoetryLockedFile>,
+}
+
+#[derive(Debug, Deserialize)]
+struct PoetryLockedFile {
+    #[serde(rename = "file")]
+    _file: String,
+    hash: String,
+}
+
 #[derive(Debug, Deserialize)]
 struct NpmInstalledPackageJson {
     name: Option<String>,
@@ -5344,6 +5417,112 @@ mod tests {
         assert!(error
             .to_string()
             .contains("unsupported Poetry dependency source"));
+    }
+
+    #[test]
+    fn reads_poetry_lock_constraints_and_hashes() {
+        let dir = tempfile::tempdir().unwrap();
+        let poetry_lock = dir.path().join("poetry.lock");
+        fs::write(
+            &poetry_lock,
+            r#"
+            [[package]]
+            name = "idna"
+            version = "3.7"
+            files = [
+                {file = "idna-3.7-py3-none-any.whl", hash = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+                {file = "idna-3.7.tar.gz", hash = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"},
+            ]
+
+            [[package]]
+            name = "charset-normalizer"
+            version = "3.4.0"
+
+            [metadata.files]
+            charset-normalizer = [
+                {file = "charset_normalizer-3.4.0-py3-none-any.whl", hash = "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"},
+            ]
+            "#,
+        )
+        .unwrap();
+
+        let requirements = read_poetry_lock_requirements(&poetry_lock).unwrap();
+        assert_eq!(
+            requirements
+                .constraints
+                .get("pypi:idna")
+                .map(String::as_str),
+            Some("3.7")
+        );
+        assert_eq!(
+            requirements
+                .constraints
+                .get("pypi:charset-normalizer")
+                .map(String::as_str),
+            Some("3.4.0")
+        );
+        assert_eq!(
+            requirements.hashes.get("pypi:idna").cloned().unwrap(),
+            BTreeSet::from([
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_owned(),
+                "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_owned()
+            ])
+        );
+        assert_eq!(
+            requirements
+                .hashes
+                .get("pypi:charset-normalizer")
+                .and_then(|hashes| hashes.iter().next())
+                .map(String::as_str),
+            Some("cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc")
+        );
+    }
+
+    #[test]
+    fn discovers_poetry_lock_constraints() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(
+            dir.path().join("pyproject.toml"),
+            r#"
+            [tool.poetry.dependencies]
+            python = "^3.11"
+            idna = "^3.0"
+            "#,
+        )
+        .unwrap();
+        fs::write(
+            dir.path().join("poetry.lock"),
+            r#"
+            [[package]]
+            name = "idna"
+            version = "3.7"
+            files = [
+                {file = "idna-3.7-py3-none-any.whl", hash = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+            ]
+            "#,
+        )
+        .unwrap();
+
+        let requirements = discover_project_requirements(dir.path()).unwrap();
+        assert!(requirements
+            .specs
+            .iter()
+            .any(|spec| spec.name == "idna" && spec.version.as_deref() == Some(">=3.0,<4")));
+        assert_eq!(
+            requirements
+                .constraints
+                .get("pypi:idna")
+                .map(String::as_str),
+            Some("3.7")
+        );
+        assert_eq!(
+            requirements
+                .hashes
+                .get("pypi:idna")
+                .and_then(|hashes| hashes.iter().next())
+                .map(String::as_str),
+            Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+        );
     }
 
     #[test]

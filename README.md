@@ -123,6 +123,7 @@ package-lock.json  exact versions, resolved tarball URLs, and integrity hashes f
 requirements.txt  PyPI requirements, direct wheel URLs, hashes, extras, -r includes, -c constraints, markers
 pyproject.toml    PEP 621 project dependencies, selected optional groups
 pyproject.toml    Poetry dependencies, dev groups, optional groups, and extras
+poetry.lock       exact PyPI versions and file hashes for locked Poetry packages
 ```
 
 What `add` does:
@@ -219,6 +220,8 @@ Supported now:
 - Poetry `pyproject.toml` dependency ingestion, including
   `[tool.poetry.dependencies]`, old `[tool.poetry.dev-dependencies]`,
   dependency groups, selected optional groups, and selected extras
+- `poetry.lock` exact-version constraints and sha256 file hash verification for
+  locked PyPI packages
 - PyPI extras resolution for dependencies gated by `extra == "..."`
 - source artifact download and cache
 - `omc.toml` and `omc.lock`
