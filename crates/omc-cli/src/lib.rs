@@ -14,11 +14,11 @@ use omc_registry::{
     parse_capability_grant, parse_npm_direct_archive_reference,
     parse_pypi_direct_archive_reference, parse_pypi_vcs_requirement, read_constraint_files,
     read_lockfile, read_manifest, read_npm_config_snapshot, read_npm_package_metadata,
-    read_npm_search, read_package_scripts, read_pip_config_snapshot, read_pypi_available_versions,
-    read_requirements_files, remove_manifest_dependency, Behavior, Ecosystem, InstallReport,
-    LinkOptions, LockedPackage, LockedPythonVcsDependency, NpmSearchPackage, OmcRegistryError,
-    PackageSpec, ProjectRequirements, PypiBinaryMode, PypiCheckIssue, PythonLocalRequirement,
-    PythonVcsRequirement, Verdict,
+    read_npm_search, read_npm_workspace_packages, read_package_scripts, read_pip_config_snapshot,
+    read_pypi_available_versions, read_requirements_files, remove_manifest_dependency, Behavior,
+    Ecosystem, InstallReport, LinkOptions, LockedPackage, LockedPythonVcsDependency,
+    NpmSearchPackage, NpmWorkspacePackage, OmcRegistryError, PackageSpec, ProjectRequirements,
+    PypiBinaryMode, PypiCheckIssue, PythonLocalRequirement, PythonVcsRequirement, Verdict,
 };
 use sha2::{Digest, Sha256, Sha384, Sha512};
 
@@ -263,6 +263,9 @@ enum NpmCompatAction {
         name: String,
         args: Vec<String>,
         if_present: bool,
+        workspaces: Vec<String>,
+        all_workspaces: bool,
+        include_workspace_root: bool,
     },
     Exec {
         command: String,
@@ -969,7 +972,63 @@ fn run_package_script_with_npm_command(
     args: &[String],
     if_present: bool,
 ) -> Result<ExitCode, OmcRegistryError> {
-    let scripts = read_package_scripts(project_dir)?;
+    run_package_script_in_dir(
+        project_dir,
+        project_dir,
+        npm_command,
+        name,
+        args,
+        if_present,
+    )
+}
+
+fn run_package_script_with_npm_command_for_workspaces(
+    project_dir: &Path,
+    npm_command: &str,
+    name: &str,
+    args: &[String],
+    if_present: bool,
+    targets: NpmScriptTargets<'_>,
+) -> Result<ExitCode, OmcRegistryError> {
+    let script_dirs = npm_script_target_dirs(
+        project_dir,
+        targets.workspaces,
+        targets.all_workspaces,
+        targets.include_workspace_root,
+    )?;
+    for script_dir in script_dirs {
+        let status = run_package_script_in_dir(
+            project_dir,
+            &script_dir,
+            npm_command,
+            name,
+            args,
+            if_present,
+        )?;
+        if status != ExitCode::SUCCESS {
+            return Ok(status);
+        }
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+#[derive(Debug, Clone, Copy)]
+struct NpmScriptTargets<'a> {
+    workspaces: &'a [String],
+    all_workspaces: bool,
+    include_workspace_root: bool,
+}
+
+fn run_package_script_in_dir(
+    project_dir: &Path,
+    script_dir: &Path,
+    npm_command: &str,
+    name: &str,
+    args: &[String],
+    if_present: bool,
+) -> Result<ExitCode, OmcRegistryError> {
+    let script_dir = script_dir.to_path_buf();
+    let scripts = read_package_scripts(&script_dir)?;
     if if_present && !scripts.contains_key(name) {
         return Ok(ExitCode::SUCCESS);
     }
@@ -986,6 +1045,7 @@ fn run_package_script_with_npm_command(
         };
         let status = run_single_package_script(
             project_dir,
+            &script_dir,
             npm_command,
             &lifecycle_name,
             script,
@@ -997,6 +1057,74 @@ fn run_package_script_with_npm_command(
     }
 
     Ok(ExitCode::SUCCESS)
+}
+
+fn npm_script_target_dirs(
+    project_dir: &Path,
+    workspaces: &[String],
+    all_workspaces: bool,
+    include_workspace_root: bool,
+) -> Result<Vec<PathBuf>, OmcRegistryError> {
+    if workspaces.is_empty() && !all_workspaces {
+        return Ok(vec![project_dir.to_path_buf()]);
+    }
+
+    let workspace_packages = read_npm_workspace_packages(project_dir)?;
+    let mut targets = Vec::new();
+    if include_workspace_root {
+        targets.push(project_dir.to_path_buf());
+    }
+    if all_workspaces {
+        targets.extend(
+            workspace_packages
+                .iter()
+                .map(|workspace| workspace.path.clone()),
+        );
+    }
+    for selector in workspaces {
+        let workspace = select_npm_workspace(project_dir, &workspace_packages, selector)?;
+        targets.push(workspace.path);
+    }
+
+    let mut seen = BTreeSet::new();
+    targets.retain(|path| seen.insert(absolute_project_dir(path)));
+    Ok(targets)
+}
+
+fn select_npm_workspace(
+    project_dir: &Path,
+    workspaces: &[NpmWorkspacePackage],
+    selector: &str,
+) -> Result<NpmWorkspacePackage, OmcRegistryError> {
+    let selector_path = absolutize_path(project_dir, PathBuf::from(selector));
+    let selector_path = fs::canonicalize(&selector_path).unwrap_or(selector_path);
+    for workspace in workspaces {
+        if workspace.name.as_deref() == Some(selector) {
+            return Ok(workspace.clone());
+        }
+        let workspace_path =
+            fs::canonicalize(&workspace.path).unwrap_or_else(|_| workspace.path.clone());
+        if workspace_path == selector_path {
+            return Ok(workspace.clone());
+        }
+    }
+
+    let available = workspaces
+        .iter()
+        .map(|workspace| {
+            workspace
+                .name
+                .clone()
+                .unwrap_or_else(|| workspace.path.display().to_string())
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    let detail = if available.is_empty() {
+        format!("npm workspace `{selector}` was not found")
+    } else {
+        format!("npm workspace `{selector}` was not found; available workspaces: {available}")
+    };
+    Err(OmcRegistryError::UnsupportedSpec(detail))
 }
 
 fn package_script_lifecycle_order(
@@ -1028,14 +1156,15 @@ fn package_script_lifecycle_order(
 
 fn run_single_package_script(
     project_dir: &Path,
+    script_dir: &Path,
     npm_command: &str,
     name: &str,
     script: &str,
     args: &[String],
 ) -> Result<ExitCode, OmcRegistryError> {
     let mut command = package_script_command(script);
-    apply_project_runtime_env(&mut command, project_dir)?;
-    apply_npm_lifecycle_env(&mut command, project_dir, npm_command, name, script)?;
+    apply_project_runtime_env_for_cwd(&mut command, project_dir, script_dir)?;
+    apply_npm_lifecycle_env(&mut command, script_dir, npm_command, name, script)?;
     let status = command.args(args).status()?;
     Ok(exit_code(status.code()))
 }
@@ -1161,13 +1290,21 @@ fn run_npm_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
             name,
             args,
             if_present,
+            workspaces,
+            all_workspaces,
+            include_workspace_root,
         } => {
-            return run_package_script_with_npm_command(
+            return run_package_script_with_npm_command_for_workspaces(
                 project_dir,
                 &command,
                 &name,
                 &args,
                 if_present,
+                NpmScriptTargets {
+                    workspaces: &workspaces,
+                    all_workspaces,
+                    include_workspace_root,
+                },
             )
         }
         NpmCompatAction::Exec { command, args } => {
@@ -4255,9 +4392,17 @@ fn apply_project_runtime_env(
     command: &mut ProcessCommand,
     project_dir: &Path,
 ) -> Result<(), OmcRegistryError> {
+    apply_project_runtime_env_for_cwd(command, project_dir, project_dir)
+}
+
+fn apply_project_runtime_env_for_cwd(
+    command: &mut ProcessCommand,
+    project_dir: &Path,
+    cwd: &Path,
+) -> Result<(), OmcRegistryError> {
     command
-        .current_dir(project_dir)
-        .env("PATH", project_path(project_dir)?)
+        .current_dir(cwd)
+        .env("PATH", project_path_for_cwd(project_dir, cwd)?)
         .env("PYTHONPATH", project_python_path(project_dir)?)
         .env("PYTHONNOUSERSITE", "1")
         .env_remove("NODE_OPTIONS")
@@ -4459,11 +4604,13 @@ fn npm_package_env_value(value: &serde_json::Value) -> Option<String> {
     }
 }
 
-fn project_path(project_dir: &Path) -> Result<OsString, OmcRegistryError> {
+fn project_path_for_cwd(project_dir: &Path, cwd: &Path) -> Result<OsString, OmcRegistryError> {
     let mut paths = vec![
+        cwd.join("node_modules").join(".bin"),
         project_dir.join("node_modules").join(".bin"),
         project_dir.join(".omc").join("python").join("bin"),
     ];
+    paths.dedup();
     if let Some(existing) = env::var_os("PATH") {
         paths.extend(env::split_paths(&existing));
     }
@@ -4636,12 +4783,18 @@ fn parse_npm_compat_action(args: &[String]) -> Result<NpmCompatAction, OmcRegist
                 name,
                 args,
                 if_present,
+                workspaces,
+                all_workspaces,
+                include_workspace_root,
             } = parse_npm_run_args("npm run", &args[1..], None)?;
             Ok(NpmCompatAction::RunScript {
                 command: command.to_owned(),
                 name,
                 args,
                 if_present,
+                workspaces,
+                all_workspaces,
+                include_workspace_root,
             })
         }
         "test" | "start" | "stop" | "restart" => {
@@ -4649,12 +4802,18 @@ fn parse_npm_compat_action(args: &[String]) -> Result<NpmCompatAction, OmcRegist
                 name,
                 args,
                 if_present,
+                workspaces,
+                all_workspaces,
+                include_workspace_root,
             } = parse_npm_run_args(command, &args[1..], Some(command))?;
             Ok(NpmCompatAction::RunScript {
                 command: command.to_owned(),
                 name,
                 args,
                 if_present,
+                workspaces,
+                all_workspaces,
+                include_workspace_root,
             })
         }
         "exec" | "x" | "npx" => {
@@ -4808,6 +4967,23 @@ fn npm_global_arg_supported_by_command(command: &str, arg: &str) -> bool {
     if matches!(arg, "--userconfig") || arg.starts_with("--userconfig=") {
         return matches!(command, "config" | "c" | "get");
     }
+    if matches!(arg, "--workspace" | "-w")
+        || arg.starts_with("--workspace=")
+        || arg.starts_with("-w=")
+    {
+        return matches!(
+            command,
+            "run" | "run-script" | "test" | "start" | "stop" | "restart"
+        );
+    }
+    if matches!(arg, "--workspaces" | "--include-workspace-root")
+        || arg.starts_with("--include-workspace-root=")
+    {
+        return matches!(
+            command,
+            "run" | "run-script" | "test" | "start" | "stop" | "restart"
+        );
+    }
     if arg == "--json" {
         return matches!(
             command,
@@ -4872,7 +5048,10 @@ fn npm_global_arg_supported_by_command(command: &str, arg: &str) -> bool {
 }
 
 fn npm_global_preserved_bool_flag(arg: &str) -> bool {
-    matches!(arg, "--json" | "--global" | "-g")
+    matches!(
+        arg,
+        "--json" | "--global" | "-g" | "--workspaces" | "--include-workspace-root"
+    )
 }
 
 fn npm_global_preserved_value_flag(arg: &str) -> bool {
@@ -4885,6 +5064,8 @@ fn npm_global_preserved_value_flag(arg: &str) -> bool {
             | "--include"
             | "--searchlimit"
             | "--limit"
+            | "--workspace"
+            | "-w"
     )
 }
 
@@ -4897,6 +5078,9 @@ fn npm_global_preserved_equals_flag(arg: &str) -> bool {
         "--include=",
         "--searchlimit=",
         "--limit=",
+        "--workspace=",
+        "-w=",
+        "--include-workspace-root=",
     ]
     .iter()
     .any(|prefix| arg.starts_with(prefix))
@@ -5976,6 +6160,9 @@ struct NpmRunArgs {
     name: String,
     args: Vec<String>,
     if_present: bool,
+    workspaces: Vec<String>,
+    all_workspaces: bool,
+    include_workspace_root: bool,
 }
 
 fn parse_npm_run_args(
@@ -5986,6 +6173,9 @@ fn parse_npm_run_args(
     let mut name = implicit_name.map(str::to_owned);
     let mut script_args = Vec::new();
     let mut if_present = false;
+    let mut workspaces = Vec::new();
+    let mut all_workspaces = false;
+    let mut include_workspace_root = false;
     let mut index = 0;
     while index < args.len() {
         let arg = &args[index];
@@ -5999,6 +6189,26 @@ fn parse_npm_run_args(
             if arg == "--if-present" {
                 if_present = true;
             }
+        } else if matches!(arg.as_str(), "--workspaces" | "--workspace=true") {
+            all_workspaces = true;
+        } else if matches!(
+            arg.as_str(),
+            "--include-workspace-root" | "--include-workspace-root=true"
+        ) {
+            include_workspace_root = true;
+        } else if matches!(arg.as_str(), "--workspace" | "-w") {
+            index += 1;
+            let Some(workspace) = args.get(index) else {
+                return Err(OmcRegistryError::UnsupportedSpec(format!(
+                    "{arg} needs a workspace"
+                )));
+            };
+            workspaces.push(workspace.clone());
+        } else if let Some(workspace) = arg
+            .strip_prefix("--workspace=")
+            .or_else(|| arg.strip_prefix("-w="))
+        {
+            workspaces.push(workspace.to_owned());
         } else if arg == "--loglevel" {
             index += 1;
             if args.get(index).is_none() {
@@ -6026,11 +6236,16 @@ fn parse_npm_run_args(
         name,
         args: script_args,
         if_present,
+        workspaces,
+        all_workspaces,
+        include_workspace_root,
     })
 }
 
 fn npm_run_equals_value_flag(arg: &str) -> bool {
-    ["--loglevel="].iter().any(|prefix| arg.starts_with(prefix))
+    ["--loglevel=", "--include-workspace-root="]
+        .iter()
+        .any(|prefix| arg.starts_with(prefix))
 }
 
 fn parse_npm_exec_args(args: &[String]) -> Result<(String, Vec<String>), OmcRegistryError> {
@@ -8089,6 +8304,9 @@ mod tests {
                 name: "build".to_owned(),
                 args: Vec::new(),
                 if_present: false,
+                workspaces: Vec::new(),
+                all_workspaces: false,
+                include_workspace_root: false,
             }
         );
         assert_eq!(
@@ -8315,6 +8533,9 @@ mod tests {
                 name: "test".to_owned(),
                 args: vec!["--watch".to_owned()],
                 if_present: false,
+                workspaces: Vec::new(),
+                all_workspaces: false,
+                include_workspace_root: false,
             }
         );
         assert_eq!(
@@ -8324,6 +8545,9 @@ mod tests {
                 name: "test".to_owned(),
                 args: vec!["--watch".to_owned()],
                 if_present: false,
+                workspaces: Vec::new(),
+                all_workspaces: false,
+                include_workspace_root: false,
             }
         );
         assert_eq!(
@@ -8333,6 +8557,9 @@ mod tests {
                 name: "build".to_owned(),
                 args: Vec::new(),
                 if_present: true,
+                workspaces: Vec::new(),
+                all_workspaces: false,
+                include_workspace_root: false,
             }
         );
         assert_eq!(
@@ -8342,6 +8569,47 @@ mod tests {
                 name: "test".to_owned(),
                 args: vec!["--watch".to_owned()],
                 if_present: true,
+                workspaces: Vec::new(),
+                all_workspaces: false,
+                include_workspace_root: false,
+            }
+        );
+        assert_eq!(
+            parse_npm_compat_action(&args(&[
+                "--workspace",
+                "@demo/lib",
+                "run",
+                "build",
+                "--",
+                "--watch",
+            ]))
+            .unwrap(),
+            NpmCompatAction::RunScript {
+                command: "run".to_owned(),
+                name: "build".to_owned(),
+                args: vec!["--watch".to_owned()],
+                if_present: false,
+                workspaces: vec!["@demo/lib".to_owned()],
+                all_workspaces: false,
+                include_workspace_root: false,
+            }
+        );
+        assert_eq!(
+            parse_npm_compat_action(&args(&[
+                "test",
+                "--workspaces",
+                "--include-workspace-root",
+                "--if-present",
+            ]))
+            .unwrap(),
+            NpmCompatAction::RunScript {
+                command: "test".to_owned(),
+                name: "test".to_owned(),
+                args: Vec::new(),
+                if_present: true,
+                workspaces: Vec::new(),
+                all_workspaces: true,
+                include_workspace_root: true,
             }
         );
         assert_eq!(
@@ -9006,6 +9274,47 @@ mod tests {
         let status = run_package_script_with_npm_command(&dir, "run", "build", &[], true).unwrap();
 
         assert_eq!(status, ExitCode::SUCCESS);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn resolves_npm_workspace_script_targets() {
+        let dir = test_dir("npm-run-workspaces");
+        fs::write(
+            dir.join("package.json"),
+            r#"{ "name": "root", "workspaces": ["packages/*"], "scripts": { "build": "true" } }"#,
+        )
+        .unwrap();
+        fs::create_dir_all(dir.join("packages/lib")).unwrap();
+        fs::write(
+            dir.join("packages/lib/package.json"),
+            r#"{ "name": "@demo/lib", "scripts": { "build": "true" } }"#,
+        )
+        .unwrap();
+        fs::create_dir_all(dir.join("packages/api")).unwrap();
+        fs::write(
+            dir.join("packages/api/package.json"),
+            r#"{ "name": "@demo/api", "scripts": { "build": "true" } }"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            npm_script_target_dirs(&dir, &["@demo/lib".to_owned()], false, false).unwrap(),
+            vec![dir.join("packages/lib")]
+        );
+        assert_eq!(
+            npm_script_target_dirs(&dir, &["packages/api".to_owned()], false, false).unwrap(),
+            vec![dir.join("packages/api")]
+        );
+        assert_eq!(
+            npm_script_target_dirs(&dir, &[], true, true).unwrap(),
+            vec![
+                dir.clone(),
+                dir.join("packages/api"),
+                dir.join("packages/lib")
+            ]
+        );
+        assert!(npm_script_target_dirs(&dir, &["missing".to_owned()], false, false).is_err());
         let _ = fs::remove_dir_all(dir);
     }
 

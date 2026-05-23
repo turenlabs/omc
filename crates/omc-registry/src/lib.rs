@@ -1924,6 +1924,38 @@ pub fn read_package_scripts(project_dir: impl AsRef<Path>) -> Result<BTreeMap<St
     Ok(scripts)
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NpmWorkspacePackage {
+    pub name: Option<String>,
+    pub path: PathBuf,
+}
+
+pub fn read_npm_workspace_packages(
+    project_dir: impl AsRef<Path>,
+) -> Result<Vec<NpmWorkspacePackage>> {
+    let project_dir = project_dir.as_ref();
+    let package_json = project_dir.join("package.json");
+    if !package_json.exists() {
+        return Ok(Vec::new());
+    }
+    let root = serde_json::from_str::<ProjectPackageJson>(&fs::read_to_string(&package_json)?)?;
+    let Some(workspaces) = root.workspaces else {
+        return Ok(Vec::new());
+    };
+    let mut packages = Vec::new();
+    for package_json in workspace_package_json_paths(project_dir, &workspaces) {
+        let package =
+            serde_json::from_str::<ProjectPackageJson>(&fs::read_to_string(&package_json)?)?;
+        let path = package_json.parent().unwrap_or(project_dir).to_path_buf();
+        packages.push(NpmWorkspacePackage {
+            name: package.name,
+            path,
+        });
+    }
+    packages.sort_by(|left, right| left.path.cmp(&right.path));
+    Ok(packages)
+}
+
 pub fn discover_project_requirements(project_dir: impl AsRef<Path>) -> Result<ProjectRequirements> {
     discover_project_requirements_with_extras(project_dir, &BTreeSet::new())
 }

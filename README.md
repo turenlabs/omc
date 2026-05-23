@@ -119,6 +119,7 @@ cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm install --regi
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm update --package-lock-only
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm ci --omit=dev
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm run test -- --watch
+cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm run build --workspace @demo/lib
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm audit --json
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm outdated --json
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm explain left-pad --json
@@ -444,8 +445,9 @@ Supported now:
   `npm_lifecycle_script`, `npm_package_name`, `npm_package_version`,
   `npm_package_config_*`, `npm_package_bin_*`, `npm_package_json`,
   `npm_config_user_agent`, and `INIT_CWD`, and `pre<script>` / `post<script>`
-  lifecycle hooks are executed around the requested script; common script flags
-  such as `--if-present`, `--silent`, `-s`, and `--loglevel=silent` are
+  lifecycle hooks are executed around the requested script; common script and
+  workspace flags such as `--if-present`, `--workspace`, `--workspaces`,
+  `--include-workspace-root`, `--silent`, `-s`, and `--loglevel=silent` are
   understood
 - `omc pip` compatibility commands for common `install`, `uninstall`, `freeze`,
   `download`, `check`, `inspect`, `show`, `hash`, `cache dir/list/remove/purge`,
