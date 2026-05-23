@@ -125,6 +125,7 @@ npm-shrinkwrap.json exact versions, resolved tarball URLs, and integrity hashes 
 yarn.lock          Yarn Classic exact versions, resolved tarball URLs, and integrity hashes for uniquely locked npm packages
 pip.conf           PyPI index-url, extra-index-url, find-links, and no-index configuration
 requirements.txt  PyPI requirements, direct wheel URLs, hashes, extras, -r includes, -c constraints, markers, simple indexes, find-links wheelhouses
+Pipfile.lock      Pipenv default/develop package pins, extras, markers, and sha256 hashes
 pyproject.toml    PEP 621 project dependencies, selected optional groups
 pyproject.toml    Poetry dependencies, dev groups, optional groups, extras, and wheel URL/path dependencies
 poetry.lock       exact PyPI versions and file hashes for locked Poetry packages
@@ -250,6 +251,8 @@ Supported now:
   markers
 - unsupported requirements entries such as editable installs, VCS URLs, and
   non-wheel direct URLs fail closed instead of being silently ignored
+- `Pipfile.lock` ingestion for Pipenv default/develop package pins, extras,
+  markers, and sha256 hashes
 - `pyproject.toml` PEP 621 dependency ingestion with `omc install --extra`
   for selected optional dependency groups
 - Poetry `pyproject.toml` dependency ingestion, including

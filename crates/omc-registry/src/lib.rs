@@ -902,6 +902,14 @@ fn discover_project_requirements_with_options(
         project.pypi_no_index |= requirements.pypi_no_index;
     }
 
+    let pipfile_lock = project_dir.join("Pipfile.lock");
+    if pipfile_lock.exists() {
+        let requirements = read_pipfile_lock_requirements(&pipfile_lock, include_dev_dependencies)?;
+        project.specs.extend(requirements.specs);
+        project.constraints.extend(requirements.constraints);
+        project.hashes.extend(requirements.hashes);
+    }
+
     let pyproject_toml = project_dir.join("pyproject.toml");
     if pyproject_toml.exists() {
         let requirements =
@@ -2004,6 +2012,79 @@ fn read_requirements_file(path: &Path) -> Result<ProjectRequirements> {
         &mut discovered,
     )?;
     Ok(discovered)
+}
+
+fn read_pipfile_lock_requirements(
+    path: &Path,
+    include_dev_dependencies: bool,
+) -> Result<ProjectRequirements> {
+    let lock = serde_json::from_str::<PipfileLock>(&fs::read_to_string(path)?)?;
+    let mut requirements = ProjectRequirements::default();
+
+    collect_pipfile_locked_packages(lock.default, &mut requirements);
+    if include_dev_dependencies {
+        collect_pipfile_locked_packages(lock.develop, &mut requirements);
+    }
+
+    Ok(requirements)
+}
+
+fn collect_pipfile_locked_packages(
+    packages: BTreeMap<String, PipfileLockedPackage>,
+    requirements: &mut ProjectRequirements,
+) {
+    for (name, package) in packages {
+        if package
+            .markers
+            .as_deref()
+            .map(|marker| !pypi_marker_applies(marker, &BTreeSet::new()))
+            .unwrap_or(false)
+        {
+            continue;
+        }
+
+        let name = normalize_pypi_name(&name);
+        let Some(version) = package.version.as_deref().and_then(pipfile_locked_version) else {
+            continue;
+        };
+
+        let extras = package
+            .extras
+            .into_iter()
+            .map(|extra| normalize_pypi_extra(&extra))
+            .filter(|extra| !extra.is_empty())
+            .collect::<BTreeSet<_>>();
+        requirements.specs.push(PackageSpec::with_extras(
+            Ecosystem::Pypi,
+            name.clone(),
+            Some(version.clone()),
+            extras,
+        ));
+
+        let key = format!("pypi:{name}");
+        requirements.constraints.insert(key.clone(), version);
+        for hash in package.hashes {
+            if let Some(hash) = normalize_sha256_hash(&hash) {
+                requirements
+                    .hashes
+                    .entry(key.clone())
+                    .or_default()
+                    .insert(hash);
+            }
+        }
+    }
+}
+
+fn pipfile_locked_version(version: &str) -> Option<String> {
+    let version = version.trim();
+    if version.is_empty() || version == "*" {
+        return None;
+    }
+    version
+        .strip_prefix("===")
+        .or_else(|| version.strip_prefix("=="))
+        .map(str::to_owned)
+        .or_else(|| is_exact_pypi_version(version).then_some(version.to_owned()))
 }
 
 fn read_pyproject_requirements(
@@ -5751,6 +5832,24 @@ enum NpmBinField {
     Map(BTreeMap<String, String>),
 }
 
+#[derive(Debug, Default, Deserialize)]
+struct PipfileLock {
+    #[serde(default)]
+    default: BTreeMap<String, PipfileLockedPackage>,
+    #[serde(default)]
+    develop: BTreeMap<String, PipfileLockedPackage>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct PipfileLockedPackage {
+    version: Option<String>,
+    #[serde(default)]
+    hashes: Vec<String>,
+    #[serde(default)]
+    extras: Vec<String>,
+    markers: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct PythonEntryPoint {
     name: String,
@@ -6918,6 +7017,114 @@ dup@^2.0.0:
                 .map(String::as_str),
             Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
         );
+    }
+
+    #[test]
+    fn reads_pipfile_lock_specs_constraints_and_hashes() {
+        let dir = tempfile::tempdir().unwrap();
+        let pipfile_lock = dir.path().join("Pipfile.lock");
+        let hash = "a".repeat(64);
+        fs::write(
+            &pipfile_lock,
+            format!(
+                r#"{{
+                    "_meta": {{}},
+                    "default": {{
+                        "Requests": {{
+                            "version": "==2.32.3",
+                            "hashes": ["sha256:{hash}"],
+                            "extras": ["socks"],
+                            "markers": "python_version >= '3'"
+                        }},
+                        "old-python-only": {{
+                            "version": "==0.1.0",
+                            "markers": "python_version < '2'"
+                        }},
+                        "editable-local": {{
+                            "path": "."
+                        }}
+                    }},
+                    "develop": {{
+                        "pytest": {{
+                            "version": "==8.2.0"
+                        }}
+                    }}
+                }}"#
+            ),
+        )
+        .unwrap();
+
+        let production = read_pipfile_lock_requirements(&pipfile_lock, false).unwrap();
+        let requests = production
+            .specs
+            .iter()
+            .find(|spec| spec.name == "requests")
+            .unwrap();
+        assert_eq!(requests.version.as_deref(), Some("2.32.3"));
+        assert!(requests.extras.contains("socks"));
+        assert_eq!(
+            production
+                .constraints
+                .get("pypi:requests")
+                .map(String::as_str),
+            Some("2.32.3")
+        );
+        assert_eq!(
+            production
+                .hashes
+                .get("pypi:requests")
+                .and_then(|hashes| hashes.iter().next())
+                .map(String::as_str),
+            Some(hash.as_str())
+        );
+        assert!(!production.specs.iter().any(|spec| spec.name == "pytest"));
+        assert!(!production
+            .specs
+            .iter()
+            .any(|spec| spec.name == "old-python-only"));
+        assert!(!production
+            .specs
+            .iter()
+            .any(|spec| spec.name == "editable-local"));
+
+        let dev = read_pipfile_lock_requirements(&pipfile_lock, true).unwrap();
+        assert!(dev
+            .specs
+            .iter()
+            .any(|spec| spec.name == "pytest" && spec.version.as_deref() == Some("8.2.0")));
+    }
+
+    #[test]
+    fn discovers_pipfile_lock_requirements() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(
+            dir.path().join("Pipfile.lock"),
+            r#"{
+                "_meta": {},
+                "default": {
+                    "idna": { "version": "==3.7" }
+                },
+                "develop": {
+                    "pytest": { "version": "==8.2.0" }
+                }
+            }"#,
+        )
+        .unwrap();
+
+        let production =
+            discover_project_requirements_with_options(dir.path(), &BTreeSet::new(), false)
+                .unwrap();
+        assert!(production
+            .specs
+            .iter()
+            .any(|spec| spec.name == "idna" && spec.version.as_deref() == Some("3.7")));
+        assert!(!production.specs.iter().any(|spec| spec.name == "pytest"));
+
+        let dev = discover_project_requirements(dir.path()).unwrap();
+        assert!(dev
+            .specs
+            .iter()
+            .any(|spec| spec.name == "pytest" && spec.version.as_deref() == Some("8.2.0")));
     }
 
     #[test]
