@@ -1927,12 +1927,24 @@ fn pypi_version_satisfies(version: &str, requirement: &str) -> bool {
 }
 
 fn pypi_file_python_compatible(file: &PypiFile, target_python: Option<&str>) -> bool {
-    let Some(target_python) = target_python else {
+    let python_compatible = target_python
+        .and_then(|target_python| {
+            file.requires_python
+                .as_deref()
+                .map(|requirement| pypi_version_satisfies(target_python, requirement))
+        })
+        .unwrap_or(true);
+    if !python_compatible {
+        return false;
+    }
+
+    if file.packagetype != "bdist_wheel" {
         return true;
-    };
-    file.requires_python
-        .as_deref()
-        .map(|requirement| pypi_version_satisfies(target_python, requirement))
+    }
+
+    current_python_wheel_compatibility()
+        .as_ref()
+        .map(|compatibility| wheel_tag_compatible(&file.filename, compatibility))
         .unwrap_or(true)
 }
 
@@ -1940,6 +1952,14 @@ fn current_python_version() -> Option<String> {
     static CURRENT_PYTHON_VERSION: OnceLock<Option<String>> = OnceLock::new();
     CURRENT_PYTHON_VERSION
         .get_or_init(detect_python_version)
+        .clone()
+}
+
+fn current_python_wheel_compatibility() -> Option<PythonWheelCompatibility> {
+    static CURRENT_PYTHON_WHEEL_COMPATIBILITY: OnceLock<Option<PythonWheelCompatibility>> =
+        OnceLock::new();
+    CURRENT_PYTHON_WHEEL_COMPATIBILITY
+        .get_or_init(detect_python_wheel_compatibility)
         .clone()
 }
 
@@ -1956,6 +1976,173 @@ fn detect_python_version() -> Option<String> {
     }
     let version = String::from_utf8(output.stdout).ok()?.trim().to_owned();
     (!version.is_empty()).then_some(version)
+}
+
+fn detect_python_wheel_compatibility() -> Option<PythonWheelCompatibility> {
+    let output = Command::new("python3")
+        .arg("-c")
+        .arg(
+            r#"import platform, sys, sysconfig
+print(sys.version_info.major)
+print(sys.version_info.minor)
+print(sys.implementation.name)
+print(sys.implementation.cache_tag or "")
+print(sysconfig.get_platform())
+print(platform.machine())
+print(platform.mac_ver()[0])
+"#,
+        )
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let stdout = String::from_utf8(output.stdout).ok()?;
+    let mut lines = stdout.lines();
+    let major = lines.next()?.trim().parse::<u64>().ok()?;
+    let minor = lines.next()?.trim().parse::<u64>().ok()?;
+    let implementation = lines.next()?.trim().to_owned();
+    let cache_tag = lines.next()?.trim().to_owned();
+    let platform = normalize_wheel_platform(lines.next()?.trim());
+    let machine = normalize_wheel_platform(lines.next()?.trim());
+    let mac_version = lines.next().unwrap_or_default().trim().to_owned();
+
+    Some(PythonWheelCompatibility::new(
+        major,
+        minor,
+        &implementation,
+        &cache_tag,
+        &platform,
+        &machine,
+        &mac_version,
+    ))
+}
+
+#[derive(Debug, Clone)]
+struct PythonWheelCompatibility {
+    python_tags: BTreeSet<String>,
+    abi_tags: BTreeSet<String>,
+    platform_tags: BTreeSet<String>,
+}
+
+impl PythonWheelCompatibility {
+    fn new(
+        major: u64,
+        minor: u64,
+        implementation: &str,
+        cache_tag: &str,
+        platform: &str,
+        machine: &str,
+        mac_version: &str,
+    ) -> Self {
+        let mut python_tags = BTreeSet::from([format!("py{major}"), format!("py{major}{minor}")]);
+        let mut abi_tags = BTreeSet::from(["none".to_owned(), "abi3".to_owned()]);
+        if implementation == "cpython" {
+            let cp_tag = format!("cp{major}{minor}");
+            python_tags.insert(cp_tag.clone());
+            abi_tags.insert(cp_tag);
+        }
+        if let Some(cache_tag) = cache_tag
+            .strip_prefix("cpython-")
+            .map(|tag| format!("cp{}", tag.replace('-', "")))
+        {
+            python_tags.insert(cache_tag.clone());
+            abi_tags.insert(cache_tag);
+        }
+
+        let mut platform_tags = BTreeSet::from(["any".to_owned()]);
+        if !platform.is_empty() {
+            platform_tags.insert(platform.to_owned());
+        }
+        platform_tags.extend(macos_platform_tags(platform, machine, mac_version));
+
+        Self {
+            python_tags,
+            abi_tags,
+            platform_tags,
+        }
+    }
+}
+
+fn macos_platform_tags(platform: &str, machine: &str, mac_version: &str) -> BTreeSet<String> {
+    let mut tags = BTreeSet::new();
+    if !platform.starts_with("macosx_") {
+        return tags;
+    }
+
+    let current_major = mac_version
+        .split('.')
+        .next()
+        .and_then(|part| part.parse::<u64>().ok())
+        .filter(|major| *major >= 11)
+        .unwrap_or(15);
+
+    for minor in 0..=16 {
+        tags.insert(format!("macosx_10_{minor}_universal2"));
+        if machine == "x86_64" {
+            tags.insert(format!("macosx_10_{minor}_x86_64"));
+            tags.insert(format!("macosx_10_{minor}_intel"));
+        }
+    }
+
+    for major in 11..=current_major {
+        tags.insert(format!("macosx_{major}_0_universal2"));
+        if machine == "arm64" || machine == "aarch64" {
+            tags.insert(format!("macosx_{major}_0_arm64"));
+        }
+        if machine == "x86_64" {
+            tags.insert(format!("macosx_{major}_0_x86_64"));
+        }
+    }
+
+    tags
+}
+
+fn normalize_wheel_platform(value: &str) -> String {
+    value.replace(['-', '.'], "_")
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct WheelTags {
+    python_tags: BTreeSet<String>,
+    abi_tags: BTreeSet<String>,
+    platform_tags: BTreeSet<String>,
+}
+
+fn parse_wheel_tags(filename: &str) -> Option<WheelTags> {
+    let stem = filename.strip_suffix(".whl")?;
+    let parts = stem.rsplitn(4, '-').collect::<Vec<_>>();
+    if parts.len() != 4 {
+        return None;
+    }
+
+    Some(WheelTags {
+        platform_tags: dot_tags(parts[0]),
+        abi_tags: dot_tags(parts[1]),
+        python_tags: dot_tags(parts[2]),
+    })
+}
+
+fn dot_tags(value: &str) -> BTreeSet<String> {
+    value.split('.').map(str::to_owned).collect()
+}
+
+fn wheel_tag_compatible(filename: &str, compatibility: &PythonWheelCompatibility) -> bool {
+    let Some(tags) = parse_wheel_tags(filename) else {
+        return false;
+    };
+
+    tags.python_tags
+        .iter()
+        .any(|tag| compatibility.python_tags.contains(tag))
+        && tags
+            .abi_tags
+            .iter()
+            .any(|tag| compatibility.abi_tags.contains(tag))
+        && tags
+            .platform_tags
+            .iter()
+            .any(|tag| compatibility.platform_tags.contains(tag))
 }
 
 fn pypi_comparator_satisfied(version: &str, comparator: &str) -> bool {
@@ -3259,7 +3446,7 @@ mod tests {
     #[test]
     fn applies_requires_python_constraints() {
         let file = PypiFile {
-            filename: "pkg.whl".to_owned(),
+            filename: "pkg-1.0.0-py3-none-any.whl".to_owned(),
             packagetype: "bdist_wheel".to_owned(),
             url: "https://example.invalid/pkg.whl".to_owned(),
             digests: PypiDigests {
@@ -3269,6 +3456,36 @@ mod tests {
         };
         assert!(!pypi_file_python_compatible(&file, Some("3.9.6")));
         assert!(pypi_file_python_compatible(&file, Some("3.11.0")));
+    }
+
+    #[test]
+    fn checks_wheel_tags_against_python_platform() {
+        let compatibility = PythonWheelCompatibility::new(
+            3,
+            9,
+            "cpython",
+            "cpython-39",
+            "macosx_10_9_universal2",
+            "arm64",
+            "14.0.0",
+        );
+
+        assert!(wheel_tag_compatible(
+            "idna-3.7-py3-none-any.whl",
+            &compatibility
+        ));
+        assert!(wheel_tag_compatible(
+            "orjson-3.10.18-cp39-cp39-macosx_10_15_x86_64.macosx_11_0_arm64.macosx_10_15_universal2.whl",
+            &compatibility
+        ));
+        assert!(!wheel_tag_compatible(
+            "orjson-3.10.18-cp310-cp310-macosx_11_0_arm64.whl",
+            &compatibility
+        ));
+        assert!(!wheel_tag_compatible(
+            "orjson-3.10.18-cp39-cp39-win_amd64.whl",
+            &compatibility
+        ));
     }
 
     #[test]

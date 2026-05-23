@@ -194,6 +194,7 @@ Supported now:
 - nested `node_modules` installation for conflicting npm dependency versions
 - npm alias dependencies such as `name: npm:other-name@range`
 - `.omc/python/site-packages` installation for PyPI wheels
+- platform-compatible PyPI wheel selection for native wheels
 - npm bin links and Python console script shims
 - `omc node`, `omc python`, and `omc run` wrappers
 - runtime source profiling into capability findings
@@ -210,7 +211,7 @@ Not implemented yet:
 - full npm bundled dependency and peer placement semantics
 - advanced requirements-file semantics such as editable installs, direct URLs,
   and index configuration
-- Python sdist build isolation and native wheel policy
+- Python sdist build isolation and native extension policy
 - execution of package code inside OMC cells for real applications
 
 ## Useful Commands
