@@ -7,8 +7,8 @@ use omc_cap::Capability;
 use omc_registry::{
     add_manifest_policy_grants, add_package_graph, init_project, install_locked_packages,
     install_locked_project, install_project, parse_capability_grant, read_lockfile,
-    read_package_scripts, remove_manifest_dependency, Behavior, LinkOptions, OmcRegistryError,
-    PackageSpec, Verdict,
+    read_package_scripts, remove_manifest_dependency, Behavior, InstallReport, LinkOptions,
+    OmcRegistryError, PackageSpec, Verdict,
 };
 
 #[derive(Debug, Parser)]
@@ -85,11 +85,32 @@ enum Command {
         #[arg(
             long = "omit-dev",
             alias = "production",
-            help = "Skip package.json devDependencies"
+            help = "Skip dev dependency inputs across npm and Python project files"
         )]
         omit_dev: bool,
         #[arg(long, help = "Install from omc.lock without registry resolution")]
         locked: bool,
+        #[arg(long, help = "Grant all host capabilities for compatibility testing")]
+        allow_all_host: bool,
+    },
+    #[command(about = "Install from omc.lock without registry resolution")]
+    Ci {
+        #[arg(
+            long = "allow",
+            help = "Grant a capability, e.g. http:api.example.com, env:API_TOKEN, fs-read:*, proc:*"
+        )]
+        allow: Vec<String>,
+        #[arg(
+            long = "extra",
+            help = "Install a pyproject.toml optional dependency group"
+        )]
+        extra: Vec<String>,
+        #[arg(
+            long = "omit-dev",
+            alias = "production",
+            help = "Skip dev dependency inputs across npm and Python project files"
+        )]
+        omit_dev: bool,
         #[arg(long, help = "Grant all host capabilities for compatibility testing")]
         allow_all_host: bool,
     },
@@ -174,15 +195,7 @@ fn run() -> Result<ExitCode, OmcRegistryError> {
             print_link_reports(&all_reports);
             let install = install_locked_packages(&cli.project_dir)?;
             println!();
-            println!(
-                "installed npm={} pypi={} npm_bins={} python_scripts={} node_modules={} python_site_packages={}",
-                install.npm_packages,
-                install.pypi_packages,
-                install.npm_bins,
-                install.python_scripts,
-                install.node_modules.display(),
-                install.python_site_packages.display()
-            );
+            print_install_report(&install);
         }
         Command::Remove {
             specs,
@@ -205,15 +218,7 @@ fn run() -> Result<ExitCode, OmcRegistryError> {
             options.allowed_capabilities = parse_grants(&allow, allow_all_host)?;
             let install = install_project(&options)?;
             println!("removed {}", removed.join(", "));
-            println!(
-                "installed npm={} pypi={} npm_bins={} python_scripts={} node_modules={} python_site_packages={}",
-                install.npm_packages,
-                install.pypi_packages,
-                install.npm_bins,
-                install.python_scripts,
-                install.node_modules.display(),
-                install.python_site_packages.display()
-            );
+            print_install_report(&install);
         }
         Command::Allow { grants } => {
             if grants.is_empty() {
@@ -237,27 +242,25 @@ fn run() -> Result<ExitCode, OmcRegistryError> {
             locked,
             allow_all_host,
         } => {
-            let mut options = LinkOptions::new(&cli.project_dir);
-            options.allowed_capabilities = parse_grants(&allow, allow_all_host)?;
-            options.project_extras = extra
-                .into_iter()
-                .map(|extra| normalize_extra(&extra))
-                .collect();
-            options.include_dev_dependencies = !omit_dev;
+            let options =
+                install_options(&cli.project_dir, &allow, extra, omit_dev, allow_all_host)?;
             let install = if locked {
                 install_locked_project(&options)?
             } else {
                 install_project(&options)?
             };
-            println!(
-                "installed npm={} pypi={} npm_bins={} python_scripts={} node_modules={} python_site_packages={}",
-                install.npm_packages,
-                install.pypi_packages,
-                install.npm_bins,
-                install.python_scripts,
-                install.node_modules.display(),
-                install.python_site_packages.display()
-            );
+            print_install_report(&install);
+        }
+        Command::Ci {
+            allow,
+            extra,
+            omit_dev,
+            allow_all_host,
+        } => {
+            let options =
+                install_options(&cli.project_dir, &allow, extra, omit_dev, allow_all_host)?;
+            let install = install_locked_project(&options)?;
+            print_install_report(&install);
         }
         Command::Audit { json } => {
             let lock = read_lockfile(cli.project_dir.join("omc.lock"))?;
@@ -323,6 +326,35 @@ fn run() -> Result<ExitCode, OmcRegistryError> {
     }
 
     Ok(ExitCode::SUCCESS)
+}
+
+fn install_options(
+    project_dir: &Path,
+    allow: &[String],
+    extra: Vec<String>,
+    omit_dev: bool,
+    allow_all_host: bool,
+) -> Result<LinkOptions, OmcRegistryError> {
+    let mut options = LinkOptions::new(project_dir);
+    options.allowed_capabilities = parse_grants(allow, allow_all_host)?;
+    options.project_extras = extra
+        .into_iter()
+        .map(|extra| normalize_extra(&extra))
+        .collect();
+    options.include_dev_dependencies = !omit_dev;
+    Ok(options)
+}
+
+fn print_install_report(install: &InstallReport) {
+    println!(
+        "installed npm={} pypi={} npm_bins={} python_scripts={} node_modules={} python_site_packages={}",
+        install.npm_packages,
+        install.pypi_packages,
+        install.npm_bins,
+        install.python_scripts,
+        install.node_modules.display(),
+        install.python_site_packages.display()
+    );
 }
 
 fn run_node(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRegistryError> {

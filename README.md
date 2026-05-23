@@ -107,6 +107,7 @@ cargo run -p omc-cli -- --project-dir /tmp/omc-demo add pypi:requests==2.32.3 --
 cargo run -p omc-cli -- --project-dir /tmp/omc-demo python -c "import requests; print(requests.__version__)"
 cargo run -p omc-cli -- --project-dir /tmp/omc-demo install --omit-dev
 cargo run -p omc-cli -- --project-dir /tmp/omc-demo install --locked
+cargo run -p omc-cli -- --project-dir /tmp/omc-demo ci
 cargo run -p omc-cli -- --project-dir /tmp/omc-demo run normalizer --version
 cargo run -p omc-cli -- --project-dir /tmp/omc-demo list
 cargo run -p omc-cli -- --project-dir /tmp/omc-demo list --json
@@ -308,6 +309,7 @@ Supported now:
   converge to current project manifests
 - locked/offline `omc install --locked` installs that validate `omc.lock`
   against current project manifests without registry resolution
+- `omc ci` as a lockfile-only install command for clean/CI workflows
 - install-time sha256 verification for cached archives before package extraction
 - text and JSON `omc list` output for locked packages
 - text and JSON audit output for locked package verdicts
