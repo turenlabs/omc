@@ -184,6 +184,67 @@ enum Command {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
+    #[command(about = "Run common npm-compatible commands through OMC")]
+    Npm {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    #[command(about = "Run common pip-compatible commands through OMC")]
+    Pip {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum NpmCompatAction {
+    Install {
+        specs: Vec<String>,
+        dev: bool,
+        omit_dev: bool,
+        allow: Vec<String>,
+        allow_all_host: bool,
+    },
+    Ci {
+        omit_dev: bool,
+        allow: Vec<String>,
+        allow_all_host: bool,
+    },
+    Remove {
+        specs: Vec<String>,
+        allow: Vec<String>,
+        allow_all_host: bool,
+    },
+    RunScript {
+        name: String,
+        args: Vec<String>,
+    },
+    Exec {
+        command: String,
+        args: Vec<String>,
+    },
+    List,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum PipCompatAction {
+    Install {
+        specs: Vec<String>,
+        requirements: Vec<PathBuf>,
+        index_url: Option<String>,
+        extra_index_urls: Vec<String>,
+        find_links: Vec<String>,
+        no_index: bool,
+        allow: Vec<String>,
+        allow_all_host: bool,
+    },
+    Uninstall {
+        specs: Vec<String>,
+        allow: Vec<String>,
+        allow_all_host: bool,
+    },
+    Freeze,
+    List,
 }
 
 fn main() -> ExitCode {
@@ -379,6 +440,8 @@ fn run() -> Result<ExitCode, OmcRegistryError> {
         Command::Run { command, args } => {
             return run_project_command(&cli.project_dir, &command, &args)
         }
+        Command::Npm { args } => return run_npm_compat(&cli.project_dir, &args),
+        Command::Pip { args } => return run_pip_compat(&cli.project_dir, &args),
     }
 
     Ok(ExitCode::SUCCESS)
@@ -469,6 +532,246 @@ fn run_project_command(
     apply_project_runtime_env(&mut process, project_dir)?;
     let status = process.args(args).status()?;
     Ok(exit_code(status.code()))
+}
+
+fn run_npm_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRegistryError> {
+    match parse_npm_compat_action(args)? {
+        NpmCompatAction::Install {
+            specs,
+            dev,
+            omit_dev,
+            allow,
+            allow_all_host,
+        } => {
+            let allowed_capabilities = parse_grants(&allow, allow_all_host)?;
+            if specs.is_empty() {
+                let mut options = LinkOptions::new(project_dir);
+                options.allowed_capabilities = allowed_capabilities;
+                options.include_dev_dependencies = !omit_dev;
+                let install = install_project(&options)?;
+                print_install_report(&install);
+            } else {
+                let specs = parse_package_specs(&specs, Some(Ecosystem::Npm))?;
+                let mut options = LinkOptions::new(project_dir);
+                options.allowed_capabilities = allowed_capabilities;
+                options.save_dev_dependency = dev;
+                let mut all_reports = Vec::new();
+                for spec in &specs {
+                    all_reports.extend(add_package_graph(spec, &options)?);
+                }
+                print_link_reports(&all_reports);
+                let install = install_locked_packages(project_dir)?;
+                println!();
+                print_install_report(&install);
+            }
+        }
+        NpmCompatAction::Ci {
+            omit_dev,
+            allow,
+            allow_all_host,
+        } => {
+            let mut options = LinkOptions::new(project_dir);
+            options.allowed_capabilities = parse_grants(&allow, allow_all_host)?;
+            options.include_dev_dependencies = !omit_dev;
+            let install = install_locked_project(&options)?;
+            print_install_report(&install);
+        }
+        NpmCompatAction::Remove {
+            specs,
+            allow,
+            allow_all_host,
+        } => {
+            remove_specs(
+                project_dir,
+                &specs,
+                Some(Ecosystem::Npm),
+                &allow,
+                allow_all_host,
+            )?;
+        }
+        NpmCompatAction::RunScript { name, args } => {
+            return run_package_script(project_dir, &name, &args)
+        }
+        NpmCompatAction::Exec { command, args } => {
+            return run_project_command(project_dir, &command, &args)
+        }
+        NpmCompatAction::List => print_locked_packages(project_dir, Some(Ecosystem::Npm), false)?,
+    }
+
+    Ok(ExitCode::SUCCESS)
+}
+
+fn run_pip_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRegistryError> {
+    match parse_pip_compat_action(args)? {
+        PipCompatAction::Install {
+            specs,
+            requirements,
+            index_url,
+            extra_index_urls,
+            find_links,
+            no_index,
+            allow,
+            allow_all_host,
+        } => {
+            let allowed_capabilities = parse_grants(&allow, allow_all_host)?;
+            if specs.is_empty() {
+                let mut options = LinkOptions::new(project_dir);
+                options.allowed_capabilities = allowed_capabilities;
+                options.requirement_files = absolutize_paths(project_dir, requirements);
+                apply_pip_compat_index_options(
+                    &mut options,
+                    index_url,
+                    extra_index_urls,
+                    find_links,
+                    no_index,
+                );
+                let install = install_project(&options)?;
+                print_install_report(&install);
+            } else {
+                let specs = parse_package_specs(&specs, Some(Ecosystem::Pypi))?;
+                let mut options = LinkOptions::new(project_dir);
+                options.allowed_capabilities = allowed_capabilities;
+                options.requirement_files = absolutize_paths(project_dir, requirements);
+                apply_pip_compat_index_options(
+                    &mut options,
+                    index_url,
+                    extra_index_urls,
+                    find_links,
+                    no_index,
+                );
+                let mut all_reports = Vec::new();
+                for spec in &specs {
+                    all_reports.extend(add_package_graph(spec, &options)?);
+                }
+                print_link_reports(&all_reports);
+                let install = if options.requirement_files.is_empty() {
+                    install_locked_packages(project_dir)?
+                } else {
+                    install_project(&options)?
+                };
+                println!();
+                print_install_report(&install);
+            }
+        }
+        PipCompatAction::Uninstall {
+            specs,
+            allow,
+            allow_all_host,
+        } => {
+            remove_specs(
+                project_dir,
+                &specs,
+                Some(Ecosystem::Pypi),
+                &allow,
+                allow_all_host,
+            )?;
+        }
+        PipCompatAction::Freeze => print_locked_freeze(project_dir)?,
+        PipCompatAction::List => print_locked_packages(project_dir, Some(Ecosystem::Pypi), false)?,
+    }
+
+    Ok(ExitCode::SUCCESS)
+}
+
+fn remove_specs(
+    project_dir: &Path,
+    specs: &[String],
+    ecosystem_hint: Option<Ecosystem>,
+    allow: &[String],
+    allow_all_host: bool,
+) -> Result<(), OmcRegistryError> {
+    let specs = parse_package_specs(specs, ecosystem_hint)?;
+    let mut removed = Vec::new();
+    for spec in &specs {
+        if !remove_manifest_dependency(project_dir, spec)? {
+            return Err(OmcRegistryError::UnsupportedSpec(format!(
+                "dependency `{}` is not in omc.toml",
+                spec.package_key()
+            )));
+        }
+        removed.push(spec.package_key());
+    }
+
+    let mut options = LinkOptions::new(project_dir);
+    options.allowed_capabilities = parse_grants(allow, allow_all_host)?;
+    let install = install_project(&options)?;
+    println!("removed {}", removed.join(", "));
+    print_install_report(&install);
+    Ok(())
+}
+
+fn print_locked_packages(
+    project_dir: &Path,
+    ecosystem: Option<Ecosystem>,
+    json: bool,
+) -> Result<(), OmcRegistryError> {
+    let lock = read_lockfile(project_dir.join("omc.lock"))?;
+    let packages = lock
+        .packages
+        .into_iter()
+        .filter(|package| {
+            ecosystem
+                .map(|ecosystem| package.ecosystem == ecosystem)
+                .unwrap_or(true)
+        })
+        .collect::<Vec<_>>();
+    if json {
+        println!("{}", serde_json::to_string_pretty(&packages)?);
+    } else if packages.is_empty() {
+        println!("packages: 0");
+    } else {
+        for package in packages {
+            println!(
+                "{}:{}@{} {} {}",
+                package.ecosystem,
+                package.name,
+                package.version,
+                verdict_label(package.verdict),
+                behavior_label(package.behavior)
+            );
+        }
+    }
+    Ok(())
+}
+
+fn print_locked_freeze(project_dir: &Path) -> Result<(), OmcRegistryError> {
+    let lock = read_lockfile(project_dir.join("omc.lock"))?;
+    for package in lock
+        .packages
+        .into_iter()
+        .filter(|package| package.ecosystem == Ecosystem::Pypi)
+    {
+        println!("{}=={}", package.name, package.version);
+    }
+    Ok(())
+}
+
+fn absolutize_paths(project_dir: &Path, paths: Vec<PathBuf>) -> Vec<PathBuf> {
+    paths
+        .into_iter()
+        .map(|path| {
+            if path.is_absolute() {
+                path
+            } else {
+                project_dir.join(path)
+            }
+        })
+        .collect()
+}
+
+fn apply_pip_compat_index_options(
+    options: &mut LinkOptions,
+    index_url: Option<String>,
+    extra_index_urls: Vec<String>,
+    find_links: Vec<String>,
+    no_index: bool,
+) {
+    if index_url.is_some() {
+        options.pypi_index_url = index_url;
+    }
+    options.pypi_extra_index_urls.extend(extra_index_urls);
+    options.pypi_find_links.extend(find_links);
+    options.pypi_no_index |= no_index;
 }
 
 fn apply_project_runtime_env(
@@ -601,6 +904,330 @@ fn behavior_label(behavior: Behavior) -> &'static str {
     }
 }
 
+fn parse_npm_compat_action(args: &[String]) -> Result<NpmCompatAction, OmcRegistryError> {
+    let Some(command) = args.first().map(String::as_str) else {
+        return Ok(NpmCompatAction::Install {
+            specs: Vec::new(),
+            dev: false,
+            omit_dev: false,
+            allow: Vec::new(),
+            allow_all_host: false,
+        });
+    };
+
+    match command {
+        "install" | "i" | "add" => parse_npm_install_args(&args[1..]),
+        "ci" => {
+            let CommonCompatFlags {
+                omit_dev,
+                allow,
+                allow_all_host,
+                positionals,
+                ..
+            } = parse_common_compat_flags(&args[1..], true)?;
+            if !positionals.is_empty() {
+                return Err(unsupported_compat_arg("npm ci", &positionals[0]));
+            }
+            Ok(NpmCompatAction::Ci {
+                omit_dev,
+                allow,
+                allow_all_host,
+            })
+        }
+        "remove" | "uninstall" | "rm" | "un" => {
+            let CommonCompatFlags {
+                allow,
+                allow_all_host,
+                positionals,
+                ..
+            } = parse_common_compat_flags(&args[1..], false)?;
+            if positionals.is_empty() {
+                return Err(OmcRegistryError::UnsupportedSpec(
+                    "npm remove needs at least one package".to_owned(),
+                ));
+            }
+            Ok(NpmCompatAction::Remove {
+                specs: positionals,
+                allow,
+                allow_all_host,
+            })
+        }
+        "run" | "run-script" => {
+            let (name, rest) = split_first_position("npm run", &args[1..])?;
+            Ok(NpmCompatAction::RunScript { name, args: rest })
+        }
+        "exec" | "x" | "npx" => {
+            let (command, rest) = split_first_position("npm exec", &args[1..])?;
+            Ok(NpmCompatAction::Exec {
+                command,
+                args: rest,
+            })
+        }
+        "list" | "ls" => Ok(NpmCompatAction::List),
+        other => Err(OmcRegistryError::UnsupportedSpec(format!(
+            "unsupported npm compatibility command `{other}`"
+        ))),
+    }
+}
+
+fn parse_npm_install_args(args: &[String]) -> Result<NpmCompatAction, OmcRegistryError> {
+    let CommonCompatFlags {
+        dev,
+        omit_dev,
+        allow,
+        allow_all_host,
+        positionals,
+    } = parse_common_compat_flags(args, true)?;
+
+    Ok(NpmCompatAction::Install {
+        specs: positionals,
+        dev,
+        omit_dev,
+        allow,
+        allow_all_host,
+    })
+}
+
+fn parse_pip_compat_action(args: &[String]) -> Result<PipCompatAction, OmcRegistryError> {
+    let Some(command) = args.first().map(String::as_str) else {
+        return Err(OmcRegistryError::UnsupportedSpec(
+            "pip compatibility needs a command such as install, uninstall, freeze, or list"
+                .to_owned(),
+        ));
+    };
+
+    match command {
+        "install" => parse_pip_install_args(&args[1..]),
+        "uninstall" | "remove" => {
+            let CommonCompatFlags {
+                allow,
+                allow_all_host,
+                positionals,
+                ..
+            } = parse_common_compat_flags(&args[1..], false)?;
+            if positionals.is_empty() {
+                return Err(OmcRegistryError::UnsupportedSpec(
+                    "pip uninstall needs at least one package".to_owned(),
+                ));
+            }
+            Ok(PipCompatAction::Uninstall {
+                specs: positionals,
+                allow,
+                allow_all_host,
+            })
+        }
+        "freeze" => Ok(PipCompatAction::Freeze),
+        "list" => Ok(PipCompatAction::List),
+        other => Err(OmcRegistryError::UnsupportedSpec(format!(
+            "unsupported pip compatibility command `{other}`"
+        ))),
+    }
+}
+
+fn parse_pip_install_args(args: &[String]) -> Result<PipCompatAction, OmcRegistryError> {
+    let mut requirements = Vec::new();
+    let mut index_url = None;
+    let mut extra_index_urls = Vec::new();
+    let mut find_links = Vec::new();
+    let mut no_index = false;
+    let mut filtered = Vec::new();
+    let mut index = 0;
+    while index < args.len() {
+        let arg = &args[index];
+        if arg == "-r" || arg == "--requirement" {
+            index += 1;
+            let Some(path) = args.get(index) else {
+                return Err(OmcRegistryError::UnsupportedSpec(format!(
+                    "{arg} needs a path"
+                )));
+            };
+            requirements.push(PathBuf::from(path));
+        } else if let Some(path) = arg.strip_prefix("--requirement=") {
+            requirements.push(PathBuf::from(path));
+        } else if arg == "-i" || arg == "--index-url" {
+            index += 1;
+            let Some(url) = args.get(index) else {
+                return Err(OmcRegistryError::UnsupportedSpec(format!(
+                    "{arg} needs a URL"
+                )));
+            };
+            index_url = Some(url.clone());
+        } else if let Some(url) = arg.strip_prefix("--index-url=") {
+            index_url = Some(url.to_owned());
+        } else if arg == "--extra-index-url" {
+            index += 1;
+            let Some(url) = args.get(index) else {
+                return Err(OmcRegistryError::UnsupportedSpec(format!(
+                    "{arg} needs a URL"
+                )));
+            };
+            extra_index_urls.push(url.clone());
+        } else if let Some(url) = arg.strip_prefix("--extra-index-url=") {
+            extra_index_urls.push(url.to_owned());
+        } else if arg == "-f" || arg == "--find-links" {
+            index += 1;
+            let Some(value) = args.get(index) else {
+                return Err(OmcRegistryError::UnsupportedSpec(format!(
+                    "{arg} needs a path or URL"
+                )));
+            };
+            find_links.push(value.clone());
+        } else if let Some(value) = arg.strip_prefix("--find-links=") {
+            find_links.push(value.to_owned());
+        } else if arg == "--no-index" {
+            no_index = true;
+        } else if arg == "-e" || arg == "--editable" {
+            index += 1;
+            let Some(path) = args.get(index) else {
+                return Err(OmcRegistryError::UnsupportedSpec(format!(
+                    "{arg} needs a path"
+                )));
+            };
+            if path != "." {
+                return Err(OmcRegistryError::UnsupportedSpec(format!(
+                    "pip editable path `{path}` is only supported for the project root"
+                )));
+            }
+        } else if matches!(
+            arg.as_str(),
+            "--upgrade"
+                | "-U"
+                | "--user"
+                | "--break-system-packages"
+                | "--disable-pip-version-check"
+                | "--no-cache-dir"
+                | "--progress-bar=off"
+        ) {
+        } else {
+            filtered.push(arg.clone());
+        }
+        index += 1;
+    }
+
+    let CommonCompatFlags {
+        allow,
+        allow_all_host,
+        positionals,
+        ..
+    } = parse_common_compat_flags(&filtered, false)?;
+
+    Ok(PipCompatAction::Install {
+        specs: positionals.into_iter().filter(|spec| spec != ".").collect(),
+        requirements,
+        index_url,
+        extra_index_urls,
+        find_links,
+        no_index,
+        allow,
+        allow_all_host,
+    })
+}
+
+#[derive(Debug, Default)]
+struct CommonCompatFlags {
+    dev: bool,
+    omit_dev: bool,
+    allow: Vec<String>,
+    allow_all_host: bool,
+    positionals: Vec<String>,
+}
+
+fn parse_common_compat_flags(
+    args: &[String],
+    npm_mode: bool,
+) -> Result<CommonCompatFlags, OmcRegistryError> {
+    let mut parsed = CommonCompatFlags::default();
+    let mut index = 0;
+    while index < args.len() {
+        let arg = &args[index];
+        if arg == "--" {
+            parsed.positionals.extend(args[index + 1..].iter().cloned());
+            break;
+        } else if arg == "--allow" {
+            index += 1;
+            let Some(grant) = args.get(index) else {
+                return Err(OmcRegistryError::UnsupportedSpec(
+                    "--allow needs a capability grant".to_owned(),
+                ));
+            };
+            parsed.allow.push(grant.clone());
+        } else if let Some(grant) = arg.strip_prefix("--allow=") {
+            parsed.allow.push(grant.to_owned());
+        } else if arg == "--allow-all-host" {
+            parsed.allow_all_host = true;
+        } else if npm_mode && matches!(arg.as_str(), "-D" | "--save-dev" | "--dev") {
+            parsed.dev = true;
+        } else if npm_mode
+            && matches!(
+                arg.as_str(),
+                "--omit-dev" | "--omit=dev" | "--production" | "--prod" | "--only=production"
+            )
+        {
+            parsed.omit_dev = true;
+        } else if npm_mode && arg == "--omit" {
+            index += 1;
+            let Some(value) = args.get(index) else {
+                return Err(OmcRegistryError::UnsupportedSpec(
+                    "--omit needs a value".to_owned(),
+                ));
+            };
+            parsed.omit_dev |= value == "dev";
+        } else if ignored_compat_flag(npm_mode, arg) {
+        } else if arg.starts_with('-') {
+            return Err(unsupported_compat_arg("compatibility command", arg));
+        } else {
+            parsed.positionals.push(arg.clone());
+        }
+        index += 1;
+    }
+    Ok(parsed)
+}
+
+fn ignored_compat_flag(npm_mode: bool, arg: &str) -> bool {
+    if npm_mode {
+        matches!(
+            arg,
+            "--ignore-scripts"
+                | "--save"
+                | "-S"
+                | "--save-prod"
+                | "--save-exact"
+                | "--no-audit"
+                | "--audit=false"
+                | "--fund=false"
+                | "--legacy-peer-deps"
+        )
+    } else {
+        arg == "-y"
+    }
+}
+
+fn split_first_position(
+    command: &str,
+    args: &[String],
+) -> Result<(String, Vec<String>), OmcRegistryError> {
+    let mut args = args.to_vec();
+    if args.first().map(String::as_str) == Some("--") {
+        args.remove(0);
+    }
+    if args.is_empty() {
+        return Err(OmcRegistryError::UnsupportedSpec(format!(
+            "{command} needs a target"
+        )));
+    }
+    let name = args.remove(0);
+    if args.first().map(String::as_str) == Some("--") {
+        args.remove(0);
+    }
+    Ok((name, args))
+}
+
+fn unsupported_compat_arg(command: &str, arg: &str) -> OmcRegistryError {
+    OmcRegistryError::UnsupportedSpec(format!(
+        "{command} does not support compatibility argument `{arg}`"
+    ))
+}
+
 fn parse_grants(
     allow: &[String],
     allow_all_host: bool,
@@ -670,4 +1297,102 @@ fn ecosystem_hint(npm: bool, pypi: bool) -> Option<Ecosystem> {
 
 fn normalize_extra(extra: &str) -> String {
     extra.trim().replace('_', "-").to_ascii_lowercase()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn args(values: &[&str]) -> Vec<String> {
+        values.iter().map(|value| value.to_string()).collect()
+    }
+
+    #[test]
+    fn parses_npm_install_compat_flags() {
+        let action = parse_npm_compat_action(&args(&[
+            "install",
+            "-D",
+            "--omit=dev",
+            "--allow-all-host",
+            "left-pad@1.3.0",
+        ]))
+        .unwrap();
+
+        assert_eq!(
+            action,
+            NpmCompatAction::Install {
+                specs: vec!["left-pad@1.3.0".to_owned()],
+                dev: true,
+                omit_dev: true,
+                allow: Vec::new(),
+                allow_all_host: true,
+            }
+        );
+    }
+
+    #[test]
+    fn parses_npm_run_and_exec_compat_commands() {
+        assert_eq!(
+            parse_npm_compat_action(&args(&["run", "test", "--", "--watch"])).unwrap(),
+            NpmCompatAction::RunScript {
+                name: "test".to_owned(),
+                args: vec!["--watch".to_owned()],
+            }
+        );
+        assert_eq!(
+            parse_npm_compat_action(&args(&["exec", "eslint", "--", "."])).unwrap(),
+            NpmCompatAction::Exec {
+                command: "eslint".to_owned(),
+                args: vec![".".to_owned()],
+            }
+        );
+    }
+
+    #[test]
+    fn parses_pip_install_requirements_and_indexes() {
+        let action = parse_pip_compat_action(&args(&[
+            "install",
+            "-r",
+            "requirements.txt",
+            "--index-url",
+            "https://mirror.example/simple",
+            "--extra-index-url=https://extra.example/simple",
+            "--find-links",
+            "wheelhouse",
+            "--no-index",
+            "--allow-all-host",
+            "requests==2.32.3",
+        ]))
+        .unwrap();
+
+        assert_eq!(
+            action,
+            PipCompatAction::Install {
+                specs: vec!["requests==2.32.3".to_owned()],
+                requirements: vec![PathBuf::from("requirements.txt")],
+                index_url: Some("https://mirror.example/simple".to_owned()),
+                extra_index_urls: vec!["https://extra.example/simple".to_owned()],
+                find_links: vec!["wheelhouse".to_owned()],
+                no_index: true,
+                allow: Vec::new(),
+                allow_all_host: true,
+            }
+        );
+    }
+
+    #[test]
+    fn parses_pip_uninstall_and_freeze() {
+        assert_eq!(
+            parse_pip_compat_action(&args(&["uninstall", "-y", "requests"])).unwrap(),
+            PipCompatAction::Uninstall {
+                specs: vec!["requests".to_owned()],
+                allow: Vec::new(),
+                allow_all_host: false,
+            }
+        );
+        assert_eq!(
+            parse_pip_compat_action(&args(&["freeze"])).unwrap(),
+            PipCompatAction::Freeze
+        );
+    }
 }
