@@ -876,6 +876,16 @@ fn discover_project_requirements_with_options(
         }
     }
 
+    let yarn_lock = project_dir.join("yarn.lock");
+    if yarn_lock.exists() {
+        let lock_requirements = read_yarn_lock_requirements(&yarn_lock)?;
+        project.constraints.extend(lock_requirements.constraints);
+        project
+            .npm_integrities
+            .extend(lock_requirements.npm_integrities);
+        project.npm_resolved.extend(lock_requirements.npm_resolved);
+    }
+
     let requirements_txt = project_dir.join("requirements.txt");
     if requirements_txt.exists() {
         let requirements = read_requirements_file(&requirements_txt)?;
@@ -1723,6 +1733,177 @@ fn read_package_lock_requirements(path: &Path) -> Result<ProjectRequirements> {
         &mut resolved,
     );
 
+    Ok(npm_requirements_from_lock_maps(
+        versions,
+        integrities,
+        resolved,
+    ))
+}
+
+fn read_yarn_lock_requirements(path: &Path) -> Result<ProjectRequirements> {
+    let content = fs::read_to_string(path)?;
+    let mut versions = BTreeMap::<String, BTreeSet<String>>::new();
+    let mut integrities = BTreeMap::<String, BTreeSet<String>>::new();
+    let mut resolved = BTreeMap::<String, BTreeSet<String>>::new();
+    let mut entry: Option<YarnLockEntry> = None;
+
+    for line in content.lines() {
+        let line = line.trim_end();
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+
+        let starts_indented = line
+            .chars()
+            .next()
+            .map(char::is_whitespace)
+            .unwrap_or(false);
+        if !starts_indented && trimmed.ends_with(':') {
+            collect_yarn_lock_entry(entry.take(), &mut versions, &mut integrities, &mut resolved);
+            entry = Some(YarnLockEntry {
+                selectors: parse_yarn_lock_selectors(trimmed.trim_end_matches(':')),
+                version: None,
+                resolved: None,
+                integrity: None,
+            });
+            continue;
+        }
+
+        let Some(entry) = entry.as_mut() else {
+            continue;
+        };
+        if let Some(value) = trimmed.strip_prefix("version ") {
+            entry.version = Some(yarn_lock_value(value));
+        } else if let Some(value) = trimmed.strip_prefix("resolved ") {
+            entry.resolved = Some(yarn_lock_value(value));
+        } else if let Some(value) = trimmed.strip_prefix("integrity ") {
+            entry.integrity = Some(yarn_lock_value(value));
+        }
+    }
+
+    collect_yarn_lock_entry(entry, &mut versions, &mut integrities, &mut resolved);
+
+    Ok(npm_requirements_from_lock_maps(
+        versions,
+        integrities,
+        resolved,
+    ))
+}
+
+fn collect_yarn_lock_entry(
+    entry: Option<YarnLockEntry>,
+    versions: &mut BTreeMap<String, BTreeSet<String>>,
+    integrities: &mut BTreeMap<String, BTreeSet<String>>,
+    resolved: &mut BTreeMap<String, BTreeSet<String>>,
+) {
+    let Some(entry) = entry else {
+        return;
+    };
+    let Some(version) = entry.version else {
+        return;
+    };
+
+    for selector in entry.selectors {
+        let Some(name) = npm_package_name_from_yarn_selector(&selector) else {
+            continue;
+        };
+        versions
+            .entry(name.clone())
+            .or_default()
+            .insert(version.clone());
+        if let Some(integrity) = &entry.integrity {
+            integrities
+                .entry(name.clone())
+                .or_default()
+                .insert(integrity.clone());
+        }
+        if let Some(url) = entry
+            .resolved
+            .as_deref()
+            .filter(|url| url.starts_with("https://"))
+        {
+            resolved.entry(name).or_default().insert(url.to_owned());
+        }
+    }
+}
+
+fn parse_yarn_lock_selectors(raw: &str) -> Vec<String> {
+    let mut selectors = Vec::new();
+    let mut current = String::new();
+    let mut in_quote = false;
+    let mut escaped = false;
+
+    for character in raw.chars() {
+        if escaped {
+            current.push(character);
+            escaped = false;
+            continue;
+        }
+        if in_quote && character == '\\' {
+            escaped = true;
+            continue;
+        }
+        if character == '"' {
+            in_quote = !in_quote;
+            continue;
+        }
+        if character == ',' && !in_quote {
+            let selector = current.trim();
+            if !selector.is_empty() {
+                selectors.push(selector.to_owned());
+            }
+            current.clear();
+            continue;
+        }
+        current.push(character);
+    }
+
+    let selector = current.trim();
+    if !selector.is_empty() {
+        selectors.push(selector.to_owned());
+    }
+
+    selectors
+}
+
+fn yarn_lock_value(value: &str) -> String {
+    let value = value.trim();
+    if value.len() >= 2 && value.starts_with('"') && value.ends_with('"') {
+        value[1..value.len() - 1]
+            .replace("\\\"", "\"")
+            .replace("\\\\", "\\")
+    } else {
+        value.to_owned()
+    }
+}
+
+fn npm_package_name_from_yarn_selector(selector: &str) -> Option<String> {
+    let selector = selector.trim();
+    if selector.is_empty() {
+        return None;
+    }
+
+    if let Some((alias, _)) = selector.split_once("@npm:") {
+        return if alias.is_empty() {
+            None
+        } else {
+            Some(alias.to_owned())
+        };
+    }
+
+    let version_separator = selector.rfind('@')?;
+    if version_separator == 0 && selector.starts_with('@') {
+        return None;
+    }
+    Some(selector[..version_separator].to_owned())
+}
+
+fn npm_requirements_from_lock_maps(
+    versions: BTreeMap<String, BTreeSet<String>>,
+    integrities: BTreeMap<String, BTreeSet<String>>,
+    resolved: BTreeMap<String, BTreeSet<String>>,
+) -> ProjectRequirements {
     let constraints = versions
         .into_iter()
         .filter_map(|(name, versions)| {
@@ -1753,7 +1934,7 @@ fn read_package_lock_requirements(path: &Path) -> Result<ProjectRequirements> {
         })
         .collect();
 
-    Ok(ProjectRequirements {
+    ProjectRequirements {
         specs: Vec::new(),
         constraints,
         hashes: BTreeMap::new(),
@@ -1763,7 +1944,7 @@ fn read_package_lock_requirements(path: &Path) -> Result<ProjectRequirements> {
         pypi_extra_index_urls: Vec::new(),
         pypi_find_links: Vec::new(),
         pypi_no_index: false,
-    })
+    }
 }
 
 fn collect_npm_lock_dependency_requirements(
@@ -5463,6 +5644,14 @@ struct NpmPackageLockDependency {
     dependencies: BTreeMap<String, NpmPackageLockDependency>,
 }
 
+#[derive(Debug)]
+struct YarnLockEntry {
+    selectors: Vec<String>,
+    version: Option<String>,
+    resolved: Option<String>,
+    integrity: Option<String>,
+}
+
 #[derive(Debug, Deserialize)]
 struct PyProjectToml {
     project: Option<PyProjectProject>,
@@ -6291,6 +6480,116 @@ mod tests {
             Some("https://registry.example.invalid/legacy-4.0.0.tgz")
         );
         assert!(!requirements.npm_resolved.contains_key("npm:dup"));
+    }
+
+    #[test]
+    fn reads_yarn_lock_constraints_integrities_and_urls() {
+        let dir = tempfile::tempdir().unwrap();
+        let yarn_lock = dir.path().join("yarn.lock");
+        fs::write(
+            &yarn_lock,
+            r#"# yarn lockfile v1
+
+left-pad@^1.0.0, "left-pad@~1.1.0":
+  version "1.1.3"
+  resolved "https://registry.yarnpkg.com/left-pad/-/left-pad-1.1.3.tgz#612f61c0f5c20ba82e3d8f3f211f98d7bc86dca5"
+  integrity sha512-leftpad
+
+"@scope/pkg@^1.0.0":
+  version "1.2.3"
+  resolved "https://registry.yarnpkg.com/@scope/pkg/-/pkg-1.2.3.tgz"
+
+"alias@npm:real-name@^3.0.0":
+  version "3.1.0"
+
+dup@^1.0.0:
+  version "1.0.0"
+
+dup@^2.0.0:
+  version "2.0.0"
+"#,
+        )
+        .unwrap();
+
+        let requirements = read_yarn_lock_requirements(&yarn_lock).unwrap();
+        assert_eq!(
+            requirements
+                .constraints
+                .get("npm:left-pad")
+                .map(String::as_str),
+            Some("1.1.3")
+        );
+        assert_eq!(
+            requirements
+                .constraints
+                .get("npm:@scope/pkg")
+                .map(String::as_str),
+            Some("1.2.3")
+        );
+        assert_eq!(
+            requirements
+                .constraints
+                .get("npm:alias")
+                .map(String::as_str),
+            Some("3.1.0")
+        );
+        assert_eq!(
+            requirements
+                .npm_integrities
+                .get("npm:left-pad")
+                .and_then(|values| values.iter().next())
+                .map(String::as_str),
+            Some("sha512-leftpad")
+        );
+        assert_eq!(
+            requirements
+                .npm_resolved
+                .get("npm:left-pad")
+                .map(String::as_str),
+            Some(
+                "https://registry.yarnpkg.com/left-pad/-/left-pad-1.1.3.tgz#612f61c0f5c20ba82e3d8f3f211f98d7bc86dca5"
+            )
+        );
+        assert!(!requirements.constraints.contains_key("npm:dup"));
+        assert!(!requirements.npm_resolved.contains_key("npm:dup"));
+    }
+
+    #[test]
+    fn discovers_yarn_lock_constraints() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(
+            dir.path().join("package.json"),
+            r#"{ "dependencies": { "left-pad": "^1.0.0" } }"#,
+        )
+        .unwrap();
+        fs::write(
+            dir.path().join("yarn.lock"),
+            r#"left-pad@^1.0.0:
+  version "1.1.3"
+  resolved "https://registry.yarnpkg.com/left-pad/-/left-pad-1.1.3.tgz"
+"#,
+        )
+        .unwrap();
+
+        let discovered = discover_project_requirements(dir.path()).unwrap();
+        assert!(discovered
+            .specs
+            .iter()
+            .any(|spec| spec.name == "left-pad" && spec.version.as_deref() == Some("^1.0.0")));
+        assert_eq!(
+            discovered
+                .constraints
+                .get("npm:left-pad")
+                .map(String::as_str),
+            Some("1.1.3")
+        );
+        assert_eq!(
+            discovered
+                .npm_resolved
+                .get("npm:left-pad")
+                .map(String::as_str),
+            Some("https://registry.yarnpkg.com/left-pad/-/left-pad-1.1.3.tgz")
+        );
     }
 
     #[test]
