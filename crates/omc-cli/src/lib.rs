@@ -221,6 +221,9 @@ enum Command {
 #[derive(Debug, PartialEq, Eq)]
 enum NpmCompatAction {
     Version,
+    PackageVersion {
+        action: NpmVersionAction,
+    },
     Install {
         specs: Vec<String>,
         archive_references: Vec<String>,
@@ -296,6 +299,19 @@ enum NpmCompatAction {
 enum NpmMaintenanceCommand {
     Prune,
     Dedupe,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum NpmVersionAction {
+    Current {
+        json: bool,
+    },
+    Bump {
+        spec: String,
+        preid: Option<String>,
+        allow_same_version: bool,
+        json: bool,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -954,6 +970,7 @@ fn run_project_command(
 fn run_npm_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRegistryError> {
     match parse_npm_compat_action(args)? {
         NpmCompatAction::Version => println!("{}", env!("CARGO_PKG_VERSION")),
+        NpmCompatAction::PackageVersion { action } => print_npm_version(project_dir, action)?,
         NpmCompatAction::Install {
             specs,
             archive_references,
@@ -1866,6 +1883,242 @@ fn pypi_download_filename(package: &LockedPackage) -> String {
                 .map(str::to_owned)
         })
         .unwrap_or_else(|| format!("{}-{}.archive", package.name, package.version))
+}
+
+fn print_npm_version(project_dir: &Path, action: NpmVersionAction) -> Result<(), OmcRegistryError> {
+    let package_json = project_dir.join("package.json");
+    let mut package = read_npm_pkg_json(&package_json)?;
+    let current = npm_package_json_version(&package)?;
+    match action {
+        NpmVersionAction::Current { json } => {
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "version": current,
+                    }))?
+                );
+            } else {
+                println!("v{current}");
+            }
+        }
+        NpmVersionAction::Bump {
+            spec,
+            preid,
+            allow_same_version,
+            json,
+        } => {
+            let next = npm_next_version(&current, &spec, preid.as_deref())?;
+            if next == current && !allow_same_version {
+                return Err(OmcRegistryError::UnsupportedSpec(format!(
+                    "Version not changed: {current}"
+                )));
+            }
+            npm_pkg_set_path(
+                &mut package,
+                "version",
+                serde_json::Value::String(next.clone()),
+            )?;
+            write_npm_pkg_json(&package_json, &package)?;
+            update_npm_lockfile_root_version(project_dir, "package-lock.json", &next)?;
+            update_npm_lockfile_root_version(project_dir, "npm-shrinkwrap.json", &next)?;
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "old": current,
+                        "new": next,
+                    }))?
+                );
+            } else {
+                println!("v{next}");
+            }
+        }
+    }
+    Ok(())
+}
+
+fn npm_package_json_version(package: &serde_json::Value) -> Result<String, OmcRegistryError> {
+    package
+        .get("version")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned)
+        .ok_or_else(|| {
+            OmcRegistryError::UnsupportedSpec("package.json does not define version".to_owned())
+        })
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct NpmSemver {
+    major: u64,
+    minor: u64,
+    patch: u64,
+    prerelease: Option<String>,
+}
+
+fn npm_next_version(
+    current: &str,
+    spec: &str,
+    preid: Option<&str>,
+) -> Result<String, OmcRegistryError> {
+    let current = parse_npm_semver(current)?;
+    let next = match spec {
+        "major" => NpmSemver {
+            major: current.major + 1,
+            minor: 0,
+            patch: 0,
+            prerelease: None,
+        },
+        "minor" => NpmSemver {
+            major: current.major,
+            minor: current.minor + 1,
+            patch: 0,
+            prerelease: None,
+        },
+        "patch" => NpmSemver {
+            major: current.major,
+            minor: current.minor,
+            patch: current.patch + 1,
+            prerelease: None,
+        },
+        "premajor" => NpmSemver {
+            major: current.major + 1,
+            minor: 0,
+            patch: 0,
+            prerelease: Some(npm_initial_prerelease(preid)),
+        },
+        "preminor" => NpmSemver {
+            major: current.major,
+            minor: current.minor + 1,
+            patch: 0,
+            prerelease: Some(npm_initial_prerelease(preid)),
+        },
+        "prepatch" => NpmSemver {
+            major: current.major,
+            minor: current.minor,
+            patch: current.patch + 1,
+            prerelease: Some(npm_initial_prerelease(preid)),
+        },
+        "prerelease" | "pre" => npm_increment_prerelease(current, preid),
+        exact => return normalize_npm_exact_version(exact),
+    };
+    Ok(next.to_string())
+}
+
+fn npm_initial_prerelease(preid: Option<&str>) -> String {
+    match preid.filter(|value| !value.is_empty()) {
+        Some(preid) => format!("{preid}.0"),
+        None => "0".to_owned(),
+    }
+}
+
+fn npm_increment_prerelease(mut version: NpmSemver, preid: Option<&str>) -> NpmSemver {
+    if let Some(prerelease) = version.prerelease.as_deref() {
+        let mut parts = prerelease.split('.').map(str::to_owned).collect::<Vec<_>>();
+        if let Some(preid) = preid.filter(|value| !value.is_empty()) {
+            if parts.first().is_none_or(|part| part != preid) {
+                version.prerelease = Some(format!("{preid}.0"));
+                return version;
+            }
+        }
+        if let Some(last) = parts.last_mut() {
+            if let Ok(number) = last.parse::<u64>() {
+                *last = (number + 1).to_string();
+                version.prerelease = Some(parts.join("."));
+                return version;
+            }
+        }
+        version.prerelease = Some(format!("{prerelease}.0"));
+        return version;
+    }
+    version.patch += 1;
+    version.prerelease = Some(npm_initial_prerelease(preid));
+    version
+}
+
+fn normalize_npm_exact_version(value: &str) -> Result<String, OmcRegistryError> {
+    Ok(parse_npm_semver(value)?.to_string())
+}
+
+fn parse_npm_semver(value: &str) -> Result<NpmSemver, OmcRegistryError> {
+    let value = value.trim().trim_start_matches('v');
+    let value = value.split_once('+').map(|(base, _)| base).unwrap_or(value);
+    let (core, prerelease) = value
+        .split_once('-')
+        .map(|(core, prerelease)| (core, Some(prerelease.to_owned())))
+        .unwrap_or((value, None));
+    let mut parts = core.split('.');
+    let major = parse_npm_version_number(parts.next(), value)?;
+    let minor = parse_npm_version_number(parts.next(), value)?;
+    let patch = parse_npm_version_number(parts.next(), value)?;
+    if parts.next().is_some()
+        || prerelease
+            .as_deref()
+            .is_some_and(|part| part.is_empty() || part.contains('+'))
+    {
+        return Err(invalid_npm_version(value));
+    }
+    Ok(NpmSemver {
+        major,
+        minor,
+        patch,
+        prerelease,
+    })
+}
+
+fn parse_npm_version_number(value: Option<&str>, raw: &str) -> Result<u64, OmcRegistryError> {
+    let Some(value) = value else {
+        return Err(invalid_npm_version(raw));
+    };
+    if value.is_empty() || value.starts_with('-') {
+        return Err(invalid_npm_version(raw));
+    }
+    value.parse().map_err(|_| invalid_npm_version(raw))
+}
+
+fn invalid_npm_version(value: &str) -> OmcRegistryError {
+    OmcRegistryError::UnsupportedSpec(format!("invalid npm package version `{value}`"))
+}
+
+impl std::fmt::Display for NpmSemver {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "{}.{}.{}", self.major, self.minor, self.patch)?;
+        if let Some(prerelease) = &self.prerelease {
+            write!(formatter, "-{prerelease}")?;
+        }
+        Ok(())
+    }
+}
+
+fn update_npm_lockfile_root_version(
+    project_dir: &Path,
+    filename: &str,
+    version: &str,
+) -> Result<(), OmcRegistryError> {
+    let path = project_dir.join(filename);
+    if !path.exists() {
+        return Ok(());
+    }
+    let mut value: serde_json::Value = serde_json::from_str(&fs::read_to_string(&path)?)?;
+    if let Some(object) = value.as_object_mut() {
+        object.insert(
+            "version".to_owned(),
+            serde_json::Value::String(version.to_owned()),
+        );
+    }
+    if let Some(root) = value
+        .get_mut("packages")
+        .and_then(serde_json::Value::as_object_mut)
+        .and_then(|packages| packages.get_mut(""))
+        .and_then(serde_json::Value::as_object_mut)
+    {
+        root.insert(
+            "version".to_owned(),
+            serde_json::Value::String(version.to_owned()),
+        );
+    }
+    fs::write(path, format!("{}\n", serde_json::to_string_pretty(&value)?))?;
+    Ok(())
 }
 
 fn print_npm_cache(project_dir: &Path, action: NpmCacheAction) -> Result<(), OmcRegistryError> {
@@ -3182,6 +3435,7 @@ fn parse_npm_compat_action(args: &[String]) -> Result<NpmCompatAction, OmcRegist
 
     match command {
         "--version" | "-v" => Ok(NpmCompatAction::Version),
+        "version" => parse_npm_version_args(&args[1..]),
         "install" | "i" | "add" | "update" | "up" | "upgrade" => parse_npm_install_args(&args[1..]),
         "ci" => {
             let CommonCompatFlags {
@@ -3345,6 +3599,78 @@ fn parse_npm_maintenance_args(
 
 fn npm_maintenance_equals_value_flag(arg: &str) -> bool {
     ["--loglevel=", "--cache="]
+        .iter()
+        .any(|prefix| arg.starts_with(prefix))
+}
+
+fn parse_npm_version_args(args: &[String]) -> Result<NpmCompatAction, OmcRegistryError> {
+    let mut json = false;
+    let mut allow_same_version = false;
+    let mut preid = None;
+    let mut positionals = Vec::new();
+    let mut index = 0;
+    while index < args.len() {
+        let arg = &args[index];
+        if arg == "--json" {
+            json = true;
+        } else if arg == "--allow-same-version" {
+            allow_same_version = true;
+        } else if arg == "--preid" {
+            index += 1;
+            let Some(value) = args.get(index) else {
+                return Err(OmcRegistryError::UnsupportedSpec(
+                    "--preid needs a value".to_owned(),
+                ));
+            };
+            preid = Some(value.clone());
+        } else if let Some(value) = arg.strip_prefix("--preid=") {
+            preid = Some(value.to_owned());
+        } else if matches!(
+            arg.as_str(),
+            "--no-git-tag-version"
+                | "--git-tag-version=false"
+                | "--git-tag-version"
+                | "--git-tag-version=true"
+                | "--commit-hooks=false"
+                | "--sign-git-tag=false"
+                | "--silent"
+                | "-s"
+        ) {
+        } else if matches!(arg.as_str(), "--message" | "-m" | "--tag-version-prefix") {
+            index += 1;
+            if args.get(index).is_none() {
+                return Err(OmcRegistryError::UnsupportedSpec(format!(
+                    "{arg} needs a value"
+                )));
+            }
+        } else if npm_version_ignored_equals_flag(arg) {
+        } else if arg.starts_with('-') {
+            return Err(unsupported_compat_arg("npm version", arg));
+        } else {
+            positionals.push(arg.clone());
+        }
+        index += 1;
+    }
+
+    let action = if positionals.is_empty() {
+        NpmVersionAction::Current { json }
+    } else if positionals.len() == 1 {
+        NpmVersionAction::Bump {
+            spec: positionals.remove(0),
+            preid,
+            allow_same_version,
+            json,
+        }
+    } else {
+        return Err(OmcRegistryError::UnsupportedSpec(
+            "npm version accepts at most one version argument".to_owned(),
+        ));
+    };
+    Ok(NpmCompatAction::PackageVersion { action })
+}
+
+fn npm_version_ignored_equals_flag(arg: &str) -> bool {
+    ["--message=", "--tag-version-prefix="]
         .iter()
         .any(|prefix| arg.starts_with(prefix))
 }
@@ -5601,6 +5927,63 @@ mod tests {
         assert_eq!(
             parse_npm_compat_action(&args(&["--version"])).unwrap(),
             NpmCompatAction::Version
+        );
+        assert_eq!(
+            parse_npm_compat_action(&args(&["version", "--json"])).unwrap(),
+            NpmCompatAction::PackageVersion {
+                action: NpmVersionAction::Current { json: true },
+            }
+        );
+        assert_eq!(
+            parse_npm_compat_action(&args(&[
+                "version",
+                "patch",
+                "--no-git-tag-version",
+                "--allow-same-version",
+            ]))
+            .unwrap(),
+            NpmCompatAction::PackageVersion {
+                action: NpmVersionAction::Bump {
+                    spec: "patch".to_owned(),
+                    preid: None,
+                    allow_same_version: true,
+                    json: false,
+                },
+            }
+        );
+        assert_eq!(
+            parse_npm_compat_action(&args(&["version", "preminor", "--preid", "rc", "--json",]))
+                .unwrap(),
+            NpmCompatAction::PackageVersion {
+                action: NpmVersionAction::Bump {
+                    spec: "preminor".to_owned(),
+                    preid: Some("rc".to_owned()),
+                    allow_same_version: false,
+                    json: true,
+                },
+            }
+        );
+
+        assert_eq!(npm_next_version("1.2.3", "patch", None).unwrap(), "1.2.4");
+        assert_eq!(
+            npm_next_version("1.2.3", "preminor", Some("rc")).unwrap(),
+            "1.3.0-rc.0"
+        );
+        assert_eq!(
+            npm_next_version("1.2.3", "prerelease", None).unwrap(),
+            "1.2.4-0"
+        );
+        assert_eq!(
+            npm_next_version("1.2.3-rc.0", "prerelease", Some("rc")).unwrap(),
+            "1.2.3-rc.1"
+        );
+        assert_eq!(
+            npm_next_version("1.2.3-alpha.0", "prerelease", Some("rc")).unwrap(),
+            "1.2.3-rc.0"
+        );
+        assert_eq!(
+            npm_next_version("v2.0.0+build.7", "2.0.0", None).unwrap(),
+            "2.0.0"
         );
 
         let action = parse_npm_compat_action(&args(&[

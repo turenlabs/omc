@@ -125,6 +125,7 @@ cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm dedupe
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm config get registry
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm cache verify
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm pkg get name version
+cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm version patch --no-git-tag-version
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm view left-pad version
 cargo run -p omc-cli --bin npx -- --omc-project-dir /tmp/omc-demo eslint -- .
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm root
@@ -410,8 +411,9 @@ Supported now:
 - `omc npm` compatibility commands for common `install`, `update` / `up` /
   `upgrade`, `ci`, `prune`, `dedupe`, `test`, `start`, `stop`, `restart`,
   `run`, `exec`, `remove`, `bin`, `root`, `prefix`, `audit` / `audit --json`,
-  `cache verify/ls/rm/clean --force`, `pkg get/set/delete`, `config get`,
-  `config list`, `get`, `view` / `info` / `show`, `list` / `list --json`,
+  `cache verify/ls/rm/clean --force`, `pkg get/set/delete`, `version`,
+  `config get`, `config list`, `get`, `view` / `info` / `show`,
+  `list` / `list --json`,
   and `outdated` / `outdated --json` flows without delegating to npm, plus a direct
   `npm` compatibility binary and direct `npx` compatibility binary for
   project-local executable flows; direct local npm tarballs and local package
