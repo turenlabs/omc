@@ -219,6 +219,7 @@ enum NpmCompatAction {
         specs: Vec<String>,
         archive_references: Vec<String>,
         local_paths: Vec<PathBuf>,
+        save: bool,
         dev: bool,
         omit_dev: bool,
         allow: Vec<String>,
@@ -686,6 +687,7 @@ fn run_npm_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
             specs,
             archive_references,
             local_paths,
+            save,
             dev,
             omit_dev,
             allow,
@@ -697,7 +699,7 @@ fn run_npm_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
                 options.allowed_capabilities = allowed_capabilities;
                 options.include_dev_dependencies = !omit_dev;
                 options.npm_local_paths = absolutize_paths(project_dir, local_paths.clone());
-                if !local_paths.is_empty() {
+                if save && !local_paths.is_empty() {
                     add_manifest_npm_local_paths(project_dir, &local_paths, dev)?;
                 }
                 let install = install_project(&options)?;
@@ -705,10 +707,11 @@ fn run_npm_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
             } else {
                 let mut options = LinkOptions::new(project_dir);
                 options.allowed_capabilities = allowed_capabilities;
+                options.save_manifest_dependency = save;
                 options.save_dev_dependency = dev;
                 options.include_dev_dependencies = !omit_dev;
                 options.npm_local_paths = absolutize_paths(project_dir, local_paths.clone());
-                if !local_paths.is_empty() {
+                if save && !local_paths.is_empty() {
                     add_manifest_npm_local_paths(project_dir, &local_paths, dev)?;
                 }
                 let mut specs = parse_package_specs(&specs, Some(Ecosystem::Npm))?;
@@ -1361,6 +1364,7 @@ fn parse_npm_compat_action(args: &[String]) -> Result<NpmCompatAction, OmcRegist
             specs: Vec::new(),
             archive_references: Vec::new(),
             local_paths: Vec::new(),
+            save: true,
             dev: false,
             omit_dev: false,
             allow: Vec::new(),
@@ -1475,6 +1479,7 @@ fn parse_npm_install_args(args: &[String]) -> Result<NpmCompatAction, OmcRegistr
     let CommonCompatFlags {
         dev,
         omit_dev,
+        save,
         allow,
         allow_all_host,
         positionals,
@@ -1484,6 +1489,7 @@ fn parse_npm_install_args(args: &[String]) -> Result<NpmCompatAction, OmcRegistr
         specs: positionals,
         archive_references,
         local_paths,
+        save,
         dev,
         omit_dev,
         allow,
@@ -1768,13 +1774,27 @@ fn is_pip_archive_arg(value: &str) -> bool {
         || filename.ends_with(".tar.gz")
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 struct CommonCompatFlags {
     dev: bool,
     omit_dev: bool,
+    save: bool,
     allow: Vec<String>,
     allow_all_host: bool,
     positionals: Vec<String>,
+}
+
+impl Default for CommonCompatFlags {
+    fn default() -> Self {
+        Self {
+            dev: false,
+            omit_dev: false,
+            save: true,
+            allow: Vec::new(),
+            allow_all_host: false,
+            positionals: Vec::new(),
+        }
+    }
 }
 
 fn parse_common_compat_flags(
@@ -1802,21 +1822,51 @@ fn parse_common_compat_flags(
             parsed.allow_all_host = true;
         } else if npm_mode && matches!(arg.as_str(), "-D" | "--save-dev" | "--dev") {
             parsed.dev = true;
+            parsed.save = true;
+        } else if npm_mode && arg == "--no-save" {
+            parsed.save = false;
+        } else if npm_mode && matches!(arg.as_str(), "--save" | "-S" | "--save-prod") {
+            parsed.save = true;
         } else if npm_mode
             && matches!(
                 arg.as_str(),
-                "--omit-dev" | "--omit=dev" | "--production" | "--prod" | "--only=production"
+                "--omit-dev" | "--production" | "--prod" | "--only=production"
             )
         {
             parsed.omit_dev = true;
-        } else if npm_mode && arg == "--omit" {
-            index += 1;
-            let Some(value) = args.get(index) else {
-                return Err(OmcRegistryError::UnsupportedSpec(
-                    "--omit needs a value".to_owned(),
-                ));
-            };
-            parsed.omit_dev |= value == "dev";
+        } else if npm_mode && matches!(arg.as_str(), "--production=false" | "--prod=false") {
+            parsed.omit_dev = false;
+        } else if npm_mode {
+            if let Some(value) = arg.strip_prefix("--omit=") {
+                parsed.omit_dev |= npm_dependency_set_contains(value, "dev");
+            } else if let Some(value) = arg.strip_prefix("--include=") {
+                if npm_dependency_set_contains(value, "dev") {
+                    parsed.omit_dev = false;
+                }
+            } else if arg == "--omit" {
+                index += 1;
+                let Some(value) = args.get(index) else {
+                    return Err(OmcRegistryError::UnsupportedSpec(
+                        "--omit needs a value".to_owned(),
+                    ));
+                };
+                parsed.omit_dev |= npm_dependency_set_contains(value, "dev");
+            } else if arg == "--include" {
+                index += 1;
+                let Some(value) = args.get(index) else {
+                    return Err(OmcRegistryError::UnsupportedSpec(
+                        "--include needs a value".to_owned(),
+                    ));
+                };
+                if npm_dependency_set_contains(value, "dev") {
+                    parsed.omit_dev = false;
+                }
+            } else if ignored_compat_flag(npm_mode, arg) {
+            } else if arg.starts_with('-') {
+                return Err(unsupported_compat_arg("compatibility command", arg));
+            } else {
+                parsed.positionals.push(arg.clone());
+            }
         } else if ignored_compat_flag(npm_mode, arg) {
         } else if arg.starts_with('-') {
             return Err(unsupported_compat_arg("compatibility command", arg));
@@ -1828,15 +1878,22 @@ fn parse_common_compat_flags(
     Ok(parsed)
 }
 
+fn npm_dependency_set_contains(value: &str, target: &str) -> bool {
+    value
+        .split(',')
+        .map(str::trim)
+        .any(|part| part.eq_ignore_ascii_case(target))
+}
+
 fn ignored_compat_flag(npm_mode: bool, arg: &str) -> bool {
     if npm_mode {
         matches!(
             arg,
             "--ignore-scripts"
-                | "--save"
-                | "-S"
-                | "--save-prod"
                 | "--save-exact"
+                | "--save-optional"
+                | "--save-peer"
+                | "-O"
                 | "--no-audit"
                 | "--audit=false"
                 | "--fund=false"
@@ -2087,6 +2144,7 @@ mod tests {
                 specs: vec!["left-pad@1.3.0".to_owned()],
                 archive_references: Vec::new(),
                 local_paths: Vec::new(),
+                save: true,
                 dev: true,
                 omit_dev: true,
                 allow: Vec::new(),
@@ -2109,6 +2167,32 @@ mod tests {
                 specs: vec!["@scope/runtime".to_owned()],
                 archive_references: vec!["./pkg.tgz".to_owned(), "file:../other.tgz".to_owned()],
                 local_paths: vec![PathBuf::from("../local-pkg")],
+                save: true,
+                dev: false,
+                omit_dev: false,
+                allow: Vec::new(),
+                allow_all_host: false,
+            }
+        );
+
+        let action = parse_npm_compat_action(&args(&[
+            "install",
+            "--no-save",
+            "--omit=optional,peer",
+            "--omit",
+            "dev",
+            "--include=dev",
+            "left-pad",
+        ]))
+        .unwrap();
+
+        assert_eq!(
+            action,
+            NpmCompatAction::Install {
+                specs: vec!["left-pad".to_owned()],
+                archive_references: Vec::new(),
+                local_paths: Vec::new(),
+                save: false,
                 dev: false,
                 omit_dev: false,
                 allow: Vec::new(),

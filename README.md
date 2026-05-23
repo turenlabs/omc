@@ -376,7 +376,8 @@ Supported now:
   `start`, `stop`, `restart`, `run`, `exec`, `remove`, `bin`, `root`,
   `prefix`, and `list` / `list --json` flows without delegating to npm, plus a
   direct `npm` compatibility binary; direct local npm tarballs and local
-  package directories are accepted as install inputs
+  package directories are accepted as install inputs; `--no-save`,
+  `--omit=...`, and `--include=...` are understood for install/ci compatibility
 - `omc pip` compatibility commands for common `install`, `uninstall`, `freeze`,
   `show`, and `list --format=columns|freeze|json` flows, including `-r`, index
   URL, constraints, extra-index, find-links, and no-index install flags without

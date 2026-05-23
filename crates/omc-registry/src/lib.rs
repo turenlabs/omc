@@ -547,6 +547,7 @@ pub struct LinkOptions {
     pub constraint_files: Vec<PathBuf>,
     pub project_extras: BTreeSet<String>,
     pub include_dev_dependencies: bool,
+    pub save_manifest_dependency: bool,
     pub save_dev_dependency: bool,
 }
 
@@ -572,6 +573,7 @@ impl LinkOptions {
             constraint_files: Vec::new(),
             project_extras: BTreeSet::new(),
             include_dev_dependencies: true,
+            save_manifest_dependency: true,
             save_dev_dependency: false,
         }
     }
@@ -747,7 +749,10 @@ pub fn add_package_graph(spec: &PackageSpec, options: &LinkOptions) -> Result<Ve
     let client = Client::builder().user_agent("omc-prototype/0.1").build()?;
     let reports = resolve_package_graph(&client, spec, &options)?;
 
-    if let Some(root) = reports.first() {
+    if options.save_manifest_dependency {
+        let Some(root) = reports.first() else {
+            return Ok(reports);
+        };
         let spec = manifest_spec_for_locked_root(spec, &root.locked);
         write_manifest_dependency(
             &options.project_dir,
@@ -2026,7 +2031,7 @@ fn link_package_inner(
         });
     }
 
-    if update_manifest {
+    if update_manifest && options.save_manifest_dependency {
         let spec = manifest_spec_for_locked_root(spec, &locked);
         write_manifest_dependency(
             &options.project_dir,
@@ -10957,6 +10962,32 @@ mod tests {
             .unwrap()
             .direct_url
             .is_some());
+    }
+
+    #[test]
+    fn skips_manifest_write_when_save_is_disabled() {
+        let dir = tempfile::tempdir().unwrap();
+        let archive = dir.path().join("transient-pkg-1.0.0.tgz");
+        fs::write(
+            &archive,
+            npm_tgz_for_test(r#"{ "name": "transient-pkg", "version": "1.0.0" }"#),
+        )
+        .unwrap();
+        let spec = parse_npm_direct_archive_reference("./transient-pkg-1.0.0.tgz", dir.path())
+            .unwrap()
+            .unwrap();
+
+        let mut options = LinkOptions::new(dir.path());
+        options.save_manifest_dependency = false;
+        add_package_graph(&spec, &options).unwrap();
+
+        let manifest = read_manifest(dir.path().join("omc.toml")).unwrap();
+        assert!(manifest.dependencies.is_empty());
+        let lock = read_lockfile(dir.path().join("omc.lock")).unwrap();
+        assert!(lock
+            .packages
+            .iter()
+            .any(|package| package.name == "transient-pkg"));
     }
 
     #[test]
