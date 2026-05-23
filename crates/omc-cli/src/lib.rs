@@ -313,6 +313,7 @@ enum PipListFormat {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DirectCompatMode {
     Npm,
+    Npx,
     Pip,
 }
 
@@ -343,6 +344,9 @@ fn run_entry() -> Result<ExitCode, OmcRegistryError> {
         let invocation = parse_direct_compat_invocation(mode, raw_args)?;
         return match mode {
             DirectCompatMode::Npm => run_npm_compat(&invocation.project_dir, &invocation.args),
+            DirectCompatMode::Npx => {
+                run_npm_compat(&invocation.project_dir, &npx_compat_args(invocation.args))
+            }
             DirectCompatMode::Pip => run_pip_compat(&invocation.project_dir, &invocation.args),
         };
     }
@@ -356,9 +360,17 @@ fn direct_compat_mode(program: Option<&std::ffi::OsStr>) -> Option<DirectCompatM
         .and_then(|name| name.to_str())?;
     match name {
         "npm" => Some(DirectCompatMode::Npm),
+        "npx" => Some(DirectCompatMode::Npx),
         "pip" | "pip3" => Some(DirectCompatMode::Pip),
         _ => None,
     }
+}
+
+fn npx_compat_args(args: Vec<String>) -> Vec<String> {
+    let mut compat_args = Vec::with_capacity(args.len() + 1);
+    compat_args.push("exec".to_owned());
+    compat_args.extend(args);
+    compat_args
 }
 
 fn parse_direct_compat_invocation<I>(
@@ -377,7 +389,7 @@ where
         let arg = os_arg_to_string(arg)?;
         if arg == "--omc-project-dir"
             || arg == "--project-dir"
-            || (mode == DirectCompatMode::Npm && arg == "--prefix")
+            || (direct_compat_uses_npm_prefix(mode) && arg == "--prefix")
         {
             let Some(path) = args.next() else {
                 return Err(OmcRegistryError::UnsupportedSpec(format!(
@@ -389,7 +401,7 @@ where
             project_dir = PathBuf::from(path);
         } else if let Some(path) = arg.strip_prefix("--project-dir=") {
             project_dir = PathBuf::from(path);
-        } else if let Some(path) = (mode == DirectCompatMode::Npm)
+        } else if let Some(path) = direct_compat_uses_npm_prefix(mode)
             .then(|| arg.strip_prefix("--prefix="))
             .flatten()
         {
@@ -407,6 +419,10 @@ where
         project_dir,
         args: compat_args,
     })
+}
+
+fn direct_compat_uses_npm_prefix(mode: DirectCompatMode) -> bool {
+    matches!(mode, DirectCompatMode::Npm | DirectCompatMode::Npx)
 }
 
 fn os_arg_to_string(arg: OsString) -> Result<String, OmcRegistryError> {
@@ -2638,10 +2654,14 @@ mod tests {
     }
 
     #[test]
-    fn detects_direct_npm_and_pip_compat_binaries() {
+    fn detects_direct_npm_npx_and_pip_compat_binaries() {
         assert_eq!(
             direct_compat_mode(Some(Path::new("/tmp/npm").as_os_str())),
             Some(DirectCompatMode::Npm)
+        );
+        assert_eq!(
+            direct_compat_mode(Some(Path::new("/tmp/npx").as_os_str())),
+            Some(DirectCompatMode::Npx)
         );
         assert_eq!(
             direct_compat_mode(Some(Path::new("/tmp/pip3").as_os_str())),
@@ -2687,6 +2707,21 @@ mod tests {
                 project_dir: PathBuf::from("/tmp/project"),
                 args: args(&["test", "--", "--watch"]),
             }
+        );
+        assert_eq!(
+            parse_direct_compat_invocation(
+                DirectCompatMode::Npx,
+                os_args(&["--prefix=/tmp/project", "eslint", "--", "."])
+            )
+            .unwrap(),
+            DirectCompatInvocation {
+                project_dir: PathBuf::from("/tmp/project"),
+                args: args(&["eslint", "--", "."]),
+            }
+        );
+        assert_eq!(
+            npx_compat_args(args(&["eslint", "--", "."])),
+            args(&["exec", "eslint", "--", "."])
         );
     }
 

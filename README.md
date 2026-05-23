@@ -116,6 +116,7 @@ cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm install left-p
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm install --registry https://registry.npmjs.org left-pad@1.3.0
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm ci --omit=dev
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm run test -- --watch
+cargo run -p omc-cli --bin npx -- --omc-project-dir /tmp/omc-demo eslint -- .
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm root
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm bin
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip install -r requirements.txt -c constraints.txt
@@ -135,12 +136,13 @@ cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo audit --json
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo remove --npm is-odd left-pad
 ```
 
-Installing with `--bins` also provides `npm` and `pip` compatibility binaries.
-They dispatch directly into OMC when they are first on `PATH`, so existing
-scripts can call `npm install`, `npm test`, `pip install`, `pip freeze`, and
-related supported commands without spelling `omc npm` or `omc pip`. They default
-to the current directory; use `OMC_PROJECT_DIR=/path/to/project`,
-`--project-dir PATH`, or `--omc-project-dir PATH` for an explicit project root.
+Installing with `--bins` also provides `npm`, `npx`, and `pip` compatibility
+binaries. They dispatch directly into OMC when they are first on `PATH`, so
+existing scripts can call `npm install`, `npm test`, `npx eslint`,
+`pip install`, `pip freeze`, and related supported commands without spelling
+`omc npm` or `omc pip`. They default to the current directory; use
+`OMC_PROJECT_DIR=/path/to/project`, `--project-dir PATH`, or
+`--omc-project-dir PATH` for an explicit project root.
 
 For existing projects, `install` reads normal project files:
 
@@ -384,8 +386,9 @@ Supported now:
 - `omc npm` compatibility commands for common `install`, `ci`, `test`,
   `start`, `stop`, `restart`, `run`, `exec`, `remove`, `bin`, `root`,
   `prefix`, and `list` / `list --json` flows without delegating to npm, plus a
-  direct `npm` compatibility binary; direct local npm tarballs and local
-  package directories are accepted as install inputs; `--no-save`,
+  direct `npm` compatibility binary and direct `npx` compatibility binary for
+  project-local executable flows; direct local npm tarballs and local package
+  directories are accepted as install inputs; `--no-save`,
   `--package-lock-only`, `--package-lock=false`, `--registry`, `--omit=...`,
   `--include=...`, and common audit/fund/peer/install-strategy flags are
   understood for install/ci compatibility; package scripts receive npm-style

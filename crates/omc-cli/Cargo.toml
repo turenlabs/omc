@@ -17,6 +17,10 @@ path = "src/bin/npm.rs"
 name = "pip"
 path = "src/bin/pip.rs"
 
+[[bin]]
+name = "npx"
+path = "src/bin/npx.rs"
+
 [dependencies]
 clap = { version = "4", features = ["derive"] }
 omc-cap = { path = "../omc-cap" }
