@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Read as _;
+use std::net::Ipv4Addr;
 use std::path::{Path, PathBuf};
 use std::process::{Command as ProcessCommand, ExitCode};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -12,8 +13,8 @@ use omc_cap::Capability;
 use omc_registry::{
     add_manifest_npm_local_paths, add_manifest_policy_grants, add_npm_dist_tag, add_package_graph,
     apply_pypi_binary_option, check_pypi_lock, compare_npm_versions, compare_pypi_versions,
-    init_project, install_locked_packages, install_locked_project, install_project, lock_project,
-    parse_capability_grant, parse_npm_direct_archive_reference,
+    create_npm_token, init_project, install_locked_packages, install_locked_project,
+    install_project, lock_project, parse_capability_grant, parse_npm_direct_archive_reference,
     parse_pypi_direct_archive_reference, parse_pypi_vcs_requirement, publish_npm_package,
     read_constraint_files, read_lockfile, read_manifest, read_npm_config_snapshot,
     read_npm_package_metadata, read_npm_package_metadata_with_userconfig,
@@ -23,9 +24,10 @@ use omc_registry::{
     remove_npm_dist_tag, revoke_npm_token, upload_pypi_distribution, Behavior, Ecosystem,
     InstallReport, LinkOptions, LockedPackage, LockedPythonVcsDependency, NpmAccessToken,
     NpmDistTagMutationResult, NpmPingResult, NpmPublishPackage, NpmPublishResult, NpmSearchPackage,
-    NpmTokenListResult, NpmTokenRevokeResult, NpmWhoamiResult, NpmWorkspacePackage,
-    OmcRegistryError, PackageSpec, ProjectRequirements, PypiBinaryMode, PypiCheckIssue,
-    PypiUploadResult, PythonLocalRequirement, PythonVcsRequirement, Verdict,
+    NpmTokenCreateOptions, NpmTokenCreateResult, NpmTokenListResult, NpmTokenRevokeResult,
+    NpmWhoamiResult, NpmWorkspacePackage, OmcRegistryError, PackageSpec, ProjectRequirements,
+    PypiBinaryMode, PypiCheckIssue, PypiUploadResult, PythonLocalRequirement, PythonVcsRequirement,
+    Verdict,
 };
 use sha2::{Digest, Sha256, Sha384, Sha512};
 
@@ -591,6 +593,14 @@ enum NpmTokenAction {
         parseable: bool,
         npm_registry: Option<String>,
         userconfig: Option<PathBuf>,
+    },
+    Create {
+        options: Box<NpmTokenCreateOptions>,
+        json: bool,
+        parseable: bool,
+        npm_registry: Option<String>,
+        userconfig: Option<PathBuf>,
+        otp: Option<String>,
     },
     Revoke {
         token: String,
@@ -2743,12 +2753,13 @@ fn npm_help_text(topic: Option<&str>) -> String {
             ],
         ),
         Some("token") => npm_command_help(
-            "npm token <list|revoke>",
+            "npm token <list|create|revoke>",
             &[
                 "List redacted npm access tokens for the authenticated registry account.",
+                "Create granular npm access tokens with explicit package/scope/org permissions.",
                 "Revoke tokens by full token or token id.",
-                "Supports --json, --parseable for list, --otp for revoke, --registry, and --userconfig.",
-                "Token creation is not implemented yet.",
+                "Create supports --password, --name, --token-description, --expires, --packages, --packages-all, --scopes, --orgs, permission flags, --cidr, --bypass-2fa, --otp, --registry, and --userconfig.",
+                "OMC does not prompt interactively; pass --password or set NPM_CONFIG_PASSWORD.",
             ],
         ),
         Some("dist-tag") => npm_command_help(
@@ -3790,6 +3801,39 @@ fn print_npm_token(project_dir: &Path, action: NpmTokenAction) -> Result<(), Omc
                 print_npm_token_list_text(&list);
             }
         }
+        NpmTokenAction::Create {
+            options,
+            json,
+            parseable,
+            npm_registry,
+            userconfig,
+            otp,
+        } => {
+            let created = create_npm_token(
+                project_dir,
+                *options,
+                npm_registry.as_deref(),
+                userconfig.as_deref(),
+                otp.as_deref(),
+            )?;
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&npm_token_create_json(&created))?
+                );
+            } else if parseable {
+                print_npm_token_create_parseable(&created);
+            } else {
+                let token = created.token.token.as_deref().unwrap_or_default();
+                println!("Created token {token}");
+                if !created.token.cidr.is_empty() {
+                    println!("with IP whitelist: {}", created.token.cidr.join(","));
+                }
+                if let Some(expires) = created.token.expiry.as_deref() {
+                    println!("expires: {expires}");
+                }
+            }
+        }
         NpmTokenAction::Revoke {
             token,
             json,
@@ -4459,6 +4503,47 @@ fn npm_token_revoke_json(revoked: &NpmTokenRevokeResult) -> serde_json::Value {
         "token": revoked.token,
         "status": revoked.status,
     })
+}
+
+fn npm_token_create_json(created: &NpmTokenCreateResult) -> serde_json::Value {
+    let mut value = created.response.clone();
+    npm_token_create_scrub_output(&mut value);
+    value
+}
+
+fn print_npm_token_create_parseable(created: &NpmTokenCreateResult) {
+    let mut value = created.response.clone();
+    npm_token_create_scrub_output(&mut value);
+    if let serde_json::Value::Object(fields) = value {
+        for (key, value) in fields {
+            println!("{key}\t{}", npm_json_parseable_value(&value));
+        }
+    }
+}
+
+fn npm_token_create_scrub_output(value: &mut serde_json::Value) {
+    if let serde_json::Value::Object(fields) = value {
+        fields.remove("key");
+        fields.remove("updated");
+        if let Some(token) = fields.get_mut("token") {
+            npm_token_create_scrub_output(token);
+        }
+    }
+}
+
+fn npm_json_parseable_value(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::Null => String::new(),
+        serde_json::Value::Bool(value) => value.to_string(),
+        serde_json::Value::Number(value) => value.to_string(),
+        serde_json::Value::String(value) => value.clone(),
+        serde_json::Value::Array(values) => values
+            .iter()
+            .map(npm_json_parseable_value)
+            .collect::<Vec<_>>()
+            .join(","),
+        serde_json::Value::Object(_) => value.to_string(),
+    }
 }
 
 fn print_npm_token_list_parseable(list: &NpmTokenListResult) {
@@ -8530,6 +8615,45 @@ fn npm_global_arg_supported_by_command(command: &str, arg: &str) -> bool {
             "login" | "adduser" | "add-user" | "publish" | "token" | "dist-tag" | "dist-tags"
         );
     }
+    if matches!(
+        arg,
+        "--read-only"
+            | "--no-read-only"
+            | "--packages-all"
+            | "--no-packages-all"
+            | "--bypass-2fa"
+            | "--no-bypass-2fa"
+    ) || arg.starts_with("--read-only=")
+        || arg.starts_with("--packages-all=")
+        || arg.starts_with("--bypass-2fa=")
+    {
+        return matches!(command, "token");
+    }
+    if matches!(
+        arg,
+        "--name"
+            | "--token-description"
+            | "--expires"
+            | "--packages"
+            | "--scopes"
+            | "--orgs"
+            | "--packages-and-scopes-permission"
+            | "--orgs-permission"
+            | "--cidr"
+            | "--password"
+    ) || arg.starts_with("--name=")
+        || arg.starts_with("--token-description=")
+        || arg.starts_with("--expires=")
+        || arg.starts_with("--packages=")
+        || arg.starts_with("--scopes=")
+        || arg.starts_with("--orgs=")
+        || arg.starts_with("--packages-and-scopes-permission=")
+        || arg.starts_with("--orgs-permission=")
+        || arg.starts_with("--cidr=")
+        || arg.starts_with("--password=")
+    {
+        return matches!(command, "token");
+    }
     if matches!(arg, "--auth-type") || arg.starts_with("--auth-type=") {
         return matches!(command, "login" | "adduser" | "add-user");
     }
@@ -8712,6 +8836,12 @@ fn npm_global_preserved_bool_flag(arg: &str) -> bool {
             | "--dry-run"
             | "--provenance"
             | "--no-provenance"
+            | "--read-only"
+            | "--no-read-only"
+            | "--packages-all"
+            | "--no-packages-all"
+            | "--bypass-2fa"
+            | "--no-bypass-2fa"
             | "--workspaces"
             | "--include-workspace-root"
             | "--package-lock-only"
@@ -8738,6 +8868,16 @@ fn npm_global_preserved_value_flag(arg: &str) -> bool {
             | "--access"
             | "--provenance-file"
             | "--scope"
+            | "--name"
+            | "--token-description"
+            | "--expires"
+            | "--packages"
+            | "--scopes"
+            | "--orgs"
+            | "--packages-and-scopes-permission"
+            | "--orgs-permission"
+            | "--cidr"
+            | "--password"
             | "--sbom-format"
             | "--sbom-type"
     )
@@ -8765,6 +8905,19 @@ fn npm_global_preserved_equals_flag(arg: &str) -> bool {
         "--provenance=",
         "--provenance-file=",
         "--scope=",
+        "--read-only=",
+        "--packages-all=",
+        "--bypass-2fa=",
+        "--name=",
+        "--token-description=",
+        "--expires=",
+        "--packages=",
+        "--scopes=",
+        "--orgs=",
+        "--packages-and-scopes-permission=",
+        "--orgs-permission=",
+        "--cidr=",
+        "--password=",
         "--sbom-format=",
         "--sbom-type=",
         "--package-lock-only=",
@@ -10115,10 +10268,7 @@ fn parse_npm_token_args(args: &[String]) -> Result<NpmCompatAction, OmcRegistryE
             command = Some(arg.as_str());
         } else {
             command_args.push(arg.clone());
-            if matches!(
-                arg.as_str(),
-                "--registry" | "--userconfig" | "--loglevel" | "--otp"
-            ) {
+            if npm_token_presubcommand_value_flag(arg) {
                 index += 1;
                 let value = args.get(index).ok_or_else(|| {
                     OmcRegistryError::UnsupportedSpec(format!("{arg} needs a value"))
@@ -10152,13 +10302,261 @@ fn parse_npm_token_args(args: &[String]) -> Result<NpmCompatAction, OmcRegistryE
             })
         }
         "revoke" | "rm" | "delete" | "del" => parse_npm_token_revoke_args(command, &command_args),
-        "create" => Err(OmcRegistryError::UnsupportedSpec(
-            "npm token create is not supported by OMC compatibility yet".to_owned(),
-        )),
+        "create" => parse_npm_token_create_args(&command_args),
         other => Err(OmcRegistryError::UnsupportedSpec(format!(
             "unsupported npm token command `{other}`"
         ))),
     }
+}
+
+fn npm_token_presubcommand_value_flag(arg: &str) -> bool {
+    matches!(
+        arg,
+        "--registry"
+            | "--userconfig"
+            | "--loglevel"
+            | "--cache"
+            | "--otp"
+            | "--name"
+            | "--token-description"
+            | "--expires"
+            | "--packages"
+            | "--scopes"
+            | "--orgs"
+            | "--packages-and-scopes-permission"
+            | "--orgs-permission"
+            | "--cidr"
+            | "--password"
+    )
+}
+
+fn parse_npm_token_create_args(args: &[String]) -> Result<NpmCompatAction, OmcRegistryError> {
+    let mut options = NpmTokenCreateOptions::default();
+    let mut json = false;
+    let mut parseable = false;
+    let mut npm_registry = None;
+    let mut userconfig = None;
+    let mut otp = None;
+    let mut positionals = Vec::new();
+    let mut index = 0;
+    while index < args.len() {
+        let arg = &args[index];
+        if arg == "--json" || arg == "--json=true" {
+            json = true;
+        } else if arg == "--json=false" {
+            json = false;
+        } else if matches!(arg.as_str(), "--parseable" | "-p" | "--parseable=true") {
+            parseable = true;
+        } else if matches!(arg.as_str(), "--parseable=false" | "--no-parseable") {
+            parseable = false;
+        } else if matches!(arg.as_str(), "--read-only" | "--read-only=true") {
+            options.read_only = true;
+        } else if matches!(arg.as_str(), "--no-read-only" | "--read-only=false") {
+            options.read_only = false;
+        } else if matches!(arg.as_str(), "--packages-all" | "--packages-all=true") {
+            options.packages_all = true;
+        } else if matches!(arg.as_str(), "--no-packages-all" | "--packages-all=false") {
+            options.packages_all = false;
+        } else if matches!(arg.as_str(), "--bypass-2fa" | "--bypass-2fa=true") {
+            options.bypass_2fa = true;
+        } else if matches!(arg.as_str(), "--no-bypass-2fa" | "--bypass-2fa=false") {
+            options.bypass_2fa = false;
+        } else if arg == "--name" {
+            index += 1;
+            options.name = Some(npm_token_flag_value(args, index, arg)?);
+        } else if let Some(value) = arg.strip_prefix("--name=") {
+            options.name = Some(value.to_owned());
+        } else if arg == "--token-description" {
+            index += 1;
+            options.description = Some(npm_token_flag_value(args, index, arg)?);
+        } else if let Some(value) = arg.strip_prefix("--token-description=") {
+            options.description = Some(value.to_owned());
+        } else if arg == "--expires" {
+            index += 1;
+            options.expires = Some(parse_npm_token_expires(&npm_token_flag_value(
+                args, index, arg,
+            )?)?);
+        } else if let Some(value) = arg.strip_prefix("--expires=") {
+            options.expires = Some(parse_npm_token_expires(value)?);
+        } else if arg == "--packages" {
+            index += 1;
+            options
+                .packages
+                .extend(npm_token_list_values(&npm_token_flag_value(
+                    args, index, arg,
+                )?));
+        } else if let Some(value) = arg.strip_prefix("--packages=") {
+            options.packages.extend(npm_token_list_values(value));
+        } else if arg == "--scopes" {
+            index += 1;
+            options
+                .scopes
+                .extend(npm_token_list_values(&npm_token_flag_value(
+                    args, index, arg,
+                )?));
+        } else if let Some(value) = arg.strip_prefix("--scopes=") {
+            options.scopes.extend(npm_token_list_values(value));
+        } else if arg == "--orgs" {
+            index += 1;
+            options
+                .orgs
+                .extend(npm_token_list_values(&npm_token_flag_value(
+                    args, index, arg,
+                )?));
+        } else if let Some(value) = arg.strip_prefix("--orgs=") {
+            options.orgs.extend(npm_token_list_values(value));
+        } else if arg == "--packages-and-scopes-permission" {
+            index += 1;
+            options.packages_and_scopes_permission = Some(parse_npm_token_permission(
+                "--packages-and-scopes-permission",
+                &npm_token_flag_value(args, index, arg)?,
+            )?);
+        } else if let Some(value) = arg.strip_prefix("--packages-and-scopes-permission=") {
+            options.packages_and_scopes_permission = Some(parse_npm_token_permission(
+                "--packages-and-scopes-permission",
+                value,
+            )?);
+        } else if arg == "--orgs-permission" {
+            index += 1;
+            options.orgs_permission = Some(parse_npm_token_permission(
+                "--orgs-permission",
+                &npm_token_flag_value(args, index, arg)?,
+            )?);
+        } else if let Some(value) = arg.strip_prefix("--orgs-permission=") {
+            options.orgs_permission = Some(parse_npm_token_permission("--orgs-permission", value)?);
+        } else if arg == "--cidr" {
+            index += 1;
+            options
+                .cidr
+                .extend(parse_npm_token_cidr_list(&npm_token_flag_value(
+                    args, index, arg,
+                )?)?);
+        } else if let Some(value) = arg.strip_prefix("--cidr=") {
+            options.cidr.extend(parse_npm_token_cidr_list(value)?);
+        } else if arg == "--password" {
+            index += 1;
+            options.password = Some(npm_token_flag_value(args, index, arg)?);
+        } else if let Some(value) = arg.strip_prefix("--password=") {
+            options.password = Some(value.to_owned());
+        } else if arg == "--registry" {
+            index += 1;
+            npm_registry = Some(npm_token_flag_value(args, index, arg)?);
+        } else if let Some(value) = arg.strip_prefix("--registry=") {
+            npm_registry = Some(value.to_owned());
+        } else if arg == "--userconfig" {
+            index += 1;
+            userconfig = Some(PathBuf::from(npm_token_flag_value(args, index, arg)?));
+        } else if let Some(value) = arg.strip_prefix("--userconfig=") {
+            userconfig = Some(PathBuf::from(value));
+        } else if arg == "--otp" {
+            index += 1;
+            otp = Some(npm_token_flag_value(args, index, arg)?);
+        } else if let Some(value) = arg.strip_prefix("--otp=") {
+            otp = Some(value.to_owned());
+        } else if arg == "--loglevel" || arg == "--cache" {
+            index += 1;
+            let _ = npm_token_flag_value(args, index, arg)?;
+        } else if matches!(
+            arg.as_str(),
+            "--silent" | "-s" | "--no-color" | "--color=false"
+        ) || npm_token_create_ignored_equals_flag(arg)
+        {
+        } else if arg.starts_with('-') {
+            return Err(unsupported_compat_arg("npm token create", arg));
+        } else {
+            positionals.push(arg.clone());
+        }
+        index += 1;
+    }
+
+    if !positionals.is_empty() {
+        return Err(unsupported_compat_arg("npm token create", &positionals[0]));
+    }
+
+    Ok(NpmCompatAction::Token {
+        action: NpmTokenAction::Create {
+            options: Box::new(options),
+            json,
+            parseable,
+            npm_registry,
+            userconfig,
+            otp,
+        },
+    })
+}
+
+fn npm_token_flag_value(
+    args: &[String],
+    index: usize,
+    flag: &str,
+) -> Result<String, OmcRegistryError> {
+    args.get(index)
+        .cloned()
+        .ok_or_else(|| OmcRegistryError::UnsupportedSpec(format!("{flag} needs a value")))
+}
+
+fn parse_npm_token_expires(value: &str) -> Result<u64, OmcRegistryError> {
+    value.parse::<u64>().map_err(|_| {
+        OmcRegistryError::UnsupportedSpec(format!(
+            "npm token create --expires needs a number of days, got `{value}`"
+        ))
+    })
+}
+
+fn parse_npm_token_permission(flag: &str, value: &str) -> Result<String, OmcRegistryError> {
+    match value {
+        "read-only" | "read-write" | "no-access" => Ok(value.to_owned()),
+        _ => Err(OmcRegistryError::UnsupportedSpec(format!(
+            "{flag} must be read-only, read-write, or no-access, got `{value}`"
+        ))),
+    }
+}
+
+fn npm_token_list_values(value: &str) -> Vec<String> {
+    value
+        .split(',')
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+        .collect()
+}
+
+fn parse_npm_token_cidr_list(value: &str) -> Result<Vec<String>, OmcRegistryError> {
+    let cidrs = npm_token_list_values(value);
+    for cidr in &cidrs {
+        validate_npm_token_cidr(cidr)?;
+    }
+    Ok(cidrs)
+}
+
+fn validate_npm_token_cidr(value: &str) -> Result<(), OmcRegistryError> {
+    let Some((ip, prefix)) = value.split_once('/') else {
+        return Err(OmcRegistryError::UnsupportedSpec(format!(
+            "CIDR whitelist contains invalid CIDR entry: {value}"
+        )));
+    };
+    if ip.parse::<Ipv4Addr>().is_err() {
+        return Err(OmcRegistryError::UnsupportedSpec(format!(
+            "CIDR whitelist contains invalid CIDR entry: {value}"
+        )));
+    }
+    let prefix = prefix.parse::<u8>().map_err(|_| {
+        OmcRegistryError::UnsupportedSpec(format!(
+            "CIDR whitelist contains invalid CIDR entry: {value}"
+        ))
+    })?;
+    if prefix > 32 {
+        return Err(OmcRegistryError::UnsupportedSpec(format!(
+            "CIDR whitelist contains invalid CIDR entry: {value}"
+        )));
+    }
+    Ok(())
+}
+
+fn npm_token_create_ignored_equals_flag(arg: &str) -> bool {
+    ["--loglevel=", "--cache=", "--color="]
+        .iter()
+        .any(|prefix| arg.starts_with(prefix))
 }
 
 fn parse_npm_token_revoke_args(
@@ -14330,7 +14728,86 @@ mod tests {
                 },
             }
         );
-        assert!(parse_npm_compat_action(&args(&["token", "create"])).is_err());
+        assert_eq!(
+            parse_npm_compat_action(&args(&[
+                "--json",
+                "--registry",
+                "https://registry.example.invalid/npm",
+                "--userconfig=ci.npmrc",
+                "--otp",
+                "123456",
+                "token",
+                "create",
+                "--password",
+                "correct-horse",
+                "--name=ci-publish",
+                "--token-description",
+                "publish from CI",
+                "--expires=30",
+                "--packages=@demo/pkg",
+                "--packages-all=false",
+                "--scopes",
+                "@demo",
+                "--orgs=demo-org",
+                "--packages-and-scopes-permission=read-write",
+                "--orgs-permission",
+                "read-only",
+                "--cidr=192.0.2.0/24,198.51.100.0/24",
+                "--bypass-2fa",
+            ]))
+            .unwrap(),
+            NpmCompatAction::Token {
+                action: NpmTokenAction::Create {
+                    options: Box::new(NpmTokenCreateOptions {
+                        password: Some("correct-horse".to_owned()),
+                        name: Some("ci-publish".to_owned()),
+                        description: Some("publish from CI".to_owned()),
+                        expires: Some(30),
+                        packages: vec!["@demo/pkg".to_owned()],
+                        packages_all: false,
+                        scopes: vec!["@demo".to_owned()],
+                        orgs: vec!["demo-org".to_owned()],
+                        packages_and_scopes_permission: Some("read-write".to_owned()),
+                        orgs_permission: Some("read-only".to_owned()),
+                        cidr: vec!["192.0.2.0/24".to_owned(), "198.51.100.0/24".to_owned()],
+                        bypass_2fa: true,
+                        read_only: false,
+                    }),
+                    json: true,
+                    parseable: false,
+                    npm_registry: Some("https://registry.example.invalid/npm".to_owned()),
+                    userconfig: Some(PathBuf::from("ci.npmrc")),
+                    otp: Some("123456".to_owned()),
+                },
+            }
+        );
+        assert_eq!(
+            parse_npm_compat_action(&args(&[
+                "--password=correct-horse",
+                "--name",
+                "ci-publish",
+                "token",
+                "create",
+            ]))
+            .unwrap(),
+            NpmCompatAction::Token {
+                action: NpmTokenAction::Create {
+                    options: Box::new(NpmTokenCreateOptions {
+                        password: Some("correct-horse".to_owned()),
+                        name: Some("ci-publish".to_owned()),
+                        ..NpmTokenCreateOptions::default()
+                    }),
+                    json: false,
+                    parseable: false,
+                    npm_registry: None,
+                    userconfig: None,
+                    otp: None,
+                },
+            }
+        );
+        assert!(
+            parse_npm_compat_action(&args(&["token", "create", "--cidr=2001:db8::/32"])).is_err()
+        );
         assert_eq!(
             parse_npm_compat_action(&args(&[
                 "--registry",

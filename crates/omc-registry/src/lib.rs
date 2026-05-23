@@ -7420,6 +7420,31 @@ pub struct NpmTokenListResult {
     pub response: serde_json::Value,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct NpmTokenCreateOptions {
+    pub password: Option<String>,
+    pub name: Option<String>,
+    pub description: Option<String>,
+    pub expires: Option<u64>,
+    pub packages: Vec<String>,
+    pub packages_all: bool,
+    pub scopes: Vec<String>,
+    pub orgs: Vec<String>,
+    pub packages_and_scopes_permission: Option<String>,
+    pub orgs_permission: Option<String>,
+    pub cidr: Vec<String>,
+    pub bypass_2fa: bool,
+    pub read_only: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct NpmTokenCreateResult {
+    pub registry: String,
+    pub status: u16,
+    pub token: NpmAccessToken,
+    pub response: serde_json::Value,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct NpmTokenRevokeResult {
     pub registry: String,
@@ -7500,14 +7525,24 @@ pub struct NpmAccessToken {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub key: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub name: Option<String>,
+    pub id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(
+        default,
+        alias = "token_description",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub description: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub token: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub readonly: Option<bool>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(
+        default,
+        alias = "cidr_whitelist",
+        skip_serializing_if = "Vec::is_empty"
+    )]
     pub cidr: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub created: Option<String>,
@@ -7515,7 +7550,7 @@ pub struct NpmAccessToken {
     pub updated: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub accessed: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, alias = "expires", skip_serializing_if = "Option::is_none")]
     pub expiry: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bypass_2fa: Option<bool>,
@@ -7815,6 +7850,15 @@ fn npm_put(client: &Client, url: &str, config: &NpmConfig) -> reqwest::blocking:
     }
 }
 
+fn npm_post(client: &Client, url: &str, config: &NpmConfig) -> reqwest::blocking::RequestBuilder {
+    let request = client.post(url);
+    if let Some(token) = config.auth_token_for_url(url) {
+        request.bearer_auth(token)
+    } else {
+        request
+    }
+}
+
 fn resolve_package(
     client: &Client,
     spec: &PackageSpec,
@@ -8063,6 +8107,121 @@ pub fn read_npm_token_list(
         urls,
         response,
     })
+}
+
+pub fn create_npm_token(
+    project_dir: &Path,
+    options: NpmTokenCreateOptions,
+    registry_override: Option<&str>,
+    userconfig_override: Option<&Path>,
+    otp: Option<&str>,
+) -> Result<NpmTokenCreateResult> {
+    let password = npm_token_create_password(options.password.as_deref())?;
+    let client = Client::new();
+    let npm_config =
+        read_npm_config_with_overrides(project_dir, registry_override, userconfig_override)?;
+    let registry = ensure_trailing_slash(&npm_config.registry);
+    let url = format!("{registry}-/npm/v1/tokens");
+    if npm_config.auth_token_for_url(&url).is_none() {
+        return Err(OmcRegistryError::UnsupportedSpec(
+            "npm token create needs authentication; run npm login or configure a registry _authToken"
+                .to_owned(),
+        ));
+    }
+
+    let mut request =
+        npm_post(&client, &url, &npm_config).json(&npm_token_create_payload(&options, &password));
+    if let Some(otp) = otp.map(str::trim).filter(|otp| !otp.is_empty()) {
+        request = request.header("npm-otp", otp);
+    }
+    let response = request.send()?;
+    response.error_for_status_ref()?;
+    let status = response.status().as_u16();
+    let response = response.json::<serde_json::Value>()?;
+    let token = npm_token_from_create_response(&response)?;
+    Ok(NpmTokenCreateResult {
+        registry,
+        status,
+        token,
+        response,
+    })
+}
+
+fn npm_token_create_password(explicit: Option<&str>) -> Result<String> {
+    explicit
+        .map(str::trim)
+        .filter(|password| !password.is_empty())
+        .map(ToOwned::to_owned)
+        .or_else(|| {
+            env::var("npm_config_password")
+                .ok()
+                .or_else(|| env::var("NPM_CONFIG_PASSWORD").ok())
+                .map(|password| password.trim().to_owned())
+                .filter(|password| !password.is_empty())
+        })
+        .ok_or_else(|| {
+            OmcRegistryError::UnsupportedSpec(
+                "npm token create needs a password; pass --password or set NPM_CONFIG_PASSWORD"
+                    .to_owned(),
+            )
+        })
+}
+
+fn npm_token_create_payload(options: &NpmTokenCreateOptions, password: &str) -> serde_json::Value {
+    let mut payload = serde_json::Map::new();
+    payload.insert("password".to_owned(), serde_json::json!(password));
+    payload.insert("name".to_owned(), serde_json::json!(options.name));
+    if let Some(description) = &options.description {
+        payload.insert("description".to_owned(), serde_json::json!(description));
+    }
+    if !options.packages.is_empty() {
+        payload.insert("packages".to_owned(), serde_json::json!(options.packages));
+    }
+    if options.packages_all {
+        payload.insert("packages_all".to_owned(), serde_json::json!(true));
+    }
+    if !options.scopes.is_empty() {
+        payload.insert("scopes".to_owned(), serde_json::json!(options.scopes));
+    }
+    if !options.orgs.is_empty() {
+        payload.insert("orgs".to_owned(), serde_json::json!(options.orgs));
+    }
+    let packages_and_scopes_permission = options
+        .packages_and_scopes_permission
+        .as_deref()
+        .or_else(|| options.read_only.then_some("read-only"));
+    if let Some(permission) = packages_and_scopes_permission {
+        payload.insert(
+            "packages_and_scopes_permission".to_owned(),
+            serde_json::json!(permission),
+        );
+    }
+    if let Some(permission) = &options.orgs_permission {
+        payload.insert("orgs_permission".to_owned(), serde_json::json!(permission));
+    }
+    if let Some(expires) = options.expires {
+        payload.insert("expires".to_owned(), serde_json::json!(expires));
+    }
+    if !options.cidr.is_empty() {
+        payload.insert("cidr_whitelist".to_owned(), serde_json::json!(options.cidr));
+    }
+    if options.bypass_2fa {
+        payload.insert("bypass_2fa".to_owned(), serde_json::json!(true));
+    }
+    serde_json::Value::Object(payload)
+}
+
+fn npm_token_from_create_response(response: &serde_json::Value) -> Result<NpmAccessToken> {
+    let token_value = response.get("token").and_then(|value| {
+        if value.is_object() {
+            Some(value.clone())
+        } else {
+            None
+        }
+    });
+    Ok(serde_json::from_value::<NpmAccessToken>(
+        token_value.unwrap_or_else(|| response.clone()),
+    )?)
 }
 
 pub fn revoke_npm_token(
@@ -17510,6 +17669,96 @@ wheels = [
         assert_eq!(
             list.urls.get("next").map(String::as_str),
             Some("https://registry.example.invalid/-/npm/v1/tokens?page=1")
+        );
+        handle.join().unwrap();
+    }
+
+    #[test]
+    fn creates_npm_token_with_userconfig_auth_and_otp() {
+        use std::io::Write as _;
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let handle = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let buffer = read_http_request_bytes(&mut stream);
+            let body_start = http_body_start(&buffer).unwrap();
+            let headers = String::from_utf8_lossy(&buffer[..body_start]);
+            assert!(headers.starts_with("POST /-/npm/v1/tokens "));
+            let lower = headers.to_ascii_lowercase();
+            assert!(lower.contains("authorization: bearer registry-token"));
+            assert!(lower.contains("npm-otp: 123456"));
+
+            let body: serde_json::Value = serde_json::from_slice(&buffer[body_start..]).unwrap();
+            assert_eq!(body["password"], "correct-horse");
+            assert_eq!(body["name"], "ci-publish");
+            assert_eq!(body["description"], "publish from CI");
+            assert_eq!(body["expires"], 30);
+            assert_eq!(body["packages"], serde_json::json!(["@demo/pkg"]));
+            assert_eq!(body["packages_all"], true);
+            assert_eq!(body["scopes"], serde_json::json!(["@demo"]));
+            assert_eq!(body["orgs"], serde_json::json!(["demo-org"]));
+            assert_eq!(body["packages_and_scopes_permission"], "read-write");
+            assert_eq!(body["orgs_permission"], "read-only");
+            assert_eq!(body["cidr_whitelist"], serde_json::json!(["192.0.2.0/24"]));
+            assert_eq!(body["bypass_2fa"], true);
+
+            let response_body = r#"{
+              "key": "a1b2c3",
+              "token": "npm_full_created_token",
+              "readonly": false,
+              "cidr_whitelist": ["192.0.2.0/24"],
+              "created": "2026-05-23T00:00:00Z",
+              "expires": "2026-06-22T00:00:00Z",
+              "updated": "2026-05-23T00:00:00Z"
+            }"#;
+            let response = format!(
+                "HTTP/1.1 201 Created\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                response_body.len(),
+                response_body
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+        });
+
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(
+            dir.path().join("ci.npmrc"),
+            format!("registry=http://{addr}/\n//{addr}/:_authToken=registry-token\n"),
+        )
+        .unwrap();
+
+        let created = create_npm_token(
+            dir.path(),
+            NpmTokenCreateOptions {
+                password: Some("correct-horse".to_owned()),
+                name: Some("ci-publish".to_owned()),
+                description: Some("publish from CI".to_owned()),
+                expires: Some(30),
+                packages: vec!["@demo/pkg".to_owned()],
+                packages_all: true,
+                scopes: vec!["@demo".to_owned()],
+                orgs: vec!["demo-org".to_owned()],
+                packages_and_scopes_permission: Some("read-write".to_owned()),
+                orgs_permission: Some("read-only".to_owned()),
+                cidr: vec!["192.0.2.0/24".to_owned()],
+                bypass_2fa: true,
+                read_only: false,
+            },
+            None,
+            Some(Path::new("ci.npmrc")),
+            Some("123456"),
+        )
+        .unwrap();
+        assert_eq!(created.registry, format!("http://{addr}/"));
+        assert_eq!(created.status, 201);
+        assert_eq!(
+            created.token.token.as_deref(),
+            Some("npm_full_created_token")
+        );
+        assert_eq!(created.token.cidr, vec!["192.0.2.0/24"]);
+        assert_eq!(
+            created.token.expiry.as_deref(),
+            Some("2026-06-22T00:00:00Z")
         );
         handle.join().unwrap();
     }
