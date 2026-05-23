@@ -111,7 +111,7 @@ For existing projects, `install` reads normal project files:
 ```text
 package.json       dependencies, devDependencies, optionalDependencies, peers
 package-lock.json  exact version constraints for uniquely locked npm packages
-requirements.txt  PyPI requirements, extras, -r includes, -c constraints, markers
+requirements.txt  PyPI requirements, hashes, extras, -r includes, -c constraints, markers
 pyproject.toml    PEP 621 project dependencies, selected optional groups
 ```
 
@@ -182,8 +182,9 @@ Supported now:
 - npm `optionalDependencies` and required `peerDependencies` ingestion
 - npm registry `optionalDependencies` and required `peerDependencies` resolution
 - `package-lock.json` exact-version constraints for uniquely locked npm packages
-- `requirements.txt` ingestion with extras, recursive `-r` includes, `-c`
-  constraints, and common Python environment markers
+- `requirements.txt` ingestion with hashes, line continuations, extras,
+  recursive `-r` includes, `-c` constraints, and common Python environment
+  markers
 - `pyproject.toml` PEP 621 dependency ingestion with `omc install --extra`
   for selected optional dependency groups
 - PyPI extras resolution for dependencies gated by `extra == "..."`
@@ -207,8 +208,8 @@ Not implemented yet:
 - imports/linking across package cells
 - native/Wasm/Cranelift backend
 - full npm bundled dependency and peer placement semantics
-- advanced requirements-file semantics such as hashes, editable installs, direct
-  URLs, and index configuration
+- advanced requirements-file semantics such as editable installs, direct URLs,
+  and index configuration
 - Python sdist build isolation and native wheel policy
 - execution of package code inside OMC cells for real applications
 

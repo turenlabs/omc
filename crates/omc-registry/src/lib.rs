@@ -373,6 +373,7 @@ pub struct LinkOptions {
     pub record_blocked: bool,
     pub allowed_capabilities: Vec<Capability>,
     pub constraints: BTreeMap<String, String>,
+    pub hashes: BTreeMap<String, BTreeSet<String>>,
     pub project_extras: BTreeSet<String>,
 }
 
@@ -383,6 +384,7 @@ impl LinkOptions {
             record_blocked: false,
             allowed_capabilities: Vec::new(),
             constraints: BTreeMap::new(),
+            hashes: BTreeMap::new(),
             project_extras: BTreeSet::new(),
         }
     }
@@ -412,6 +414,7 @@ pub struct InstallReport {
 pub struct ProjectRequirements {
     pub specs: Vec<PackageSpec>,
     pub constraints: BTreeMap<String, String>,
+    pub hashes: BTreeMap<String, BTreeSet<String>>,
 }
 
 #[derive(Debug, Clone)]
@@ -487,6 +490,7 @@ pub fn install_project(options: &LinkOptions) -> Result<InstallReport> {
         discover_project_requirements_with_extras(&options.project_dir, &options.project_extras)?;
     specs.extend(discovered.specs);
     options.constraints.extend(discovered.constraints);
+    options.hashes.extend(discovered.hashes);
 
     let mut seen_roots = BTreeSet::new();
     for spec in specs {
@@ -533,6 +537,7 @@ pub fn discover_project_requirements_with_extras(
         let requirements = read_requirements_file(&requirements_txt)?;
         project.specs.extend(requirements.specs);
         project.constraints.extend(requirements.constraints);
+        project.hashes.extend(requirements.hashes);
     }
 
     let pyproject_toml = project_dir.join("pyproject.toml");
@@ -587,6 +592,15 @@ fn link_package_inner(
             return Err(OmcRegistryError::DigestMismatch {
                 name: resolved.name.clone(),
                 expected: expected.clone(),
+                actual: sha256,
+            });
+        }
+    }
+    if let Some(hashes) = options.hashes.get(&spec.constraint_key()) {
+        if !hashes.contains(&sha256) {
+            return Err(OmcRegistryError::DigestMismatch {
+                name: resolved.name.clone(),
+                expected: hashes.iter().cloned().collect::<Vec<_>>().join(","),
                 actual: sha256,
             });
         }
@@ -887,8 +901,8 @@ fn read_requirements_file_inner(
     }
 
     let base_dir = path.parent().unwrap_or_else(|| Path::new("."));
-    for raw_line in fs::read_to_string(path)?.lines() {
-        let line = raw_line.split('#').next().unwrap_or_default().trim();
+    for raw_line in requirement_logical_lines(&fs::read_to_string(path)?) {
+        let line = raw_line.trim();
         if line.is_empty() {
             continue;
         }
@@ -907,9 +921,19 @@ fn read_requirements_file_inner(
             continue;
         }
 
-        if let Some(spec) = parse_pypi_requirement(line) {
+        let parsed = parse_requirement_line(line);
+        if let Some(spec) = parse_pypi_requirement(&parsed.requirement) {
             match mode {
-                RequirementsMode::Install => discovered.specs.push(spec),
+                RequirementsMode::Install => {
+                    if !parsed.hashes.is_empty() {
+                        discovered
+                            .hashes
+                            .entry(spec.constraint_key())
+                            .or_default()
+                            .extend(parsed.hashes);
+                    }
+                    discovered.specs.push(spec);
+                }
                 RequirementsMode::Constraint => {
                     if let Some(version) = spec.version.clone() {
                         discovered
@@ -921,6 +945,145 @@ fn read_requirements_file_inner(
         }
     }
     Ok(())
+}
+
+fn requirement_logical_lines(content: &str) -> Vec<String> {
+    let mut lines = Vec::new();
+    let mut current = String::new();
+
+    for raw_line in content.lines() {
+        let mut line = raw_line
+            .split('#')
+            .next()
+            .unwrap_or_default()
+            .trim_end()
+            .to_owned();
+        let continued = line.ends_with('\\');
+        if continued {
+            line.pop();
+        }
+        let line = line.trim();
+        if !line.is_empty() {
+            if !current.is_empty() {
+                current.push(' ');
+            }
+            current.push_str(line);
+        }
+        if !continued && !current.trim().is_empty() {
+            lines.push(std::mem::take(&mut current));
+        }
+    }
+
+    if !current.trim().is_empty() {
+        lines.push(current);
+    }
+
+    lines
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct ParsedRequirementLine {
+    requirement: String,
+    hashes: BTreeSet<String>,
+}
+
+fn parse_requirement_line(line: &str) -> ParsedRequirementLine {
+    let (requirement, options) = match first_pip_option_start(line) {
+        Some(index) => (line[..index].trim(), line[index..].trim()),
+        None => (line.trim(), ""),
+    };
+    let mut parsed = ParsedRequirementLine {
+        requirement: requirement.to_owned(),
+        hashes: BTreeSet::new(),
+    };
+
+    let tokens = shell_like_tokens(options);
+    let mut index = 0;
+    while index < tokens.len() {
+        let token = &tokens[index];
+        let hash = if let Some(hash) = token.strip_prefix("--hash=") {
+            Some(hash)
+        } else if token == "--hash" {
+            index += 1;
+            tokens.get(index).map(String::as_str)
+        } else {
+            None
+        };
+
+        if let Some(hash) = hash.and_then(normalize_sha256_hash) {
+            parsed.hashes.insert(hash);
+        }
+        index += 1;
+    }
+
+    parsed
+}
+
+fn first_pip_option_start(line: &str) -> Option<usize> {
+    let mut quote = None;
+    let mut index = 0;
+
+    while index < line.len() {
+        let ch = line[index..].chars().next().unwrap_or_default();
+        let ch_len = ch.len_utf8();
+
+        if matches!(ch, '\'' | '"') {
+            if quote == Some(ch) {
+                quote = None;
+            } else if quote.is_none() {
+                quote = Some(ch);
+            }
+        }
+
+        if quote.is_none() && ch.is_whitespace() {
+            let rest = line[index..].trim_start();
+            if rest.starts_with('-') {
+                return Some(index);
+            }
+        }
+
+        index += ch_len;
+    }
+
+    None
+}
+
+fn shell_like_tokens(value: &str) -> Vec<String> {
+    let mut tokens = Vec::new();
+    let mut current = String::new();
+    let mut quote = None;
+
+    for ch in value.chars() {
+        if matches!(ch, '\'' | '"') {
+            if quote == Some(ch) {
+                quote = None;
+            } else if quote.is_none() {
+                quote = Some(ch);
+            } else {
+                current.push(ch);
+            }
+            continue;
+        }
+
+        if quote.is_none() && ch.is_whitespace() {
+            if !current.is_empty() {
+                tokens.push(std::mem::take(&mut current));
+            }
+        } else {
+            current.push(ch);
+        }
+    }
+
+    if !current.is_empty() {
+        tokens.push(current);
+    }
+
+    tokens
+}
+
+fn normalize_sha256_hash(value: &str) -> Option<String> {
+    let hash = value.strip_prefix("sha256:")?.to_ascii_lowercase();
+    (hash.len() == 64 && hash.chars().all(|ch| ch.is_ascii_hexdigit())).then_some(hash)
 }
 
 pub fn install_locked_packages(project_dir: impl AsRef<Path>) -> Result<InstallReport> {
@@ -2940,7 +3103,7 @@ mod tests {
         fs::write(&constraints, "urllib3==2.2.1\n").unwrap();
         fs::write(
             &requirements,
-            "requests[socks]==2.32.3\n# ignored\nidna>=2,<4\n-r nested.txt\n-c constraints.txt\ncolorama; extra == 'windows'\n",
+            "requests[socks]==2.32.3 \\\n  --hash=sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n# ignored\nidna>=2,<4\n-r nested.txt\n-c constraints.txt\ncolorama; extra == 'windows'\n",
         )
         .unwrap();
         let discovered = read_requirements_file(&requirements).unwrap();
@@ -2963,6 +3126,14 @@ mod tests {
                 .get("pypi:urllib3")
                 .map(String::as_str),
             Some("==2.2.1")
+        );
+        assert_eq!(
+            discovered
+                .hashes
+                .get("pypi:requests")
+                .and_then(|hashes| hashes.iter().next())
+                .map(String::as_str),
+            Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
         );
     }
 
@@ -3066,6 +3237,23 @@ mod tests {
             evaluate_pypi_marker("os_name == 'nt' and python_version >= '3.0'", &env),
             Some(false)
         );
+    }
+
+    #[test]
+    fn parses_requirement_continuations_and_hash_options() {
+        let lines = requirement_logical_lines(
+            "idna==3.7 \\\n  --hash=sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \\\n  --hash sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\n",
+        );
+        assert_eq!(lines.len(), 1);
+
+        let parsed = parse_requirement_line(&lines[0]);
+        assert_eq!(parsed.requirement, "idna==3.7");
+        assert!(parsed
+            .hashes
+            .contains("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"));
+        assert!(parsed
+            .hashes
+            .contains("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"));
     }
 
     #[test]
