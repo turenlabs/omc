@@ -539,6 +539,7 @@ pub struct LinkOptions {
     pub pypi_extra_index_urls: Vec<String>,
     pub pypi_find_links: Vec<String>,
     pub pypi_no_index: bool,
+    pub pypi_require_hashes: bool,
     pub npm_local_paths: Vec<PathBuf>,
     pub python_local_paths: Vec<PathBuf>,
     pub python_vcs_requirements: Vec<PythonVcsRequirement>,
@@ -565,6 +566,7 @@ impl LinkOptions {
             pypi_extra_index_urls: Vec::new(),
             pypi_find_links: Vec::new(),
             pypi_no_index: false,
+            pypi_require_hashes: false,
             npm_local_paths: Vec::new(),
             python_local_paths: Vec::new(),
             python_vcs_requirements: Vec::new(),
@@ -674,6 +676,7 @@ fn apply_project_requirements_to_options(
         .extend(requirements.pypi_extra_index_urls);
     options.pypi_find_links.extend(requirements.pypi_find_links);
     options.pypi_no_index |= requirements.pypi_no_index;
+    options.pypi_require_hashes |= requirements.pypi_require_hashes;
     options
         .python_local_paths
         .extend(requirements.python_local_paths);
@@ -973,6 +976,10 @@ fn project_requested_specs(options: &mut LinkOptions, locked: bool) -> Result<Ve
         )?;
         options.python_vcs_locks.extend(resolved.locks);
         apply_project_requirements_to_options(options, &mut specs, resolved.requirements);
+    }
+
+    if options.pypi_require_hashes {
+        enforce_pypi_hashes_for_specs(&specs, &options.hashes, &options.constraints)?;
     }
 
     let mut seen = BTreeSet::new();
@@ -5496,8 +5503,23 @@ fn normalize_sha256_hash(value: &str) -> Option<String> {
 }
 
 fn enforce_requirements_hashes(requirements: &ProjectRequirements) -> Result<()> {
-    for spec in &requirements.specs {
-        if !requirements.hashes.contains_key(&spec.constraint_key()) {
+    enforce_pypi_hashes_for_specs(
+        &requirements.specs,
+        &requirements.hashes,
+        &requirements.constraints,
+    )
+}
+
+fn enforce_pypi_hashes_for_specs(
+    specs: &[PackageSpec],
+    hashes: &BTreeMap<String, BTreeSet<String>>,
+    constraints: &BTreeMap<String, String>,
+) -> Result<()> {
+    for spec in specs
+        .iter()
+        .filter(|spec| spec.ecosystem == Ecosystem::Pypi)
+    {
+        if !hashes.contains_key(&spec.constraint_key()) {
             return Err(OmcRegistryError::UnsupportedRequirement(format!(
                 "--require-hashes needs a hash for `{}`",
                 spec.requested()
@@ -5505,8 +5527,7 @@ fn enforce_requirements_hashes(requirements: &ProjectRequirements) -> Result<()>
         }
 
         if spec.direct_url.is_none() {
-            let requirement =
-                constrained_pypi_requirement(spec, &requirements.constraints).unwrap_or_default();
+            let requirement = constrained_pypi_requirement(spec, constraints).unwrap_or_default();
             if !is_exact_pypi_requirement(&requirement) {
                 return Err(OmcRegistryError::UnsupportedRequirement(format!(
                     "--require-hashes needs an exact pin for `{}`",
@@ -14071,6 +14092,29 @@ wheels = [
         .unwrap();
         let error = read_requirements_file(&requirements).unwrap_err();
         assert!(error.to_string().contains("needs an exact pin"));
+    }
+
+    #[test]
+    fn command_line_require_hashes_enforces_requirement_hashes() {
+        let dir = tempfile::tempdir().unwrap();
+        let requirements = dir.path().join("requirements.txt");
+        fs::write(&requirements, "idna==3.7\n").unwrap();
+        let mut options = LinkOptions::new(dir.path());
+        options.requirement_files = vec![requirements.clone()];
+        options.pypi_require_hashes = true;
+        let error = project_requested_specs(&mut options, false).unwrap_err();
+        assert!(error.to_string().contains("needs a hash"));
+
+        fs::write(
+            &requirements,
+            "idna==3.7 --hash=sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n",
+        )
+        .unwrap();
+        let mut options = LinkOptions::new(dir.path());
+        options.requirement_files = vec![requirements];
+        options.pypi_require_hashes = true;
+        let specs = project_requested_specs(&mut options, false).unwrap();
+        assert!(has_spec(&specs, "idna", "==3.7"));
     }
 
     #[test]

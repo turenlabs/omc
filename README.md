@@ -383,8 +383,9 @@ Supported now:
   install/ci compatibility
 - `omc pip` compatibility commands for common `install`, `uninstall`, `freeze`,
   `show`, and `list --format=columns|freeze|json` flows, including `-r`, index
-  URL, constraints, extra-index, find-links, and no-index install flags without
-  delegating to pip; direct `pip install -e PATH` and `pip install ./path`
+  URL, constraints, extra-index, find-links, no-index, require-hashes,
+  trusted-host, and binary-policy install flags without delegating to pip;
+  direct `pip install -e PATH` and `pip install ./path`
   local directory installs; direct `pip install ./archive.whl`,
   `./archive.tar.gz`, and HTTPS archive URL installs; and a direct `pip`
   compatibility binary

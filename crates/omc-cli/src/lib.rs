@@ -273,6 +273,7 @@ enum PipCompatAction {
         extra_index_urls: Vec<String>,
         find_links: Vec<String>,
         no_index: bool,
+        require_hashes: bool,
         allow: Vec<String>,
         allow_all_host: bool,
     },
@@ -798,6 +799,7 @@ fn run_pip_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
             extra_index_urls,
             find_links,
             no_index,
+            require_hashes,
             allow,
             allow_all_host,
         } => {
@@ -815,6 +817,7 @@ fn run_pip_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
                     find_links,
                     no_index,
                 );
+                options.pypi_require_hashes = require_hashes;
                 let install = install_project(&options)?;
                 print_install_report(&install);
             } else {
@@ -830,6 +833,7 @@ fn run_pip_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
                     find_links,
                     no_index,
                 );
+                options.pypi_require_hashes = require_hashes;
                 let mut specs = parse_package_specs(&specs, Some(Ecosystem::Pypi))?;
                 specs.extend(parse_pip_archive_references(
                     project_dir,
@@ -1591,6 +1595,7 @@ fn parse_pip_install_args(args: &[String]) -> Result<PipCompatAction, OmcRegistr
     let mut extra_index_urls = Vec::new();
     let mut find_links = Vec::new();
     let mut no_index = false;
+    let mut require_hashes = false;
     let mut archive_references = Vec::new();
     let mut local_paths = Vec::new();
     let mut filtered = Vec::new();
@@ -1649,6 +1654,17 @@ fn parse_pip_install_args(args: &[String]) -> Result<PipCompatAction, OmcRegistr
             find_links.push(value.to_owned());
         } else if arg == "--no-index" {
             no_index = true;
+        } else if arg == "--require-hashes" {
+            require_hashes = true;
+        } else if arg == "--prefer-binary" {
+        } else if arg == "--only-binary" || arg == "--trusted-host" {
+            index += 1;
+            if args.get(index).is_none() {
+                return Err(OmcRegistryError::UnsupportedSpec(format!(
+                    "{arg} needs a value"
+                )));
+            }
+        } else if arg.starts_with("--only-binary=") || arg.starts_with("--trusted-host=") {
         } else if arg == "-e" || arg == "--editable" {
             index += 1;
             let Some(path) = args.get(index) else {
@@ -1696,6 +1712,7 @@ fn parse_pip_install_args(args: &[String]) -> Result<PipCompatAction, OmcRegistr
         extra_index_urls,
         find_links,
         no_index,
+        require_hashes,
         allow,
         allow_all_host,
     })
@@ -2304,6 +2321,11 @@ mod tests {
             "--find-links",
             "wheelhouse",
             "--no-index",
+            "--require-hashes",
+            "--only-binary=:all:",
+            "--trusted-host",
+            "mirror.example",
+            "--prefer-binary",
             "--allow-all-host",
             "requests==2.32.3",
         ]))
@@ -2321,6 +2343,7 @@ mod tests {
                 extra_index_urls: vec!["https://extra.example/simple".to_owned()],
                 find_links: vec!["wheelhouse".to_owned()],
                 no_index: true,
+                require_hashes: true,
                 allow: Vec::new(),
                 allow_all_host: true,
             }
@@ -2353,6 +2376,7 @@ mod tests {
                 extra_index_urls: Vec::new(),
                 find_links: Vec::new(),
                 no_index: false,
+                require_hashes: false,
                 allow: Vec::new(),
                 allow_all_host: false,
             }
@@ -2381,6 +2405,7 @@ mod tests {
                 extra_index_urls: Vec::new(),
                 find_links: Vec::new(),
                 no_index: false,
+                require_hashes: false,
                 allow: Vec::new(),
                 allow_all_host: false,
             }
