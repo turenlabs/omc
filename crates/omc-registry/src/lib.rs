@@ -96,9 +96,33 @@ pub struct PackageSpec {
     pub ecosystem: Ecosystem,
     pub name: String,
     pub version: Option<String>,
+    pub extras: BTreeSet<String>,
 }
 
 impl PackageSpec {
+    fn new(ecosystem: Ecosystem, name: impl Into<String>, version: Option<String>) -> Self {
+        Self {
+            ecosystem,
+            name: name.into(),
+            version,
+            extras: BTreeSet::new(),
+        }
+    }
+
+    fn with_extras(
+        ecosystem: Ecosystem,
+        name: impl Into<String>,
+        version: Option<String>,
+        extras: BTreeSet<String>,
+    ) -> Self {
+        Self {
+            ecosystem,
+            name: name.into(),
+            version,
+            extras,
+        }
+    }
+
     pub fn parse(raw: &str) -> Result<Self> {
         let (ecosystem, rest) = raw
             .split_once(':')
@@ -112,13 +136,29 @@ impl PackageSpec {
     }
 
     pub fn package_key(&self) -> String {
+        format!("{}:{}", self.ecosystem, self.name_with_extras())
+    }
+
+    fn constraint_key(&self) -> String {
         format!("{}:{}", self.ecosystem, self.name)
     }
 
     pub fn requested(&self) -> String {
         match &self.version {
-            Some(version) => format!("{}:{}@{}", self.ecosystem, self.name, version),
+            Some(version) => format!("{}:{}@{}", self.ecosystem, self.name_with_extras(), version),
             None => self.package_key(),
+        }
+    }
+
+    fn name_with_extras(&self) -> String {
+        if self.ecosystem == Ecosystem::Pypi && !self.extras.is_empty() {
+            format!(
+                "{}[{}]",
+                self.name,
+                self.extras.iter().cloned().collect::<Vec<_>>().join(",")
+            )
+        } else {
+            self.name.clone()
         }
     }
 }
@@ -143,11 +183,7 @@ fn parse_npm_spec(raw: &str, rest: &str) -> Result<PackageSpec> {
         return Err(OmcRegistryError::UnsupportedSpec(raw.to_owned()));
     }
 
-    Ok(PackageSpec {
-        ecosystem: Ecosystem::Npm,
-        name: name.to_owned(),
-        version,
-    })
+    Ok(PackageSpec::new(Ecosystem::Npm, name, version))
 }
 
 fn parse_pypi_spec(rest: &str) -> Result<PackageSpec> {
@@ -156,18 +192,22 @@ fn parse_pypi_spec(rest: &str) -> Result<PackageSpec> {
     } else if let Some((name, version)) = rest.rsplit_once('@') {
         (name, Some(version.to_owned()))
     } else {
-        (rest, None)
+        return parse_pypi_requirement(rest)
+            .ok_or_else(|| OmcRegistryError::UnsupportedSpec(rest.to_owned()));
     };
+
+    let (name, extras) = parse_pypi_name_and_extras(name);
 
     if name.is_empty() || version.as_deref() == Some("") {
         return Err(OmcRegistryError::UnsupportedSpec(rest.to_owned()));
     }
 
-    Ok(PackageSpec {
-        ecosystem: Ecosystem::Pypi,
-        name: name.to_owned(),
+    Ok(PackageSpec::with_extras(
+        Ecosystem::Pypi,
+        name,
         version,
-    })
+        extras,
+    ))
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -332,6 +372,7 @@ pub struct LinkOptions {
     pub project_dir: PathBuf,
     pub record_blocked: bool,
     pub allowed_capabilities: Vec<Capability>,
+    pub constraints: BTreeMap<String, String>,
 }
 
 impl LinkOptions {
@@ -340,6 +381,7 @@ impl LinkOptions {
             project_dir: project_dir.into(),
             record_blocked: false,
             allowed_capabilities: Vec::new(),
+            constraints: BTreeMap::new(),
         }
     }
 }
@@ -362,6 +404,12 @@ pub struct InstallReport {
     pub npm_bin_dir: PathBuf,
     pub python_site_packages: PathBuf,
     pub python_bin_dir: PathBuf,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct ProjectRequirements {
+    pub specs: Vec<PackageSpec>,
+    pub constraints: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone)]
@@ -427,39 +475,50 @@ pub fn add_package_graph(spec: &PackageSpec, options: &LinkOptions) -> Result<Ve
 pub fn install_project(options: &LinkOptions) -> Result<InstallReport> {
     init_project(&options.project_dir, None)?;
 
+    let mut options = options.clone();
     let manifest = read_manifest(options.project_dir.join(MANIFEST))?;
     let mut specs = Vec::new();
     for (key, version) in manifest.dependencies {
         specs.push(PackageSpec::parse(&format!("{key}@{version}"))?);
     }
-    specs.extend(discover_project_specs(&options.project_dir)?);
+    let discovered = discover_project_requirements(&options.project_dir)?;
+    specs.extend(discovered.specs);
+    options.constraints.extend(discovered.constraints);
 
     let mut seen_roots = BTreeSet::new();
     for spec in specs {
         if !seen_roots.insert(spec.requested()) {
             continue;
         }
-        add_package_graph(&spec, options)?;
+        add_package_graph(&spec, &options)?;
     }
 
     install_locked_packages(&options.project_dir)
 }
 
 pub fn discover_project_specs(project_dir: impl AsRef<Path>) -> Result<Vec<PackageSpec>> {
+    Ok(discover_project_requirements(project_dir)?.specs)
+}
+
+pub fn discover_project_requirements(project_dir: impl AsRef<Path>) -> Result<ProjectRequirements> {
     let project_dir = project_dir.as_ref();
-    let mut specs = Vec::new();
+    let mut project = ProjectRequirements::default();
 
     let package_json = project_dir.join("package.json");
     if package_json.exists() {
-        specs.extend(read_package_json_specs(&package_json)?);
+        project
+            .specs
+            .extend(read_package_json_specs(&package_json)?);
     }
 
     let requirements_txt = project_dir.join("requirements.txt");
     if requirements_txt.exists() {
-        specs.extend(read_requirements_specs(&requirements_txt)?);
+        let requirements = read_requirements_file(&requirements_txt)?;
+        project.specs.extend(requirements.specs);
+        project.constraints.extend(requirements.constraints);
     }
 
-    Ok(specs)
+    Ok(project)
 }
 
 fn add_package_graph_inner(
@@ -472,7 +531,9 @@ fn add_package_graph_inner(
     let (report, dependencies) = link_package_inner(client, spec, options, false)?;
     let resolved_key = format!(
         "{}:{}@{}",
-        report.locked.ecosystem, report.locked.name, report.locked.version
+        report.locked.ecosystem,
+        spec.name_with_extras(),
+        report.locked.version
     );
 
     if !seen.insert(resolved_key) {
@@ -494,7 +555,7 @@ fn link_package_inner(
     options: &LinkOptions,
     update_manifest: bool,
 ) -> Result<(LinkReport, Vec<PackageSpec>)> {
-    let resolved = resolve_package(client, spec)?;
+    let resolved = resolve_package(client, spec, options)?;
     let archive_bytes = download_artifact(client, &resolved)?;
     let sha256 = sha256_hex(&archive_bytes);
 
@@ -641,31 +702,47 @@ fn read_package_json_specs(path: &Path) -> Result<Vec<PackageSpec>> {
 
     for dependencies in [package.dependencies, package.dev_dependencies] {
         for (name, requirement) in dependencies {
-            specs.push(PackageSpec {
-                ecosystem: Ecosystem::Npm,
-                name,
-                version: Some(requirement),
-            });
+            specs.push(PackageSpec::new(Ecosystem::Npm, name, Some(requirement)));
         }
     }
 
     Ok(specs)
 }
 
-fn read_requirements_specs(path: &Path) -> Result<Vec<PackageSpec>> {
-    read_requirements_specs_inner(path, &mut BTreeSet::new())
+fn read_requirements_file(path: &Path) -> Result<ProjectRequirements> {
+    let mut discovered = ProjectRequirements::default();
+    read_requirements_file_inner(
+        path,
+        RequirementsMode::Install,
+        &mut BTreeSet::new(),
+        &mut discovered,
+    )?;
+    Ok(discovered)
 }
 
-fn read_requirements_specs_inner(
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum RequirementsMode {
+    Install,
+    Constraint,
+}
+
+#[derive(Debug, Clone)]
+struct RequirementsInclude {
+    path: String,
+    mode: RequirementsMode,
+}
+
+fn read_requirements_file_inner(
     path: &Path,
-    seen: &mut BTreeSet<PathBuf>,
-) -> Result<Vec<PackageSpec>> {
+    mode: RequirementsMode,
+    seen: &mut BTreeSet<(RequirementsMode, PathBuf)>,
+    discovered: &mut ProjectRequirements,
+) -> Result<()> {
     let seen_key = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
-    if !seen.insert(seen_key) {
-        return Ok(Vec::new());
+    if !seen.insert((mode, seen_key)) {
+        return Ok(());
     }
 
-    let mut specs = Vec::new();
     let base_dir = path.parent().unwrap_or_else(|| Path::new("."));
     for raw_line in fs::read_to_string(path)?.lines() {
         let line = raw_line.split('#').next().unwrap_or_default().trim();
@@ -674,10 +751,12 @@ fn read_requirements_specs_inner(
         }
 
         if let Some(include) = parse_requirements_include(line) {
-            specs.extend(read_requirements_specs_inner(
-                &base_dir.join(include),
+            read_requirements_file_inner(
+                &base_dir.join(include.path),
+                include.mode,
                 seen,
-            )?);
+                discovered,
+            )?;
             continue;
         }
 
@@ -686,10 +765,19 @@ fn read_requirements_specs_inner(
         }
 
         if let Some(spec) = parse_pypi_requirement(line) {
-            specs.push(spec);
+            match mode {
+                RequirementsMode::Install => discovered.specs.push(spec),
+                RequirementsMode::Constraint => {
+                    if let Some(version) = spec.version.clone() {
+                        discovered
+                            .constraints
+                            .insert(spec.constraint_key(), version);
+                    }
+                }
+            }
         }
     }
-    Ok(specs)
+    Ok(())
 }
 
 pub fn install_locked_packages(project_dir: impl AsRef<Path>) -> Result<InstallReport> {
@@ -1145,10 +1233,14 @@ pub fn parse_capability_grant(value: &str) -> Result<Capability> {
     }
 }
 
-fn resolve_package(client: &Client, spec: &PackageSpec) -> Result<ResolvedPackage> {
+fn resolve_package(
+    client: &Client,
+    spec: &PackageSpec,
+    options: &LinkOptions,
+) -> Result<ResolvedPackage> {
     match spec.ecosystem {
         Ecosystem::Npm => resolve_npm(client, spec),
-        Ecosystem::Pypi => resolve_pypi(client, spec),
+        Ecosystem::Pypi => resolve_pypi(client, spec, options),
     }
 }
 
@@ -1188,11 +1280,7 @@ fn resolve_npm(client: &Client, spec: &PackageSpec) -> Result<ResolvedPackage> {
         .clone()
         .unwrap_or_default()
         .into_iter()
-        .map(|(name, requirement)| PackageSpec {
-            ecosystem: Ecosystem::Npm,
-            name,
-            version: Some(requirement),
-        })
+        .map(|(name, requirement)| PackageSpec::new(Ecosystem::Npm, name, Some(requirement)))
         .collect::<Vec<_>>();
     let filename = version_doc
         .dist
@@ -1225,10 +1313,15 @@ fn npm_registry_name_and_requirement(spec: &PackageSpec) -> Result<(String, Opti
     Ok((alias_spec.name, alias_spec.version))
 }
 
-fn resolve_pypi(client: &Client, spec: &PackageSpec) -> Result<ResolvedPackage> {
+fn resolve_pypi(
+    client: &Client,
+    spec: &PackageSpec,
+    options: &LinkOptions,
+) -> Result<ResolvedPackage> {
     let encoded = urlencoding::encode(&spec.name);
     let target_python = current_python_version();
-    let version = match spec.version.as_deref() {
+    let constrained_requirement = constrained_pypi_requirement(spec, &options.constraints);
+    let version = match constrained_requirement.as_deref() {
         Some(requirement) if is_exact_pypi_version(requirement) => requirement.to_owned(),
         Some(requirement) => {
             let url = format!("https://pypi.org/pypi/{encoded}/json");
@@ -1265,7 +1358,7 @@ fn resolve_pypi(client: &Client, spec: &PackageSpec) -> Result<ResolvedPackage> 
         .requires_dist
         .unwrap_or_default()
         .into_iter()
-        .filter_map(|requirement| parse_pypi_requirement(&requirement))
+        .filter_map(|requirement| parse_pypi_requirement_with_extras(&requirement, &spec.extras))
         .collect::<Vec<_>>();
 
     Ok(ResolvedPackage {
@@ -1278,6 +1371,23 @@ fn resolve_pypi(client: &Client, spec: &PackageSpec) -> Result<ResolvedPackage> 
         npm_scripts: BTreeMap::new(),
         dependencies,
     })
+}
+
+fn constrained_pypi_requirement(
+    spec: &PackageSpec,
+    constraints: &BTreeMap<String, String>,
+) -> Option<String> {
+    match (
+        spec.version.as_deref(),
+        constraints.get(&spec.constraint_key()),
+    ) {
+        (Some(requirement), Some(constraint)) if !requirement.trim().is_empty() => {
+            Some(format!("{requirement},{constraint}"))
+        }
+        (Some(requirement), None) => Some(requirement.to_owned()),
+        (_, Some(constraint)) => Some(constraint.clone()),
+        (None, None) => None,
+    }
 }
 
 fn choose_pypi_file<'a>(
@@ -1518,10 +1628,17 @@ fn comparable_version(version: &str) -> Vec<u64> {
 }
 
 fn parse_pypi_requirement(requirement: &str) -> Option<PackageSpec> {
+    parse_pypi_requirement_with_extras(requirement, &BTreeSet::new())
+}
+
+fn parse_pypi_requirement_with_extras(
+    requirement: &str,
+    active_extras: &BTreeSet<String>,
+) -> Option<PackageSpec> {
     let mut parts = requirement.splitn(2, ';');
     let requirement = parts.next()?.trim();
     if let Some(marker) = parts.next() {
-        if !pypi_marker_applies(marker) {
+        if !pypi_marker_applies(marker, active_extras) {
             return None;
         }
     }
@@ -1535,10 +1652,7 @@ fn parse_pypi_requirement(requirement: &str) -> Option<PackageSpec> {
         .find(|(_, ch)| !ch.is_ascii_alphanumeric() && !matches!(ch, '-' | '_' | '.' | '[' | ']'))
         .map(|(index, _)| index)
         .unwrap_or(requirement.len());
-    let mut name = requirement[..name_end].trim();
-    if let Some((base, _)) = name.split_once('[') {
-        name = base;
-    }
+    let (name, extras) = parse_pypi_name_and_extras(requirement[..name_end].trim());
     if name.is_empty() {
         return None;
     }
@@ -1549,30 +1663,62 @@ fn parse_pypi_requirement(requirement: &str) -> Option<PackageSpec> {
         .trim_end_matches(')')
         .replace(' ', "");
 
-    Some(PackageSpec {
-        ecosystem: Ecosystem::Pypi,
-        name: name.replace('_', "-"),
-        version: (!version.is_empty()).then_some(version),
-    })
+    Some(PackageSpec::with_extras(
+        Ecosystem::Pypi,
+        name,
+        (!version.is_empty()).then_some(version),
+        extras,
+    ))
 }
 
-fn parse_requirements_include(line: &str) -> Option<String> {
-    for prefix in ["--requirement="] {
+fn parse_pypi_name_and_extras(name: &str) -> (String, BTreeSet<String>) {
+    let Some((base, extras)) = name.split_once('[') else {
+        return (normalize_pypi_name(name), BTreeSet::new());
+    };
+    let extras = extras
+        .trim_end_matches(']')
+        .split(',')
+        .map(|extra| extra.trim().replace('_', "-").to_ascii_lowercase())
+        .filter(|extra| !extra.is_empty())
+        .collect::<BTreeSet<_>>();
+    (normalize_pypi_name(base), extras)
+}
+
+fn normalize_pypi_name(name: &str) -> String {
+    name.replace('_', "-").to_ascii_lowercase()
+}
+
+fn parse_requirements_include(line: &str) -> Option<RequirementsInclude> {
+    for (prefix, mode) in [
+        ("--requirement=", RequirementsMode::Install),
+        ("--constraint=", RequirementsMode::Constraint),
+    ] {
         if let Some(rest) = line.strip_prefix(prefix) {
             let rest = rest.trim();
             if !rest.is_empty() {
-                return Some(rest.to_owned());
+                return Some(RequirementsInclude {
+                    path: rest.to_owned(),
+                    mode,
+                });
             }
         }
     }
 
-    for prefix in ["-r", "--requirement"] {
+    for (prefix, mode) in [
+        ("-r", RequirementsMode::Install),
+        ("--requirement", RequirementsMode::Install),
+        ("-c", RequirementsMode::Constraint),
+        ("--constraint", RequirementsMode::Constraint),
+    ] {
         if let Some(rest) = line.strip_prefix(prefix) {
             let rest = rest.trim_start();
             if rest.is_empty() {
                 continue;
             }
-            return Some(rest.to_owned());
+            return Some(RequirementsInclude {
+                path: rest.to_owned(),
+                mode,
+            });
         }
     }
 
@@ -1621,9 +1767,16 @@ impl PypiMarkerEnvironment {
     }
 }
 
-fn pypi_marker_applies(marker: &str) -> bool {
-    let env = PypiMarkerEnvironment::current();
-    evaluate_pypi_marker(marker.trim(), &env).unwrap_or(true)
+fn pypi_marker_applies(marker: &str, active_extras: &BTreeSet<String>) -> bool {
+    let mut env = PypiMarkerEnvironment::current();
+    if active_extras.is_empty() {
+        return evaluate_pypi_marker(marker.trim(), &env).unwrap_or(true);
+    }
+
+    active_extras.iter().any(|extra| {
+        env.extra.clone_from(extra);
+        evaluate_pypi_marker(marker.trim(), &env).unwrap_or(true)
+    })
 }
 
 fn evaluate_pypi_marker(marker: &str, env: &PypiMarkerEnvironment) -> Option<bool> {
@@ -2316,10 +2469,24 @@ mod tests {
         assert_eq!(spec.ecosystem, Ecosystem::Pypi);
         assert_eq!(spec.name, "requests");
         assert_eq!(spec.version.as_deref(), Some("2.32.3"));
+        assert!(spec.extras.is_empty());
 
         let spec = PackageSpec::parse("pypi:six@1.16.0").unwrap();
         assert_eq!(spec.name, "six");
         assert_eq!(spec.version.as_deref(), Some("1.16.0"));
+
+        let spec = PackageSpec::parse("pypi:urllib3<3,>=1.21.1").unwrap();
+        assert_eq!(spec.name, "urllib3");
+        assert_eq!(spec.version.as_deref(), Some("<3,>=1.21.1"));
+
+        let spec = PackageSpec::parse("pypi:requests[socks,security]==2.32.3").unwrap();
+        assert_eq!(spec.name, "requests");
+        assert_eq!(spec.version.as_deref(), Some("2.32.3"));
+        assert_eq!(
+            spec.extras,
+            BTreeSet::from(["security".to_owned(), "socks".to_owned()])
+        );
+        assert_eq!(spec.package_key(), "pypi:requests[security,socks]");
     }
 
     #[test]
@@ -2337,6 +2504,7 @@ mod tests {
             ecosystem: Ecosystem::Npm,
             name: "string-width-cjs".to_owned(),
             version: Some("npm:string-width@^4.2.0".to_owned()),
+            extras: BTreeSet::new(),
         };
         let (registry_name, requirement) = npm_registry_name_and_requirement(&spec).unwrap();
         assert_eq!(registry_name, "string-width");
@@ -2369,16 +2537,19 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let requirements = dir.path().join("requirements.txt");
         let nested = dir.path().join("nested.txt");
+        let constraints = dir.path().join("constraints.txt");
         fs::write(&nested, "charset-normalizer==3.4.0\n").unwrap();
+        fs::write(&constraints, "urllib3==2.2.1\n").unwrap();
         fs::write(
             &requirements,
-            "requests==2.32.3\n# ignored\nidna>=2,<4\n-r nested.txt\ncolorama; extra == 'windows'\n",
+            "requests[socks]==2.32.3\n# ignored\nidna>=2,<4\n-r nested.txt\n-c constraints.txt\ncolorama; extra == 'windows'\n",
         )
         .unwrap();
-        let specs = read_requirements_specs(&requirements).unwrap();
-        assert!(specs
-            .iter()
-            .any(|spec| spec.name == "requests" && spec.version.as_deref() == Some("==2.32.3")));
+        let discovered = read_requirements_file(&requirements).unwrap();
+        let specs = discovered.specs;
+        assert!(specs.iter().any(|spec| spec.name == "requests"
+            && spec.version.as_deref() == Some("==2.32.3")
+            && spec.extras.contains("socks")));
         assert!(specs
             .iter()
             .any(|spec| spec.name == "idna" && spec.version.as_deref() == Some(">=2,<4")));
@@ -2388,15 +2559,38 @@ mod tests {
                 && spec.version.as_deref() == Some("==3.4.0")));
         assert!(!specs.iter().any(|spec| spec.name == "colorama"));
         assert_eq!(specs.len(), 3);
+        assert_eq!(
+            discovered
+                .constraints
+                .get("pypi:urllib3")
+                .map(String::as_str),
+            Some("==2.2.1")
+        );
     }
 
     #[test]
-    fn parses_pypi_requires_dist_without_extras() {
+    fn parses_pypi_requires_dist_with_extras() {
         let spec = parse_pypi_requirement("urllib3<3,>=1.21.1").unwrap();
         assert_eq!(spec.name, "urllib3");
         assert_eq!(spec.version.as_deref(), Some("<3,>=1.21.1"));
 
         assert!(parse_pypi_requirement("PySocks>=1.5.6; extra == 'socks'").is_none());
+
+        let extras = BTreeSet::from(["socks".to_owned()]);
+        let spec = parse_pypi_requirement_with_extras("PySocks>=1.5.6; extra == 'socks'", &extras)
+            .unwrap();
+        assert_eq!(spec.name, "pysocks");
+        assert_eq!(spec.version.as_deref(), Some(">=1.5.6"));
+    }
+
+    #[test]
+    fn merges_pypi_constraints_into_requirements() {
+        let spec = PackageSpec::new(Ecosystem::Pypi, "urllib3", Some("<3,>=1.21.1".to_owned()));
+        let constraints = BTreeMap::from([("pypi:urllib3".to_owned(), "==2.2.1".to_owned())]);
+        assert_eq!(
+            constrained_pypi_requirement(&spec, &constraints).as_deref(),
+            Some("<3,>=1.21.1,==2.2.1")
+        );
     }
 
     #[test]
