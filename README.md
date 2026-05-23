@@ -202,6 +202,7 @@ cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip cache list
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip config get global.index-url
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip config set global.index-url https://pypi.org/simple/
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip uninstall -r requirements.txt -y
+cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo twine check --strict dist/*
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo twine upload -r testpypi dist/*
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo twine upload --repository-url https://upload.pypi.org/legacy/ -u __token__ -p "$PYPI_API_TOKEN" --skip-existing dist/*
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo twine upload --repository-url https://private.example/legacy/ --cert certs/ca.pem --client-cert certs/client.pem -u __token__ -p "$PYPI_API_TOKEN" dist/*
@@ -219,7 +220,7 @@ Installing with `--bins` also provides `node`, `npm`, `npx`, `pip`, `pip3`,
 when they are first on `PATH`, so existing scripts can call standard commands
 such as `node`, `npm install`, `npm test`, `npx eslint`, `pip install`,
 `pip3 install`, `pip freeze`, `python -m pip`, `python3 -m pip`,
-`twine upload`, and `python -m twine` without spelling `omc node`, `omc npm`,
+`twine check`, `twine upload`, and `python -m twine` without spelling `omc node`, `omc npm`,
 `omc pip`, `omc python`, or `omc twine`. They default to the
 current directory; use
 `OMC_PROJECT_DIR=/path/to/project`, `--project-dir PATH`, or

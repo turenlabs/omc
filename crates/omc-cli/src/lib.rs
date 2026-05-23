@@ -12,11 +12,11 @@ use flate2::Compression;
 use omc_cap::Capability;
 use omc_registry::{
     add_manifest_npm_local_paths, add_manifest_policy_grants, add_npm_dist_tag, add_npm_team_user,
-    add_package_graph, apply_pypi_binary_option, check_pypi_lock, compare_npm_versions,
-    compare_pypi_versions, create_npm_team, create_npm_token, deprecate_npm_package,
-    destroy_npm_team, grant_npm_access, init_project, install_locked_packages,
-    install_locked_project, install_project, lock_project, mutate_npm_package_owner,
-    parse_capability_grant, parse_npm_direct_archive_reference,
+    add_package_graph, apply_pypi_binary_option, check_pypi_distribution, check_pypi_lock,
+    compare_npm_versions, compare_pypi_versions, create_npm_team, create_npm_token,
+    deprecate_npm_package, destroy_npm_team, grant_npm_access, init_project,
+    install_locked_packages, install_locked_project, install_project, lock_project,
+    mutate_npm_package_owner, parse_capability_grant, parse_npm_direct_archive_reference,
     parse_pypi_direct_archive_reference, parse_pypi_vcs_requirement, publish_npm_package,
     read_constraint_files, read_lockfile, read_manifest, read_npm_access_collaborators,
     read_npm_access_packages, read_npm_access_status, read_npm_config_snapshot, read_npm_org_users,
@@ -990,7 +990,14 @@ enum PipConfigLocation {
 enum TwineCompatAction {
     Help { topic: Option<String> },
     Version,
+    Check(TwineCheckAction),
     Upload(TwineUploadAction),
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct TwineCheckAction {
+    paths: Vec<PathBuf>,
+    strict: bool,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -2500,11 +2507,57 @@ fn run_pip_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
 
 fn run_twine_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRegistryError> {
     match parse_twine_compat_action(args)? {
-        TwineCompatAction::Help { topic } => print_twine_help(topic.as_deref()),
-        TwineCompatAction::Version => println!("twine {} from OMC", env!("CARGO_PKG_VERSION")),
-        TwineCompatAction::Upload(action) => print_twine_upload(project_dir, action)?,
+        TwineCompatAction::Help { topic } => {
+            print_twine_help(topic.as_deref());
+            Ok(ExitCode::SUCCESS)
+        }
+        TwineCompatAction::Version => {
+            println!("twine {} from OMC", env!("CARGO_PKG_VERSION"));
+            Ok(ExitCode::SUCCESS)
+        }
+        TwineCompatAction::Check(action) => {
+            let failed = print_twine_check(project_dir, action)?;
+            Ok(if failed {
+                ExitCode::FAILURE
+            } else {
+                ExitCode::SUCCESS
+            })
+        }
+        TwineCompatAction::Upload(action) => {
+            print_twine_upload(project_dir, action)?;
+            Ok(ExitCode::SUCCESS)
+        }
     }
-    Ok(ExitCode::SUCCESS)
+}
+
+fn print_twine_check(
+    project_dir: &Path,
+    action: TwineCheckAction,
+) -> Result<bool, OmcRegistryError> {
+    if action.paths.is_empty() {
+        return Err(OmcRegistryError::UnsupportedSpec(
+            "twine check needs at least one distribution file".to_owned(),
+        ));
+    }
+
+    let mut failed = false;
+    for path in &action.paths {
+        let absolute = absolutize_path(project_dir, path.clone());
+        let result = check_pypi_distribution(&absolute, action.strict)?;
+        print!("Checking {}: ", path.display());
+        if result.passed && result.warnings.is_empty() {
+            println!("PASSED");
+        } else if result.passed {
+            println!("PASSED with warnings");
+        } else {
+            println!("FAILED due to warnings");
+            failed = true;
+        }
+        for warning in result.warnings {
+            println!("warning: {warning}");
+        }
+    }
+    Ok(failed)
 }
 
 fn print_twine_upload(
@@ -3336,8 +3389,16 @@ fn twine_help_text(topic: Option<&str>) -> String {
         None => twine_command_help(
             "twine <command>",
             &[
-                "OMC Twine compatibility uploads Python wheel and sdist artifacts through the OMC registry client.",
-                "Supported commands: upload.",
+                "OMC Twine compatibility validates and uploads Python wheel and sdist artifacts through OMC.",
+                "Supported commands: check, upload.",
+            ],
+        ),
+        Some("check") => twine_command_help(
+            "twine check [--strict] dist [dist ...]",
+            &[
+                "Validate Python wheel and sdist metadata before upload.",
+                "Checks long_description and long_description_content_type warnings without delegating to Twine.",
+                "Supports --strict to fail on warnings.",
             ],
         ),
         Some("upload") => twine_command_help(
@@ -3369,6 +3430,7 @@ fn twine_command_help(usage: &str, lines: &[&str]) -> String {
 fn twine_help_topic(topic: &str) -> Option<&'static str> {
     match topic {
         "help" | "--help" | "-h" => None,
+        "check" => Some("check"),
         "upload" => Some("upload"),
         _ => Some("unknown"),
     }
@@ -13839,12 +13901,13 @@ fn parse_twine_compat_action(args: &[String]) -> Result<TwineCompatAction, OmcRe
     }
     let Some(command) = args.first().map(String::as_str) else {
         return Err(OmcRegistryError::UnsupportedSpec(
-            "twine compatibility needs a command such as upload".to_owned(),
+            "twine compatibility needs a command such as check or upload".to_owned(),
         ));
     };
 
     match command {
         "--version" | "-V" => Ok(TwineCompatAction::Version),
+        "check" => parse_twine_check_args(&args[1..]),
         "upload" => parse_twine_upload_args(&args[1..]),
         other => Err(OmcRegistryError::UnsupportedSpec(format!(
             "unsupported twine compatibility command `{other}`"
@@ -13898,6 +13961,32 @@ fn normalize_twine_global_args(args: &[String]) -> Result<Vec<String>, OmcRegist
         index += 1;
     }
     Ok(Vec::new())
+}
+
+fn parse_twine_check_args(args: &[String]) -> Result<TwineCompatAction, OmcRegistryError> {
+    let mut paths = Vec::new();
+    let mut strict = false;
+    let mut index = 0;
+    while index < args.len() {
+        let arg = &args[index];
+        if twine_help_flag(arg) {
+            return Ok(TwineCompatAction::Help {
+                topic: Some("check".to_owned()),
+            });
+        } else if arg == "--strict" {
+            strict = true;
+        } else if matches!(
+            arg.as_str(),
+            "--non-interactive" | "--disable-progress-bar" | "--verbose"
+        ) {
+        } else if arg.starts_with('-') {
+            return Err(unsupported_compat_arg("twine check", arg));
+        } else {
+            paths.push(PathBuf::from(arg));
+        }
+        index += 1;
+    }
+    Ok(TwineCompatAction::Check(TwineCheckAction { paths, strict }))
 }
 
 fn parse_twine_upload_args(args: &[String]) -> Result<TwineCompatAction, OmcRegistryError> {
@@ -18852,6 +18941,29 @@ mod tests {
             }
         );
         assert_eq!(
+            parse_twine_compat_action(&args(&["check", "--help"])).unwrap(),
+            TwineCompatAction::Help {
+                topic: Some("check".to_owned())
+            }
+        );
+        assert_eq!(
+            parse_twine_compat_action(&args(&[
+                "check",
+                "--strict",
+                "--non-interactive",
+                "dist/demo-1.0.0.tar.gz",
+                "dist/demo-1.0.0-py3-none-any.whl",
+            ]))
+            .unwrap(),
+            TwineCompatAction::Check(TwineCheckAction {
+                paths: vec![
+                    PathBuf::from("dist/demo-1.0.0.tar.gz"),
+                    PathBuf::from("dist/demo-1.0.0-py3-none-any.whl"),
+                ],
+                strict: true,
+            })
+        );
+        assert_eq!(
             parse_twine_compat_action(&args(&[
                 "upload",
                 "--repository-url",
@@ -18889,6 +19001,14 @@ mod tests {
                 comment: Some("release upload".to_owned()),
             })
         );
+        assert!(print_twine_check(
+            Path::new("."),
+            TwineCheckAction {
+                paths: Vec::new(),
+                strict: false,
+            },
+        )
+        .is_err());
     }
 
     #[test]

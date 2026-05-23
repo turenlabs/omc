@@ -7629,6 +7629,16 @@ pub struct PypiUploadResult {
     pub response_text: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PypiDistributionCheckResult {
+    pub filename: String,
+    pub name: String,
+    pub version: String,
+    pub strict: bool,
+    pub passed: bool,
+    pub warnings: Vec<String>,
+}
+
 #[derive(Debug, Clone, Copy, Default)]
 pub struct PypiUploadOptions<'a> {
     pub skip_existing: bool,
@@ -10313,6 +10323,65 @@ pub fn upload_pypi_distribution(
         skipped,
         response_text: (!text.trim().is_empty()).then_some(text),
     })
+}
+
+pub fn check_pypi_distribution(path: &Path, strict: bool) -> Result<PypiDistributionCheckResult> {
+    let distribution = prepare_pypi_upload_distribution(path)?;
+    let warnings = pypi_distribution_check_warnings(&distribution);
+    let passed = warnings.is_empty() || !strict;
+    Ok(PypiDistributionCheckResult {
+        filename: distribution.filename,
+        name: distribution.name,
+        version: distribution.version,
+        strict,
+        passed,
+        warnings,
+    })
+}
+
+fn pypi_distribution_check_warnings(distribution: &PypiUploadDistribution) -> Vec<String> {
+    let mut warnings = Vec::new();
+    let content_type =
+        pypi_upload_metadata_value(&distribution.metadata, "description_content_type")
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+    if content_type.is_none() {
+        warnings.push(
+            "`long_description_content_type` missing. defaulting to `text/x-rst`.".to_owned(),
+        );
+    }
+
+    let description = distribution
+        .description
+        .as_deref()
+        .or_else(|| pypi_upload_metadata_value(&distribution.metadata, "description"))
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    if description
+        .map(|value| value.eq_ignore_ascii_case("UNKNOWN"))
+        .unwrap_or(true)
+    {
+        warnings.push("`long_description` missing.".to_owned());
+    }
+
+    if let Some(content_type) = content_type {
+        let media_type = content_type
+            .split(';')
+            .next()
+            .unwrap_or(content_type)
+            .trim()
+            .to_ascii_lowercase();
+        if !matches!(
+            media_type.as_str(),
+            "text/plain" | "text/x-rst" | "text/markdown"
+        ) {
+            warnings.push(format!(
+                "`long_description_content_type` `{content_type}` is not one of text/plain, text/x-rst, or text/markdown."
+            ));
+        }
+    }
+
+    warnings
 }
 
 fn pypi_upload_client(cert: Option<&Path>, client_cert: Option<&Path>) -> Result<Client> {
@@ -20888,6 +20957,39 @@ wheels = [
         assert_eq!(result.sha256_digest, expected_digest);
         assert!(!result.skipped);
         handle.join().unwrap();
+    }
+
+    #[test]
+    fn checks_pypi_distribution_metadata_warnings_and_strict_mode() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let clean_wheel = python_wheel_for_test(
+            "Metadata-Version: 2.1\nName: demo-pkg\nVersion: 1.0.0\nDescription-Content-Type: text/markdown\n\n# Long description\n",
+        );
+        let clean_path = dir.path().join("demo_pkg-1.0.0-py3-none-any.whl");
+        fs::write(&clean_path, clean_wheel).unwrap();
+        let clean = check_pypi_distribution(&clean_path, true).unwrap();
+        assert!(clean.passed);
+        assert!(clean.warnings.is_empty());
+
+        let warning_wheel =
+            python_wheel_for_test("Metadata-Version: 2.1\nName: demo-pkg\nVersion: 1.0.1\n\n");
+        let warning_path = dir.path().join("demo_pkg-1.0.1-py3-none-any.whl");
+        fs::write(&warning_path, warning_wheel).unwrap();
+        let relaxed = check_pypi_distribution(&warning_path, false).unwrap();
+        assert!(relaxed.passed);
+        assert!(relaxed
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("long_description_content_type")));
+        assert!(relaxed
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("long_description")));
+
+        let strict = check_pypi_distribution(&warning_path, true).unwrap();
+        assert!(!strict.passed);
+        assert_eq!(strict.warnings, relaxed.warnings);
     }
 
     #[test]
