@@ -10,9 +10,10 @@ use omc_registry::{
     apply_pypi_binary_option, check_pypi_lock, init_project, install_locked_packages,
     install_locked_project, install_project, lock_project, parse_capability_grant,
     parse_npm_direct_archive_reference, parse_pypi_direct_archive_reference, read_lockfile,
-    read_npm_config_snapshot, read_package_scripts, read_requirements_files,
-    remove_manifest_dependency, Behavior, Ecosystem, InstallReport, LinkOptions, LockedPackage,
-    OmcRegistryError, PackageSpec, PypiBinaryMode, PypiCheckIssue, PythonLocalRequirement, Verdict,
+    read_npm_config_snapshot, read_package_scripts, read_pip_config_snapshot,
+    read_requirements_files, remove_manifest_dependency, Behavior, Ecosystem, InstallReport,
+    LinkOptions, LockedPackage, OmcRegistryError, PackageSpec, PypiBinaryMode, PypiCheckIssue,
+    PythonLocalRequirement, Verdict,
 };
 
 #[derive(Debug, Parser)]
@@ -297,6 +298,9 @@ enum PipCompatAction {
     List {
         format: PipListFormat,
     },
+    Config {
+        action: PipConfigAction,
+    },
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -324,6 +328,12 @@ enum PipListFormat {
     Columns,
     Freeze,
     Json,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum PipConfigAction {
+    Get { keys: Vec<String>, json: bool },
+    List { json: bool },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1075,6 +1085,7 @@ fn run_pip_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
             PipListFormat::Freeze => print_locked_freeze(project_dir)?,
             PipListFormat::Json => print_locked_pip_json(project_dir)?,
         },
+        PipCompatAction::Config { action } => print_pip_config(project_dir, action)?,
     }
 
     Ok(ExitCode::SUCCESS)
@@ -1237,6 +1248,119 @@ fn npm_config_value_for_key(values: &BTreeMap<String, String>, key: &str) -> Str
         .get(key)
         .cloned()
         .unwrap_or_else(|| "undefined".to_owned())
+}
+
+fn print_pip_config(project_dir: &Path, action: PipConfigAction) -> Result<(), OmcRegistryError> {
+    let values = pip_config_values(project_dir)?;
+    match action {
+        PipConfigAction::Get { keys, json } => {
+            if json {
+                if keys.len() == 1 {
+                    let value = pip_config_value_for_key(&values, &keys[0])?;
+                    println!("{}", serde_json::to_string_pretty(&value)?);
+                } else {
+                    let mut selected = BTreeMap::new();
+                    for key in keys {
+                        selected.insert(key.clone(), pip_config_value_for_key(&values, &key)?);
+                    }
+                    println!("{}", serde_json::to_string_pretty(&selected)?);
+                }
+            } else {
+                for key in keys {
+                    println!("{}", pip_config_value_for_key(&values, &key)?);
+                }
+            }
+        }
+        PipConfigAction::List { json } => {
+            if json {
+                println!("{}", serde_json::to_string_pretty(&values)?);
+            } else {
+                for (key, value) in values {
+                    println!("{key}={value}");
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn pip_config_values(project_dir: &Path) -> Result<BTreeMap<String, String>, OmcRegistryError> {
+    let snapshot = read_pip_config_snapshot(project_dir)?;
+    let mut values = BTreeMap::from([
+        ("global.index-url".to_owned(), snapshot.index_url),
+        ("global.no-index".to_owned(), snapshot.no_index.to_string()),
+    ]);
+    if !snapshot.extra_index_urls.is_empty() {
+        values.insert(
+            "global.extra-index-url".to_owned(),
+            snapshot.extra_index_urls.join(" "),
+        );
+    }
+    if !snapshot.find_links.is_empty() {
+        values.insert(
+            "global.find-links".to_owned(),
+            snapshot.find_links.join(" "),
+        );
+    }
+    if let Some(value) = pip_binary_config_value(snapshot.binary_all, PypiBinaryMode::Source) {
+        values.insert("global.no-binary".to_owned(), value);
+    }
+    if let Some(value) = pip_binary_config_value(snapshot.binary_all, PypiBinaryMode::Binary) {
+        values.insert("global.only-binary".to_owned(), value);
+    }
+    for (package, mode) in snapshot.binary_packages {
+        match mode {
+            PypiBinaryMode::Source => values
+                .entry("global.no-binary".to_owned())
+                .and_modify(|value| {
+                    if !value.is_empty() {
+                        value.push(',');
+                    }
+                    value.push_str(&package);
+                })
+                .or_insert(package),
+            PypiBinaryMode::Binary => values
+                .entry("global.only-binary".to_owned())
+                .and_modify(|value| {
+                    if !value.is_empty() {
+                        value.push(',');
+                    }
+                    value.push_str(&package);
+                })
+                .or_insert(package),
+        };
+    }
+    Ok(values)
+}
+
+fn pip_binary_config_value(mode: Option<PypiBinaryMode>, target: PypiBinaryMode) -> Option<String> {
+    (mode == Some(target)).then(|| ":all:".to_owned())
+}
+
+fn pip_config_value_for_key(
+    values: &BTreeMap<String, String>,
+    key: &str,
+) -> Result<String, OmcRegistryError> {
+    pip_config_key_aliases(key)
+        .into_iter()
+        .find_map(|key| values.get(&key).cloned())
+        .ok_or_else(|| {
+            OmcRegistryError::UnsupportedSpec(format!("pip config key `{key}` is not set"))
+        })
+}
+
+fn pip_config_key_aliases(key: &str) -> Vec<String> {
+    let normalized = key.trim().to_ascii_lowercase().replace('_', "-");
+    if let Some((section, name)) = normalized.split_once('.') {
+        if matches!(section, "global" | "install") {
+            return vec![normalized.clone(), format!("global.{name}")];
+        }
+        return vec![normalized];
+    }
+    vec![
+        format!("global.{normalized}"),
+        format!("install.{normalized}"),
+    ]
 }
 
 fn print_lock_only_report(project_dir: &Path) {
@@ -2419,10 +2543,85 @@ fn parse_pip_compat_action(args: &[String]) -> Result<PipCompatAction, OmcRegist
         "list" => Ok(PipCompatAction::List {
             format: parse_pip_list_format(&args[1..])?,
         }),
+        "config" => parse_pip_config_args(&args[1..]),
         other => Err(OmcRegistryError::UnsupportedSpec(format!(
             "unsupported pip compatibility command `{other}`"
         ))),
     }
+}
+
+fn parse_pip_config_args(args: &[String]) -> Result<PipCompatAction, OmcRegistryError> {
+    let PipConfigArgs {
+        json,
+        mut positionals,
+    } = parse_pip_config_common_args(args)?;
+    let command = if positionals.is_empty() {
+        "list".to_owned()
+    } else {
+        positionals.remove(0)
+    };
+    match command.as_str() {
+        "get" => {
+            if positionals.is_empty() {
+                return Err(OmcRegistryError::UnsupportedSpec(
+                    "pip config get needs at least one key".to_owned(),
+                ));
+            }
+            Ok(PipCompatAction::Config {
+                action: PipConfigAction::Get {
+                    keys: positionals,
+                    json,
+                },
+            })
+        }
+        "list" => {
+            if !positionals.is_empty() {
+                return Err(unsupported_compat_arg("pip config list", &positionals[0]));
+            }
+            Ok(PipCompatAction::Config {
+                action: PipConfigAction::List { json },
+            })
+        }
+        other => Err(OmcRegistryError::UnsupportedSpec(format!(
+            "unsupported pip config command `{other}`"
+        ))),
+    }
+}
+
+#[derive(Debug)]
+struct PipConfigArgs {
+    json: bool,
+    positionals: Vec<String>,
+}
+
+fn parse_pip_config_common_args(args: &[String]) -> Result<PipConfigArgs, OmcRegistryError> {
+    let mut json = false;
+    let mut positionals = Vec::new();
+    let mut index = 0;
+    while index < args.len() {
+        let arg = &args[index];
+        if arg == "--json" {
+            json = true;
+        } else if matches!(
+            arg.as_str(),
+            "--user" | "--global" | "--site" | "--isolated" | "-v" | "--verbose" | "-q" | "--quiet"
+        ) {
+        } else if arg == "--editor" {
+            index += 1;
+            if args.get(index).is_none() {
+                return Err(OmcRegistryError::UnsupportedSpec(
+                    "--editor needs a value".to_owned(),
+                ));
+            }
+        } else if arg.starts_with("--editor=") {
+        } else if arg.starts_with('-') {
+            return Err(unsupported_compat_arg("pip config", arg));
+        } else {
+            positionals.push(arg.clone());
+        }
+        index += 1;
+    }
+    Ok(PipConfigArgs { json, positionals })
 }
 
 fn parse_pip_uninstall_args(args: &[String]) -> Result<PipCompatAction, OmcRegistryError> {
@@ -4060,6 +4259,31 @@ mod tests {
             }
         );
         assert!(parse_pip_compat_action(&args(&["list", "--outdated"])).is_err());
+        assert_eq!(
+            parse_pip_compat_action(&args(&[
+                "config",
+                "--user",
+                "get",
+                "global.index-url",
+                "--json",
+            ]))
+            .unwrap(),
+            PipCompatAction::Config {
+                action: PipConfigAction::Get {
+                    keys: vec!["global.index-url".to_owned()],
+                    json: true,
+                },
+            }
+        );
+        assert_eq!(
+            parse_pip_compat_action(&args(&["config", "list", "--verbose"])).unwrap(),
+            PipCompatAction::Config {
+                action: PipConfigAction::List { json: false },
+            }
+        );
+        assert!(
+            parse_pip_compat_action(&args(&["config", "set", "global.index-url", "x"])).is_err()
+        );
     }
 
     #[test]

@@ -135,6 +135,7 @@ cargo run -p omc-cli --bin python3 -- --omc-project-dir /tmp/omc-demo -m pip fre
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip freeze
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip show requests
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip list --format=json
+cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip config get global.index-url
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip uninstall -r requirements.txt -y
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo list
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo list --json
@@ -415,8 +416,9 @@ Supported now:
   such as `--if-present`, `--silent`, `-s`, and `--loglevel=silent` are
   understood
 - `omc pip` compatibility commands for common `install`, `uninstall`, `freeze`,
-  `check`, `show`, and `list --format=columns|freeze|json` flows, including
-  `-r`, index URL, constraints, extra-index, find-links, no-index,
+  `check`, `show`, `config get`, `config list`, and
+  `list --format=columns|freeze|json` flows, including `-r`, index URL,
+  constraints, extra-index, find-links, no-index,
   require-hashes, no-deps, target-directory, trusted-host, retry/timeout,
   reinstall, warning, build-isolation, and binary-policy install flags without
   delegating to pip; `pip uninstall -r requirements.txt` removes named

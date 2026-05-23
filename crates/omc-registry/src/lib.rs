@@ -2519,6 +2519,16 @@ struct PipConfig {
     no_index: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PipConfigSnapshot {
+    pub index_url: String,
+    pub extra_index_urls: Vec<String>,
+    pub find_links: Vec<String>,
+    pub binary_all: Option<PypiBinaryMode>,
+    pub binary_packages: BTreeMap<String, PypiBinaryMode>,
+    pub no_index: bool,
+}
+
 fn apply_pip_config_files(project_dir: &Path, options: &mut LinkOptions) -> Result<()> {
     let config = read_pip_config(project_dir)?;
     if options.pypi_index_url.is_none() {
@@ -2553,6 +2563,30 @@ fn read_pip_config(project_dir: &Path) -> Result<PipConfig> {
         read_pip_config_into(&PathBuf::from(path), &mut config)?;
     }
     Ok(config)
+}
+
+pub fn read_pip_config_snapshot(project_dir: &Path) -> Result<PipConfigSnapshot> {
+    let config = read_pip_config(project_dir)?;
+    let mut options = LinkOptions::new(project_dir);
+    options.pypi_index_url = config.index_url;
+    options
+        .pypi_extra_index_urls
+        .extend(config.extra_index_urls);
+    options.pypi_find_links.extend(config.find_links);
+    options.pypi_binary_all = config.binary_all;
+    options.pypi_binary_packages = config.binary_packages;
+    options.pypi_no_index = config.no_index;
+    apply_pypi_environment_config(&mut options, true);
+    Ok(PipConfigSnapshot {
+        index_url: options
+            .pypi_index_url
+            .unwrap_or_else(|| "https://pypi.org/simple/".to_owned()),
+        extra_index_urls: options.pypi_extra_index_urls,
+        find_links: options.pypi_find_links,
+        binary_all: options.pypi_binary_all,
+        binary_packages: options.pypi_binary_packages,
+        no_index: options.pypi_no_index,
+    })
 }
 
 fn read_pip_config_into(path: &Path, config: &mut PipConfig) -> Result<()> {
