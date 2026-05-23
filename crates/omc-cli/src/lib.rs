@@ -21,23 +21,40 @@ use omc_registry::{
     read_constraint_files, read_lockfile, read_manifest, read_npm_access_collaborators,
     read_npm_access_packages, read_npm_access_status, read_npm_config_snapshot, read_npm_org_users,
     read_npm_package_metadata, read_npm_package_metadata_with_userconfig, read_npm_package_owners,
-    read_npm_ping_with_userconfig, read_npm_search, read_npm_team_users, read_npm_teams,
-    read_npm_token_list, read_npm_whoami, read_npm_workspace_packages, read_package_scripts,
-    read_pip_config_snapshot, read_pypi_available_versions, read_requirements_files,
-    remove_manifest_dependency, remove_npm_dist_tag, remove_npm_org_user, remove_npm_team_user,
-    revoke_npm_access, revoke_npm_token, set_npm_access_mfa, set_npm_access_status,
-    set_npm_org_user, unpublish_npm_package, upload_pypi_distribution, Behavior, Ecosystem,
-    InstallReport, LinkOptions, LockedPackage, LockedPythonVcsDependency, NpmAccessMapResult,
-    NpmAccessMutationResult, NpmAccessStatusResult, NpmAccessToken, NpmDeprecateResult,
-    NpmDistTagMutationResult, NpmOrgListResult, NpmOrgMutationResult, NpmOwnerListResult,
-    NpmOwnerMutationResult, NpmPingResult, NpmPublishPackage, NpmPublishResult, NpmSearchPackage,
-    NpmTeamListResult, NpmTeamMutationResult, NpmTokenCreateOptions, NpmTokenCreateResult,
-    NpmTokenListResult, NpmTokenRevokeResult, NpmUnpublishResult, NpmWhoamiResult,
-    NpmWorkspacePackage, OmcRegistryError, PackageSpec, ProjectRequirements, PypiBinaryMode,
-    PypiCheckIssue, PypiUploadOptions, PypiUploadResult, PythonLocalRequirement,
+    read_npm_ping_with_userconfig, read_npm_profile, read_npm_search, read_npm_team_users,
+    read_npm_teams, read_npm_token_list, read_npm_whoami, read_npm_workspace_packages,
+    read_package_scripts, read_pip_config_snapshot, read_pypi_available_versions,
+    read_requirements_files, remove_manifest_dependency, remove_npm_dist_tag, remove_npm_org_user,
+    remove_npm_team_user, revoke_npm_access, revoke_npm_token, set_npm_access_mfa,
+    set_npm_access_status, set_npm_org_user, set_npm_profile_property, unpublish_npm_package,
+    upload_pypi_distribution, Behavior, Ecosystem, InstallReport, LinkOptions, LockedPackage,
+    LockedPythonVcsDependency, NpmAccessMapResult, NpmAccessMutationResult, NpmAccessStatusResult,
+    NpmAccessToken, NpmDeprecateResult, NpmDistTagMutationResult, NpmOrgListResult,
+    NpmOrgMutationResult, NpmOwnerListResult, NpmOwnerMutationResult, NpmPingResult,
+    NpmProfileMutationResult, NpmProfileResult, NpmPublishPackage, NpmPublishResult,
+    NpmSearchPackage, NpmTeamListResult, NpmTeamMutationResult, NpmTokenCreateOptions,
+    NpmTokenCreateResult, NpmTokenListResult, NpmTokenRevokeResult, NpmUnpublishResult,
+    NpmWhoamiResult, NpmWorkspacePackage, OmcRegistryError, PackageSpec, ProjectRequirements,
+    PypiBinaryMode, PypiCheckIssue, PypiUploadOptions, PypiUploadResult, PythonLocalRequirement,
     PythonVcsRequirement, Verdict,
 };
 use sha2::{Digest, Sha256, Sha384, Sha512};
+
+const NPM_PROFILE_KNOWN_KEYS: &[&str] = &[
+    "name",
+    "email",
+    "two-factor auth",
+    "fullname",
+    "homepage",
+    "freenode",
+    "twitter",
+    "github",
+    "created",
+    "updated",
+];
+const NPM_PROFILE_WRITABLE_KEYS: &[&str] = &[
+    "email", "password", "fullname", "homepage", "freenode", "twitter", "github",
+];
 
 #[derive(Debug, Parser)]
 #[command(name = "omc")]
@@ -378,6 +395,9 @@ enum NpmCompatAction {
     Token {
         action: NpmTokenAction,
     },
+    Profile {
+        action: NpmProfileAction,
+    },
     Owner {
         action: NpmOwnerAction,
     },
@@ -578,6 +598,26 @@ enum NpmAccessAction {
         scope_team: String,
         package: Option<String>,
         json: bool,
+        npm_registry: Option<String>,
+        userconfig: Option<PathBuf>,
+        otp: Option<String>,
+    },
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum NpmProfileAction {
+    Get {
+        keys: Vec<String>,
+        json: bool,
+        parseable: bool,
+        npm_registry: Option<String>,
+        userconfig: Option<PathBuf>,
+    },
+    Set {
+        property: String,
+        value: String,
+        json: bool,
+        parseable: bool,
         npm_registry: Option<String>,
         userconfig: Option<PathBuf>,
         otp: Option<String>,
@@ -2275,6 +2315,7 @@ fn run_npm_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
         NpmCompatAction::Login { action } => print_npm_login(project_dir, action)?,
         NpmCompatAction::Logout { action } => print_npm_logout(project_dir, action)?,
         NpmCompatAction::Token { action } => print_npm_token(project_dir, action)?,
+        NpmCompatAction::Profile { action } => print_npm_profile(project_dir, action)?,
         NpmCompatAction::Owner { action } => print_npm_owner(project_dir, action)?,
         NpmCompatAction::Access { action } => print_npm_access(project_dir, action)?,
         NpmCompatAction::Org { action } => print_npm_org(project_dir, action)?,
@@ -3100,6 +3141,15 @@ fn npm_help_text(topic: Option<&str>) -> String {
                 "OMC does not prompt interactively; pass --password or set NPM_CONFIG_PASSWORD.",
             ],
         ),
+        Some("profile") => npm_command_help(
+            "npm profile <get|set> ...",
+            &[
+                "Read or update noninteractive npm registry profile fields through the configured registry.",
+                "Supports get [key...] and set <email|fullname|homepage|freenode|twitter|github> <value>.",
+                "Supports --json, --parseable, --registry, --userconfig, and --otp for set.",
+                "Interactive password and 2FA profile commands are reported as unsupported.",
+            ],
+        ),
         Some("owner") => npm_command_help(
             "npm owner <ls|add|rm> ...",
             &[
@@ -3198,7 +3248,7 @@ fn npm_general_help_text() -> String {
         "npm <command>",
         &[
             "OMC npm compatibility runs supported npm workflows through OMC's verifier, lockfile, cache, and project-local runtime paths.",
-            "Supported commands: install, install-test, ci, install-ci-test, remove, run, test, start, stop, restart, exec, list, explain, audit, outdated, fund, prune, dedupe, rebuild, cache, pkg, version, pack, publish, unpublish, deprecate, undeprecate, search, ping, whoami, login, adduser, logout, token, owner, access, org, team, dist-tag, sbom, view, docs, repo, bugs, home, config, init, bin, root, prefix.",
+            "Supported commands: install, install-test, ci, install-ci-test, remove, run, test, start, stop, restart, exec, list, explain, audit, outdated, fund, prune, dedupe, rebuild, cache, pkg, version, pack, publish, unpublish, deprecate, undeprecate, search, ping, whoami, login, adduser, logout, token, profile, owner, access, org, team, dist-tag, sbom, view, docs, repo, bugs, home, config, init, bin, root, prefix.",
             "Use `npm help <command>` for focused OMC compatibility notes.",
         ],
     )
@@ -3243,6 +3293,7 @@ fn npm_help_topic(topic: &str) -> Option<&'static str> {
         "login" | "adduser" | "add-user" => Some("login"),
         "logout" => Some("logout"),
         "token" => Some("token"),
+        "profile" => Some("profile"),
         "owner" => Some("owner"),
         "access" => Some("access"),
         "org" => Some("org"),
@@ -4245,6 +4296,212 @@ fn print_npm_token(project_dir: &Path, action: NpmTokenAction) -> Result<(), Omc
         }
     }
     Ok(())
+}
+
+fn print_npm_profile(project_dir: &Path, action: NpmProfileAction) -> Result<(), OmcRegistryError> {
+    match action {
+        NpmProfileAction::Get {
+            keys,
+            json,
+            parseable,
+            npm_registry,
+            userconfig,
+        } => {
+            let profile =
+                read_npm_profile(project_dir, npm_registry.as_deref(), userconfig.as_deref())?;
+            print_npm_profile_get(profile, &keys, json, parseable)?;
+        }
+        NpmProfileAction::Set {
+            property,
+            value,
+            json,
+            parseable,
+            npm_registry,
+            userconfig,
+            otp,
+        } => {
+            let result = set_npm_profile_property(
+                project_dir,
+                &property,
+                &value,
+                npm_registry.as_deref(),
+                userconfig.as_deref(),
+                otp.as_deref(),
+            )?;
+            print_npm_profile_set(result, json, parseable)?;
+        }
+    }
+    Ok(())
+}
+
+fn print_npm_profile_get(
+    result: NpmProfileResult,
+    keys: &[String],
+    json: bool,
+    parseable: bool,
+) -> Result<(), OmcRegistryError> {
+    if json {
+        println!("{}", serde_json::to_string_pretty(&result.profile)?);
+        return Ok(());
+    }
+
+    let cleaned = npm_profile_cleaned(&result.profile);
+    if !keys.is_empty() {
+        let values = keys
+            .iter()
+            .flat_map(|key| key.split(','))
+            .map(str::trim)
+            .filter(|key| !key.is_empty())
+            .map(|key| {
+                npm_profile_cleaned_get(&cleaned, key)
+                    .map(npm_profile_display_value)
+                    .unwrap_or_default()
+            })
+            .collect::<Vec<_>>();
+        println!("{}", values.join("\t"));
+    } else if parseable {
+        if let Some(object) = result.profile.as_object() {
+            for (key, value) in object {
+                let display = if key == "tfa" {
+                    npm_profile_cleaned_get(&cleaned, "two-factor auth")
+                        .map(npm_profile_display_value)
+                        .unwrap_or_default()
+                } else {
+                    npm_profile_display_value(value)
+                };
+                println!("{key}\t{display}");
+            }
+        }
+    } else {
+        for (key, value) in cleaned {
+            println!("{key}: {}", npm_profile_display_value(&value));
+        }
+    }
+    Ok(())
+}
+
+fn print_npm_profile_set(
+    result: NpmProfileMutationResult,
+    json: bool,
+    parseable: bool,
+) -> Result<(), OmcRegistryError> {
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                result.property.clone(): result.value.clone(),
+            }))?
+        );
+    } else if parseable {
+        println!(
+            "{}\t{}",
+            result.property,
+            npm_profile_display_value(&result.value)
+        );
+    } else if !result.value.is_null() {
+        println!(
+            "Set {} to {}",
+            result.property,
+            npm_profile_display_value(&result.value)
+        );
+    } else {
+        println!("Set {}", result.property);
+    }
+    Ok(())
+}
+
+fn npm_profile_cleaned(profile: &serde_json::Value) -> Vec<(String, serde_json::Value)> {
+    let mut cleaned = Vec::new();
+    for key in NPM_PROFILE_KNOWN_KEYS {
+        cleaned.push((
+            (*key).to_owned(),
+            profile
+                .get(*key)
+                .cloned()
+                .unwrap_or(serde_json::Value::Null),
+        ));
+    }
+
+    if let Some(object) = profile.as_object() {
+        for (key, value) in object {
+            if npm_profile_cleaned_get(&cleaned, key).is_none()
+                && key != "tfa"
+                && key != "email_verified"
+            {
+                cleaned.push((key.clone(), value.clone()));
+            }
+        }
+    }
+
+    let email = profile
+        .get("email")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
+    let suffix = if profile
+        .get("email_verified")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
+    {
+        " (verified)"
+    } else {
+        "(unverified)"
+    };
+    npm_profile_cleaned_set(
+        &mut cleaned,
+        "email",
+        serde_json::Value::String(format!("{email}{suffix}")),
+    );
+
+    let tfa_mode = profile
+        .get("tfa")
+        .and_then(serde_json::Value::as_object)
+        .filter(|tfa| {
+            !tfa.get("pending")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false)
+        })
+        .and_then(|tfa| tfa.get("mode"))
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("disabled");
+    npm_profile_cleaned_set(
+        &mut cleaned,
+        "two-factor auth",
+        serde_json::Value::String(tfa_mode.to_owned()),
+    );
+    cleaned
+}
+
+fn npm_profile_cleaned_get<'a>(
+    cleaned: &'a [(String, serde_json::Value)],
+    key: &str,
+) -> Option<&'a serde_json::Value> {
+    cleaned
+        .iter()
+        .find(|(candidate, _)| candidate == key)
+        .map(|(_, value)| value)
+}
+
+fn npm_profile_cleaned_set(
+    cleaned: &mut [(String, serde_json::Value)],
+    key: &str,
+    value: serde_json::Value,
+) {
+    if let Some((_, existing)) = cleaned
+        .iter_mut()
+        .find(|(candidate, _)| candidate.as_str() == key)
+    {
+        *existing = value;
+    }
+}
+
+fn npm_profile_display_value(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::Null => String::new(),
+        serde_json::Value::Bool(value) => value.to_string(),
+        serde_json::Value::Number(value) => value.to_string(),
+        serde_json::Value::String(value) => value.clone(),
+        _ => value.to_string(),
+    }
 }
 
 fn print_npm_access(project_dir: &Path, action: NpmAccessAction) -> Result<(), OmcRegistryError> {
@@ -9675,6 +9932,7 @@ fn parse_npm_compat_action(args: &[String]) -> Result<NpmCompatAction, OmcRegist
         "login" | "adduser" | "add-user" => parse_npm_login_args(&args[1..]),
         "logout" => parse_npm_logout_args(&args[1..]),
         "token" => parse_npm_token_args(&args[1..]),
+        "profile" => parse_npm_profile_args(&args[1..]),
         "owner" => parse_npm_owner_args(&args[1..]),
         "access" => parse_npm_access_args(&args[1..]),
         "org" => parse_npm_org_args(&args[1..]),
@@ -9839,6 +10097,7 @@ fn npm_global_arg_supported_by_command(command: &str, arg: &str) -> bool {
                 | "add-user"
                 | "logout"
                 | "token"
+                | "profile"
                 | "owner"
                 | "access"
                 | "org"
@@ -9866,6 +10125,7 @@ fn npm_global_arg_supported_by_command(command: &str, arg: &str) -> bool {
                 | "deprecate"
                 | "undeprecate"
                 | "token"
+                | "profile"
                 | "owner"
                 | "access"
                 | "org"
@@ -9970,6 +10230,7 @@ fn npm_global_arg_supported_by_command(command: &str, arg: &str) -> bool {
                 | "undeprecate"
                 | "logout"
                 | "token"
+                | "profile"
                 | "owner"
                 | "access"
                 | "org"
@@ -10051,6 +10312,7 @@ fn npm_global_arg_supported_by_command(command: &str, arg: &str) -> bool {
                 | "add-user"
                 | "logout"
                 | "token"
+                | "profile"
                 | "owner"
                 | "access"
                 | "org"
@@ -10066,6 +10328,9 @@ fn npm_global_arg_supported_by_command(command: &str, arg: &str) -> bool {
                 | "c"
                 | "get"
         );
+    }
+    if matches!(arg, "--parseable" | "-p") || arg.starts_with("--parseable=") {
+        return matches!(command, "profile" | "org" | "team");
     }
     if matches!(arg, "--depth") || arg.starts_with("--depth=") {
         return matches!(command, "list" | "ls" | "ll" | "la" | "outdated");
@@ -10127,6 +10392,8 @@ fn npm_global_preserved_bool_flag(arg: &str) -> bool {
             | "--no-packages-all"
             | "--bypass-2fa"
             | "--no-bypass-2fa"
+            | "--parseable"
+            | "-p"
             | "--workspaces"
             | "--include-workspace-root"
             | "--package-lock-only"
@@ -10194,6 +10461,7 @@ fn npm_global_preserved_equals_flag(arg: &str) -> bool {
         "--read-only=",
         "--packages-all=",
         "--bypass-2fa=",
+        "--parseable=",
         "--name=",
         "--token-description=",
         "--expires=",
@@ -12115,6 +12383,160 @@ fn parse_npm_token_revoke_args(
             otp,
         },
     })
+}
+
+fn parse_npm_profile_args(args: &[String]) -> Result<NpmCompatAction, OmcRegistryError> {
+    let mut positionals = Vec::new();
+    let mut json = false;
+    let mut parseable = false;
+    let mut npm_registry = None;
+    let mut userconfig = None;
+    let mut otp = None;
+    let mut index = 0;
+    while index < args.len() {
+        let arg = &args[index];
+        if arg == "--json" || arg == "--json=true" {
+            json = true;
+        } else if arg == "--json=false" || arg == "--no-json" {
+            json = false;
+        } else if matches!(arg.as_str(), "--parseable" | "-p" | "--parseable=true") {
+            parseable = true;
+        } else if matches!(arg.as_str(), "--parseable=false" | "--no-parseable") {
+            parseable = false;
+        } else if arg == "--registry" {
+            index += 1;
+            npm_registry = Some(npm_profile_flag_value(args, index, arg)?);
+        } else if let Some(value) = arg.strip_prefix("--registry=") {
+            npm_registry = Some(value.to_owned());
+        } else if arg == "--userconfig" {
+            index += 1;
+            userconfig = Some(PathBuf::from(npm_profile_flag_value(args, index, arg)?));
+        } else if let Some(value) = arg.strip_prefix("--userconfig=") {
+            userconfig = Some(PathBuf::from(value));
+        } else if arg == "--otp" {
+            index += 1;
+            otp = Some(npm_profile_flag_value(args, index, arg)?);
+        } else if let Some(value) = arg.strip_prefix("--otp=") {
+            otp = Some(value.to_owned());
+        } else if matches!(
+            arg.as_str(),
+            "--silent" | "-s" | "--workspaces" | "--include-workspace-root"
+        ) || npm_profile_ignored_equals_flag(arg)
+        {
+        } else if matches!(
+            arg.as_str(),
+            "--loglevel" | "--cache" | "--workspace" | "-w"
+        ) {
+            index += 1;
+            let _ = npm_profile_flag_value(args, index, arg)?;
+        } else if arg.starts_with('-') {
+            return Err(unsupported_compat_arg("npm profile", arg));
+        } else {
+            positionals.push(arg.clone());
+        }
+        index += 1;
+    }
+
+    let Some(command) = positionals.first().map(String::as_str) else {
+        return Err(OmcRegistryError::UnsupportedSpec(
+            "npm profile needs a command".to_owned(),
+        ));
+    };
+
+    match command {
+        "get" => Ok(NpmCompatAction::Profile {
+            action: NpmProfileAction::Get {
+                keys: positionals[1..].to_vec(),
+                json,
+                parseable,
+                npm_registry,
+                userconfig,
+            },
+        }),
+        "set" => parse_npm_profile_set_args(
+            &positionals[1..],
+            json,
+            parseable,
+            npm_registry,
+            userconfig,
+            otp,
+        ),
+        "enable-2fa" | "enable-tfa" | "enable2fa" | "enabletfa" | "disable-2fa" | "disable-tfa"
+        | "disable2fa" | "disabletfa" => Err(OmcRegistryError::UnsupportedSpec(format!(
+            "npm profile {command} is interactive and is not implemented by OMC"
+        ))),
+        other => Err(OmcRegistryError::UnsupportedSpec(format!(
+            "unsupported npm profile command `{other}`"
+        ))),
+    }
+}
+
+fn parse_npm_profile_set_args(
+    args: &[String],
+    json: bool,
+    parseable: bool,
+    npm_registry: Option<String>,
+    userconfig: Option<PathBuf>,
+    otp: Option<String>,
+) -> Result<NpmCompatAction, OmcRegistryError> {
+    let Some(property) = args.first().map(|value| value.to_lowercase()) else {
+        return Err(OmcRegistryError::UnsupportedSpec(
+            "npm profile set <property> <value>".to_owned(),
+        ));
+    };
+    if property == "password" {
+        return Err(OmcRegistryError::UnsupportedSpec(
+            "npm profile set password is interactive and is not implemented by OMC".to_owned(),
+        ));
+    }
+    if !NPM_PROFILE_WRITABLE_KEYS.contains(&property.as_str()) {
+        return Err(OmcRegistryError::UnsupportedSpec(format!(
+            "\"{property}\" is not a property we can set. Valid properties are: {}",
+            NPM_PROFILE_WRITABLE_KEYS.join(", ")
+        )));
+    }
+    let value = args
+        .get(1..)
+        .filter(|values| !values.is_empty())
+        .ok_or_else(|| {
+            OmcRegistryError::UnsupportedSpec("npm profile set <property> <value>".to_owned())
+        })?;
+    Ok(NpmCompatAction::Profile {
+        action: NpmProfileAction::Set {
+            property,
+            value: value.join(" "),
+            json,
+            parseable,
+            npm_registry,
+            userconfig,
+            otp,
+        },
+    })
+}
+
+fn npm_profile_ignored_equals_flag(arg: &str) -> bool {
+    [
+        "--json=",
+        "--loglevel=",
+        "--cache=",
+        "--parseable=",
+        "--workspace=",
+        "-w=",
+        "--workspaces=",
+        "--include-workspace-root=",
+    ]
+    .iter()
+    .any(|prefix| arg.starts_with(prefix))
+}
+
+fn npm_profile_flag_value(
+    args: &[String],
+    index: usize,
+    flag: &str,
+) -> Result<String, OmcRegistryError> {
+    args.get(index)
+        .cloned()
+        .ok_or_else(|| OmcRegistryError::UnsupportedSpec(format!("{flag} needs a value")))
 }
 
 fn parse_npm_owner_args(args: &[String]) -> Result<NpmCompatAction, OmcRegistryError> {
@@ -17295,6 +17717,57 @@ mod tests {
         assert!(
             parse_npm_compat_action(&args(&["token", "create", "--cidr=2001:db8::/32"])).is_err()
         );
+        assert_eq!(
+            parse_npm_compat_action(&args(&[
+                "--json",
+                "--registry",
+                "https://registry.example.invalid/npm",
+                "--userconfig=ci.npmrc",
+                "profile",
+                "get",
+                "name,email",
+                "github",
+            ]))
+            .unwrap(),
+            NpmCompatAction::Profile {
+                action: NpmProfileAction::Get {
+                    keys: vec!["name,email".to_owned(), "github".to_owned()],
+                    json: true,
+                    parseable: false,
+                    npm_registry: Some("https://registry.example.invalid/npm".to_owned()),
+                    userconfig: Some(PathBuf::from("ci.npmrc")),
+                },
+            }
+        );
+        assert_eq!(
+            parse_npm_compat_action(&args(&[
+                "--parseable",
+                "--registry=https://registry.example.invalid/npm",
+                "--userconfig",
+                "ci.npmrc",
+                "--otp",
+                "123456",
+                "profile",
+                "set",
+                "fullname",
+                "Alice",
+                "Example",
+            ]))
+            .unwrap(),
+            NpmCompatAction::Profile {
+                action: NpmProfileAction::Set {
+                    property: "fullname".to_owned(),
+                    value: "Alice Example".to_owned(),
+                    json: false,
+                    parseable: true,
+                    npm_registry: Some("https://registry.example.invalid/npm".to_owned()),
+                    userconfig: Some(PathBuf::from("ci.npmrc")),
+                    otp: Some("123456".to_owned()),
+                },
+            }
+        );
+        assert!(parse_npm_compat_action(&args(&["profile", "set", "name", "alice"])).is_err());
+        assert!(parse_npm_compat_action(&args(&["profile", "enable-2fa"])).is_err());
         assert_eq!(
             parse_npm_compat_action(&args(&[
                 "--json",

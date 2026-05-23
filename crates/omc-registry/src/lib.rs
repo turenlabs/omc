@@ -33,6 +33,9 @@ const ARTIFACT_SCHEMA: u32 = 1;
 const ARTIFACT_SIGNING_KEY: &str = "artifact-ed25519.key";
 const MAX_FILE_BYTES: u64 = 2 * 1024 * 1024;
 const NPM_DIRECT_TARBALL_PLACEHOLDER: &str = "__omc_direct_tarball__";
+const NPM_PROFILE_WRITABLE_KEYS: &[&str] = &[
+    "email", "password", "fullname", "homepage", "freenode", "twitter", "github",
+];
 
 #[derive(Debug, Error)]
 pub enum OmcRegistryError {
@@ -7411,6 +7414,21 @@ pub struct NpmWhoamiResult {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct NpmProfileResult {
+    pub registry: String,
+    pub profile: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct NpmProfileMutationResult {
+    pub registry: String,
+    pub property: String,
+    pub value: serde_json::Value,
+    pub status: u16,
+    pub response: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct NpmTokenListResult {
     pub registry: String,
     pub tokens: Vec<NpmAccessToken>,
@@ -8200,6 +8218,89 @@ pub fn read_npm_whoami(
     Ok(NpmWhoamiResult {
         registry,
         username,
+        response,
+    })
+}
+
+pub fn read_npm_profile(
+    project_dir: &Path,
+    registry_override: Option<&str>,
+    userconfig_override: Option<&Path>,
+) -> Result<NpmProfileResult> {
+    let client = Client::new();
+    let npm_config =
+        read_npm_config_with_overrides(project_dir, registry_override, userconfig_override)?;
+    let registry = ensure_trailing_slash(&npm_config.registry);
+    let url = format!("{registry}-/npm/v1/user");
+    let profile = npm_get(&client, &url, &npm_config)
+        .send()?
+        .error_for_status()?
+        .json::<serde_json::Value>()?;
+    Ok(NpmProfileResult { registry, profile })
+}
+
+pub fn set_npm_profile_property(
+    project_dir: &Path,
+    property: &str,
+    value: &str,
+    registry_override: Option<&str>,
+    userconfig_override: Option<&Path>,
+    otp: Option<&str>,
+) -> Result<NpmProfileMutationResult> {
+    let property = property.trim().to_lowercase();
+    if !NPM_PROFILE_WRITABLE_KEYS.contains(&property.as_str()) {
+        return Err(OmcRegistryError::UnsupportedSpec(format!(
+            "\"{property}\" is not a property we can set"
+        )));
+    }
+    if property == "password" {
+        return Err(OmcRegistryError::UnsupportedSpec(
+            "npm profile set password is interactive and is not implemented by OMC".to_owned(),
+        ));
+    }
+
+    let client = Client::new();
+    let npm_config =
+        read_npm_config_with_overrides(project_dir, registry_override, userconfig_override)?;
+    let registry = ensure_trailing_slash(&npm_config.registry);
+    let url = format!("{registry}-/npm/v1/user");
+    let current = npm_get(&client, &url, &npm_config)
+        .send()?
+        .error_for_status()?
+        .json::<serde_json::Value>()?;
+    let mut body = serde_json::Map::new();
+    for key in NPM_PROFILE_WRITABLE_KEYS {
+        if *key == "password" {
+            continue;
+        }
+        if let Some(value) = current.get(*key) {
+            body.insert((*key).to_owned(), value.clone());
+        }
+    }
+    let new_value = if value.is_empty() {
+        serde_json::Value::Null
+    } else {
+        serde_json::Value::String(value.to_owned())
+    };
+    body.insert(property.clone(), new_value.clone());
+
+    let mut request = npm_post(&client, &url, &npm_config).json(&body);
+    if let Some(otp) = otp.map(str::trim).filter(|otp| !otp.is_empty()) {
+        request = request.header("npm-otp", otp);
+    }
+    let response = request.send()?;
+    response.error_for_status_ref()?;
+    let status = response.status().as_u16();
+    let response = response.json::<serde_json::Value>()?;
+    let value = response
+        .get(&property)
+        .cloned()
+        .unwrap_or_else(|| new_value.clone());
+    Ok(NpmProfileMutationResult {
+        registry,
+        property,
+        value,
+        status,
         response,
     })
 }
@@ -19517,6 +19618,126 @@ wheels = [
                 .and_then(serde_json::Value::as_str),
             Some("alice")
         );
+        handle.join().unwrap();
+    }
+
+    #[test]
+    fn reads_npm_profile_with_userconfig_auth() {
+        use std::io::Write as _;
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let handle = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let buffer = read_http_request_bytes(&mut stream);
+            let body_start = http_body_start(&buffer).unwrap();
+            let headers = String::from_utf8_lossy(&buffer[..body_start]);
+            assert!(headers.starts_with("GET /-/npm/v1/user "));
+            assert!(headers
+                .to_ascii_lowercase()
+                .contains("authorization: bearer registry-token"));
+
+            let body = r#"{"name":"alice","email":"alice@example.invalid","email_verified":true,"tfa":{"pending":false,"mode":"auth-and-writes"},"fullname":"Alice Example","github":"alice"}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+        });
+
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(
+            dir.path().join("ci.npmrc"),
+            format!("registry=http://{addr}/\n//{addr}/:_authToken=registry-token\n"),
+        )
+        .unwrap();
+
+        let profile = read_npm_profile(dir.path(), None, Some(Path::new("ci.npmrc"))).unwrap();
+        assert_eq!(profile.registry, format!("http://{addr}/"));
+        assert_eq!(
+            profile
+                .profile
+                .get("name")
+                .and_then(serde_json::Value::as_str),
+            Some("alice")
+        );
+        assert_eq!(
+            profile
+                .profile
+                .get("tfa")
+                .and_then(|tfa| tfa.get("mode"))
+                .and_then(serde_json::Value::as_str),
+            Some("auth-and-writes")
+        );
+        handle.join().unwrap();
+    }
+
+    #[test]
+    fn sets_npm_profile_property_with_userconfig_auth_and_otp() {
+        use std::io::Write as _;
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let handle = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let buffer = read_http_request_bytes(&mut stream);
+            let body_start = http_body_start(&buffer).unwrap();
+            let headers = String::from_utf8_lossy(&buffer[..body_start]);
+            assert!(headers.starts_with("GET /-/npm/v1/user "));
+            assert!(headers
+                .to_ascii_lowercase()
+                .contains("authorization: bearer registry-token"));
+            let body = r#"{"name":"alice","email":"alice@example.invalid","fullname":"Alice Example","homepage":"","github":"alice"}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+
+            let (mut stream, _) = listener.accept().unwrap();
+            let buffer = read_http_request_bytes(&mut stream);
+            let body_start = http_body_start(&buffer).unwrap();
+            let headers = String::from_utf8_lossy(&buffer[..body_start]);
+            assert!(headers.starts_with("POST /-/npm/v1/user "));
+            let lower = headers.to_ascii_lowercase();
+            assert!(lower.contains("authorization: bearer registry-token"));
+            assert!(lower.contains("npm-otp: 123456"));
+            let body: serde_json::Value = serde_json::from_slice(&buffer[body_start..]).unwrap();
+            assert_eq!(body["email"], "alice@example.invalid");
+            assert_eq!(body["fullname"], "Alice Updated");
+            assert_eq!(body["github"], "alice");
+
+            let response_body = r#"{"name":"alice","email":"alice@example.invalid","fullname":"Alice Updated","homepage":"","github":"alice"}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                response_body.len(),
+                response_body
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+        });
+
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(
+            dir.path().join("ci.npmrc"),
+            format!("registry=http://{addr}/\n//{addr}/:_authToken=registry-token\n"),
+        )
+        .unwrap();
+
+        let result = set_npm_profile_property(
+            dir.path(),
+            "fullname",
+            "Alice Updated",
+            None,
+            Some(Path::new("ci.npmrc")),
+            Some("123456"),
+        )
+        .unwrap();
+        assert_eq!(result.registry, format!("http://{addr}/"));
+        assert_eq!(result.property, "fullname");
+        assert_eq!(result.value, serde_json::json!("Alice Updated"));
+        assert_eq!(result.status, 200);
         handle.join().unwrap();
     }
 
