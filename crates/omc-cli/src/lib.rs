@@ -16,6 +16,7 @@ use omc_registry::{
     Ecosystem, InstallReport, LinkOptions, LockedPackage, OmcRegistryError, PackageSpec,
     PypiBinaryMode, PypiCheckIssue, PythonLocalRequirement, Verdict,
 };
+use sha2::{Digest, Sha256, Sha384, Sha512};
 
 #[derive(Debug, Parser)]
 #[command(name = "omc")]
@@ -317,6 +318,10 @@ enum PipCompatAction {
         specs: Vec<String>,
         files: bool,
     },
+    Hash {
+        algorithm: PipHashAlgorithm,
+        paths: Vec<PathBuf>,
+    },
     Check,
     Freeze,
     List {
@@ -338,6 +343,23 @@ enum PipCompatAction {
     Config {
         action: PipConfigAction,
     },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PipHashAlgorithm {
+    Sha256,
+    Sha384,
+    Sha512,
+}
+
+impl PipHashAlgorithm {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Sha256 => "sha256",
+            Self::Sha384 => "sha384",
+            Self::Sha512 => "sha512",
+        }
+    }
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -1136,6 +1158,9 @@ fn run_pip_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
         PipCompatAction::Show { specs, files } => {
             return print_locked_pip_show(project_dir, &specs, files)
         }
+        PipCompatAction::Hash { algorithm, paths } => {
+            print_pip_hash(project_dir, algorithm, paths)?
+        }
         PipCompatAction::Check => return print_locked_pip_check(project_dir),
         PipCompatAction::Freeze => print_locked_freeze(project_dir)?,
         PipCompatAction::List {
@@ -1578,6 +1603,36 @@ fn print_pip_index_versions(
         println!("Available versions: {}", listing.versions.join(", "));
     }
     Ok(())
+}
+
+fn print_pip_hash(
+    project_dir: &Path,
+    algorithm: PipHashAlgorithm,
+    paths: Vec<PathBuf>,
+) -> Result<(), OmcRegistryError> {
+    for path in paths {
+        let resolved = absolutize_path(project_dir, path.clone());
+        let bytes = fs::read(&resolved)?;
+        println!("{}:", path.display());
+        println!(
+            "--hash={}:{}",
+            algorithm.name(),
+            pip_hash_digest(algorithm, &bytes)
+        );
+    }
+    Ok(())
+}
+
+fn pip_hash_digest(algorithm: PipHashAlgorithm, bytes: &[u8]) -> String {
+    let digest = match algorithm {
+        PipHashAlgorithm::Sha256 => Sha256::digest(bytes).to_vec(),
+        PipHashAlgorithm::Sha384 => Sha384::digest(bytes).to_vec(),
+        PipHashAlgorithm::Sha512 => Sha512::digest(bytes).to_vec(),
+    };
+    digest
+        .into_iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>()
 }
 
 fn print_pip_config(project_dir: &Path, action: PipConfigAction) -> Result<(), OmcRegistryError> {
@@ -3149,6 +3204,7 @@ fn parse_pip_compat_action(args: &[String]) -> Result<PipCompatAction, OmcRegist
         "install" => parse_pip_install_args(&args[1..]),
         "uninstall" | "remove" => parse_pip_uninstall_args(&args[1..]),
         "show" => parse_pip_show_args(&args[1..]),
+        "hash" => parse_pip_hash_args(&args[1..]),
         "check" => {
             parse_pip_check_args(&args[1..])?;
             Ok(PipCompatAction::Check)
@@ -3470,6 +3526,52 @@ fn parse_pip_show_args(args: &[String]) -> Result<PipCompatAction, OmcRegistryEr
         ));
     }
     Ok(PipCompatAction::Show { specs, files })
+}
+
+fn parse_pip_hash_args(args: &[String]) -> Result<PipCompatAction, OmcRegistryError> {
+    let mut algorithm = PipHashAlgorithm::Sha256;
+    let mut paths = Vec::new();
+    let mut index = 0;
+    while index < args.len() {
+        let arg = &args[index];
+        if arg == "-a" || arg == "--algorithm" {
+            index += 1;
+            let Some(value) = args.get(index) else {
+                return Err(OmcRegistryError::UnsupportedSpec(format!(
+                    "{arg} needs a value"
+                )));
+            };
+            algorithm = parse_pip_hash_algorithm(value)?;
+        } else if let Some(value) = arg.strip_prefix("--algorithm=") {
+            algorithm = parse_pip_hash_algorithm(value)?;
+        } else if matches!(
+            arg.as_str(),
+            "--disable-pip-version-check" | "-v" | "--verbose" | "-q" | "--quiet"
+        ) {
+        } else if arg.starts_with('-') {
+            return Err(unsupported_compat_arg("pip hash", arg));
+        } else {
+            paths.push(PathBuf::from(arg));
+        }
+        index += 1;
+    }
+    if paths.is_empty() {
+        return Err(OmcRegistryError::UnsupportedSpec(
+            "pip hash needs at least one file".to_owned(),
+        ));
+    }
+    Ok(PipCompatAction::Hash { algorithm, paths })
+}
+
+fn parse_pip_hash_algorithm(value: &str) -> Result<PipHashAlgorithm, OmcRegistryError> {
+    match value.to_ascii_lowercase().as_str() {
+        "sha256" => Ok(PipHashAlgorithm::Sha256),
+        "sha384" => Ok(PipHashAlgorithm::Sha384),
+        "sha512" => Ok(PipHashAlgorithm::Sha512),
+        other => Err(OmcRegistryError::UnsupportedSpec(format!(
+            "unsupported pip hash algorithm `{other}`"
+        ))),
+    }
 }
 
 fn parse_pip_check_args(args: &[String]) -> Result<(), OmcRegistryError> {
@@ -5115,6 +5217,23 @@ mod tests {
                 specs: vec!["requests".to_owned()],
                 files: true,
             }
+        );
+        assert_eq!(
+            parse_pip_compat_action(&args(&[
+                "hash",
+                "--algorithm",
+                "sha512",
+                "--disable-pip-version-check",
+                "dist/pkg.whl",
+            ]))
+            .unwrap(),
+            PipCompatAction::Hash {
+                algorithm: PipHashAlgorithm::Sha512,
+                paths: vec![PathBuf::from("dist/pkg.whl")],
+            }
+        );
+        assert!(
+            parse_pip_compat_action(&args(&["hash", "--algorithm", "md5", "pkg.whl"])).is_err()
         );
     }
 

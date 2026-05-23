@@ -844,6 +844,7 @@ dependencies = [
  "omc-registry",
  "reqwest",
  "serde_json",
+ "sha2",
  "thiserror",
 ]
 
