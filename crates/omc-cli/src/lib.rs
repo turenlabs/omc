@@ -243,6 +243,7 @@ enum NpmCompatAction {
         command: String,
         name: String,
         args: Vec<String>,
+        if_present: bool,
     },
     Exec {
         command: String,
@@ -748,7 +749,7 @@ fn run_package_script(
     name: &str,
     args: &[String],
 ) -> Result<ExitCode, OmcRegistryError> {
-    run_package_script_with_npm_command(project_dir, "run-script", name, args)
+    run_package_script_with_npm_command(project_dir, "run-script", name, args, false)
 }
 
 fn run_package_script_with_npm_command(
@@ -756,8 +757,12 @@ fn run_package_script_with_npm_command(
     npm_command: &str,
     name: &str,
     args: &[String],
+    if_present: bool,
 ) -> Result<ExitCode, OmcRegistryError> {
     let scripts = read_package_scripts(project_dir)?;
+    if if_present && !scripts.contains_key(name) {
+        return Ok(ExitCode::SUCCESS);
+    }
     let lifecycle = package_script_lifecycle_order(&scripts, name)?;
 
     for lifecycle_name in lifecycle {
@@ -931,7 +936,16 @@ fn run_npm_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
             command,
             name,
             args,
-        } => return run_package_script_with_npm_command(project_dir, &command, &name, &args),
+            if_present,
+        } => {
+            return run_package_script_with_npm_command(
+                project_dir,
+                &command,
+                &name,
+                &args,
+                if_present,
+            )
+        }
         NpmCompatAction::Exec { command, args } => {
             return run_project_command(project_dir, &command, &args)
         }
@@ -1857,18 +1871,31 @@ fn parse_npm_compat_action(args: &[String]) -> Result<NpmCompatAction, OmcRegist
             })
         }
         "run" | "run-script" => {
-            let (name, rest) = split_first_position("npm run", &args[1..])?;
+            let NpmRunArgs {
+                name,
+                args,
+                if_present,
+            } = parse_npm_run_args("npm run", &args[1..], None)?;
             Ok(NpmCompatAction::RunScript {
                 command: command.to_owned(),
                 name,
-                args: rest,
+                args,
+                if_present,
             })
         }
-        "test" | "start" | "stop" | "restart" => Ok(NpmCompatAction::RunScript {
-            command: command.to_owned(),
-            name: command.to_owned(),
-            args: strip_optional_double_dash(&args[1..]),
-        }),
+        "test" | "start" | "stop" | "restart" => {
+            let NpmRunArgs {
+                name,
+                args,
+                if_present,
+            } = parse_npm_run_args(command, &args[1..], Some(command))?;
+            Ok(NpmCompatAction::RunScript {
+                command: command.to_owned(),
+                name,
+                args,
+                if_present,
+            })
+        }
         "exec" | "x" | "npx" => {
             let (command, rest) = parse_npm_exec_args(&args[1..])?;
             Ok(NpmCompatAction::Exec {
@@ -1962,6 +1989,68 @@ fn parse_npm_install_args(args: &[String]) -> Result<NpmCompatAction, OmcRegistr
         allow,
         allow_all_host,
     })
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct NpmRunArgs {
+    name: String,
+    args: Vec<String>,
+    if_present: bool,
+}
+
+fn parse_npm_run_args(
+    command: &str,
+    args: &[String],
+    implicit_name: Option<&str>,
+) -> Result<NpmRunArgs, OmcRegistryError> {
+    let mut name = implicit_name.map(str::to_owned);
+    let mut script_args = Vec::new();
+    let mut if_present = false;
+    let mut index = 0;
+    while index < args.len() {
+        let arg = &args[index];
+        if arg == "--" {
+            script_args.extend(args[index + 1..].iter().cloned());
+            break;
+        } else if matches!(
+            arg.as_str(),
+            "--if-present" | "--silent" | "-s" | "--loglevel=silent"
+        ) {
+            if arg == "--if-present" {
+                if_present = true;
+            }
+        } else if arg == "--loglevel" {
+            index += 1;
+            if args.get(index).is_none() {
+                return Err(OmcRegistryError::UnsupportedSpec(format!(
+                    "{arg} needs a value"
+                )));
+            }
+        } else if npm_run_equals_value_flag(arg) {
+        } else if name.is_none() && !arg.starts_with('-') {
+            name = Some(arg.clone());
+        } else if name.is_some() {
+            script_args.push(arg.clone());
+        } else {
+            return Err(unsupported_compat_arg(command, arg));
+        }
+        index += 1;
+    }
+
+    let Some(name) = name else {
+        return Err(OmcRegistryError::UnsupportedSpec(format!(
+            "{command} needs a target"
+        )));
+    };
+    Ok(NpmRunArgs {
+        name,
+        args: script_args,
+        if_present,
+    })
+}
+
+fn npm_run_equals_value_flag(arg: &str) -> bool {
+    ["--loglevel="].iter().any(|prefix| arg.starts_with(prefix))
 }
 
 fn parse_npm_exec_args(args: &[String]) -> Result<(String, Vec<String>), OmcRegistryError> {
@@ -2795,14 +2884,6 @@ fn split_first_position(
     Ok((name, args))
 }
 
-fn strip_optional_double_dash(args: &[String]) -> Vec<String> {
-    let mut args = args.to_vec();
-    if args.first().map(String::as_str) == Some("--") {
-        args.remove(0);
-    }
-    args
-}
-
 fn unsupported_compat_arg(command: &str, arg: &str) -> OmcRegistryError {
     OmcRegistryError::UnsupportedSpec(format!(
         "{command} does not support compatibility argument `{arg}`"
@@ -3139,6 +3220,7 @@ mod tests {
                 command: "run".to_owned(),
                 name: "test".to_owned(),
                 args: vec!["--watch".to_owned()],
+                if_present: false,
             }
         );
         assert_eq!(
@@ -3147,6 +3229,25 @@ mod tests {
                 command: "test".to_owned(),
                 name: "test".to_owned(),
                 args: vec!["--watch".to_owned()],
+                if_present: false,
+            }
+        );
+        assert_eq!(
+            parse_npm_compat_action(&args(&["run", "--if-present", "--silent", "build"])).unwrap(),
+            NpmCompatAction::RunScript {
+                command: "run".to_owned(),
+                name: "build".to_owned(),
+                args: Vec::new(),
+                if_present: true,
+            }
+        );
+        assert_eq!(
+            parse_npm_compat_action(&args(&["test", "--if-present", "--", "--watch"])).unwrap(),
+            NpmCompatAction::RunScript {
+                command: "test".to_owned(),
+                name: "test".to_owned(),
+                args: vec!["--watch".to_owned()],
+                if_present: true,
             }
         );
         assert_eq!(
@@ -3297,6 +3398,21 @@ mod tests {
             package_script_lifecycle_order(&scripts, "prepare").unwrap(),
             vec!["prepare".to_owned()]
         );
+    }
+
+    #[test]
+    fn npm_run_if_present_allows_missing_script() {
+        let dir = test_dir("npm-run-if-present");
+        fs::write(
+            dir.join("package.json"),
+            r#"{ "scripts": { "test": "true" } }"#,
+        )
+        .unwrap();
+
+        let status = run_package_script_with_npm_command(&dir, "run", "build", &[], true).unwrap();
+
+        assert_eq!(status, ExitCode::SUCCESS);
+        let _ = fs::remove_dir_all(dir);
     }
 
     #[test]

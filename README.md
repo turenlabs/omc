@@ -407,7 +407,9 @@ Supported now:
   `npm_lifecycle_script`, `npm_package_name`, `npm_package_version`,
   `npm_package_config_*`, `npm_package_bin_*`, `npm_package_json`,
   `npm_config_user_agent`, and `INIT_CWD`, and `pre<script>` / `post<script>`
-  lifecycle hooks are executed around the requested script
+  lifecycle hooks are executed around the requested script; common script flags
+  such as `--if-present`, `--silent`, `-s`, and `--loglevel=silent` are
+  understood
 - `omc pip` compatibility commands for common `install`, `uninstall`, `freeze`,
   `check`, `show`, and `list --format=columns|freeze|json` flows, including
   `-r`, index URL, constraints, extra-index, find-links, no-index,
