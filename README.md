@@ -381,14 +381,16 @@ Supported now:
   `prefix`, and `list` / `list --json` flows without delegating to npm, plus a
   direct `npm` compatibility binary; direct local npm tarballs and local
   package directories are accepted as install inputs; `--no-save`,
-  `--package-lock-only`, `--omit=...`, and `--include=...` are understood for
-  install/ci compatibility
+  `--package-lock-only`, `--package-lock=false`, `--omit=...`,
+  `--include=...`, and common audit/fund/peer/install-strategy flags are
+  understood for install/ci compatibility
 - `omc pip` compatibility commands for common `install`, `uninstall`, `freeze`,
   `check`, `show`, and `list --format=columns|freeze|json` flows, including
   `-r`, index URL, constraints, extra-index, find-links, no-index,
-  require-hashes, no-deps, target-directory, trusted-host, and binary-policy
-  install flags without delegating to pip; direct `pip install -e PATH` and
-  `pip install ./path` local directory installs; direct
+  require-hashes, no-deps, target-directory, trusted-host, retry/timeout,
+  reinstall, warning, build-isolation, and binary-policy install flags without
+  delegating to pip; direct `pip install -e PATH` and `pip install ./path`
+  local directory installs; direct
   `pip install ./archive.whl`, `./archive.tar.gz`, and HTTPS archive URL
   installs; and a direct `pip` compatibility binary
 - isolated `omc python` execution that uses OMC site-packages without ambient

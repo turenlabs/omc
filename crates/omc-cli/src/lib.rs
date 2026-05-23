@@ -1538,14 +1538,26 @@ fn parse_npm_install_args(args: &[String]) -> Result<NpmCompatAction, OmcRegistr
     let mut archive_references = Vec::new();
     let mut local_paths = Vec::new();
     let mut filtered = Vec::new();
-    for arg in args {
+    let mut index = 0;
+    while index < args.len() {
+        let arg = &args[index];
         if is_npm_archive_arg(arg) {
             archive_references.push(arg.clone());
+        } else if ignored_npm_value_flag(arg) {
+            filtered.push(arg.clone());
+            index += 1;
+            let Some(value) = args.get(index) else {
+                return Err(OmcRegistryError::UnsupportedSpec(format!(
+                    "{arg} needs a value"
+                )));
+            };
+            filtered.push(value.clone());
         } else if is_npm_local_directory_arg(arg) {
             local_paths.push(npm_local_path_arg(arg)?);
         } else {
             filtered.push(arg.clone());
         }
+        index += 1;
     }
 
     let CommonCompatFlags {
@@ -1764,8 +1776,24 @@ fn parse_pip_install_args(args: &[String]) -> Result<PipCompatAction, OmcRegistr
                 | "--break-system-packages"
                 | "--disable-pip-version-check"
                 | "--no-cache-dir"
-                | "--progress-bar=off"
+                | "--force-reinstall"
+                | "--ignore-installed"
+                | "--no-build-isolation"
+                | "--use-pep517"
+                | "--no-use-pep517"
+                | "--compile"
+                | "--no-compile"
+                | "--no-warn-script-location"
+                | "--no-warn-conflicts"
         ) {
+        } else if pip_ignored_install_value_flag(arg) {
+            index += 1;
+            if args.get(index).is_none() {
+                return Err(OmcRegistryError::UnsupportedSpec(format!(
+                    "{arg} needs a value"
+                )));
+            }
+        } else if pip_ignored_install_equals_flag(arg) {
         } else if is_pip_archive_arg(arg) {
             archive_references.push(arg.clone());
         } else if is_pip_local_directory_arg(arg) {
@@ -1799,6 +1827,33 @@ fn parse_pip_install_args(args: &[String]) -> Result<PipCompatAction, OmcRegistr
         allow,
         allow_all_host,
     })
+}
+
+fn pip_ignored_install_value_flag(arg: &str) -> bool {
+    matches!(
+        arg,
+        "--progress-bar"
+            | "--upgrade-strategy"
+            | "--root-user-action"
+            | "--retries"
+            | "--timeout"
+            | "--exists-action"
+            | "--keyring-provider"
+    )
+}
+
+fn pip_ignored_install_equals_flag(arg: &str) -> bool {
+    [
+        "--progress-bar=",
+        "--upgrade-strategy=",
+        "--root-user-action=",
+        "--retries=",
+        "--timeout=",
+        "--exists-action=",
+        "--keyring-provider=",
+    ]
+    .iter()
+    .any(|prefix| arg.starts_with(prefix))
 }
 
 fn npm_local_path_arg(value: &str) -> Result<PathBuf, OmcRegistryError> {
@@ -1985,6 +2040,13 @@ fn parse_common_compat_flags(
                 if npm_dependency_set_contains(value, "dev") {
                     parsed.omit_dev = false;
                 }
+            } else if ignored_npm_value_flag(arg) {
+                index += 1;
+                if args.get(index).is_none() {
+                    return Err(OmcRegistryError::UnsupportedSpec(format!(
+                        "{arg} needs a value"
+                    )));
+                }
             } else if ignored_compat_flag(npm_mode, arg) {
             } else if arg.starts_with('-') {
                 return Err(unsupported_compat_arg("compatibility command", arg));
@@ -2014,18 +2076,40 @@ fn ignored_compat_flag(npm_mode: bool, arg: &str) -> bool {
         matches!(
             arg,
             "--ignore-scripts"
+                | "--ignore-scripts=false"
                 | "--save-exact"
                 | "--save-optional"
                 | "--save-peer"
                 | "-O"
+                | "--no-fund"
+                | "--fund"
+                | "--fund=false"
+                | "--audit"
                 | "--no-audit"
                 | "--audit=false"
-                | "--fund=false"
+                | "--package-lock"
+                | "--package-lock=true"
+                | "--package-lock=false"
+                | "--foreground-scripts"
                 | "--legacy-peer-deps"
-        )
+                | "--legacy-peer-deps=true"
+                | "--strict-peer-deps"
+                | "--strict-peer-deps=false"
+                | "--engine-strict=false"
+        ) || ignored_npm_equals_flag(arg)
     } else {
         arg == "-y"
     }
+}
+
+fn ignored_npm_value_flag(arg: &str) -> bool {
+    matches!(arg, "--install-strategy" | "--cache")
+}
+
+fn ignored_npm_equals_flag(arg: &str) -> bool {
+    ["--install-strategy=", "--cache="]
+        .iter()
+        .any(|prefix| arg.starts_with(prefix))
 }
 
 fn parse_json_list_flag(command: &str, args: &[String]) -> Result<bool, OmcRegistryError> {
@@ -2257,6 +2341,14 @@ mod tests {
             "install",
             "-D",
             "--omit=dev",
+            "--install-strategy",
+            "hoisted",
+            "--cache=/tmp/npm-cache",
+            "--package-lock=false",
+            "--no-fund",
+            "--legacy-peer-deps=true",
+            "--strict-peer-deps=false",
+            "--foreground-scripts",
             "--allow-all-host",
             "left-pad@1.3.0",
         ]))
@@ -2412,6 +2504,21 @@ mod tests {
             "--trusted-host",
             "mirror.example",
             "--prefer-binary",
+            "--force-reinstall",
+            "--ignore-installed",
+            "--upgrade-strategy",
+            "eager",
+            "--root-user-action=ignore",
+            "--progress-bar",
+            "off",
+            "--retries",
+            "1",
+            "--timeout=5",
+            "--exists-action",
+            "i",
+            "--no-build-isolation",
+            "--no-warn-script-location",
+            "--no-compile",
             "--allow-all-host",
             "requests==2.32.3",
         ]))
