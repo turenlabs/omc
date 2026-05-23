@@ -5,9 +5,10 @@ use std::{env, ffi::OsString};
 use clap::{Parser, Subcommand};
 use omc_cap::Capability;
 use omc_registry::{
-    add_package_graph, init_project, install_locked_packages, install_locked_project,
-    install_project, parse_capability_grant, read_lockfile, read_package_scripts,
-    remove_manifest_dependency, Behavior, LinkOptions, OmcRegistryError, PackageSpec, Verdict,
+    add_manifest_policy_grants, add_package_graph, init_project, install_locked_packages,
+    install_locked_project, install_project, parse_capability_grant, read_lockfile,
+    read_package_scripts, remove_manifest_dependency, Behavior, LinkOptions, OmcRegistryError,
+    PackageSpec, Verdict,
 };
 
 #[derive(Debug, Parser)]
@@ -53,6 +54,11 @@ enum Command {
         allow: Vec<String>,
         #[arg(long, help = "Grant all host capabilities for compatibility testing")]
         allow_all_host: bool,
+    },
+    #[command(about = "Persist capability grants in omc.toml policy")]
+    Allow {
+        #[arg(help = "Capability grants such as http:api.example.com or env:API_TOKEN")]
+        grants: Vec<String>,
     },
     #[command(about = "Resolve omc.toml dependencies and install locked packages")]
     Install {
@@ -190,6 +196,21 @@ fn run() -> Result<ExitCode, OmcRegistryError> {
                 install.node_modules.display(),
                 install.python_site_packages.display()
             );
+        }
+        Command::Allow { grants } => {
+            if grants.is_empty() {
+                return Err(OmcRegistryError::UnsupportedSpec(
+                    "at least one grant is required".to_owned(),
+                ));
+            }
+            let added = add_manifest_policy_grants(&cli.project_dir, &grants)?;
+            if added.is_empty() {
+                println!("policy unchanged");
+            } else {
+                for grant in added {
+                    println!("allowed {grant}");
+                }
+            }
         }
         Command::Install {
             allow,

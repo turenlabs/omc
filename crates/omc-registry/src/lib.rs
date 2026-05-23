@@ -528,6 +528,33 @@ pub fn remove_manifest_dependency(
     Ok(removed)
 }
 
+pub fn add_manifest_policy_grants(
+    project_dir: impl AsRef<Path>,
+    grants: &[String],
+) -> Result<Vec<String>> {
+    let project_dir = project_dir.as_ref();
+    init_project(project_dir, None)?;
+
+    let manifest_path = project_dir.join(MANIFEST);
+    let mut manifest = read_manifest(&manifest_path)?;
+    let mut existing = manifest
+        .policy
+        .allow
+        .iter()
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    let mut added = Vec::new();
+    for grant in grants {
+        let normalized = parse_capability_grant(grant)?.to_string();
+        if existing.insert(normalized.clone()) {
+            added.push(normalized);
+        }
+    }
+    manifest.policy.allow = existing.into_iter().collect();
+    fs::write(&manifest_path, toml::to_string_pretty(&manifest)?)?;
+    Ok(added)
+}
+
 pub fn install_project(options: &LinkOptions) -> Result<InstallReport> {
     init_project(&options.project_dir, None)?;
 
@@ -3642,6 +3669,36 @@ mod tests {
         assert!(removed);
         assert!(manifest.dependencies.is_empty());
         assert_eq!(manifest.policy.allow, vec!["http:api.example.com"]);
+    }
+
+    #[test]
+    fn adds_manifest_policy_grants() {
+        let dir = tempfile::tempdir().unwrap();
+        let added = add_manifest_policy_grants(
+            dir.path(),
+            &[
+                "http:api.example.com".to_owned(),
+                "env:API_TOKEN".to_owned(),
+                "http:api.example.com".to_owned(),
+            ],
+        )
+        .unwrap();
+        let manifest = read_manifest(dir.path().join("omc.toml")).unwrap();
+
+        assert_eq!(
+            added,
+            vec![
+                "http:api.example.com".to_owned(),
+                "env.read:API_TOKEN".to_owned()
+            ]
+        );
+        assert_eq!(
+            manifest.policy.allow,
+            vec![
+                "env.read:API_TOKEN".to_owned(),
+                "http:api.example.com".to_owned()
+            ]
+        );
     }
 
     #[test]
