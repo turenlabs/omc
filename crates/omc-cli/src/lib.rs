@@ -14,20 +14,22 @@ use omc_registry::{
     add_manifest_npm_local_paths, add_manifest_policy_grants, add_npm_dist_tag, add_package_graph,
     apply_pypi_binary_option, check_pypi_lock, compare_npm_versions, compare_pypi_versions,
     create_npm_token, deprecate_npm_package, init_project, install_locked_packages,
-    install_locked_project, install_project, lock_project, parse_capability_grant,
-    parse_npm_direct_archive_reference, parse_pypi_direct_archive_reference,
-    parse_pypi_vcs_requirement, publish_npm_package, read_constraint_files, read_lockfile,
-    read_manifest, read_npm_config_snapshot, read_npm_package_metadata,
-    read_npm_package_metadata_with_userconfig, read_npm_ping_with_userconfig, read_npm_search,
-    read_npm_token_list, read_npm_whoami, read_npm_workspace_packages, read_package_scripts,
-    read_pip_config_snapshot, read_pypi_available_versions, read_requirements_files,
-    remove_manifest_dependency, remove_npm_dist_tag, revoke_npm_token, upload_pypi_distribution,
-    Behavior, Ecosystem, InstallReport, LinkOptions, LockedPackage, LockedPythonVcsDependency,
-    NpmAccessToken, NpmDeprecateResult, NpmDistTagMutationResult, NpmPingResult, NpmPublishPackage,
-    NpmPublishResult, NpmSearchPackage, NpmTokenCreateOptions, NpmTokenCreateResult,
-    NpmTokenListResult, NpmTokenRevokeResult, NpmWhoamiResult, NpmWorkspacePackage,
-    OmcRegistryError, PackageSpec, ProjectRequirements, PypiBinaryMode, PypiCheckIssue,
-    PypiUploadOptions, PypiUploadResult, PythonLocalRequirement, PythonVcsRequirement, Verdict,
+    install_locked_project, install_project, lock_project, mutate_npm_package_owner,
+    parse_capability_grant, parse_npm_direct_archive_reference,
+    parse_pypi_direct_archive_reference, parse_pypi_vcs_requirement, publish_npm_package,
+    read_constraint_files, read_lockfile, read_manifest, read_npm_config_snapshot,
+    read_npm_package_metadata, read_npm_package_metadata_with_userconfig, read_npm_package_owners,
+    read_npm_ping_with_userconfig, read_npm_search, read_npm_token_list, read_npm_whoami,
+    read_npm_workspace_packages, read_package_scripts, read_pip_config_snapshot,
+    read_pypi_available_versions, read_requirements_files, remove_manifest_dependency,
+    remove_npm_dist_tag, revoke_npm_token, upload_pypi_distribution, Behavior, Ecosystem,
+    InstallReport, LinkOptions, LockedPackage, LockedPythonVcsDependency, NpmAccessToken,
+    NpmDeprecateResult, NpmDistTagMutationResult, NpmOwnerListResult, NpmOwnerMutationResult,
+    NpmPingResult, NpmPublishPackage, NpmPublishResult, NpmSearchPackage, NpmTokenCreateOptions,
+    NpmTokenCreateResult, NpmTokenListResult, NpmTokenRevokeResult, NpmWhoamiResult,
+    NpmWorkspacePackage, OmcRegistryError, PackageSpec, ProjectRequirements, PypiBinaryMode,
+    PypiCheckIssue, PypiUploadOptions, PypiUploadResult, PythonLocalRequirement,
+    PythonVcsRequirement, Verdict,
 };
 use sha2::{Digest, Sha256, Sha384, Sha512};
 
@@ -367,6 +369,9 @@ enum NpmCompatAction {
     Token {
         action: NpmTokenAction,
     },
+    Owner {
+        action: NpmOwnerAction,
+    },
     DistTag {
         action: NpmDistTagAction,
     },
@@ -472,6 +477,32 @@ enum NpmDistTagAction {
     Remove {
         spec: String,
         tag: String,
+        npm_registry: Option<String>,
+        userconfig: Option<PathBuf>,
+        otp: Option<String>,
+    },
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum NpmOwnerAction {
+    List {
+        spec: Option<String>,
+        json: bool,
+        npm_registry: Option<String>,
+        userconfig: Option<PathBuf>,
+    },
+    Add {
+        user: String,
+        spec: Option<String>,
+        json: bool,
+        npm_registry: Option<String>,
+        userconfig: Option<PathBuf>,
+        otp: Option<String>,
+    },
+    Remove {
+        user: String,
+        spec: Option<String>,
+        json: bool,
         npm_registry: Option<String>,
         userconfig: Option<PathBuf>,
         otp: Option<String>,
@@ -2071,6 +2102,7 @@ fn run_npm_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
         NpmCompatAction::Login { action } => print_npm_login(project_dir, action)?,
         NpmCompatAction::Logout { action } => print_npm_logout(project_dir, action)?,
         NpmCompatAction::Token { action } => print_npm_token(project_dir, action)?,
+        NpmCompatAction::Owner { action } => print_npm_owner(project_dir, action)?,
         NpmCompatAction::DistTag { action } => print_npm_dist_tag(project_dir, action)?,
         NpmCompatAction::Sbom { action } => print_npm_sbom(project_dir, action)?,
         NpmCompatAction::Config {
@@ -2838,6 +2870,14 @@ fn npm_help_text(topic: Option<&str>) -> String {
                 "OMC does not prompt interactively; pass --password or set NPM_CONFIG_PASSWORD.",
             ],
         ),
+        Some("owner") => npm_command_help(
+            "npm owner <ls|add|rm> ...",
+            &[
+                "List, add, or remove owners for an npm registry package.",
+                "Supports ls [package], add <user> [package], and rm <user> [package].",
+                "Supports --json, --registry, --userconfig, and --otp for owner mutations.",
+            ],
+        ),
         Some("dist-tag") => npm_command_help(
             "npm dist-tag <add|rm|ls> ...",
             &[
@@ -2903,7 +2943,7 @@ fn npm_general_help_text() -> String {
         "npm <command>",
         &[
             "OMC npm compatibility runs supported npm workflows through OMC's verifier, lockfile, cache, and project-local runtime paths.",
-            "Supported commands: install, install-test, ci, install-ci-test, remove, run, test, start, stop, restart, exec, list, explain, audit, outdated, fund, prune, dedupe, rebuild, cache, pkg, version, pack, publish, deprecate, undeprecate, search, ping, whoami, login, adduser, logout, token, dist-tag, sbom, view, docs, repo, bugs, home, config, init, bin, root, prefix.",
+            "Supported commands: install, install-test, ci, install-ci-test, remove, run, test, start, stop, restart, exec, list, explain, audit, outdated, fund, prune, dedupe, rebuild, cache, pkg, version, pack, publish, deprecate, undeprecate, search, ping, whoami, login, adduser, logout, token, owner, dist-tag, sbom, view, docs, repo, bugs, home, config, init, bin, root, prefix.",
             "Use `npm help <command>` for focused OMC compatibility notes.",
         ],
     )
@@ -2947,6 +2987,7 @@ fn npm_help_topic(topic: &str) -> Option<&'static str> {
         "login" | "adduser" | "add-user" => Some("login"),
         "logout" => Some("logout"),
         "token" => Some("token"),
+        "owner" => Some("owner"),
         "dist-tag" | "dist-tags" => Some("dist-tag"),
         "sbom" => Some("sbom"),
         "view" | "info" | "show" | "v" => Some("view"),
@@ -3938,6 +3979,111 @@ fn print_npm_token(project_dir: &Path, action: NpmTokenAction) -> Result<(), Omc
     Ok(())
 }
 
+fn print_npm_owner(project_dir: &Path, action: NpmOwnerAction) -> Result<(), OmcRegistryError> {
+    match action {
+        NpmOwnerAction::List {
+            spec,
+            json,
+            npm_registry,
+            userconfig,
+        } => {
+            let spec = npm_owner_package_spec(project_dir, spec.as_deref())?;
+            let spec = parse_package_spec(&spec, Some(Ecosystem::Npm))?;
+            let result = read_npm_package_owners(
+                project_dir,
+                &spec,
+                npm_registry.as_deref(),
+                userconfig.as_deref(),
+            )?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&result)?);
+            } else {
+                print_npm_owner_list_text(&result);
+            }
+        }
+        NpmOwnerAction::Add {
+            user,
+            spec,
+            json,
+            npm_registry,
+            userconfig,
+            otp,
+        } => {
+            let spec = npm_owner_package_spec(project_dir, spec.as_deref())?;
+            let spec = parse_package_spec(&spec, Some(Ecosystem::Npm))?;
+            let result = mutate_npm_package_owner(
+                project_dir,
+                &spec,
+                &user,
+                true,
+                npm_registry.as_deref(),
+                userconfig.as_deref(),
+                otp.as_deref(),
+            )?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&result)?);
+            } else {
+                print_npm_owner_mutation_text(&result);
+            }
+        }
+        NpmOwnerAction::Remove {
+            user,
+            spec,
+            json,
+            npm_registry,
+            userconfig,
+            otp,
+        } => {
+            let spec = npm_owner_package_spec(project_dir, spec.as_deref())?;
+            let spec = parse_package_spec(&spec, Some(Ecosystem::Npm))?;
+            let result = mutate_npm_package_owner(
+                project_dir,
+                &spec,
+                &user,
+                false,
+                npm_registry.as_deref(),
+                userconfig.as_deref(),
+                otp.as_deref(),
+            )?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&result)?);
+            } else {
+                print_npm_owner_mutation_text(&result);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn print_npm_owner_list_text(result: &NpmOwnerListResult) {
+    if result.owners.is_empty() {
+        println!("no admin found");
+        return;
+    }
+    for owner in &result.owners {
+        println!("{}", npm_owner_text(owner));
+    }
+}
+
+fn print_npm_owner_mutation_text(result: &NpmOwnerMutationResult) {
+    if result.changed {
+        let prefix = if result.added { '+' } else { '-' };
+        println!("{prefix} {} ({})", result.user, result.package);
+    } else if result.added {
+        println!("{} is already an owner of {}", result.user, result.package);
+    } else {
+        println!("{} is not an owner of {}", result.user, result.package);
+    }
+}
+
+fn npm_owner_text(owner: &omc_registry::NpmSearchUser) -> String {
+    let username = owner.username.as_deref().unwrap_or_default();
+    match owner.email.as_deref() {
+        Some(email) if !email.is_empty() => format!("{username} <{email}>"),
+        _ => username.to_owned(),
+    }
+}
+
 fn print_npm_dist_tag(
     project_dir: &Path,
     action: NpmDistTagAction,
@@ -4036,6 +4182,22 @@ fn npm_dist_tag_package_spec(
     let Some(name) = package.get("name").and_then(serde_json::Value::as_str) else {
         return Err(OmcRegistryError::UnsupportedSpec(
             "npm dist-tag ls needs a package or package.json name".to_owned(),
+        ));
+    };
+    Ok(name.to_owned())
+}
+
+fn npm_owner_package_spec(
+    project_dir: &Path,
+    spec: Option<&str>,
+) -> Result<String, OmcRegistryError> {
+    if let Some(spec) = spec {
+        return Ok(spec.to_owned());
+    }
+    let package = read_npm_pkg_json(&project_dir.join("package.json"))?;
+    let Some(name) = package.get("name").and_then(serde_json::Value::as_str) else {
+        return Err(OmcRegistryError::UnsupportedSpec(
+            "npm owner needs a package or package.json name".to_owned(),
         ));
     };
     Ok(name.to_owned())
@@ -8573,6 +8735,7 @@ fn parse_npm_compat_action(args: &[String]) -> Result<NpmCompatAction, OmcRegist
         "login" | "adduser" | "add-user" => parse_npm_login_args(&args[1..]),
         "logout" => parse_npm_logout_args(&args[1..]),
         "token" => parse_npm_token_args(&args[1..]),
+        "owner" => parse_npm_owner_args(&args[1..]),
         "dist-tag" | "dist-tags" => parse_npm_dist_tag_args(&args[1..]),
         "sbom" => parse_npm_sbom_args(&args[1..]),
         "view" | "info" | "show" | "v" => parse_npm_view_args(&args[1..]),
@@ -8732,6 +8895,7 @@ fn npm_global_arg_supported_by_command(command: &str, arg: &str) -> bool {
                 | "add-user"
                 | "logout"
                 | "token"
+                | "owner"
                 | "dist-tag"
                 | "dist-tags"
                 | "sbom"
@@ -8754,6 +8918,7 @@ fn npm_global_arg_supported_by_command(command: &str, arg: &str) -> bool {
                 | "deprecate"
                 | "undeprecate"
                 | "token"
+                | "owner"
                 | "dist-tag"
                 | "dist-tags"
         );
@@ -8847,6 +9012,7 @@ fn npm_global_arg_supported_by_command(command: &str, arg: &str) -> bool {
                 | "undeprecate"
                 | "logout"
                 | "token"
+                | "owner"
                 | "dist-tag"
                 | "dist-tags"
         );
@@ -8864,6 +9030,7 @@ fn npm_global_arg_supported_by_command(command: &str, arg: &str) -> bool {
                 | "stop"
                 | "restart"
                 | "fund"
+                | "owner"
                 | "publish"
                 | "dist-tag"
                 | "dist-tags"
@@ -8882,6 +9049,7 @@ fn npm_global_arg_supported_by_command(command: &str, arg: &str) -> bool {
                 | "stop"
                 | "restart"
                 | "fund"
+                | "owner"
                 | "publish"
                 | "dist-tag"
                 | "dist-tags"
@@ -8919,6 +9087,7 @@ fn npm_global_arg_supported_by_command(command: &str, arg: &str) -> bool {
                 | "add-user"
                 | "logout"
                 | "token"
+                | "owner"
                 | "dist-tag"
                 | "dist-tags"
                 | "view"
@@ -10877,6 +11046,147 @@ fn parse_npm_token_revoke_args(
             otp,
         },
     })
+}
+
+fn parse_npm_owner_args(args: &[String]) -> Result<NpmCompatAction, OmcRegistryError> {
+    let mut positionals = Vec::new();
+    let mut json = false;
+    let mut npm_registry = None;
+    let mut userconfig = None;
+    let mut otp = None;
+    let mut index = 0;
+    while index < args.len() {
+        let arg = &args[index];
+        if arg == "--json" || arg == "--json=true" {
+            json = true;
+        } else if arg == "--json=false" {
+            json = false;
+        } else if arg == "--registry" {
+            index += 1;
+            npm_registry = Some(npm_owner_flag_value(args, index, arg)?);
+        } else if let Some(value) = arg.strip_prefix("--registry=") {
+            npm_registry = Some(value.to_owned());
+        } else if arg == "--userconfig" {
+            index += 1;
+            userconfig = Some(PathBuf::from(npm_owner_flag_value(args, index, arg)?));
+        } else if let Some(value) = arg.strip_prefix("--userconfig=") {
+            userconfig = Some(PathBuf::from(value));
+        } else if arg == "--otp" {
+            index += 1;
+            otp = Some(npm_owner_flag_value(args, index, arg)?);
+        } else if let Some(value) = arg.strip_prefix("--otp=") {
+            otp = Some(value.to_owned());
+        } else if matches!(
+            arg.as_str(),
+            "--silent" | "-s" | "--parseable" | "-p" | "--workspaces" | "--include-workspace-root"
+        ) || npm_owner_ignored_equals_flag(arg)
+        {
+        } else if matches!(arg.as_str(), "--loglevel" | "--workspace" | "-w") {
+            index += 1;
+            let _ = npm_owner_flag_value(args, index, arg)?;
+        } else if arg.starts_with('-') {
+            return Err(unsupported_compat_arg("npm owner", arg));
+        } else {
+            positionals.push(arg.clone());
+        }
+        index += 1;
+    }
+
+    match positionals.first().map(String::as_str) {
+        Some("ls" | "list") => {
+            positionals.remove(0);
+            if positionals.len() > 1 {
+                return Err(unsupported_compat_arg("npm owner ls", &positionals[1]));
+            }
+            Ok(NpmCompatAction::Owner {
+                action: NpmOwnerAction::List {
+                    spec: positionals.pop(),
+                    json,
+                    npm_registry,
+                    userconfig,
+                },
+            })
+        }
+        Some("add") => {
+            positionals.remove(0);
+            let Some(user) = positionals.first().cloned() else {
+                return Err(OmcRegistryError::UnsupportedSpec(
+                    "npm owner add needs a username".to_owned(),
+                ));
+            };
+            let spec = positionals.get(1).cloned();
+            if positionals.len() > 2 {
+                return Err(unsupported_compat_arg("npm owner add", &positionals[2]));
+            }
+            Ok(NpmCompatAction::Owner {
+                action: NpmOwnerAction::Add {
+                    user,
+                    spec,
+                    json,
+                    npm_registry,
+                    userconfig,
+                    otp,
+                },
+            })
+        }
+        Some("rm" | "remove" | "delete" | "del") => {
+            positionals.remove(0);
+            let Some(user) = positionals.first().cloned() else {
+                return Err(OmcRegistryError::UnsupportedSpec(
+                    "npm owner rm needs a username".to_owned(),
+                ));
+            };
+            let spec = positionals.get(1).cloned();
+            if positionals.len() > 2 {
+                return Err(unsupported_compat_arg("npm owner rm", &positionals[2]));
+            }
+            Ok(NpmCompatAction::Owner {
+                action: NpmOwnerAction::Remove {
+                    user,
+                    spec,
+                    json,
+                    npm_registry,
+                    userconfig,
+                    otp,
+                },
+            })
+        }
+        Some(other) => Err(OmcRegistryError::UnsupportedSpec(format!(
+            "unsupported npm owner command `{other}`"
+        ))),
+        None => Ok(NpmCompatAction::Owner {
+            action: NpmOwnerAction::List {
+                spec: None,
+                json,
+                npm_registry,
+                userconfig,
+            },
+        }),
+    }
+}
+
+fn npm_owner_ignored_equals_flag(arg: &str) -> bool {
+    [
+        "--json=",
+        "--loglevel=",
+        "--parseable=",
+        "--workspace=",
+        "-w=",
+        "--workspaces=",
+        "--include-workspace-root=",
+    ]
+    .iter()
+    .any(|prefix| arg.starts_with(prefix))
+}
+
+fn npm_owner_flag_value(
+    args: &[String],
+    index: usize,
+    flag: &str,
+) -> Result<String, OmcRegistryError> {
+    args.get(index)
+        .cloned()
+        .ok_or_else(|| OmcRegistryError::UnsupportedSpec(format!("{flag} needs a value")))
 }
 
 fn parse_npm_dist_tag_args(args: &[String]) -> Result<NpmCompatAction, OmcRegistryError> {
@@ -15110,6 +15420,66 @@ mod tests {
         assert!(
             parse_npm_compat_action(&args(&["token", "create", "--cidr=2001:db8::/32"])).is_err()
         );
+        assert_eq!(
+            parse_npm_compat_action(&args(&[
+                "--json",
+                "--registry",
+                "https://registry.example.invalid/npm",
+                "--userconfig=ci.npmrc",
+                "owner",
+                "ls",
+                "left-pad",
+            ]))
+            .unwrap(),
+            NpmCompatAction::Owner {
+                action: NpmOwnerAction::List {
+                    spec: Some("left-pad".to_owned()),
+                    json: true,
+                    npm_registry: Some("https://registry.example.invalid/npm".to_owned()),
+                    userconfig: Some(PathBuf::from("ci.npmrc")),
+                },
+            }
+        );
+        assert_eq!(
+            parse_npm_compat_action(&args(&[
+                "--registry",
+                "https://registry.example.invalid/npm",
+                "--userconfig",
+                "ci.npmrc",
+                "--otp",
+                "123456",
+                "owner",
+                "add",
+                "alice",
+                "@scope/pkg",
+                "--json",
+            ]))
+            .unwrap(),
+            NpmCompatAction::Owner {
+                action: NpmOwnerAction::Add {
+                    user: "alice".to_owned(),
+                    spec: Some("@scope/pkg".to_owned()),
+                    json: true,
+                    npm_registry: Some("https://registry.example.invalid/npm".to_owned()),
+                    userconfig: Some(PathBuf::from("ci.npmrc")),
+                    otp: Some("123456".to_owned()),
+                },
+            }
+        );
+        assert_eq!(
+            parse_npm_compat_action(&args(&["owner", "rm", "alice", "left-pad"])).unwrap(),
+            NpmCompatAction::Owner {
+                action: NpmOwnerAction::Remove {
+                    user: "alice".to_owned(),
+                    spec: Some("left-pad".to_owned()),
+                    json: false,
+                    npm_registry: None,
+                    userconfig: None,
+                    otp: None,
+                },
+            }
+        );
+        assert!(parse_npm_compat_action(&args(&["owner", "add"])).is_err());
         assert_eq!(
             parse_npm_compat_action(&args(&[
                 "--registry",

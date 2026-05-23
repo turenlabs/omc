@@ -7465,6 +7465,26 @@ pub struct NpmDistTagMutationResult {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct NpmOwnerListResult {
+    pub registry: String,
+    pub package: String,
+    pub owners: Vec<NpmSearchUser>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct NpmOwnerMutationResult {
+    pub registry: String,
+    pub package: String,
+    pub user: String,
+    pub added: bool,
+    pub changed: bool,
+    pub owners: Vec<NpmSearchUser>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<u16>,
+    pub response: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct NpmDeprecateResult {
     pub registry: String,
     pub package: String,
@@ -7613,7 +7633,7 @@ pub struct NpmSearchPackage {
 pub struct NpmSearchUser {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub email: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, alias = "name", skip_serializing_if = "Option::is_none")]
     pub username: Option<String>,
 }
 
@@ -8372,6 +8392,222 @@ pub fn remove_npm_dist_tag(
         version: None,
         status,
         response,
+    })
+}
+
+pub fn read_npm_package_owners(
+    project_dir: &Path,
+    spec: &PackageSpec,
+    registry_override: Option<&str>,
+    userconfig_override: Option<&Path>,
+) -> Result<NpmOwnerListResult> {
+    if spec.ecosystem != Ecosystem::Npm || spec.direct_url.is_some() {
+        return Err(OmcRegistryError::UnsupportedSpec(spec.requested()));
+    }
+    let (package, _) = npm_registry_name_and_requirement(spec)?;
+    let client = Client::new();
+    let npm_config =
+        read_npm_config_with_overrides(project_dir, registry_override, userconfig_override)?;
+    let registry = ensure_trailing_slash(npm_config.registry_for(&package));
+    let packument = npm_owner_packument(&client, &registry, &package, &npm_config)?;
+    let owners = npm_packument_maintainers(&packument)?;
+    Ok(NpmOwnerListResult {
+        registry,
+        package,
+        owners,
+    })
+}
+
+pub fn mutate_npm_package_owner(
+    project_dir: &Path,
+    spec: &PackageSpec,
+    user: &str,
+    added: bool,
+    registry_override: Option<&str>,
+    userconfig_override: Option<&Path>,
+    otp: Option<&str>,
+) -> Result<NpmOwnerMutationResult> {
+    if spec.ecosystem != Ecosystem::Npm || spec.direct_url.is_some() {
+        return Err(OmcRegistryError::UnsupportedSpec(spec.requested()));
+    }
+    let user = user.trim();
+    if user.is_empty() {
+        return Err(OmcRegistryError::UnsupportedSpec(
+            "npm owner mutation needs a username".to_owned(),
+        ));
+    }
+    let (package, _) = npm_registry_name_and_requirement(spec)?;
+    let client = Client::new();
+    let npm_config =
+        read_npm_config_with_overrides(project_dir, registry_override, userconfig_override)?;
+    let registry = ensure_trailing_slash(npm_config.registry_for(&package));
+    let user_doc = npm_owner_user(&client, &registry, user, &npm_config)?;
+    let username = user_doc.username.clone().ok_or_else(|| {
+        OmcRegistryError::UnsupportedSpec(format!("npm owner user `{user}` did not include a name"))
+    })?;
+
+    let packument = npm_owner_packument(&client, &registry, &package, &npm_config)?;
+    let package_id = packument
+        .get("_id")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or(&package)
+        .to_owned();
+    let revision = packument
+        .get("_rev")
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| {
+            OmcRegistryError::UnsupportedSpec(format!(
+                "npm registry response for `{package}` did not include _rev"
+            ))
+        })?
+        .to_owned();
+    let owners = npm_packument_maintainers(&packument)?;
+    let existing = owners
+        .iter()
+        .any(|owner| owner.username.as_deref() == Some(username.as_str()));
+    let (changed, owners) = if added {
+        if existing {
+            (false, owners)
+        } else {
+            let mut owners = owners;
+            owners.push(user_doc);
+            owners.sort_by(|left, right| left.username.cmp(&right.username));
+            (true, owners)
+        }
+    } else if !existing {
+        (false, owners)
+    } else {
+        let owners = owners
+            .into_iter()
+            .filter(|owner| owner.username.as_deref() != Some(username.as_str()))
+            .collect::<Vec<_>>();
+        if owners.is_empty() {
+            return Err(OmcRegistryError::UnsupportedSpec(
+                "Cannot remove all owners of a package. Add someone else first.".to_owned(),
+            ));
+        }
+        (true, owners)
+    };
+
+    if !changed {
+        return Ok(NpmOwnerMutationResult {
+            registry,
+            package,
+            user: username.clone(),
+            added,
+            changed,
+            owners,
+            status: None,
+            response: serde_json::json!({ "changed": false }),
+        });
+    }
+
+    let encoded = urlencoding::encode(&package);
+    let url = format!(
+        "{}{}/-rev/{}",
+        registry,
+        encoded,
+        urlencoding::encode(&revision)
+    );
+    if npm_config.auth_token_for_url(&url).is_none() {
+        return Err(OmcRegistryError::UnsupportedSpec(
+            "npm owner needs authentication; run npm login or configure a registry _authToken"
+                .to_owned(),
+        ));
+    }
+    let body = serde_json::json!({
+        "_id": package_id,
+        "_rev": revision,
+        "maintainers": owners.iter().map(npm_owner_json).collect::<Vec<_>>(),
+    });
+    let mut request = npm_put(&client, &url, &npm_config).json(&body);
+    if let Some(otp) = otp.map(str::trim).filter(|otp| !otp.is_empty()) {
+        request = request.header("npm-otp", otp);
+    }
+    let response = request.send()?;
+    response.error_for_status_ref()?;
+    let status = response.status().as_u16();
+    let response = npm_optional_json_response(response)?;
+    Ok(NpmOwnerMutationResult {
+        registry,
+        package,
+        user: username,
+        added,
+        changed,
+        owners,
+        status: Some(status),
+        response,
+    })
+}
+
+fn npm_owner_packument(
+    client: &Client,
+    registry: &str,
+    package: &str,
+    npm_config: &NpmConfig,
+) -> Result<serde_json::Value> {
+    let encoded = urlencoding::encode(package);
+    let url = format!("{}{}?write=true", registry, encoded);
+    Ok(npm_get(client, &url, npm_config)
+        .send()?
+        .error_for_status()?
+        .json::<serde_json::Value>()?)
+}
+
+fn npm_owner_user(
+    client: &Client,
+    registry: &str,
+    user: &str,
+    npm_config: &NpmConfig,
+) -> Result<NpmSearchUser> {
+    let url = format!(
+        "{}-/user/org.couchdb.user:{}",
+        registry,
+        urlencoding::encode(user)
+    );
+    let value = npm_get(client, &url, npm_config)
+        .send()?
+        .error_for_status()?
+        .json::<serde_json::Value>()?;
+    let mut user = serde_json::from_value::<NpmSearchUser>(value)?;
+    if user
+        .username
+        .as_deref()
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .is_none()
+    {
+        user.username = None;
+    }
+    Ok(user)
+}
+
+fn npm_packument_maintainers(packument: &serde_json::Value) -> Result<Vec<NpmSearchUser>> {
+    let Some(maintainers) = packument.get("maintainers") else {
+        return Ok(Vec::new());
+    };
+    let maintainers = maintainers.as_array().ok_or_else(|| {
+        OmcRegistryError::UnsupportedSpec(
+            "npm registry response maintainers field was not an array".to_owned(),
+        )
+    })?;
+    let mut owners = Vec::new();
+    for maintainer in maintainers {
+        let owner = serde_json::from_value::<NpmSearchUser>(maintainer.clone())?;
+        if owner.username.as_deref().unwrap_or_default().is_empty() {
+            continue;
+        }
+        owners.push(owner);
+    }
+    owners.sort_by(|left, right| left.username.cmp(&right.username));
+    Ok(owners)
+}
+
+fn npm_owner_json(owner: &NpmSearchUser) -> serde_json::Value {
+    serde_json::json!({
+        "name": owner.username,
+        "email": owner.email,
     })
 }
 
@@ -18174,6 +18410,138 @@ wheels = [
         assert_eq!(result.versions, vec!["1.0.0", "1.1.0"]);
         assert_eq!(result.status, Some(200));
         assert_eq!(result.response["ok"], true);
+        handle.join().unwrap();
+    }
+
+    #[test]
+    fn reads_and_mutates_npm_owners_with_userconfig_auth_and_otp() {
+        use std::io::Write as _;
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let handle = std::thread::spawn(move || {
+            let packument = r#"{
+              "_id": "demo-pkg",
+              "_rev": "1-abc",
+              "name": "demo-pkg",
+              "maintainers": [
+                {"name": "alice", "email": "alice@example.invalid"},
+                {"name": "bob", "email": "bob@example.invalid"}
+              ],
+              "versions": {"1.0.0": {"name": "demo-pkg", "version": "1.0.0"}}
+            }"#;
+
+            let (mut stream, _) = listener.accept().unwrap();
+            let buffer = read_http_request_bytes(&mut stream);
+            let body_start = http_body_start(&buffer).unwrap();
+            let headers = String::from_utf8_lossy(&buffer[..body_start]);
+            assert!(headers.starts_with("GET /demo-pkg?write=true "));
+            assert!(headers
+                .to_ascii_lowercase()
+                .contains("authorization: bearer registry-token"));
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                packument.len(),
+                packument
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+
+            let (mut stream, _) = listener.accept().unwrap();
+            let buffer = read_http_request_bytes(&mut stream);
+            let body_start = http_body_start(&buffer).unwrap();
+            let headers = String::from_utf8_lossy(&buffer[..body_start]);
+            assert!(headers.starts_with("GET /-/user/org.couchdb.user:carol "));
+            assert!(headers
+                .to_ascii_lowercase()
+                .contains("authorization: bearer registry-token"));
+            let user = r#"{"name":"carol","email":"carol@example.invalid"}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                user.len(),
+                user
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+
+            let (mut stream, _) = listener.accept().unwrap();
+            let buffer = read_http_request_bytes(&mut stream);
+            let body_start = http_body_start(&buffer).unwrap();
+            let headers = String::from_utf8_lossy(&buffer[..body_start]);
+            assert!(headers.starts_with("GET /demo-pkg?write=true "));
+            assert!(headers
+                .to_ascii_lowercase()
+                .contains("authorization: bearer registry-token"));
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                packument.len(),
+                packument
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+
+            let (mut stream, _) = listener.accept().unwrap();
+            let buffer = read_http_request_bytes(&mut stream);
+            let body_start = http_body_start(&buffer).unwrap();
+            let headers = String::from_utf8_lossy(&buffer[..body_start]);
+            assert!(headers.starts_with("PUT /demo-pkg/-rev/1-abc "));
+            let lower = headers.to_ascii_lowercase();
+            assert!(lower.contains("authorization: bearer registry-token"));
+            assert!(lower.contains("npm-otp: 123456"));
+            let body: serde_json::Value = serde_json::from_slice(&buffer[body_start..]).unwrap();
+            assert_eq!(body["_id"], "demo-pkg");
+            assert_eq!(body["_rev"], "1-abc");
+            assert_eq!(
+                body["maintainers"],
+                serde_json::json!([
+                    {"name": "alice", "email": "alice@example.invalid"},
+                    {"name": "bob", "email": "bob@example.invalid"},
+                    {"name": "carol", "email": "carol@example.invalid"}
+                ])
+            );
+            let response_body = r#"{"ok":true}"#;
+            let response = format!(
+                "HTTP/1.1 201 Created\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                response_body.len(),
+                response_body
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+        });
+
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(
+            dir.path().join("ci.npmrc"),
+            format!("registry=http://{addr}/\n//{addr}/:_authToken=registry-token\n"),
+        )
+        .unwrap();
+
+        let spec = PackageSpec::parse("npm:demo-pkg").unwrap();
+        let owners =
+            read_npm_package_owners(dir.path(), &spec, None, Some(Path::new("ci.npmrc"))).unwrap();
+        assert_eq!(owners.registry, format!("http://{addr}/"));
+        assert_eq!(owners.package, "demo-pkg");
+        assert_eq!(owners.owners.len(), 2);
+        assert_eq!(owners.owners[0].username.as_deref(), Some("alice"));
+        assert_eq!(
+            owners.owners[0].email.as_deref(),
+            Some("alice@example.invalid")
+        );
+
+        let mutation = mutate_npm_package_owner(
+            dir.path(),
+            &spec,
+            "carol",
+            true,
+            None,
+            Some(Path::new("ci.npmrc")),
+            Some("123456"),
+        )
+        .unwrap();
+        assert_eq!(mutation.registry, format!("http://{addr}/"));
+        assert_eq!(mutation.package, "demo-pkg");
+        assert_eq!(mutation.user, "carol");
+        assert!(mutation.added);
+        assert!(mutation.changed);
+        assert_eq!(mutation.status, Some(201));
+        assert_eq!(mutation.owners.len(), 3);
+        assert_eq!(mutation.response["ok"], true);
         handle.join().unwrap();
     }
 
