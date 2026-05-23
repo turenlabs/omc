@@ -369,10 +369,17 @@ enum NpmPkgAction {
 
 #[derive(Debug, PartialEq, Eq)]
 struct NpmPackAction {
-    packages: Vec<PathBuf>,
+    packages: Vec<NpmPackInput>,
     destination: PathBuf,
     json: bool,
     dry_run: bool,
+    npm_registry: Option<String>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum NpmPackInput {
+    Local(PathBuf),
+    Registry(String),
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -2650,14 +2657,25 @@ fn print_npm_pack(project_dir: &Path, action: NpmPackAction) -> Result<(), OmcRe
         fs::create_dir_all(&destination)?;
     }
     let package_roots = if action.packages.is_empty() {
-        vec![PathBuf::from(".")]
+        vec![NpmPackInput::Local(PathBuf::from("."))]
     } else {
         action.packages
     };
     let mut results = Vec::new();
-    for package_root in package_roots {
-        let root = absolutize_path(project_dir, package_root);
-        let result = npm_pack_package(&root, &destination, action.dry_run)?;
+    for package in package_roots {
+        let result = match package {
+            NpmPackInput::Local(package_root) => {
+                let root = absolutize_path(project_dir, package_root);
+                npm_pack_package(&root, &destination, action.dry_run)?
+            }
+            NpmPackInput::Registry(spec) => npm_pack_registry_package(
+                project_dir,
+                &spec,
+                &destination,
+                action.dry_run,
+                action.npm_registry.as_deref(),
+            )?,
+        };
         if !action.json {
             println!("{}", result.filename);
         }
@@ -2675,6 +2693,63 @@ fn print_npm_pack(project_dir: &Path, action: NpmPackAction) -> Result<(), OmcRe
         );
     }
     Ok(())
+}
+
+fn npm_pack_registry_package(
+    project_dir: &Path,
+    spec: &str,
+    destination: &Path,
+    dry_run: bool,
+    npm_registry: Option<&str>,
+) -> Result<NpmPackResult, OmcRegistryError> {
+    let spec = parse_package_spec(spec, Some(Ecosystem::Npm))?;
+    let metadata = read_npm_package_metadata(project_dir, &spec, npm_registry)?;
+    let tarball_url = npm_view_field_value(&metadata, "dist.tarball")
+        .and_then(|value| value.as_str().map(str::to_owned))
+        .ok_or_else(|| OmcRegistryError::MissingArtifact(metadata.name.clone()))?;
+    let bytes = reqwest::blocking::get(&tarball_url)?
+        .error_for_status()?
+        .bytes()?
+        .to_vec();
+    let filename = npm_pack_filename(&metadata.name, &metadata.version);
+    let files = npm_packed_files_from_tarball(&bytes)?;
+    let unpacked_size = files.iter().map(|file| file.size).sum();
+    let size = if dry_run {
+        0
+    } else {
+        fs::write(destination.join(&filename), &bytes)?;
+        bytes.len() as u64
+    };
+    Ok(NpmPackResult {
+        id: format!("{}@{}", metadata.name, metadata.version),
+        name: metadata.name,
+        version: metadata.version,
+        filename,
+        size,
+        unpacked_size,
+        files,
+    })
+}
+
+fn npm_packed_files_from_tarball(bytes: &[u8]) -> Result<Vec<NpmPackedFile>, OmcRegistryError> {
+    let decoder = flate2::read::GzDecoder::new(std::io::Cursor::new(bytes));
+    let mut archive = tar::Archive::new(decoder);
+    let mut files = Vec::new();
+    for entry in archive.entries()? {
+        let entry = entry?;
+        if !entry.header().entry_type().is_file() {
+            continue;
+        }
+        let size = entry.size();
+        let path = entry.path()?.to_string_lossy().into_owned();
+        let path = path
+            .strip_prefix("package/")
+            .unwrap_or(path.as_str())
+            .to_owned();
+        files.push(NpmPackedFile { path, size });
+    }
+    files.sort_by(|left, right| left.path.cmp(&right.path));
+    Ok(files)
 }
 
 #[derive(Debug)]
@@ -4599,6 +4674,7 @@ fn npm_global_arg_supported_by_command(command: &str, arg: &str) -> bool {
                 | "upgrade"
                 | "ci"
                 | "outdated"
+                | "pack"
                 | "view"
                 | "info"
                 | "show"
@@ -4622,6 +4698,7 @@ fn npm_global_arg_supported_by_command(command: &str, arg: &str) -> bool {
                 | "outdated"
                 | "audit"
                 | "pkg"
+                | "pack"
                 | "view"
                 | "info"
                 | "show"
@@ -5173,6 +5250,7 @@ fn parse_npm_pack_args(args: &[String]) -> Result<NpmCompatAction, OmcRegistryEr
     let mut json = false;
     let mut dry_run = false;
     let mut packages = Vec::new();
+    let mut npm_registry = None;
     let mut index = 0;
     while index < args.len() {
         let arg = &args[index];
@@ -5191,6 +5269,16 @@ fn parse_npm_pack_args(args: &[String]) -> Result<NpmCompatAction, OmcRegistryEr
             destination = PathBuf::from(path);
         } else if let Some(path) = arg.strip_prefix("--pack-destination=") {
             destination = PathBuf::from(path);
+        } else if arg == "--registry" {
+            index += 1;
+            let Some(registry) = args.get(index) else {
+                return Err(OmcRegistryError::UnsupportedSpec(
+                    "--registry needs a URL".to_owned(),
+                ));
+            };
+            npm_registry = Some(registry.clone());
+        } else if let Some(registry) = arg.strip_prefix("--registry=") {
+            npm_registry = Some(registry.to_owned());
         } else if npm_pack_ignored_value_flag(arg) {
             index += 1;
             if args.get(index).is_none() {
@@ -5202,11 +5290,9 @@ fn parse_npm_pack_args(args: &[String]) -> Result<NpmCompatAction, OmcRegistryEr
         } else if arg.starts_with('-') {
             return Err(unsupported_compat_arg("npm pack", arg));
         } else if npm_pack_local_package_arg(arg) {
-            packages.push(PathBuf::from(arg));
+            packages.push(NpmPackInput::Local(PathBuf::from(arg)));
         } else {
-            return Err(OmcRegistryError::UnsupportedSpec(format!(
-                "npm pack registry spec `{arg}` is not supported by OMC compatibility yet"
-            )));
+            packages.push(NpmPackInput::Registry(arg.clone()));
         }
         index += 1;
     }
@@ -5216,6 +5302,7 @@ fn parse_npm_pack_args(args: &[String]) -> Result<NpmCompatAction, OmcRegistryEr
             destination,
             json,
             dry_run,
+            npm_registry,
         },
     })
 }
@@ -7991,14 +8078,31 @@ mod tests {
             .unwrap(),
             NpmCompatAction::Pack {
                 action: NpmPackAction {
-                    packages: vec![PathBuf::from(".")],
+                    packages: vec![NpmPackInput::Local(PathBuf::from("."))],
                     destination: PathBuf::from("dist"),
                     json: true,
                     dry_run: true,
+                    npm_registry: None,
                 },
             }
         );
-        assert!(parse_npm_compat_action(&args(&["pack", "left-pad@1.3.0"])).is_err());
+        assert_eq!(
+            parse_npm_compat_action(&args(&[
+                "--registry=https://registry.example.invalid/npm",
+                "pack",
+                "left-pad@1.3.0",
+            ]))
+            .unwrap(),
+            NpmCompatAction::Pack {
+                action: NpmPackAction {
+                    packages: vec![NpmPackInput::Registry("left-pad@1.3.0".to_owned())],
+                    destination: PathBuf::from("."),
+                    json: false,
+                    dry_run: false,
+                    npm_registry: Some("https://registry.example.invalid/npm".to_owned()),
+                },
+            }
+        );
         assert_eq!(
             parse_npm_compat_action(&args(&[
                 "prune",
@@ -8385,6 +8489,7 @@ mod tests {
                 destination: PathBuf::from("dist"),
                 json: false,
                 dry_run: false,
+                npm_registry: None,
             },
         )
         .unwrap();
@@ -8422,6 +8527,7 @@ mod tests {
                 destination: PathBuf::from("dry"),
                 json: true,
                 dry_run: true,
+                npm_registry: None,
             },
         )
         .unwrap();

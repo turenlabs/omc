@@ -130,6 +130,7 @@ cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm cache verify
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm pkg get name version
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm version patch --no-git-tag-version
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm pack --pack-destination dist
+cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm pack left-pad@1.3.0 --pack-destination dist
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm view left-pad version
 cargo run -p omc-cli --bin npx -- --omc-project-dir /tmp/omc-demo eslint -- .
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm root
@@ -425,7 +426,8 @@ Supported now:
   and `outdated` / `outdated --json` flows without delegating to npm, plus a direct
   `npm` compatibility binary and direct `npx` compatibility binary for
   project-local executable flows; direct local npm tarballs and local package
-  directories are accepted as install/update inputs; common `npm exec` / `npx`
+  directories are accepted as install/update inputs; `npm pack` supports local
+  package directories and registry specs; common `npm exec` / `npx`
   flags such as `--yes`,
   `--package`, `--cache`, and `--registry` are parsed before dispatching to
   project-local executables; `--no-save`,
