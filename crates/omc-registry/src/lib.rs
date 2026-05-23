@@ -40,9 +40,7 @@ pub enum OmcRegistryError {
     BlockedPackage { spec: String },
     #[error("registry response did not include a downloadable artifact for {0}")]
     MissingArtifact(String),
-    #[error(
-        "registry response did not include a compatible PyPI wheel for {0}; source distributions are not built by this prototype"
-    )]
+    #[error("registry response did not include a compatible PyPI archive for {0}")]
     MissingCompatibleWheel(String),
     #[error("could not resolve a version for {name} matching `{requirement}`")]
     UnsatisfiedRequirement { name: String, requirement: String },
@@ -2734,7 +2732,12 @@ fn pipfile_table_requirement(
         if path.is_dir() {
             return Ok(Some(PypiProjectRequirement::LocalPath(path)));
         }
-        if path.extension().and_then(|ext| ext.to_str()) == Some("whl") {
+        if path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .map(is_pypi_archive_filename)
+            .unwrap_or(false)
+        {
             let url = reqwest::Url::from_file_path(&path)
                 .map_err(|_| OmcRegistryError::UnsupportedRequirement(name.to_owned()))?;
             return Ok(Some(PypiProjectRequirement::Spec(
@@ -2748,7 +2751,7 @@ fn pipfile_table_requirement(
             )));
         }
         return Err(OmcRegistryError::UnsupportedRequirement(format!(
-            "Pipfile local path `{}` must point to an existing directory or wheel",
+            "Pipfile local path `{}` must point to an existing directory, wheel, or .tar.gz sdist",
             path.display()
         )));
     }
@@ -2773,9 +2776,9 @@ fn pipfile_file_requirement(
 ) -> Result<Option<PypiProjectRequirement>> {
     let extras = normalized_pypi_extras(extras);
     if file.contains("://") {
-        if !file.to_ascii_lowercase().contains(".whl") {
+        if !is_pypi_archive_reference(file) {
             return Err(OmcRegistryError::UnsupportedRequirement(format!(
-                "Pipfile file dependency `{file}` must be a wheel"
+                "Pipfile file dependency `{file}` must be a wheel or .tar.gz sdist"
             )));
         }
         return Ok(Some(PypiProjectRequirement::Spec(
@@ -2790,9 +2793,14 @@ fn pipfile_file_requirement(
     }
 
     let path = resolved_local_path(file, base_dir);
-    if path.extension().and_then(|ext| ext.to_str()) != Some("whl") {
+    if !path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .map(is_pypi_archive_filename)
+        .unwrap_or(false)
+    {
         return Err(OmcRegistryError::UnsupportedRequirement(format!(
-            "Pipfile file dependency `{}` must be a wheel",
+            "Pipfile file dependency `{}` must be a wheel or .tar.gz sdist",
             path.display()
         )));
     }
@@ -4085,7 +4093,7 @@ fn poetry_dependency_requirement(
                 )));
             }
             if let Some(path) = table.file.as_deref() {
-                return poetry_local_wheel_dependency_spec(name, path, base_dir)
+                return poetry_local_archive_dependency_spec(name, path, base_dir)
                     .map(PoetryDependencyRequirement::Spec)
                     .map(Some);
             }
@@ -4110,7 +4118,12 @@ fn poetry_local_path_dependency(
     base_dir: &Path,
 ) -> Result<PoetryDependencyRequirement> {
     let path = resolved_local_path(path, base_dir);
-    if path.extension().and_then(|ext| ext.to_str()) == Some("whl") {
+    if path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .map(is_pypi_archive_filename)
+        .unwrap_or(false)
+    {
         let url = reqwest::Url::from_file_path(&path).map_err(|_| {
             OmcRegistryError::UnsupportedSpec(format!(
                 "unsupported Poetry dependency source for `{name}`"
@@ -4143,13 +4156,18 @@ fn resolved_local_path(path: &str, base_dir: &Path) -> PathBuf {
     }
 }
 
-fn poetry_local_wheel_dependency_spec(
+fn poetry_local_archive_dependency_spec(
     name: &str,
     path: &str,
     base_dir: &Path,
 ) -> Result<PackageSpec> {
     let path = resolved_local_path(path, base_dir);
-    if path.extension().and_then(|ext| ext.to_str()) != Some("whl") {
+    if !path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .map(is_pypi_archive_filename)
+        .unwrap_or(false)
+    {
         return Err(OmcRegistryError::UnsupportedSpec(format!(
             "unsupported Poetry dependency source for `{name}`"
         )));
@@ -4382,7 +4400,7 @@ fn read_requirements_file_inner(
         }
 
         if let Some((spec, hashes)) =
-            parse_pypi_local_wheel_requirement(&parsed.requirement, base_dir)?
+            parse_pypi_local_archive_requirement(&parsed.requirement, base_dir)?
         {
             if mode == RequirementsMode::Constraint {
                 return Err(OmcRegistryError::UnsupportedRequirement(line.to_owned()));
@@ -6639,7 +6657,7 @@ fn pypi_local_find_link_candidates(
         return Ok(Vec::new());
     }
     if source.extension().and_then(|ext| ext.to_str()) == Some("whl") {
-        return Ok(pypi_local_wheel_candidate(source, package, target_python)
+        return Ok(pypi_local_archive_candidate(source, package, target_python)
             .into_iter()
             .collect());
     }
@@ -6649,7 +6667,7 @@ fn pypi_local_find_link_candidates(
         .map(is_python_sdist_filename)
         .unwrap_or(false)
     {
-        return Ok(pypi_local_wheel_candidate(source, package, target_python)
+        return Ok(pypi_local_archive_candidate(source, package, target_python)
             .into_iter()
             .collect());
     }
@@ -6671,7 +6689,7 @@ fn pypi_local_find_link_candidates(
     Ok(candidates)
 }
 
-fn pypi_local_wheel_candidate(
+fn pypi_local_archive_candidate(
     path: &Path,
     package: &str,
     target_python: Option<&str>,
@@ -7461,7 +7479,7 @@ fn parse_pypi_local_direct_requirement(
     if name.is_empty() {
         return Ok(None);
     }
-    let Some((url, hashes, _)) = local_wheel_url_and_hashes(path.trim(), base_dir)? else {
+    let Some((url, hashes, _)) = local_pypi_archive_url_and_hashes(path.trim(), base_dir)? else {
         return Ok(None);
     };
     Ok(Some((
@@ -7588,7 +7606,7 @@ fn parse_pypi_local_direct_path_requirement(
         return Ok(None);
     }
     let (path, _) = direct_requirement_url_and_hashes(path.trim());
-    if path.contains("://") || path.to_ascii_lowercase().ends_with(".whl") {
+    if path.contains("://") || is_pypi_archive_reference(&path) {
         return Ok(None);
     }
     let path = resolved_local_path(&path, base_dir);
@@ -7610,7 +7628,7 @@ fn parse_pypi_local_path_requirement(
 
     if !looks_like_local_path_requirement(requirement_body)
         || requirement_body.contains("://")
-        || requirement_body.to_ascii_lowercase().ends_with(".whl")
+        || is_pypi_archive_reference(requirement_body)
     {
         return Ok(None);
     }
@@ -7648,15 +7666,20 @@ fn pypi_direct_reference_applies(requirement: &str, active_extras: &BTreeSet<Str
     requirement.contains(" @ ")
 }
 
-fn parse_pypi_local_wheel_requirement(
+fn parse_pypi_local_archive_requirement(
     requirement: &str,
     base_dir: &Path,
 ) -> Result<Option<(PackageSpec, BTreeSet<String>)>> {
-    let Some((url, hashes, filename)) = local_wheel_url_and_hashes(requirement.trim(), base_dir)?
+    let Some((url, hashes, filename)) =
+        local_pypi_archive_url_and_hashes(requirement.trim(), base_dir)?
     else {
         return Ok(None);
     };
-    let Some((name, _version)) = parse_wheel_name_and_version(&filename) else {
+    let name = if let Some((name, _version)) = parse_wheel_name_and_version(&filename) {
+        name
+    } else if let Some((name, _version)) = parse_sdist_name_and_version(&filename) {
+        name
+    } else {
         return Ok(None);
     };
     Ok(Some((
@@ -7665,12 +7688,12 @@ fn parse_pypi_local_wheel_requirement(
     )))
 }
 
-fn local_wheel_url_and_hashes(
+fn local_pypi_archive_url_and_hashes(
     value: &str,
     base_dir: &Path,
 ) -> Result<Option<(String, BTreeSet<String>, String)>> {
     let (path, hashes) = direct_requirement_url_and_hashes(value);
-    if path.contains("://") || !path.to_ascii_lowercase().ends_with(".whl") {
+    if path.contains("://") || !is_pypi_archive_reference(&path) {
         return Ok(None);
     }
 
@@ -7688,6 +7711,20 @@ fn local_wheel_url_and_hashes(
     let url = reqwest::Url::from_file_path(&path)
         .map_err(|_| OmcRegistryError::UnsupportedRequirement(value.to_owned()))?;
     Ok(Some((url.to_string(), hashes, filename)))
+}
+
+fn is_pypi_archive_reference(value: &str) -> bool {
+    let (value, _) = direct_requirement_url_and_hashes(value.trim());
+    let filename = value
+        .rsplit_once('/')
+        .map(|(_, filename)| filename)
+        .unwrap_or(&value);
+    is_pypi_archive_filename(filename)
+}
+
+fn is_pypi_archive_filename(filename: &str) -> bool {
+    let lower = filename.to_ascii_lowercase();
+    lower.ends_with(".whl") || is_python_sdist_filename(&lower)
 }
 
 fn direct_requirement_url_and_hashes(url: &str) -> (String, BTreeSet<String>) {
@@ -11171,10 +11208,12 @@ setup(name="setup-py-root")
             .path()
             .join("wheels")
             .join("local_idna-3.7-py3-none-any.whl");
+        let sdist = dir.path().join("wheels").join("local_source-1.0.0.tar.gz");
         fs::create_dir_all(&local_pkg).unwrap();
         fs::create_dir_all(&dev_local).unwrap();
         fs::create_dir_all(wheel.parent().unwrap()).unwrap();
         fs::write(&wheel, b"not a real wheel").unwrap();
+        fs::write(&sdist, b"not a real sdist").unwrap();
         fs::write(
             &pipfile,
             r#"
@@ -11198,6 +11237,7 @@ setup(name="setup-py-root")
             old-python-only = { version = "==0.1.0", markers = "python_version < '2'" }
             localpkg = { path = "localpkg", editable = true }
             local-idna = { file = "wheels/local_idna-3.7-py3-none-any.whl" }
+            local-source = { file = "wheels/local_source-1.0.0.tar.gz" }
             any-version = "*"
 
             [dev-packages]
@@ -11232,6 +11272,16 @@ setup(name="setup-py-root")
             .as_deref()
             .unwrap()
             .ends_with("local_idna-3.7-py3-none-any.whl"));
+        let local_source = production
+            .specs
+            .iter()
+            .find(|spec| spec.name == "local-source")
+            .unwrap();
+        assert!(local_source
+            .direct_url
+            .as_deref()
+            .unwrap()
+            .ends_with("local_source-1.0.0.tar.gz"));
         assert_eq!(
             production.pypi_index_url.as_deref(),
             Some("https://pypi.org/simple/")
@@ -11941,7 +11991,7 @@ wheels = [
     }
 
     #[test]
-    fn reads_local_wheel_requirements() {
+    fn reads_local_pypi_archive_requirements() {
         let dir = tempfile::tempdir().unwrap();
         let wheels = dir.path().join("wheels");
         fs::create_dir_all(&wheels).unwrap();
@@ -11955,10 +12005,12 @@ wheels = [
             b"not a real wheel",
         )
         .unwrap();
+        fs::write(wheels.join("source_pkg-1.0.0.tar.gz"), b"not a real sdist").unwrap();
+        fs::write(wheels.join("bare_pkg-2.0.0.tgz"), b"not a real sdist").unwrap();
         let requirements = dir.path().join("requirements.txt");
         fs::write(
             &requirements,
-            "idna @ ./wheels/idna-3.7-py3-none-any.whl#sha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa --hash=sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\n./wheels/typing_extensions-4.12.2-py3-none-any.whl\n",
+            "idna @ ./wheels/idna-3.7-py3-none-any.whl#sha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa --hash=sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\nsource-pkg @ ./wheels/source_pkg-1.0.0.tar.gz#sha256=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\n./wheels/typing_extensions-4.12.2-py3-none-any.whl\n./wheels/bare_pkg-2.0.0.tgz\n",
         )
         .unwrap();
 
@@ -11979,11 +12031,29 @@ wheels = [
             .iter()
             .any(|spec| spec.name == "typing-extensions"
                 && spec.direct_url.as_deref().unwrap().starts_with("file://")));
+        assert!(discovered.specs.iter().any(|spec| spec.name == "source-pkg"
+            && spec
+                .direct_url
+                .as_deref()
+                .unwrap()
+                .ends_with("/wheels/source_pkg-1.0.0.tar.gz")));
+        assert!(discovered.specs.iter().any(|spec| spec.name == "bare-pkg"
+            && spec
+                .direct_url
+                .as_deref()
+                .unwrap()
+                .ends_with("/wheels/bare_pkg-2.0.0.tgz")));
         assert_eq!(
             discovered.hashes.get("pypi:idna").cloned().unwrap(),
             BTreeSet::from([
                 "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_owned(),
                 "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_owned()
+            ])
+        );
+        assert_eq!(
+            discovered.hashes.get("pypi:source-pkg").cloned().unwrap(),
+            BTreeSet::from([
+                "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc".to_owned()
             ])
         );
     }
@@ -12056,18 +12126,29 @@ wheels = [
     }
 
     #[test]
-    fn reads_local_find_links_wheel_candidates() {
+    fn reads_local_find_links_archive_candidates() {
         let dir = tempfile::tempdir().unwrap();
         let wheel = dir.path().join("idna-3.7-py3-none-any.whl");
+        let sdist = dir.path().join("idna-3.6.tar.gz");
         fs::write(&wheel, b"not a real wheel").unwrap();
+        fs::write(&sdist, b"not a real sdist").unwrap();
 
         let candidates =
             pypi_local_find_link_candidates(dir.path(), "idna", Some("3.11.0")).unwrap();
-        assert_eq!(candidates.len(), 1);
-        assert_eq!(candidates[0].filename, "idna-3.7-py3-none-any.whl");
-        assert_eq!(candidates[0].version, "3.7");
-        assert_eq!(candidates[0].local_path.as_deref(), Some(wheel.as_path()));
-        assert!(candidates[0].url.starts_with("file://"));
+        assert_eq!(candidates.len(), 2);
+        let wheel_candidate = candidates
+            .iter()
+            .find(|candidate| !candidate.sdist)
+            .unwrap();
+        assert_eq!(wheel_candidate.filename, "idna-3.7-py3-none-any.whl");
+        assert_eq!(wheel_candidate.version, "3.7");
+        assert_eq!(wheel_candidate.local_path.as_deref(), Some(wheel.as_path()));
+        assert!(wheel_candidate.url.starts_with("file://"));
+        let sdist_candidate = candidates.iter().find(|candidate| candidate.sdist).unwrap();
+        assert_eq!(sdist_candidate.filename, "idna-3.6.tar.gz");
+        assert_eq!(sdist_candidate.version, "3.6");
+        assert_eq!(sdist_candidate.local_path.as_deref(), Some(sdist.as_path()));
+        assert!(sdist_candidate.url.starts_with("file://"));
     }
 
     #[test]
@@ -12216,6 +12297,7 @@ wheels = [
             .path()
             .join("wheels")
             .join("local_idna-3.7-py3-none-any.whl");
+        let sdist = dir.path().join("wheels").join("local_source-1.0.0.tar.gz");
         fs::create_dir_all(wheel.parent().unwrap()).unwrap();
         fs::create_dir_all(dir.path().join("vendor/local-package")).unwrap();
         fs::create_dir_all(dir.path().join("vendor/uv-local")).unwrap();
@@ -12232,6 +12314,7 @@ wheels = [
         )
         .unwrap();
         fs::write(&wheel, b"not a real wheel").unwrap();
+        fs::write(&sdist, b"not a real sdist").unwrap();
         fs::write(
             &pyproject,
             r#"
@@ -12239,6 +12322,7 @@ wheels = [
             dependencies = [
                 "idna==3.7",
                 "local-idna @ ./wheels/local_idna-3.7-py3-none-any.whl#sha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "local-source @ ./wheels/local_source-1.0.0.tar.gz",
                 "local-package @ ./vendor/local-package",
                 "uv-local",
                 "ws-local",
@@ -12277,6 +12361,12 @@ wheels = [
         assert!(!base.specs.iter().any(|spec| spec.name == "colorama"));
         assert!(base.specs.iter().any(|spec| spec.name == "local-idna"
             && spec.direct_url.as_deref().unwrap().starts_with("file://")));
+        assert!(base.specs.iter().any(|spec| spec.name == "local-source"
+            && spec
+                .direct_url
+                .as_deref()
+                .unwrap()
+                .ends_with("/wheels/local_source-1.0.0.tar.gz")));
         assert_eq!(
             base.hashes.get("pypi:local-idna").cloned().unwrap(),
             BTreeSet::from([
@@ -12469,15 +12559,18 @@ wheels = [
             .path()
             .join("wheels")
             .join("local_idna-3.7-py3-none-any.whl");
+        let sdist = dir.path().join("wheels").join("local_source-1.0.0.tar.gz");
         fs::create_dir_all(wheel.parent().unwrap()).unwrap();
         fs::create_dir_all(dir.path().join("vendor/local-package")).unwrap();
         fs::write(&wheel, b"not a real wheel").unwrap();
+        fs::write(&sdist, b"not a real sdist").unwrap();
         fs::write(
             &pyproject,
             r#"
             [tool.poetry.dependencies]
             idna = { url = "https://example.invalid/idna-3.7-py3-none-any.whl" }
             local-idna = { path = "wheels/local_idna-3.7-py3-none-any.whl" }
+            local-source = { path = "wheels/local_source-1.0.0.tar.gz" }
             local-package = { path = "vendor/local-package", develop = true }
             "#,
         )
@@ -12505,6 +12598,16 @@ wheels = [
             .as_deref()
             .unwrap()
             .ends_with("local_idna-3.7-py3-none-any.whl"));
+        let local_source = requirements
+            .specs
+            .iter()
+            .find(|spec| spec.name == "local-source")
+            .unwrap();
+        assert!(local_source
+            .direct_url
+            .as_deref()
+            .unwrap()
+            .ends_with("local_source-1.0.0.tar.gz"));
         assert_eq!(
             requirements.python_local_paths,
             vec![dir.path().join("vendor/local-package")]
