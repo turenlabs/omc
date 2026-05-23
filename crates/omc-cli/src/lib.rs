@@ -11405,12 +11405,6 @@ fn print_locked_pip_outdated(
     find_links: Vec<String>,
     no_index: bool,
 ) -> Result<(), OmcRegistryError> {
-    if format == PipListFormat::Freeze {
-        return Err(OmcRegistryError::UnsupportedSpec(
-            "pip list --outdated does not support --format=freeze".to_owned(),
-        ));
-    }
-
     let lock = read_lockfile(project_dir.join("omc.lock"))?;
     let mut rows = Vec::new();
     for package in lock
@@ -11470,7 +11464,11 @@ fn print_locked_pip_outdated(
                 .collect::<Vec<_>>();
             println!("{}", serde_json::to_string_pretty(&packages)?);
         }
-        PipListFormat::Freeze => unreachable!("freeze format rejected before listing"),
+        PipListFormat::Freeze => {
+            for row in rows {
+                println!("{}=={}", row.name, row.version);
+            }
+        }
     }
     Ok(())
 }
@@ -19656,11 +19654,6 @@ fn parse_pip_list_args(args: &[String]) -> Result<PipCompatAction, OmcRegistryEr
         }
         index += 1;
     }
-    if outdated && format == PipListFormat::Freeze {
-        return Err(OmcRegistryError::UnsupportedSpec(
-            "pip list --outdated does not support --format=freeze".to_owned(),
-        ));
-    }
     Ok(PipCompatAction::List {
         format,
         outdated,
@@ -24195,6 +24188,17 @@ verdict = "accepted"
             }
         );
         assert_eq!(
+            parse_pip_compat_action(&args(&["list", "--outdated", "--format=freeze"])).unwrap(),
+            PipCompatAction::List {
+                format: PipListFormat::Freeze,
+                outdated: true,
+                index_url: None,
+                extra_index_urls: Vec::new(),
+                find_links: Vec::new(),
+                no_index: false,
+            }
+        );
+        assert_eq!(
             parse_pip_compat_action(&args(&[
                 "index",
                 "versions",
@@ -24216,9 +24220,6 @@ verdict = "accepted"
             }
         );
         assert!(parse_pip_compat_action(&args(&["index", "foo", "requests"])).is_err());
-        assert!(
-            parse_pip_compat_action(&args(&["list", "--outdated", "--format=freeze"])).is_err()
-        );
         assert_eq!(
             parse_pip_compat_action(&args(&[
                 "config",

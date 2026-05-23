@@ -215,6 +215,7 @@ cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip list --format=
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip inspect
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip debug --verbose
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip list --outdated --format=json
+cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip list --outdated --format=freeze
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip index versions requests
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip hash ./dist/local_pkg-1.0.0-py3-none-any.whl
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip cache list
@@ -537,7 +538,8 @@ Supported now:
 - `omc pip` compatibility commands for common `install`, `uninstall`, `freeze`,
   `download`, `check`, `debug`, `help`, `inspect`, `show`, `hash`, `cache dir/list/remove/purge`,
   `wheel`, `index versions`, `config get/set/unset/list`, and
-  `list --format=columns|freeze|json` flows, including `pip list --outdated`,
+  `list --format=columns|freeze|json` flows, including `pip list --outdated`
+  with columns, JSON, and freeze output,
   `-r`, index URL,
   constraints, extra-index, find-links, no-index,
   require-hashes, no-deps, target-directory, trusted-host, retry/timeout,
