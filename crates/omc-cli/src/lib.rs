@@ -12,7 +12,7 @@ use omc_registry::{
     apply_pypi_binary_option, check_pypi_lock, compare_npm_versions, compare_pypi_versions,
     init_project, install_locked_packages, install_locked_project, install_project, lock_project,
     parse_capability_grant, parse_npm_direct_archive_reference,
-    parse_pypi_direct_archive_reference, read_constraint_files, read_lockfile,
+    parse_pypi_direct_archive_reference, read_constraint_files, read_lockfile, read_manifest,
     read_npm_config_snapshot, read_npm_package_metadata, read_package_scripts,
     read_pip_config_snapshot, read_pypi_available_versions, read_requirements_files,
     remove_manifest_dependency, Behavior, Ecosystem, InstallReport, LinkOptions, LockedPackage,
@@ -271,6 +271,10 @@ enum NpmCompatAction {
         kind: NpmPathKind,
     },
     List {
+        json: bool,
+    },
+    Explain {
+        specs: Vec<String>,
         json: bool,
     },
     Outdated {
@@ -1145,6 +1149,9 @@ fn run_npm_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
         NpmCompatAction::List { json } => {
             print_locked_packages(project_dir, Some(Ecosystem::Npm), json)?
         }
+        NpmCompatAction::Explain { specs, json } => {
+            return print_npm_explain(project_dir, &specs, json)
+        }
         NpmCompatAction::Outdated {
             json,
             parseable,
@@ -1784,6 +1791,146 @@ fn npm_outdated_dependent(project_dir: &Path) -> String {
         .and_then(|name| name.to_str())
         .unwrap_or("omc-project")
         .to_owned()
+}
+
+#[derive(Debug)]
+struct NpmExplainPackage {
+    name: String,
+    version: String,
+    location: PathBuf,
+    dependents: Vec<String>,
+}
+
+fn print_npm_explain(
+    project_dir: &Path,
+    specs: &[String],
+    json: bool,
+) -> Result<ExitCode, OmcRegistryError> {
+    let targets = specs
+        .iter()
+        .map(|spec| npm_explain_requested_name(spec))
+        .collect::<Result<BTreeSet<_>, _>>()?;
+    let lock = read_lockfile(project_dir.join("omc.lock"))?;
+    let packages = lock
+        .packages
+        .iter()
+        .filter(|package| package.ecosystem == Ecosystem::Npm)
+        .collect::<Vec<_>>();
+    let root_dependencies = npm_root_dependency_names(project_dir)?;
+    let root = npm_outdated_dependent(project_dir);
+    let mut rows = Vec::new();
+
+    for package in packages.iter().copied() {
+        if !targets.contains(&package.name) {
+            continue;
+        }
+        let mut dependents = BTreeSet::new();
+        if root_dependencies.contains(&package.name) {
+            dependents.insert(root.clone());
+        }
+        for parent in &packages {
+            if parent.name == package.name && parent.version == package.version {
+                continue;
+            }
+            if npm_lock_package_depends_on(parent, &package.name) {
+                dependents.insert(format!("{}@{}", parent.name, parent.version));
+            }
+        }
+        let dependents = if dependents.is_empty() {
+            vec!["omc.lock".to_owned()]
+        } else {
+            dependents.into_iter().collect()
+        };
+        rows.push(NpmExplainPackage {
+            name: package.name.clone(),
+            version: package.version.clone(),
+            location: npm_outdated_location(project_dir, &package.name),
+            dependents,
+        });
+    }
+
+    rows.sort_by(|left, right| {
+        (left.name.as_str(), left.version.as_str())
+            .cmp(&(right.name.as_str(), right.version.as_str()))
+    });
+
+    if json {
+        let value = rows
+            .iter()
+            .map(|row| {
+                serde_json::json!({
+                    "name": row.name,
+                    "version": row.version,
+                    "location": row.location.display().to_string(),
+                    "dependents": row.dependents,
+                })
+            })
+            .collect::<Vec<_>>();
+        println!("{}", serde_json::to_string_pretty(&value)?);
+    } else {
+        for row in &rows {
+            println!("{}@{}", row.name, row.version);
+            println!("{}", row.location.display());
+            for dependent in &row.dependents {
+                println!("  depended on by {dependent}");
+            }
+        }
+    }
+
+    if rows.is_empty() {
+        Ok(ExitCode::from(1))
+    } else {
+        Ok(ExitCode::SUCCESS)
+    }
+}
+
+fn npm_explain_requested_name(spec: &str) -> Result<String, OmcRegistryError> {
+    parse_package_spec(spec, Some(Ecosystem::Npm)).map(|spec| spec.name)
+}
+
+fn npm_root_dependency_names(project_dir: &Path) -> Result<BTreeSet<String>, OmcRegistryError> {
+    let mut names = BTreeSet::new();
+    let package_json = project_dir.join("package.json");
+    if package_json.exists() {
+        let package = read_npm_pkg_json(&package_json)?;
+        for field in [
+            "dependencies",
+            "devDependencies",
+            "optionalDependencies",
+            "peerDependencies",
+        ] {
+            if let Some(object) = package.get(field).and_then(serde_json::Value::as_object) {
+                names.extend(object.keys().cloned());
+            }
+        }
+    }
+
+    let manifest = read_manifest(project_dir.join("omc.toml"))?;
+    for key in manifest
+        .dependencies
+        .keys()
+        .chain(manifest.dev_dependencies.keys())
+    {
+        if let Ok(spec) = PackageSpec::parse(key) {
+            if spec.ecosystem == Ecosystem::Npm {
+                names.insert(spec.name);
+            }
+        }
+    }
+    Ok(names)
+}
+
+fn npm_lock_package_depends_on(package: &LockedPackage, name: &str) -> bool {
+    package
+        .dependencies
+        .iter()
+        .chain(package.optional_dependencies.iter())
+        .any(|dependency| npm_dependency_name(dependency).as_deref() == Some(name))
+}
+
+fn npm_dependency_name(dependency: &str) -> Option<String> {
+    let spec = PackageSpec::parse(dependency).ok()?;
+    (spec.ecosystem == Ecosystem::Npm).then_some(spec.name)
 }
 
 fn npm_view_field_value(
@@ -4271,6 +4418,7 @@ fn parse_npm_compat_action(args: &[String]) -> Result<NpmCompatAction, OmcRegist
         "list" | "ls" => Ok(NpmCompatAction::List {
             json: parse_json_list_flag("npm list", &args[1..])?,
         }),
+        "explain" | "why" => parse_npm_explain_args(&args[1..]),
         "outdated" => parse_npm_outdated_args(&args[1..]),
         "audit" => parse_npm_audit_args(&args[1..]),
         "cache" => parse_npm_cache_args(&args[1..]),
@@ -4395,6 +4543,8 @@ fn npm_global_arg_supported_by_command(command: &str, arg: &str) -> bool {
             "version"
                 | "list"
                 | "ls"
+                | "explain"
+                | "why"
                 | "outdated"
                 | "audit"
                 | "pkg"
@@ -5023,6 +5173,44 @@ fn npm_pack_ignored_equals_flag(arg: &str) -> bool {
     ]
     .iter()
     .any(|prefix| arg.starts_with(prefix))
+}
+
+fn parse_npm_explain_args(args: &[String]) -> Result<NpmCompatAction, OmcRegistryError> {
+    let mut json = false;
+    let mut specs = Vec::new();
+    let mut index = 0;
+    while index < args.len() {
+        let arg = &args[index];
+        if arg == "--json" {
+            json = true;
+        } else if matches!(arg.as_str(), "--silent" | "-s" | "--long" | "--parseable") {
+        } else if matches!(arg.as_str(), "--workspace" | "-w" | "--loglevel") {
+            index += 1;
+            if args.get(index).is_none() {
+                return Err(OmcRegistryError::UnsupportedSpec(format!(
+                    "{arg} needs a value"
+                )));
+            }
+        } else if npm_explain_ignored_equals_flag(arg) {
+        } else if arg.starts_with('-') {
+            return Err(unsupported_compat_arg("npm explain", arg));
+        } else {
+            specs.push(arg.clone());
+        }
+        index += 1;
+    }
+    if specs.is_empty() {
+        return Err(OmcRegistryError::UnsupportedSpec(
+            "npm explain needs at least one package".to_owned(),
+        ));
+    }
+    Ok(NpmCompatAction::Explain { specs, json })
+}
+
+fn npm_explain_ignored_equals_flag(arg: &str) -> bool {
+    ["--workspace=", "--loglevel="]
+        .iter()
+        .any(|prefix| arg.starts_with(prefix))
 }
 
 fn parse_npm_outdated_args(args: &[String]) -> Result<NpmCompatAction, OmcRegistryError> {
@@ -7338,6 +7526,13 @@ mod tests {
                 fields: vec!["version".to_owned()],
                 json: true,
                 npm_registry: None,
+            }
+        );
+        assert_eq!(
+            parse_npm_compat_action(&args(&["--json", "why", "left-pad"])).unwrap(),
+            NpmCompatAction::Explain {
+                specs: vec!["left-pad".to_owned()],
+                json: true,
             }
         );
         assert_eq!(

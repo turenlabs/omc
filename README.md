@@ -121,6 +121,7 @@ cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm ci --omit=dev
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm run test -- --watch
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm audit --json
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm outdated --json
+cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm explain left-pad --json
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm prune --omit=dev
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm dedupe
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm config get registry
@@ -418,7 +419,7 @@ Supported now:
   `run`, `exec`, `init`, `remove`, `bin`, `root`, `prefix`, `audit` / `audit --json`,
   `cache verify/ls/rm/clean --force`, `pkg get/set/delete`, `version`,
   `pack`, `config get/set/delete/list`, `get`, `view` / `info` / `show`,
-  `list` / `list --json`,
+  `list` / `list --json`, `explain` / `why`,
   and `outdated` / `outdated --json` flows without delegating to npm, plus a direct
   `npm` compatibility binary and direct `npx` compatibility binary for
   project-local executable flows; direct local npm tarballs and local package
