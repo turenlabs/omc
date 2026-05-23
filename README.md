@@ -199,6 +199,8 @@ Supported now:
 - npm registry `optionalDependencies` and required `peerDependencies` resolution
 - npm platform filtering for optional dependencies using package `os`, `cpu`,
   and `libc` metadata
+- npm bundled dependency metadata so bundled packages are not resolved from the
+  registry a second time
 - `package-lock.json` exact-version constraints for uniquely locked npm packages
 - `requirements.txt` ingestion with hashes, line continuations, extras,
   recursive `-r` includes, `-c` constraints, and common Python environment
@@ -238,8 +240,7 @@ Not implemented yet:
 - full control-flow graph verification
 - imports/linking across package cells
 - native/Wasm/Cranelift backend
-- full npm bundled dependency and peer placement semantics beyond current
-  required-peer and platform-optional handling
+- full npm peer placement semantics beyond current required-peer handling
 - advanced requirements-file semantics such as editable installs, direct URLs,
   and index configuration beyond fail-closed rejection
 - Python sdist build isolation and native extension policy beyond fail-closed

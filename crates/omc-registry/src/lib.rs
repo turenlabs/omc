@@ -1911,6 +1911,7 @@ fn npm_registry_name_and_requirement(spec: &PackageSpec) -> Result<(String, Opti
 
 fn npm_runtime_dependencies(version_doc: &NpmVersion) -> Vec<PackageDependency> {
     let mut dependencies = Vec::new();
+    let bundled = npm_bundled_dependency_names(version_doc);
 
     dependencies.extend(
         version_doc
@@ -1918,6 +1919,7 @@ fn npm_runtime_dependencies(version_doc: &NpmVersion) -> Vec<PackageDependency> 
             .clone()
             .unwrap_or_default()
             .into_iter()
+            .filter(|(name, _)| !bundled.contains(name))
             .map(|(name, requirement)| npm_dependency(name, requirement, false)),
     );
     dependencies.extend(
@@ -1926,6 +1928,7 @@ fn npm_runtime_dependencies(version_doc: &NpmVersion) -> Vec<PackageDependency> 
             .clone()
             .unwrap_or_default()
             .into_iter()
+            .filter(|(name, _)| !bundled.contains(name))
             .map(|(name, requirement)| npm_dependency(name, requirement, true)),
     );
     dependencies.extend(
@@ -1937,6 +1940,7 @@ fn npm_runtime_dependencies(version_doc: &NpmVersion) -> Vec<PackageDependency> 
                 .unwrap_or_default(),
         )
         .into_iter()
+        .filter(|(name, _)| !bundled.contains(name))
         .map(|(name, requirement)| npm_dependency(name, requirement, false)),
     );
 
@@ -1951,6 +1955,35 @@ fn npm_runtime_dependencies(version_doc: &NpmVersion) -> Vec<PackageDependency> 
         left.spec.name == right.spec.name && left.spec.version == right.spec.version
     });
     dependencies
+}
+
+fn npm_bundled_dependency_names(version_doc: &NpmVersion) -> BTreeSet<String> {
+    let field = version_doc
+        .bundle_dependencies
+        .as_ref()
+        .or(version_doc.bundled_dependencies.as_ref());
+
+    match field.and_then(NpmStringList::bool_value) {
+        Some(true) => version_doc
+            .dependencies
+            .clone()
+            .unwrap_or_default()
+            .into_keys()
+            .chain(
+                version_doc
+                    .optional_dependencies
+                    .clone()
+                    .unwrap_or_default()
+                    .into_keys(),
+            )
+            .collect(),
+        Some(false) => BTreeSet::new(),
+        None => field
+            .map(NpmStringList::values)
+            .unwrap_or_default()
+            .into_iter()
+            .collect(),
+    }
 }
 
 fn npm_dependency(name: String, requirement: String, optional: bool) -> PackageDependency {
@@ -3386,6 +3419,10 @@ struct NpmVersion {
     dependencies: Option<BTreeMap<String, String>>,
     #[serde(default, rename = "optionalDependencies")]
     optional_dependencies: Option<BTreeMap<String, String>>,
+    #[serde(default, rename = "bundleDependencies")]
+    bundle_dependencies: Option<NpmStringList>,
+    #[serde(default, rename = "bundledDependencies")]
+    bundled_dependencies: Option<NpmStringList>,
     #[serde(default, rename = "peerDependencies")]
     peer_dependencies: Option<BTreeMap<String, String>>,
     #[serde(default, rename = "peerDependenciesMeta")]
@@ -3397,6 +3434,7 @@ struct NpmVersion {
 enum NpmStringList {
     One(String),
     Many(Vec<String>),
+    Bool(bool),
 }
 
 impl NpmStringList {
@@ -3404,6 +3442,14 @@ impl NpmStringList {
         match self {
             Self::One(value) => vec![value.clone()],
             Self::Many(values) => values.clone(),
+            Self::Bool(_) => Vec::new(),
+        }
+    }
+
+    fn bool_value(&self) -> Option<bool> {
+        match self {
+            Self::Bool(value) => Some(*value),
+            _ => None,
         }
     }
 }
@@ -3617,6 +3663,8 @@ mod tests {
                 "optional-runtime".to_owned(),
                 "^2.0.0".to_owned(),
             )])),
+            bundle_dependencies: None,
+            bundled_dependencies: None,
             peer_dependencies: Some(BTreeMap::from([
                 ("required-peer".to_owned(), "^3.0.0".to_owned()),
                 ("optional-peer".to_owned(), "^4.0.0".to_owned()),
@@ -3670,6 +3718,71 @@ mod tests {
             ])),
             Some(current_npm_os())
         ));
+    }
+
+    #[test]
+    fn skips_npm_bundled_dependencies() {
+        let version_doc = NpmVersion {
+            version: "1.0.0".to_owned(),
+            dist: NpmDist {
+                tarball: "https://example.invalid/package.tgz".to_owned(),
+            },
+            os: None,
+            cpu: None,
+            libc: None,
+            scripts: None,
+            dependencies: Some(BTreeMap::from([
+                ("bundled-runtime".to_owned(), "^1.0.0".to_owned()),
+                ("external-runtime".to_owned(), "^2.0.0".to_owned()),
+            ])),
+            optional_dependencies: Some(BTreeMap::from([(
+                "bundled-optional".to_owned(),
+                "^3.0.0".to_owned(),
+            )])),
+            bundle_dependencies: Some(NpmStringList::Many(vec![
+                "bundled-runtime".to_owned(),
+                "bundled-optional".to_owned(),
+            ])),
+            bundled_dependencies: None,
+            peer_dependencies: None,
+            peer_dependencies_meta: None,
+        };
+
+        let dependencies = npm_runtime_dependencies(&version_doc);
+        assert!(dependencies
+            .iter()
+            .any(|dependency| dependency.spec.name == "external-runtime"));
+        assert!(!dependencies
+            .iter()
+            .any(|dependency| dependency.spec.name == "bundled-runtime"));
+        assert!(!dependencies
+            .iter()
+            .any(|dependency| dependency.spec.name == "bundled-optional"));
+    }
+
+    #[test]
+    fn supports_boolean_npm_bundle_dependencies() {
+        let version_doc = NpmVersion {
+            version: "1.0.0".to_owned(),
+            dist: NpmDist {
+                tarball: "https://example.invalid/package.tgz".to_owned(),
+            },
+            os: None,
+            cpu: None,
+            libc: None,
+            scripts: None,
+            dependencies: Some(BTreeMap::from([(
+                "bundled-runtime".to_owned(),
+                "^1.0.0".to_owned(),
+            )])),
+            optional_dependencies: None,
+            bundle_dependencies: Some(NpmStringList::Bool(true)),
+            bundled_dependencies: None,
+            peer_dependencies: None,
+            peer_dependencies_meta: None,
+        };
+
+        assert!(npm_runtime_dependencies(&version_doc).is_empty());
     }
 
     #[test]
