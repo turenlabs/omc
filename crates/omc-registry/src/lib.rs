@@ -221,12 +221,26 @@ pub struct OmcManifest {
     pub project: ProjectInfo,
     #[serde(default)]
     pub dependencies: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "ManifestPolicy::is_empty")]
+    pub policy: ManifestPolicy,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProjectInfo {
     pub name: String,
     pub version: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ManifestPolicy {
+    #[serde(default)]
+    pub allow: Vec<String>,
+}
+
+impl ManifestPolicy {
+    fn is_empty(&self) -> bool {
+        self.allow.is_empty()
+    }
 }
 
 impl OmcManifest {
@@ -237,6 +251,7 @@ impl OmcManifest {
                 version: "0.1.0".to_owned(),
             },
             dependencies: BTreeMap::new(),
+            policy: ManifestPolicy::default(),
         }
     }
 }
@@ -464,19 +479,21 @@ pub fn init_project(project_dir: impl AsRef<Path>, name: Option<&str>) -> Result
 
 pub fn link_package(spec: &PackageSpec, options: &LinkOptions) -> Result<LinkReport> {
     init_project(&options.project_dir, None)?;
+    let options = options_with_manifest_policy(options)?;
 
     let client = Client::builder().user_agent("omc-prototype/0.1").build()?;
-    let (report, _) = link_package_inner(&client, spec, options, true)?;
+    let (report, _) = link_package_inner(&client, spec, &options, true)?;
     Ok(report)
 }
 
 pub fn add_package_graph(spec: &PackageSpec, options: &LinkOptions) -> Result<Vec<LinkReport>> {
     init_project(&options.project_dir, None)?;
+    let options = options_with_manifest_policy(options)?;
 
     let client = Client::builder().user_agent("omc-prototype/0.1").build()?;
     let mut reports = Vec::new();
     let mut seen = BTreeSet::new();
-    add_package_graph_inner(&client, spec, options, &mut seen, &mut reports)?;
+    add_package_graph_inner(&client, spec, &options, &mut seen, &mut reports)?;
 
     if let Some(root) = reports.first() {
         write_manifest_dependency(&options.project_dir, spec, &root.locked.version)?;
@@ -488,7 +505,7 @@ pub fn add_package_graph(spec: &PackageSpec, options: &LinkOptions) -> Result<Ve
 pub fn install_project(options: &LinkOptions) -> Result<InstallReport> {
     init_project(&options.project_dir, None)?;
 
-    let mut options = options.clone();
+    let mut options = options_with_manifest_policy(options)?;
     let manifest = read_manifest(options.project_dir.join(MANIFEST))?;
     let mut specs = Vec::new();
     for (key, version) in manifest.dependencies {
@@ -761,6 +778,17 @@ pub fn read_manifest(path: impl AsRef<Path>) -> Result<OmcManifest> {
         return Ok(OmcManifest::new("omc-project"));
     }
     Ok(toml::from_str(&fs::read_to_string(path)?)?)
+}
+
+fn options_with_manifest_policy(options: &LinkOptions) -> Result<LinkOptions> {
+    let mut options = options.clone();
+    let manifest = read_manifest(options.project_dir.join(MANIFEST))?;
+    for grant in manifest.policy.allow {
+        options
+            .allowed_capabilities
+            .push(parse_capability_grant(&grant)?);
+    }
+    Ok(options)
 }
 
 fn read_package_json_specs(
@@ -3637,6 +3665,31 @@ mod tests {
             parse_capability_grant("dynamic-eval").unwrap(),
             Capability::DynamicEval
         );
+    }
+
+    #[test]
+    fn reads_manifest_policy_grants() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(
+            dir.path().join("omc.toml"),
+            r#"
+            [project]
+            name = "policy-demo"
+            version = "0.1.0"
+
+            [policy]
+            allow = ["http:api.example.com", "env:API_TOKEN"]
+            "#,
+        )
+        .unwrap();
+
+        let options = options_with_manifest_policy(&LinkOptions::new(dir.path())).unwrap();
+        assert!(options
+            .allowed_capabilities
+            .contains(&Capability::HttpHost("api.example.com".to_owned())));
+        assert!(options
+            .allowed_capabilities
+            .contains(&Capability::EnvRead("API_TOKEN".to_owned())));
     }
 
     #[test]

@@ -158,6 +158,13 @@ cargo run -p omc-cli -- --project-dir /tmp/omc-demo add npm:some-client@1.0.0 \
   --allow env:API_TOKEN
 ```
 
+Projects can persist approved grants in `omc.toml`:
+
+```toml
+[policy]
+allow = ["http:api.example.com", "env:API_TOKEN"]
+```
+
 This is still a prototype. It replaces install-time execution with registry
 resolution, source caching, OMC artifact generation, capability verification,
 lockfile recording, and local install trees for Node/Python imports. It does
@@ -196,6 +203,7 @@ Supported now:
 - PyPI extras resolution for dependencies gated by `extra == "..."`
 - source artifact download and cache
 - `omc.toml` and `omc.lock`
+- persistent `[policy].allow` grants in `omc.toml`
 - text and JSON audit output for locked package verdicts
 - `node_modules` installation for npm tarballs
 - nested `node_modules` installation for conflicting npm dependency versions
