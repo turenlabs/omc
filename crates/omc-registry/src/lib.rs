@@ -19,6 +19,7 @@ use sha1::Sha1;
 use sha2::{Digest, Sha256, Sha512};
 use tar::Archive;
 use thiserror::Error;
+use walkdir::{DirEntry, WalkDir};
 
 pub type Result<T> = std::result::Result<T, OmcRegistryError>;
 
@@ -1463,6 +1464,28 @@ fn read_package_json_specs(
     include_dev_dependencies: bool,
 ) -> Result<Vec<PackageSpec>> {
     let package = serde_json::from_str::<ProjectPackageJson>(&fs::read_to_string(path)?)?;
+    let workspaces = package.workspaces.clone();
+    let mut specs = package_json_dependency_specs(package, include_dev_dependencies);
+
+    if let Some(workspaces) = workspaces {
+        let root = path.parent().unwrap_or_else(|| Path::new("."));
+        for package_json in workspace_package_json_paths(root, &workspaces) {
+            let package =
+                serde_json::from_str::<ProjectPackageJson>(&fs::read_to_string(package_json)?)?;
+            specs.extend(package_json_dependency_specs(
+                package,
+                include_dev_dependencies,
+            ));
+        }
+    }
+
+    Ok(specs)
+}
+
+fn package_json_dependency_specs(
+    package: ProjectPackageJson,
+    include_dev_dependencies: bool,
+) -> Vec<PackageSpec> {
     let mut specs = Vec::new();
     let dev_dependencies = if include_dev_dependencies {
         package.dev_dependencies
@@ -1481,7 +1504,174 @@ fn read_package_json_specs(
         }
     }
 
-    Ok(specs)
+    specs
+}
+
+fn workspace_package_json_paths(root: &Path, workspaces: &ProjectWorkspaces) -> Vec<PathBuf> {
+    let mut includes = Vec::new();
+    let mut excludes = Vec::new();
+    for pattern in workspaces.patterns() {
+        let pattern = pattern.trim();
+        if pattern.is_empty() {
+            continue;
+        }
+        if let Some(exclude) = pattern.strip_prefix('!') {
+            excludes.push(exclude.trim());
+        } else {
+            includes.push(pattern);
+        }
+    }
+
+    if includes.is_empty() {
+        return Vec::new();
+    }
+
+    let root_package_json = root.join("package.json");
+    let mut package_json_paths = Vec::new();
+    let mut seen = BTreeSet::new();
+
+    for entry in WalkDir::new(root)
+        .follow_links(false)
+        .into_iter()
+        .filter_entry(should_enter_workspace_dir)
+        .filter_map(std::result::Result::ok)
+    {
+        if !entry.file_type().is_file() || entry.file_name() != "package.json" {
+            continue;
+        }
+
+        let package_json = entry.path();
+        if package_json == root_package_json {
+            continue;
+        }
+
+        let Some(package_dir) = package_json.parent() else {
+            continue;
+        };
+        let Ok(relative_dir) = package_dir.strip_prefix(root) else {
+            continue;
+        };
+
+        if workspace_patterns_match(&includes, &excludes, relative_dir) {
+            let package_json = package_json.to_path_buf();
+            if seen.insert(package_json.clone()) {
+                package_json_paths.push(package_json);
+            }
+        }
+    }
+
+    package_json_paths
+}
+
+fn should_enter_workspace_dir(entry: &DirEntry) -> bool {
+    if entry.depth() == 0 || !entry.file_type().is_dir() {
+        return true;
+    }
+
+    !matches!(
+        entry.file_name().to_str(),
+        Some("node_modules" | ".git" | ".omc")
+    )
+}
+
+fn workspace_patterns_match(includes: &[&str], excludes: &[&str], relative_dir: &Path) -> bool {
+    let segments = path_segments(relative_dir);
+    includes
+        .iter()
+        .any(|pattern| workspace_pattern_matches(pattern, &segments))
+        && !excludes
+            .iter()
+            .any(|pattern| workspace_pattern_matches(pattern, &segments))
+}
+
+fn workspace_pattern_matches(pattern: &str, path_segments: &[String]) -> bool {
+    let pattern_segments = workspace_pattern_segments(pattern);
+    workspace_segments_match(&pattern_segments, path_segments)
+}
+
+fn workspace_pattern_segments(pattern: &str) -> Vec<&str> {
+    let pattern = pattern
+        .trim()
+        .trim_start_matches("./")
+        .trim_end_matches('/')
+        .trim_end_matches('\\');
+    let pattern = pattern.strip_suffix("/package.json").unwrap_or(pattern);
+    let pattern = pattern.strip_suffix("\\package.json").unwrap_or(pattern);
+
+    pattern
+        .split(['/', '\\'])
+        .filter(|segment| !segment.is_empty())
+        .collect()
+}
+
+fn path_segments(path: &Path) -> Vec<String> {
+    path.components()
+        .filter_map(|component| match component {
+            std::path::Component::Normal(segment) => {
+                segment.to_str().map(std::borrow::ToOwned::to_owned)
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+fn workspace_segments_match(pattern_segments: &[&str], path_segments: &[String]) -> bool {
+    let Some((pattern_segment, remaining_pattern)) = pattern_segments.split_first() else {
+        return path_segments.is_empty();
+    };
+
+    if *pattern_segment == "**" {
+        return workspace_segments_match(remaining_pattern, path_segments)
+            || (!path_segments.is_empty()
+                && workspace_segments_match(pattern_segments, &path_segments[1..]));
+    }
+
+    let Some((path_segment, remaining_path)) = path_segments.split_first() else {
+        return false;
+    };
+
+    workspace_segment_matches(pattern_segment, path_segment)
+        && workspace_segments_match(remaining_pattern, remaining_path)
+}
+
+fn workspace_segment_matches(pattern: &str, value: &str) -> bool {
+    if !pattern.contains('*') {
+        return pattern == value;
+    }
+
+    let starts_with_star = pattern.starts_with('*');
+    let ends_with_star = pattern.ends_with('*');
+    let mut rest = value;
+    let mut first = true;
+    let mut matched_any_part = false;
+
+    for part in pattern.split('*').filter(|part| !part.is_empty()) {
+        matched_any_part = true;
+        if first && !starts_with_star {
+            let Some(next) = rest.strip_prefix(part) else {
+                return false;
+            };
+            rest = next;
+        } else {
+            let Some(index) = rest.find(part) else {
+                return false;
+            };
+            rest = &rest[index + part.len()..];
+        }
+        first = false;
+    }
+
+    if !matched_any_part {
+        return true;
+    }
+
+    if !ends_with_star {
+        if let Some(last_part) = pattern.rsplit('*').find(|part| !part.is_empty()) {
+            return value.ends_with(last_part);
+        }
+    }
+
+    true
 }
 
 fn required_peer_dependencies(
@@ -5213,6 +5403,8 @@ struct ProjectPackageJson {
     #[serde(default)]
     scripts: BTreeMap<String, String>,
     #[serde(default)]
+    workspaces: Option<ProjectWorkspaces>,
+    #[serde(default)]
     dependencies: BTreeMap<String, String>,
     #[serde(default, rename = "devDependencies")]
     dev_dependencies: BTreeMap<String, String>,
@@ -5222,6 +5414,25 @@ struct ProjectPackageJson {
     peer_dependencies: BTreeMap<String, String>,
     #[serde(default, rename = "peerDependenciesMeta")]
     peer_dependencies_meta: BTreeMap<String, NpmPeerDependencyMeta>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+enum ProjectWorkspaces {
+    Patterns(Vec<String>),
+    Config {
+        #[serde(default)]
+        packages: Vec<String>,
+    },
+}
+
+impl ProjectWorkspaces {
+    fn patterns(&self) -> &[String] {
+        match self {
+            Self::Patterns(patterns) => patterns,
+            Self::Config { packages } => packages,
+        }
+    }
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -5500,6 +5711,12 @@ struct PypiDigests {
 mod tests {
     use super::*;
 
+    fn has_spec(specs: &[PackageSpec], name: &str, requirement: &str) -> bool {
+        specs
+            .iter()
+            .any(|spec| spec.name == name && spec.version.as_deref() == Some(requirement))
+    }
+
     #[test]
     fn parses_npm_specs() {
         let spec = PackageSpec::parse("npm:left-pad@1.3.0").unwrap();
@@ -5620,6 +5837,87 @@ mod tests {
             .iter()
             .any(|spec| spec.name == "is-odd" && spec.version.as_deref() == Some("3.0.1")));
         assert!(!production_specs.iter().any(|spec| spec.name == "which"));
+    }
+
+    #[test]
+    fn reads_workspace_package_json_specs() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir_all(dir.path().join("packages/api")).unwrap();
+        fs::create_dir_all(dir.path().join("packages/ignored")).unwrap();
+        fs::create_dir_all(dir.path().join("node_modules/nope")).unwrap();
+
+        let package_json = dir.path().join("package.json");
+        fs::write(
+            &package_json,
+            r#"{
+                "name": "workspace-root",
+                "workspaces": ["packages/*", "!packages/ignored"],
+                "dependencies": { "root-dep": "1.0.0" },
+                "devDependencies": { "root-dev": "2.0.0" }
+            }"#,
+        )
+        .unwrap();
+        fs::write(
+            dir.path().join("packages/api/package.json"),
+            r#"{
+                "name": "api",
+                "dependencies": { "workspace-dep": "3.0.0" },
+                "devDependencies": { "workspace-dev": "4.0.0" }
+            }"#,
+        )
+        .unwrap();
+        fs::write(
+            dir.path().join("packages/ignored/package.json"),
+            r#"{ "dependencies": { "ignored-dep": "5.0.0" } }"#,
+        )
+        .unwrap();
+        fs::write(
+            dir.path().join("node_modules/nope/package.json"),
+            r#"{ "dependencies": { "node-modules-dep": "6.0.0" } }"#,
+        )
+        .unwrap();
+
+        let specs = read_package_json_specs(&package_json, true).unwrap();
+        assert!(has_spec(&specs, "root-dep", "1.0.0"));
+        assert!(has_spec(&specs, "root-dev", "2.0.0"));
+        assert!(has_spec(&specs, "workspace-dep", "3.0.0"));
+        assert!(has_spec(&specs, "workspace-dev", "4.0.0"));
+        assert!(!specs.iter().any(|spec| spec.name == "ignored-dep"));
+        assert!(!specs.iter().any(|spec| spec.name == "node-modules-dep"));
+
+        let production_specs = read_package_json_specs(&package_json, false).unwrap();
+        assert!(has_spec(&production_specs, "root-dep", "1.0.0"));
+        assert!(has_spec(&production_specs, "workspace-dep", "3.0.0"));
+        assert!(!production_specs.iter().any(|spec| spec.name == "root-dev"));
+        assert!(!production_specs
+            .iter()
+            .any(|spec| spec.name == "workspace-dev"));
+    }
+
+    #[test]
+    fn reads_workspace_package_json_specs_from_object_form() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir_all(dir.path().join("apps/web")).unwrap();
+
+        let package_json = dir.path().join("package.json");
+        fs::write(
+            &package_json,
+            r#"{
+                "name": "workspace-root",
+                "workspaces": {
+                    "packages": ["apps/*"]
+                }
+            }"#,
+        )
+        .unwrap();
+        fs::write(
+            dir.path().join("apps/web/package.json"),
+            r#"{ "name": "web", "dependencies": { "web-dep": "1.2.3" } }"#,
+        )
+        .unwrap();
+
+        let specs = read_package_json_specs(&package_json, true).unwrap();
+        assert!(has_spec(&specs, "web-dep", "1.2.3"));
     }
 
     #[test]
