@@ -2561,22 +2561,26 @@ fn collect_pipfile_lock_sources(
             continue;
         };
 
-        if requirements.pypi_index_url.is_none() {
-            requirements.pypi_index_url = Some(index_url);
-            continue;
-        }
-
-        if requirements.pypi_index_url.as_deref() == Some(index_url.as_str())
-            || requirements
-                .pypi_extra_index_urls
-                .iter()
-                .any(|extra| extra == &index_url)
-        {
-            continue;
-        }
-
-        requirements.pypi_extra_index_urls.push(index_url);
+        push_project_pypi_index_url(requirements, index_url);
     }
+}
+
+fn push_project_pypi_index_url(requirements: &mut ProjectRequirements, index_url: String) {
+    if requirements.pypi_index_url.is_none() {
+        requirements.pypi_index_url = Some(index_url);
+        return;
+    }
+
+    if requirements.pypi_index_url.as_deref() == Some(index_url.as_str())
+        || requirements
+            .pypi_extra_index_urls
+            .iter()
+            .any(|extra| extra == &index_url)
+    {
+        return;
+    }
+
+    requirements.pypi_extra_index_urls.push(index_url);
 }
 
 fn collect_pipfile_locked_packages(
@@ -3481,6 +3485,8 @@ fn read_pyproject_requirements(
         .extend(group_requirements.python_local_paths);
 
     if let Some(poetry) = pyproject.tool.and_then(|tool| tool.poetry) {
+        collect_poetry_sources(&poetry.source, &mut discovered);
+
         let poetry_requirements = read_poetry_dependencies(
             &poetry.dependencies,
             &poetry.extras,
@@ -3646,6 +3652,19 @@ fn read_poetry_dependencies(
     }
 
     Ok(requirements)
+}
+
+fn collect_poetry_sources(sources: &[PoetrySource], requirements: &mut ProjectRequirements) {
+    for source in sources {
+        let Some(index_url) = source
+            .url
+            .as_deref()
+            .and_then(normalize_pypi_simple_index_url)
+        else {
+            continue;
+        };
+        push_project_pypi_index_url(requirements, index_url);
+    }
 }
 
 fn read_poetry_lock_requirements(path: &Path) -> Result<ProjectRequirements> {
@@ -8214,7 +8233,14 @@ struct PoetryProject {
     #[serde(default)]
     scripts: BTreeMap<String, PoetryScript>,
     #[serde(default)]
+    source: Vec<PoetrySource>,
+    #[serde(default)]
     group: BTreeMap<String, PoetryGroup>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct PoetrySource {
+    url: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -11126,9 +11152,24 @@ wheels = [
         fs::write(
             &pyproject,
             r#"
+            [[tool.poetry.source]]
+            name = "private"
+            url = "https://packages.example/simple"
+            priority = "primary"
+
+            [[tool.poetry.source]]
+            name = "backup"
+            url = "https://backup.example/simple/"
+            priority = "supplemental"
+
+            [[tool.poetry.source]]
+            name = "duplicate"
+            url = "https://backup.example/simple"
+            priority = "supplemental"
+
             [tool.poetry.dependencies]
             python = "^3.11"
-            requests = "^2.32.0"
+            requests = { version = "^2.32.0", source = "private" }
             rich = { version = "^13.0.0", optional = true }
 
             [tool.poetry.extras]
@@ -11162,6 +11203,14 @@ wheels = [
             .specs
             .iter()
             .any(|spec| spec.name == "ruff" && spec.version.as_deref() == Some(">=0.5.0,<0.6")));
+        assert_eq!(
+            base.pypi_index_url.as_deref(),
+            Some("https://packages.example/simple/")
+        );
+        assert_eq!(
+            base.pypi_extra_index_urls,
+            vec!["https://backup.example/simple/".to_owned()]
+        );
         assert!(!base.specs.iter().any(|spec| spec.name == "python"));
         assert!(!base.specs.iter().any(|spec| spec.name == "rich"));
         assert!(!base.specs.iter().any(|spec| spec.name == "markdown"));
