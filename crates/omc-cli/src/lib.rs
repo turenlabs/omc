@@ -14,11 +14,12 @@ use omc_registry::{
     parse_capability_grant, parse_npm_direct_archive_reference,
     parse_pypi_direct_archive_reference, parse_pypi_vcs_requirement, read_constraint_files,
     read_lockfile, read_manifest, read_npm_config_snapshot, read_npm_package_metadata,
-    read_npm_search, read_npm_workspace_packages, read_package_scripts, read_pip_config_snapshot,
-    read_pypi_available_versions, read_requirements_files, remove_manifest_dependency, Behavior,
-    Ecosystem, InstallReport, LinkOptions, LockedPackage, LockedPythonVcsDependency,
-    NpmSearchPackage, NpmWorkspacePackage, OmcRegistryError, PackageSpec, ProjectRequirements,
-    PypiBinaryMode, PypiCheckIssue, PythonLocalRequirement, PythonVcsRequirement, Verdict,
+    read_npm_ping, read_npm_search, read_npm_workspace_packages, read_package_scripts,
+    read_pip_config_snapshot, read_pypi_available_versions, read_requirements_files,
+    remove_manifest_dependency, Behavior, Ecosystem, InstallReport, LinkOptions, LockedPackage,
+    LockedPythonVcsDependency, NpmPingResult, NpmSearchPackage, NpmWorkspacePackage,
+    OmcRegistryError, PackageSpec, ProjectRequirements, PypiBinaryMode, PypiCheckIssue,
+    PythonLocalRequirement, PythonVcsRequirement, Verdict,
 };
 use sha2::{Digest, Sha256, Sha384, Sha512};
 
@@ -327,6 +328,10 @@ enum NpmCompatAction {
     },
     Search {
         action: NpmSearchAction,
+    },
+    Ping {
+        json: bool,
+        npm_registry: Option<String>,
     },
     Config {
         action: NpmConfigAction,
@@ -1836,6 +1841,9 @@ fn run_npm_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
         NpmCompatAction::Pkg { action } => print_npm_pkg(project_dir, action)?,
         NpmCompatAction::Pack { action } => print_npm_pack(project_dir, action)?,
         NpmCompatAction::Search { action } => print_npm_search(project_dir, action)?,
+        NpmCompatAction::Ping { json, npm_registry } => {
+            print_npm_ping(project_dir, json, npm_registry.as_deref())?
+        }
         NpmCompatAction::Config {
             action,
             npm_registry,
@@ -2298,6 +2306,10 @@ fn npm_help_text(topic: Option<&str>) -> String {
             "npm search <terms...>",
             &["Search the configured npm registry. Aliases: s, se, find. Supports --json, --parseable, --searchlimit."],
         ),
+        Some("ping") => npm_command_help(
+            "npm ping",
+            &["Check configured npm registry reachability. Supports --json and --registry."],
+        ),
         Some("view") => npm_command_help(
             "npm view <package-spec> [field...]",
             &["Read package metadata from the configured npm registry. Aliases: info, show, v. Supports --json."],
@@ -2348,7 +2360,7 @@ fn npm_general_help_text() -> String {
         "npm <command>",
         &[
             "OMC npm compatibility runs supported npm workflows through OMC's verifier, lockfile, cache, and project-local runtime paths.",
-            "Supported commands: install, install-test, ci, install-ci-test, remove, run, test, start, stop, restart, exec, list, explain, audit, outdated, fund, prune, dedupe, rebuild, cache, pkg, version, pack, search, view, docs, repo, bugs, home, config, init, bin, root, prefix.",
+            "Supported commands: install, install-test, ci, install-ci-test, remove, run, test, start, stop, restart, exec, list, explain, audit, outdated, fund, prune, dedupe, rebuild, cache, pkg, version, pack, search, ping, view, docs, repo, bugs, home, config, init, bin, root, prefix.",
             "Use `npm help <command>` for focused OMC compatibility notes.",
         ],
     )
@@ -2385,6 +2397,7 @@ fn npm_help_topic(topic: &str) -> Option<&'static str> {
         "rebuild" | "rb" => Some("rebuild"),
         "pack" => Some("pack"),
         "search" | "s" | "se" | "find" => Some("search"),
+        "ping" => Some("ping"),
         "view" | "info" | "show" | "v" => Some("view"),
         "docs" | "doc" | "repo" | "repository" | "bugs" | "home" | "homepage" => {
             Some("metadata-url")
@@ -3005,6 +3018,28 @@ fn print_npm_search(project_dir: &Path, action: NpmSearchAction) -> Result<(), O
         }
     }
     Ok(())
+}
+
+fn print_npm_ping(
+    project_dir: &Path,
+    json: bool,
+    npm_registry: Option<&str>,
+) -> Result<(), OmcRegistryError> {
+    let ping = read_npm_ping(project_dir, npm_registry)?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&npm_ping_json(&ping))?);
+    } else {
+        println!("pong {}", ping.registry);
+    }
+    Ok(())
+}
+
+fn npm_ping_json(ping: &NpmPingResult) -> serde_json::Value {
+    serde_json::json!({
+        "ok": true,
+        "registry": ping.registry,
+        "response": ping.response,
+    })
 }
 
 fn npm_search_short_date(package: &NpmSearchPackage) -> &str {
@@ -6471,6 +6506,7 @@ fn parse_npm_compat_action(args: &[String]) -> Result<NpmCompatAction, OmcRegist
         "pkg" => parse_npm_pkg_args(&args[1..]),
         "pack" => parse_npm_pack_args(&args[1..]),
         "search" | "s" | "se" | "find" => parse_npm_search_args(&args[1..]),
+        "ping" => parse_npm_ping_args(&args[1..]),
         "view" | "info" | "show" | "v" => parse_npm_view_args(&args[1..]),
         "docs" | "doc" => {
             parse_npm_metadata_url_args(command, NpmMetadataUrlKind::Docs, &args[1..])
@@ -7722,6 +7758,46 @@ fn npm_search_ignored_equals_flag(arg: &str) -> bool {
     ]
     .iter()
     .any(|prefix| arg.starts_with(prefix))
+}
+
+fn parse_npm_ping_args(args: &[String]) -> Result<NpmCompatAction, OmcRegistryError> {
+    let mut json = false;
+    let mut filtered = Vec::new();
+    let mut index = 0;
+    while index < args.len() {
+        let arg = &args[index];
+        if arg == "--json" {
+            json = true;
+        } else if matches!(arg.as_str(), "--silent" | "-s" | "--parseable") {
+        } else if matches!(arg.as_str(), "--userconfig" | "--loglevel") {
+            index += 1;
+            if args.get(index).is_none() {
+                return Err(OmcRegistryError::UnsupportedSpec(format!(
+                    "{arg} needs a value"
+                )));
+            }
+        } else if npm_ping_equals_value_flag(arg) {
+        } else {
+            filtered.push(arg.clone());
+        }
+        index += 1;
+    }
+
+    let CommonCompatFlags {
+        npm_registry,
+        positionals,
+        ..
+    } = parse_common_compat_flags(&filtered, true)?;
+    if !positionals.is_empty() {
+        return Err(unsupported_compat_arg("npm ping", &positionals[0]));
+    }
+    Ok(NpmCompatAction::Ping { json, npm_registry })
+}
+
+fn npm_ping_equals_value_flag(arg: &str) -> bool {
+    ["--userconfig=", "--loglevel="]
+        .iter()
+        .any(|prefix| arg.starts_with(prefix))
 }
 
 fn parse_npm_explain_args(args: &[String]) -> Result<NpmCompatAction, OmcRegistryError> {
@@ -11125,6 +11201,19 @@ mod tests {
                     limit: 250,
                     npm_registry: None,
                 },
+            }
+        );
+        assert_eq!(
+            parse_npm_compat_action(&args(&[
+                "ping",
+                "--json",
+                "--registry=https://registry.example.invalid/npm",
+                "--loglevel=silent",
+            ]))
+            .unwrap(),
+            NpmCompatAction::Ping {
+                json: true,
+                npm_registry: Some("https://registry.example.invalid/npm".to_owned()),
             }
         );
         assert_eq!(

@@ -7396,6 +7396,12 @@ pub struct NpmConfigSnapshot {
 }
 
 #[derive(Debug, Clone)]
+pub struct NpmPingResult {
+    pub registry: String,
+    pub response: serde_json::Value,
+}
+
+#[derive(Debug, Clone)]
 pub struct NpmPackageMetadata {
     pub name: String,
     pub version: String,
@@ -7813,6 +7819,21 @@ pub fn read_npm_package_metadata(
         versions: root.versions.keys().cloned().collect(),
         manifest,
     })
+}
+
+pub fn read_npm_ping(project_dir: &Path, registry_override: Option<&str>) -> Result<NpmPingResult> {
+    let client = Client::new();
+    let mut options = LinkOptions::new(project_dir);
+    options.npm_registry_url = registry_override.map(str::to_owned);
+    let npm_config = read_npm_config_for_options(project_dir, &options)?;
+    let registry = ensure_trailing_slash(&npm_config.registry);
+    let url = format!("{registry}-/ping");
+    let response = npm_get(&client, &url, &npm_config)
+        .send()?
+        .error_for_status()?
+        .json::<serde_json::Value>()
+        .unwrap_or_else(|_| serde_json::json!({ "ok": true }));
+    Ok(NpmPingResult { registry, response })
 }
 
 pub fn read_npm_search(
