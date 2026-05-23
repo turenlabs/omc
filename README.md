@@ -126,6 +126,7 @@ cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip install --no-d
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip install --target vendor ./dist/local_pkg-1.0.0.tar.gz
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip install ./dist/local_pkg-1.0.0-py3-none-any.whl
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo python -m pip install -e ../local-package
+cargo run -p omc-cli --bin pip3 -- --omc-project-dir /tmp/omc-demo freeze
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip freeze
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip show requests
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip list --format=json
@@ -136,10 +137,10 @@ cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo audit --json
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo remove --npm is-odd left-pad
 ```
 
-Installing with `--bins` also provides `npm`, `npx`, and `pip` compatibility
+Installing with `--bins` also provides `npm`, `npx`, `pip`, and `pip3` compatibility
 binaries. They dispatch directly into OMC when they are first on `PATH`, so
 existing scripts can call `npm install`, `npm test`, `npx eslint`,
-`pip install`, `pip freeze`, and related supported commands without spelling
+`pip install`, `pip3 install`, `pip freeze`, and related supported commands without spelling
 `omc npm` or `omc pip`. They default to the current directory; use
 `OMC_PROJECT_DIR=/path/to/project`, `--project-dir PATH`, or
 `--omc-project-dir PATH` for an explicit project root.
@@ -407,7 +408,7 @@ Supported now:
   `pip install -e '.[dev]'`; direct
   `pip install ./archive.whl`, `./archive.tar.gz`, and HTTPS archive URL
   installs; `omc python -m pip ...` dispatches to the same compatibility path;
-  and a direct `pip` compatibility binary
+  and direct `pip` / `pip3` compatibility binaries
 - isolated `omc python` execution that uses OMC site-packages without ambient
   user/global Python site-packages or startup/hook environment variables
 - isolated Node execution wrappers that remove ambient `NODE_PATH` module

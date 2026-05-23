@@ -18,6 +18,10 @@ name = "pip"
 path = "src/bin/pip.rs"
 
 [[bin]]
+name = "pip3"
+path = "src/bin/pip3.rs"
+
+[[bin]]
 name = "npx"
 path = "src/bin/npx.rs"
 
