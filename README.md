@@ -123,6 +123,7 @@ cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm outdated --jso
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm prune --omit=dev
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm dedupe
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm config get registry
+cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm config set registry https://registry.npmjs.org/
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm cache verify
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm pkg get name version
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm version patch --no-git-tag-version
@@ -412,7 +413,7 @@ Supported now:
   `upgrade`, `ci`, `prune`, `dedupe`, `test`, `start`, `stop`, `restart`,
   `run`, `exec`, `remove`, `bin`, `root`, `prefix`, `audit` / `audit --json`,
   `cache verify/ls/rm/clean --force`, `pkg get/set/delete`, `version`,
-  `config get`, `config list`, `get`, `view` / `info` / `show`,
+  `config get/set/delete/list`, `get`, `view` / `info` / `show`,
   `list` / `list --json`,
   and `outdated` / `outdated --json` flows without delegating to npm, plus a direct
   `npm` compatibility binary and direct `npx` compatibility binary for

@@ -346,6 +346,8 @@ enum NpmPkgAction {
 enum NpmConfigAction {
     Get { keys: Vec<String>, json: bool },
     List { json: bool },
+    Set { assignments: Vec<(String, String)> },
+    Delete { keys: Vec<String> },
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -1349,6 +1351,18 @@ fn print_npm_config(
     npm_registry: Option<&str>,
     userconfig: Option<&Path>,
 ) -> Result<(), OmcRegistryError> {
+    match action {
+        NpmConfigAction::Set { assignments } => {
+            write_npm_config_assignments(project_dir, userconfig, &assignments)?;
+            return Ok(());
+        }
+        NpmConfigAction::Delete { keys } => {
+            delete_npm_config_keys(project_dir, userconfig, &keys)?;
+            return Ok(());
+        }
+        NpmConfigAction::Get { .. } | NpmConfigAction::List { .. } => {}
+    }
+
     let values = npm_config_values(project_dir, npm_registry, userconfig)?;
     match action {
         NpmConfigAction::Get { keys, json } => {
@@ -1381,6 +1395,7 @@ fn print_npm_config(
                 }
             }
         }
+        NpmConfigAction::Set { .. } | NpmConfigAction::Delete { .. } => unreachable!(),
     }
     Ok(())
 }
@@ -1452,6 +1467,103 @@ fn npm_config_value_for_key(values: &BTreeMap<String, String>, key: &str) -> Str
         .get(key)
         .cloned()
         .unwrap_or_else(|| "undefined".to_owned())
+}
+
+fn write_npm_config_assignments(
+    project_dir: &Path,
+    userconfig: Option<&Path>,
+    assignments: &[(String, String)],
+) -> Result<(), OmcRegistryError> {
+    let path = npm_config_write_path(project_dir, userconfig);
+    let mut lines = read_npm_config_lines(&path)?;
+    for (key, value) in assignments {
+        upsert_npm_config_line(&mut lines, key, value);
+    }
+    write_npm_config_lines(&path, &lines)
+}
+
+fn delete_npm_config_keys(
+    project_dir: &Path,
+    userconfig: Option<&Path>,
+    keys: &[String],
+) -> Result<(), OmcRegistryError> {
+    let path = npm_config_write_path(project_dir, userconfig);
+    let mut lines = read_npm_config_lines(&path)?;
+    lines.retain(|line| {
+        let Some(key) = npm_config_line_key(line) else {
+            return true;
+        };
+        !keys.iter().any(|target| target == key)
+    });
+    write_npm_config_lines(&path, &lines)
+}
+
+fn npm_config_write_path(project_dir: &Path, userconfig: Option<&Path>) -> PathBuf {
+    if let Some(userconfig) = userconfig {
+        return absolutize_path(project_dir, userconfig.to_path_buf());
+    }
+    project_dir.join(".npmrc")
+}
+
+fn read_npm_config_lines(path: &Path) -> Result<Vec<String>, OmcRegistryError> {
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+    Ok(fs::read_to_string(path)?
+        .lines()
+        .map(str::to_owned)
+        .collect())
+}
+
+fn write_npm_config_lines(path: &Path, lines: &[String]) -> Result<(), OmcRegistryError> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let mut content = lines.join("\n");
+    if !content.is_empty() {
+        content.push('\n');
+    }
+    fs::write(path, content)?;
+    Ok(())
+}
+
+fn upsert_npm_config_line(lines: &mut Vec<String>, key: &str, value: &str) {
+    if let Some(line) = lines
+        .iter_mut()
+        .find(|line| npm_config_line_key(line).is_some_and(|existing| existing == key))
+    {
+        *line = format!("{key}={value}");
+        return;
+    }
+    lines.push(format!("{key}={value}"));
+}
+
+fn npm_config_line_key(line: &str) -> Option<&str> {
+    let line = strip_npm_config_comment(line).trim();
+    if line.is_empty() {
+        return None;
+    }
+    line.split_once('=')
+        .map(|(key, _)| key.trim())
+        .filter(|key| !key.is_empty())
+}
+
+fn strip_npm_config_comment(line: &str) -> &str {
+    let trimmed = line.trim_start();
+    if trimmed.starts_with('#') || trimmed.starts_with(';') {
+        return "";
+    }
+    for (index, ch) in line.char_indices() {
+        let previous_was_whitespace = line[..index]
+            .chars()
+            .last()
+            .map(char::is_whitespace)
+            .unwrap_or(false);
+        if matches!(ch, '#' | ';') && previous_was_whitespace {
+            return &line[..index];
+        }
+    }
+    line
 }
 
 fn print_npm_view(
@@ -4025,6 +4137,8 @@ fn parse_npm_config_args(args: &[String]) -> Result<NpmCompatAction, OmcRegistry
     match command {
         "get" => parse_npm_config_get_args(&args[1..]),
         "list" | "ls" => parse_npm_config_list_args(&args[1..]),
+        "set" => parse_npm_config_set_args(&args[1..]),
+        "delete" | "del" | "rm" | "unset" => parse_npm_config_delete_args(&args[1..]),
         other => Err(OmcRegistryError::UnsupportedSpec(format!(
             "unsupported npm config command `{other}`"
         ))),
@@ -4117,6 +4231,79 @@ fn parse_npm_config_list_args(args: &[String]) -> Result<NpmCompatAction, OmcReg
         npm_registry,
         userconfig,
     })
+}
+
+fn parse_npm_config_set_args(args: &[String]) -> Result<NpmCompatAction, OmcRegistryError> {
+    let NpmConfigArgs {
+        npm_registry,
+        userconfig,
+        positionals,
+        ..
+    } = parse_npm_config_common_args(args)?;
+    let assignments = parse_npm_config_assignments(positionals)?;
+    Ok(NpmCompatAction::Config {
+        action: NpmConfigAction::Set { assignments },
+        npm_registry,
+        userconfig,
+    })
+}
+
+fn parse_npm_config_delete_args(args: &[String]) -> Result<NpmCompatAction, OmcRegistryError> {
+    let NpmConfigArgs {
+        npm_registry,
+        userconfig,
+        positionals,
+        ..
+    } = parse_npm_config_common_args(args)?;
+    if positionals.is_empty() {
+        return Err(OmcRegistryError::UnsupportedSpec(
+            "npm config delete needs at least one key".to_owned(),
+        ));
+    }
+    Ok(NpmCompatAction::Config {
+        action: NpmConfigAction::Delete { keys: positionals },
+        npm_registry,
+        userconfig,
+    })
+}
+
+fn parse_npm_config_assignments(
+    positionals: Vec<String>,
+) -> Result<Vec<(String, String)>, OmcRegistryError> {
+    if positionals.is_empty() {
+        return Err(OmcRegistryError::UnsupportedSpec(
+            "npm config set needs a key and value".to_owned(),
+        ));
+    }
+    if positionals.iter().any(|value| value.contains('=')) {
+        return positionals
+            .into_iter()
+            .map(|assignment| {
+                let Some((key, value)) = assignment.split_once('=') else {
+                    return Err(OmcRegistryError::UnsupportedSpec(format!(
+                        "npm config set mixed assignment formats at `{assignment}`"
+                    )));
+                };
+                npm_config_assignment(key, value)
+            })
+            .collect();
+    }
+    if positionals.len() != 2 {
+        return Err(OmcRegistryError::UnsupportedSpec(
+            "npm config set needs either KEY VALUE or KEY=VALUE".to_owned(),
+        ));
+    }
+    npm_config_assignment(&positionals[0], &positionals[1]).map(|assignment| vec![assignment])
+}
+
+fn npm_config_assignment(key: &str, value: &str) -> Result<(String, String), OmcRegistryError> {
+    let key = key.trim();
+    if key.is_empty() {
+        return Err(OmcRegistryError::UnsupportedSpec(
+            "npm config key cannot be empty".to_owned(),
+        ));
+    }
+    Ok((key.to_owned(), value.trim().to_owned()))
 }
 
 #[derive(Debug)]
@@ -6408,7 +6595,118 @@ mod tests {
                 userconfig: None,
             }
         );
-        assert!(parse_npm_compat_action(&args(&["config", "set", "registry", "x"])).is_err());
+        assert_eq!(
+            parse_npm_compat_action(&args(&["config", "set", "registry", "x"])).unwrap(),
+            NpmCompatAction::Config {
+                action: NpmConfigAction::Set {
+                    assignments: vec![("registry".to_owned(), "x".to_owned())],
+                },
+                npm_registry: None,
+                userconfig: None,
+            }
+        );
+        assert_eq!(
+            parse_npm_compat_action(&args(&[
+                "config",
+                "set",
+                "@scope:registry=https://registry.example.invalid/npm",
+                "--userconfig=ci.npmrc",
+            ]))
+            .unwrap(),
+            NpmCompatAction::Config {
+                action: NpmConfigAction::Set {
+                    assignments: vec![(
+                        "@scope:registry".to_owned(),
+                        "https://registry.example.invalid/npm".to_owned(),
+                    )],
+                },
+                npm_registry: None,
+                userconfig: Some(PathBuf::from("ci.npmrc")),
+            }
+        );
+        assert_eq!(
+            parse_npm_compat_action(&args(&["config", "delete", "registry"])).unwrap(),
+            NpmCompatAction::Config {
+                action: NpmConfigAction::Delete {
+                    keys: vec!["registry".to_owned()],
+                },
+                npm_registry: None,
+                userconfig: None,
+            }
+        );
+    }
+
+    #[test]
+    fn writes_npm_config_set_and_delete() {
+        let dir = test_dir("npm-config-set-delete");
+        fs::write(
+            dir.join(".npmrc"),
+            "registry=https://old.example.invalid/npm\n# keep this\nlegacy-peer-deps=true\n",
+        )
+        .unwrap();
+
+        print_npm_config(
+            &dir,
+            NpmConfigAction::Set {
+                assignments: vec![
+                    (
+                        "registry".to_owned(),
+                        "https://new.example.invalid/npm".to_owned(),
+                    ),
+                    (
+                        "@scope:registry".to_owned(),
+                        "https://scope.example.invalid/npm".to_owned(),
+                    ),
+                ],
+            },
+            None,
+            None,
+        )
+        .unwrap();
+
+        let config = fs::read_to_string(dir.join(".npmrc")).unwrap();
+        assert!(config.contains("registry=https://new.example.invalid/npm\n"));
+        assert!(config.contains("# keep this\n"));
+        assert!(config.contains("@scope:registry=https://scope.example.invalid/npm\n"));
+        let values = npm_config_values(&dir, None, Some(Path::new("empty-user.npmrc"))).unwrap();
+        assert_eq!(
+            values.get("registry").map(String::as_str),
+            Some("https://new.example.invalid/npm/")
+        );
+        assert_eq!(
+            values.get("@scope:registry").map(String::as_str),
+            Some("https://scope.example.invalid/npm/")
+        );
+
+        print_npm_config(
+            &dir,
+            NpmConfigAction::Delete {
+                keys: vec!["registry".to_owned()],
+            },
+            None,
+            None,
+        )
+        .unwrap();
+        let config = fs::read_to_string(dir.join(".npmrc")).unwrap();
+        assert!(!config.contains("registry=https://new.example.invalid/npm\n"));
+        assert!(config.contains("@scope:registry=https://scope.example.invalid/npm\n"));
+
+        print_npm_config(
+            &dir,
+            NpmConfigAction::Set {
+                assignments: vec![(
+                    "registry".to_owned(),
+                    "https://ci.example.invalid".to_owned(),
+                )],
+            },
+            None,
+            Some(Path::new("ci.npmrc")),
+        )
+        .unwrap();
+        assert_eq!(
+            fs::read_to_string(dir.join("ci.npmrc")).unwrap(),
+            "registry=https://ci.example.invalid\n"
+        );
     }
 
     #[test]
