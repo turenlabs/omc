@@ -323,6 +323,8 @@ pub struct OmcLock {
     pub version: u32,
     #[serde(default)]
     pub packages: Vec<LockedPackage>,
+    #[serde(default)]
+    pub python_vcs: Vec<LockedPythonVcsDependency>,
 }
 
 impl OmcLock {
@@ -330,6 +332,7 @@ impl OmcLock {
         Self {
             version: 1,
             packages: Vec::new(),
+            python_vcs: Vec::new(),
         }
     }
 
@@ -358,6 +361,28 @@ impl OmcLock {
             });
         }
     }
+
+    fn replace_python_vcs(&mut self, mut dependencies: Vec<LockedPythonVcsDependency>) {
+        dependencies.sort_by(|left, right| {
+            (
+                left.name.as_str(),
+                left.url.as_str(),
+                left.reference.as_deref().unwrap_or_default(),
+                left.subdirectory.as_deref().unwrap_or_default(),
+                left.extras.as_slice(),
+            )
+                .cmp(&(
+                    right.name.as_str(),
+                    right.url.as_str(),
+                    right.reference.as_deref().unwrap_or_default(),
+                    right.subdirectory.as_deref().unwrap_or_default(),
+                    right.extras.as_slice(),
+                ))
+        });
+        dependencies
+            .dedup_by(|left, right| python_vcs_lock_key(left) == python_vcs_lock_key(right));
+        self.python_vcs = dependencies;
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -381,6 +406,19 @@ pub struct LockedPackage {
     pub capabilities: Vec<CapabilityFinding>,
     #[serde(default)]
     pub verifier_findings: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LockedPythonVcsDependency {
+    pub name: String,
+    pub url: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reference: Option<String>,
+    pub resolved_commit: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subdirectory: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub extras: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -469,6 +507,7 @@ pub struct LinkOptions {
     pub pypi_no_index: bool,
     pub python_local_paths: Vec<PathBuf>,
     pub python_vcs_requirements: Vec<PythonVcsRequirement>,
+    pub python_vcs_locks: Vec<LockedPythonVcsDependency>,
     pub requirement_files: Vec<PathBuf>,
     pub project_extras: BTreeSet<String>,
     pub include_dev_dependencies: bool,
@@ -491,6 +530,7 @@ impl LinkOptions {
             pypi_no_index: false,
             python_local_paths: Vec::new(),
             python_vcs_requirements: Vec::new(),
+            python_vcs_locks: Vec::new(),
             requirement_files: Vec::new(),
             project_extras: BTreeSet::new(),
             include_dev_dependencies: true,
@@ -542,6 +582,12 @@ pub struct PythonVcsRequirement {
     pub reference: Option<String>,
     pub subdirectory: Option<PathBuf>,
     pub extras: BTreeSet<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct PythonVcsResolveResult {
+    requirements: ProjectRequirements,
+    locks: Vec<LockedPythonVcsDependency>,
 }
 
 fn extend_project_requirements(
@@ -724,7 +770,7 @@ pub fn install_project(options: &LinkOptions) -> Result<InstallReport> {
     init_project(&options.project_dir, None)?;
 
     let mut options = options.clone();
-    let specs = project_requested_specs(&mut options)?;
+    let specs = project_requested_specs(&mut options, false)?;
 
     let client = Client::builder().user_agent("omc-prototype/0.1").build()?;
     let mut seen_roots = BTreeSet::new();
@@ -739,6 +785,7 @@ pub fn install_project(options: &LinkOptions) -> Result<InstallReport> {
     }
 
     prune_lockfile(&options.project_dir, &retained)?;
+    sync_python_vcs_lockfile(&options.project_dir, options.python_vcs_locks.clone())?;
     let lock = read_lockfile(options.project_dir.join(LOCKFILE))?;
     let mut report = install_lock(&options.project_dir, &lock)?;
     report.npm_bins += install_npm_project_links(
@@ -759,7 +806,7 @@ pub fn install_locked_project(options: &LinkOptions) -> Result<InstallReport> {
     init_project(&options.project_dir, None)?;
 
     let mut options = options.clone();
-    let specs = project_requested_specs(&mut options)?;
+    let specs = project_requested_specs(&mut options, true)?;
     let lock = read_lockfile(options.project_dir.join(LOCKFILE))?;
     let retained = locked_reachable_package_keys(&lock, &specs, &options)?;
     let mut selected = lock;
@@ -782,7 +829,7 @@ pub fn install_locked_project(options: &LinkOptions) -> Result<InstallReport> {
     Ok(report)
 }
 
-fn project_requested_specs(options: &mut LinkOptions) -> Result<Vec<PackageSpec>> {
+fn project_requested_specs(options: &mut LinkOptions, locked: bool) -> Result<Vec<PackageSpec>> {
     let manifest = read_manifest(options.project_dir.join(MANIFEST))?;
     apply_manifest_config(&manifest, options)?;
     let mut specs = Vec::new();
@@ -807,11 +854,18 @@ fn project_requested_specs(options: &mut LinkOptions) -> Result<Vec<PackageSpec>
     }
 
     if !options.python_vcs_requirements.is_empty() {
-        let requirements = resolve_python_vcs_requirements(
+        let lock = if locked {
+            Some(read_lockfile(options.project_dir.join(LOCKFILE))?)
+        } else {
+            None
+        };
+        let resolved = resolve_python_vcs_requirements(
             &options.project_dir,
             &options.python_vcs_requirements,
+            lock.as_ref().map(|lock| lock.python_vcs.as_slice()),
         )?;
-        apply_project_requirements_to_options(options, &mut specs, requirements);
+        options.python_vcs_locks.extend(resolved.locks);
+        apply_project_requirements_to_options(options, &mut specs, resolved.requirements);
     }
 
     let mut seen = BTreeSet::new();
@@ -822,8 +876,10 @@ fn project_requested_specs(options: &mut LinkOptions) -> Result<Vec<PackageSpec>
 fn resolve_python_vcs_requirements(
     project_dir: &Path,
     requirements: &[PythonVcsRequirement],
-) -> Result<ProjectRequirements> {
+    locked: Option<&[LockedPythonVcsDependency]>,
+) -> Result<PythonVcsResolveResult> {
     let mut resolved = ProjectRequirements::default();
+    let mut locks = Vec::new();
     let mut queue = requirements.to_vec();
     let mut seen = BTreeSet::new();
 
@@ -831,48 +887,46 @@ fn resolve_python_vcs_requirements(
         if !seen.insert(requirement.clone()) {
             continue;
         }
-        let source_requirements = resolve_python_vcs_requirement(project_dir, &requirement)?;
+        let (source_requirements, lock) =
+            resolve_python_vcs_requirement(project_dir, &requirement, locked)?;
         queue.extend(source_requirements.python_vcs_requirements.clone());
         extend_project_requirements(&mut resolved, source_requirements);
+        locks.push(lock);
     }
 
-    Ok(resolved)
+    Ok(PythonVcsResolveResult {
+        requirements: resolved,
+        locks,
+    })
 }
 
 fn resolve_python_vcs_requirement(
     project_dir: &Path,
     requirement: &PythonVcsRequirement,
-) -> Result<ProjectRequirements> {
+    locked: Option<&[LockedPythonVcsDependency]>,
+) -> Result<(ProjectRequirements, LockedPythonVcsDependency)> {
     let checkout_dir = python_vcs_checkout_dir(project_dir, requirement);
-    remove_path_if_exists(&checkout_dir)?;
-    fs::create_dir_all(checkout_dir.parent().ok_or_else(|| {
-        OmcRegistryError::UnsupportedRequirement(format!(
-            "VCS checkout path `{}` has no parent",
-            checkout_dir.display()
-        ))
-    })?)?;
-
-    let mut clone = Command::new("git");
-    clone
-        .arg("clone")
-        .arg("--quiet")
-        .arg(&requirement.url)
-        .arg(&checkout_dir);
-    run_git_command(&mut clone, &format!("clone `{}`", requirement.url))?;
-
-    if let Some(reference) = requirement.reference.as_deref() {
-        let mut checkout = Command::new("git");
-        checkout
-            .arg("-C")
-            .arg(&checkout_dir)
-            .arg("checkout")
-            .arg("--quiet")
-            .arg(reference);
-        run_git_command(
-            &mut checkout,
-            &format!("checkout `{reference}` for `{}`", requirement.name),
-        )?;
+    let locked_dependency = locked
+        .map(|locks| find_locked_python_vcs_dependency(locks, requirement))
+        .transpose()?
+        .flatten();
+    if locked.is_some() && locked_dependency.is_none() {
+        return Err(OmcRegistryError::LockfileOutOfDate(format!(
+            "pypi:{} @ git+{}",
+            requirement.name, requirement.url
+        )));
     }
+    let checkout_reference = locked_dependency
+        .as_ref()
+        .map(|dependency| dependency.resolved_commit.as_str())
+        .or(requirement.reference.as_deref());
+    checkout_python_vcs_dependency(
+        &checkout_dir,
+        requirement,
+        checkout_reference,
+        locked.is_some(),
+    )?;
+    let resolved_commit = git_rev_parse_head(&checkout_dir, &requirement.name)?;
 
     let package_dir = if let Some(subdirectory) = requirement.subdirectory.as_deref() {
         checked_join(&checkout_dir, subdirectory)?
@@ -889,7 +943,8 @@ fn resolve_python_vcs_requirement(
 
     let mut resolved = read_python_source_requirements(&package_dir, &requirement.extras)?;
     push_python_local_path(&mut resolved, package_dir);
-    Ok(resolved)
+    let lock = locked_python_vcs_dependency(requirement, resolved_commit);
+    Ok((resolved, lock))
 }
 
 fn python_vcs_checkout_dir(project_dir: &Path, requirement: &PythonVcsRequirement) -> PathBuf {
@@ -918,6 +973,163 @@ fn python_vcs_checkout_dir(project_dir: &Path, requirement: &PythonVcsRequiremen
         .join("vcs")
         .join(safe_name(&requirement.name))
         .join(&digest[..16])
+}
+
+fn checkout_python_vcs_dependency(
+    checkout_dir: &Path,
+    requirement: &PythonVcsRequirement,
+    reference: Option<&str>,
+    locked: bool,
+) -> Result<()> {
+    if locked && checkout_dir.join(".git").is_dir() {
+        if let Some(reference) = reference {
+            if checkout_python_vcs_reference(checkout_dir, &requirement.name, reference).is_err() {
+                let mut fetch = Command::new("git");
+                fetch
+                    .arg("-C")
+                    .arg(checkout_dir)
+                    .arg("fetch")
+                    .arg("--quiet")
+                    .arg("--all")
+                    .arg("--tags");
+                run_git_command(&mut fetch, &format!("fetch `{}`", requirement.name))?;
+                checkout_python_vcs_reference(checkout_dir, &requirement.name, reference)?;
+            }
+        }
+        return Ok(());
+    }
+
+    remove_path_if_exists(checkout_dir)?;
+    fs::create_dir_all(checkout_dir.parent().ok_or_else(|| {
+        OmcRegistryError::UnsupportedRequirement(format!(
+            "VCS checkout path `{}` has no parent",
+            checkout_dir.display()
+        ))
+    })?)?;
+
+    let mut clone = Command::new("git");
+    clone
+        .arg("clone")
+        .arg("--quiet")
+        .arg(&requirement.url)
+        .arg(checkout_dir);
+    run_git_command(&mut clone, &format!("clone `{}`", requirement.url))?;
+
+    if let Some(reference) = reference {
+        checkout_python_vcs_reference(checkout_dir, &requirement.name, reference)?;
+    }
+
+    Ok(())
+}
+
+fn checkout_python_vcs_reference(checkout_dir: &Path, name: &str, reference: &str) -> Result<()> {
+    let mut checkout = Command::new("git");
+    checkout
+        .arg("-C")
+        .arg(checkout_dir)
+        .arg("checkout")
+        .arg("--quiet")
+        .arg(reference);
+    run_git_command(
+        &mut checkout,
+        &format!("checkout `{reference}` for `{name}`"),
+    )?;
+    Ok(())
+}
+
+fn git_rev_parse_head(checkout_dir: &Path, name: &str) -> Result<String> {
+    let mut rev_parse = Command::new("git");
+    rev_parse
+        .arg("-C")
+        .arg(checkout_dir)
+        .arg("rev-parse")
+        .arg("HEAD");
+    let commit = run_git_command(&mut rev_parse, &format!("resolve HEAD for `{name}`"))?;
+    if !is_git_commit_hash(&commit) {
+        return Err(OmcRegistryError::UnsupportedRequirement(format!(
+            "git resolve HEAD for `{name}` returned invalid commit `{commit}`"
+        )));
+    }
+    Ok(commit)
+}
+
+fn is_git_commit_hash(value: &str) -> bool {
+    value.len() == 40 && value.chars().all(|ch| ch.is_ascii_hexdigit())
+}
+
+fn locked_python_vcs_dependency(
+    requirement: &PythonVcsRequirement,
+    resolved_commit: String,
+) -> LockedPythonVcsDependency {
+    LockedPythonVcsDependency {
+        name: requirement.name.clone(),
+        url: requirement.url.clone(),
+        reference: requirement.reference.clone(),
+        resolved_commit,
+        subdirectory: python_vcs_subdirectory_string(requirement.subdirectory.as_deref()),
+        extras: requirement.extras.iter().cloned().collect(),
+    }
+}
+
+fn find_locked_python_vcs_dependency(
+    locks: &[LockedPythonVcsDependency],
+    requirement: &PythonVcsRequirement,
+) -> Result<Option<LockedPythonVcsDependency>> {
+    for lock in locks {
+        if !python_vcs_lock_matches_requirement(lock, requirement) {
+            continue;
+        }
+        if !is_git_commit_hash(&lock.resolved_commit) {
+            return Err(OmcRegistryError::LockfileOutOfDate(format!(
+                "pypi:{} @ git+{}",
+                requirement.name, requirement.url
+            )));
+        }
+        return Ok(Some(lock.clone()));
+    }
+    Ok(None)
+}
+
+fn python_vcs_lock_matches_requirement(
+    lock: &LockedPythonVcsDependency,
+    requirement: &PythonVcsRequirement,
+) -> bool {
+    let extras = lock
+        .extras
+        .iter()
+        .map(|extra| normalize_pypi_extra(extra))
+        .filter(|extra| !extra.is_empty())
+        .collect::<BTreeSet<_>>();
+    lock.name == requirement.name
+        && lock.url == requirement.url
+        && lock.reference == requirement.reference
+        && lock.subdirectory == python_vcs_subdirectory_string(requirement.subdirectory.as_deref())
+        && extras == requirement.extras
+}
+
+fn python_vcs_lock_key(
+    lock: &LockedPythonVcsDependency,
+) -> (String, String, Option<String>, Option<String>, Vec<String>) {
+    let extras = lock
+        .extras
+        .iter()
+        .map(|extra| normalize_pypi_extra(extra))
+        .filter(|extra| !extra.is_empty())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    (
+        lock.name.clone(),
+        lock.url.clone(),
+        lock.reference.clone(),
+        lock.subdirectory.clone(),
+        extras,
+    )
+}
+
+fn python_vcs_subdirectory_string(path: Option<&Path>) -> Option<String> {
+    path.map(|path| path.to_string_lossy().replace('\\', "/"))
+        .filter(|path| !path.is_empty())
 }
 
 fn run_git_command(command: &mut Command, description: &str) -> Result<String> {
@@ -1782,6 +1994,17 @@ fn prune_lockfile(project_dir: &Path, retained: &BTreeSet<String>) -> Result<usi
         fs::write(lockfile, toml::to_string_pretty(&lock)?)?;
     }
     Ok(removed)
+}
+
+fn sync_python_vcs_lockfile(
+    project_dir: &Path,
+    dependencies: Vec<LockedPythonVcsDependency>,
+) -> Result<()> {
+    let lockfile = project_dir.join(LOCKFILE);
+    let mut lock = read_lockfile(&lockfile)?;
+    lock.replace_python_vcs(dependencies);
+    fs::write(lockfile, toml::to_string_pretty(&lock)?)?;
+    Ok(())
 }
 
 fn locked_package_key(package: &LockedPackage) -> String {
@@ -4872,16 +5095,19 @@ fn is_exact_pypi_requirement(requirement: &str) -> bool {
 pub fn install_locked_packages(project_dir: impl AsRef<Path>) -> Result<InstallReport> {
     let project_dir = project_dir.as_ref();
     let lock = read_lockfile(project_dir.join(LOCKFILE))?;
-    let mut report = install_lock(project_dir, &lock)?;
-    report.npm_bins +=
-        install_npm_project_links(project_dir, &report.node_modules, &report.npm_bin_dir, true)?;
     let mut project =
         discover_project_requirements_with_options(project_dir, &BTreeSet::new(), true)?;
     if !project.python_vcs_requirements.is_empty() {
-        let vcs_requirements =
-            resolve_python_vcs_requirements(project_dir, &project.python_vcs_requirements)?;
-        extend_project_requirements(&mut project, vcs_requirements);
+        let vcs_requirements = resolve_python_vcs_requirements(
+            project_dir,
+            &project.python_vcs_requirements,
+            Some(&lock.python_vcs),
+        )?;
+        extend_project_requirements(&mut project, vcs_requirements.requirements);
     }
+    let mut report = install_lock(project_dir, &lock)?;
+    report.npm_bins +=
+        install_npm_project_links(project_dir, &report.node_modules, &report.npm_bin_dir, true)?;
     report.python_scripts += install_python_local_paths(
         &project.python_local_paths,
         &report.python_site_packages,
@@ -10972,6 +11198,7 @@ packages:
             toml::to_string_pretty(&OmcLock {
                 version: 1,
                 packages: vec![keep.clone(), stale],
+                python_vcs: Vec::new(),
             })
             .unwrap(),
         )
@@ -11037,6 +11264,7 @@ packages:
         let lock = OmcLock {
             version: 1,
             packages: vec![root, dependency],
+            python_vcs: Vec::new(),
         };
         let options = LinkOptions::new(".");
         let retained = locked_reachable_package_keys(
@@ -11057,6 +11285,7 @@ packages:
         let lock = OmcLock {
             version: 1,
             packages: vec![root],
+            python_vcs: Vec::new(),
         };
         let options = LinkOptions::new(".");
         let retained = locked_reachable_package_keys(
@@ -11077,6 +11306,7 @@ packages:
         let lock = OmcLock {
             version: 1,
             packages: vec![locked_package_for_test(Ecosystem::Npm, "left-pad", "1.1.0")],
+            python_vcs: Vec::new(),
         };
         let options = LinkOptions::new(".");
         let error = locked_reachable_package_keys(
@@ -11368,6 +11598,7 @@ packages:
             &OmcLock {
                 version: 1,
                 packages: vec![package],
+                python_vcs: Vec::new(),
             },
         )
         .unwrap();
@@ -11423,6 +11654,7 @@ packages:
             &OmcLock {
                 version: 1,
                 packages: vec![package],
+                python_vcs: Vec::new(),
             },
         )
         .unwrap();
@@ -11561,6 +11793,11 @@ packages:
 
         let report = install_project(&LinkOptions::new(&project)).unwrap();
         assert_eq!(report.python_scripts, 1);
+        let lock = read_lockfile(project.join("omc.lock")).unwrap();
+        assert_eq!(lock.python_vcs.len(), 1);
+        assert_eq!(lock.python_vcs[0].name, "gitpkg");
+        assert_eq!(lock.python_vcs[0].reference.as_deref(), Some("HEAD"));
+        assert!(is_git_commit_hash(&lock.python_vcs[0].resolved_commit));
         let local_paths = fs::read_to_string(project.join(".omc/python/local-paths")).unwrap();
         assert!(local_paths.contains(".omc/python/vcs/gitpkg/"));
 
@@ -11569,6 +11806,96 @@ packages:
             .unwrap();
         assert!(output.status.success());
         assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "git-vcs-ok");
+    }
+
+    #[test]
+    fn locked_python_vcs_install_uses_pinned_commit() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("gitpkg-repo");
+        let src = repo.join("src").join("gitpkg");
+        fs::create_dir_all(&src).unwrap();
+        fs::write(src.join("__init__.py"), "").unwrap();
+        fs::write(src.join("cli.py"), "def main():\n    print('v1')\n").unwrap();
+        fs::write(
+            repo.join("pyproject.toml"),
+            r#"
+            [project]
+            name = "gitpkg"
+
+            [project.scripts]
+            git-vcs-cli = "gitpkg.cli:main"
+            "#,
+        )
+        .unwrap();
+        commit_git_repo(&repo);
+        let first_commit = git_rev_parse_head(&repo, "gitpkg").unwrap();
+
+        let project = dir.path().join("project");
+        fs::create_dir_all(&project).unwrap();
+        let repo_url = reqwest::Url::from_directory_path(&repo)
+            .unwrap()
+            .to_string();
+        fs::write(
+            project.join("requirements.txt"),
+            format!("gitpkg @ git+{repo_url}@HEAD\n"),
+        )
+        .unwrap();
+
+        install_project(&LinkOptions::new(&project)).unwrap();
+        let lock = read_lockfile(project.join("omc.lock")).unwrap();
+        assert_eq!(lock.python_vcs.len(), 1);
+        assert_eq!(lock.python_vcs[0].resolved_commit, first_commit);
+
+        fs::write(src.join("cli.py"), "def main():\n    print('v2')\n").unwrap();
+        assert!(Command::new("git")
+            .arg("-C")
+            .arg(&repo)
+            .arg("add")
+            .arg(".")
+            .status()
+            .unwrap()
+            .success());
+        assert!(Command::new("git")
+            .arg("-C")
+            .arg(&repo)
+            .arg("-c")
+            .arg("user.email=omc@example.invalid")
+            .arg("-c")
+            .arg("user.name=omc test")
+            .arg("commit")
+            .arg("--quiet")
+            .arg("-m")
+            .arg("second")
+            .status()
+            .unwrap()
+            .success());
+        assert_ne!(git_rev_parse_head(&repo, "gitpkg").unwrap(), first_commit);
+        remove_path_if_exists(&project.join(".omc/python/vcs")).unwrap();
+
+        install_locked_project(&LinkOptions::new(&project)).unwrap();
+        let output = Command::new(project.join(".omc/python/bin/git-vcs-cli"))
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "v1");
+    }
+
+    #[test]
+    fn locked_python_vcs_install_requires_lock_entry() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(
+            dir.path().join("requirements.txt"),
+            "gitpkg @ git+https://example.invalid/gitpkg.git@main\n",
+        )
+        .unwrap();
+        fs::write(
+            dir.path().join("omc.lock"),
+            toml::to_string_pretty(&OmcLock::new()).unwrap(),
+        )
+        .unwrap();
+
+        let error = install_locked_project(&LinkOptions::new(dir.path())).unwrap_err();
+        assert!(matches!(error, OmcRegistryError::LockfileOutOfDate(_)));
     }
 
     #[test]
@@ -11598,9 +11925,11 @@ packages:
             subdirectory: None,
             extras: BTreeSet::new(),
         };
-        let requirements = resolve_python_vcs_requirements(dir.path(), &[vcs]).unwrap();
-        assert!(has_spec(&requirements.specs, "idna", "==3.7"));
-        assert_eq!(requirements.python_local_paths.len(), 1);
+        let resolved = resolve_python_vcs_requirements(dir.path(), &[vcs], None).unwrap();
+        assert!(has_spec(&resolved.requirements.specs, "idna", "==3.7"));
+        assert_eq!(resolved.requirements.python_local_paths.len(), 1);
+        assert_eq!(resolved.locks.len(), 1);
+        assert!(is_git_commit_hash(&resolved.locks[0].resolved_commit));
     }
 
     #[test]
