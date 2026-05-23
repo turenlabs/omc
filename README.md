@@ -122,6 +122,7 @@ package.json       dependencies, devDependencies, optionalDependencies, peers; u
 package-lock.json  exact version constraints for uniquely locked npm packages
 requirements.txt  PyPI requirements, hashes, extras, -r includes, -c constraints, markers
 pyproject.toml    PEP 621 project dependencies, selected optional groups
+pyproject.toml    Poetry dependencies, dev groups, optional groups, and extras
 ```
 
 What `add` does:
@@ -211,6 +212,9 @@ Supported now:
   index configuration fail closed instead of being silently ignored
 - `pyproject.toml` PEP 621 dependency ingestion with `omc install --extra`
   for selected optional dependency groups
+- Poetry `pyproject.toml` dependency ingestion, including
+  `[tool.poetry.dependencies]`, old `[tool.poetry.dev-dependencies]`,
+  dependency groups, selected optional groups, and selected extras
 - PyPI extras resolution for dependencies gated by `extra == "..."`
 - source artifact download and cache
 - `omc.toml` and `omc.lock`
@@ -247,6 +251,7 @@ Not implemented yet:
 - full npm peer placement semantics beyond current required-peer handling
 - advanced requirements-file semantics such as editable installs, direct URLs,
   and index configuration beyond fail-closed rejection
+- Poetry direct path/git/url/file dependencies beyond fail-closed rejection
 - Python sdist build isolation and native extension policy beyond fail-closed
   rejection
 - execution of package code inside OMC cells for real applications

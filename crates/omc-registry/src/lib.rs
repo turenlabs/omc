@@ -795,7 +795,8 @@ fn discover_project_requirements_with_options(
 
     let pyproject_toml = project_dir.join("pyproject.toml");
     if pyproject_toml.exists() {
-        let requirements = read_pyproject_requirements(&pyproject_toml, project_extras)?;
+        let requirements =
+            read_pyproject_requirements(&pyproject_toml, project_extras, include_dev_dependencies)?;
         project.specs.extend(requirements.specs);
     }
 
@@ -1184,36 +1185,198 @@ fn read_requirements_file(path: &Path) -> Result<ProjectRequirements> {
 fn read_pyproject_requirements(
     path: &Path,
     project_extras: &BTreeSet<String>,
+    include_dev_dependencies: bool,
 ) -> Result<ProjectRequirements> {
     let pyproject = toml::from_str::<PyProjectToml>(&fs::read_to_string(path)?)?;
     let mut discovered = ProjectRequirements::default();
-    let Some(project) = pyproject.project else {
-        return Ok(discovered);
-    };
 
-    for dependency in project.dependencies {
-        if let Some(spec) = parse_pypi_requirement(&dependency) {
-            discovered.specs.push(spec);
+    if let Some(project) = pyproject.project {
+        for dependency in project.dependencies {
+            if let Some(spec) = parse_pypi_requirement(&dependency) {
+                discovered.specs.push(spec);
+            }
         }
-    }
 
-    let optional_dependencies = project
-        .optional_dependencies
-        .into_iter()
-        .map(|(extra, dependencies)| (normalize_pypi_extra(&extra), dependencies))
-        .collect::<BTreeMap<_, _>>();
+        let optional_dependencies = project
+            .optional_dependencies
+            .into_iter()
+            .map(|(extra, dependencies)| (normalize_pypi_extra(&extra), dependencies))
+            .collect::<BTreeMap<_, _>>();
 
-    for extra in project_extras {
-        if let Some(dependencies) = optional_dependencies.get(extra) {
-            for dependency in dependencies {
-                if let Some(spec) = parse_pypi_requirement_with_extras(dependency, project_extras) {
-                    discovered.specs.push(spec);
+        for extra in project_extras {
+            if let Some(dependencies) = optional_dependencies.get(extra) {
+                for dependency in dependencies {
+                    if let Some(spec) =
+                        parse_pypi_requirement_with_extras(dependency, project_extras)
+                    {
+                        discovered.specs.push(spec);
+                    }
                 }
             }
         }
     }
 
+    if let Some(poetry) = pyproject.tool.and_then(|tool| tool.poetry) {
+        discovered.specs.extend(read_poetry_dependencies(
+            &poetry.dependencies,
+            &poetry.extras,
+            project_extras,
+        )?);
+
+        if include_dev_dependencies {
+            discovered.specs.extend(read_poetry_dependencies(
+                &poetry.dev_dependencies,
+                &BTreeMap::new(),
+                &BTreeSet::new(),
+            )?);
+        }
+
+        for (group_name, group) in poetry.group {
+            let group_name = normalize_pypi_extra(&group_name);
+            let include_group = if group_name == "dev" {
+                include_dev_dependencies
+            } else if group.optional {
+                project_extras.contains(&group_name)
+            } else {
+                true
+            };
+
+            if include_group {
+                discovered.specs.extend(read_poetry_dependencies(
+                    &group.dependencies,
+                    &BTreeMap::new(),
+                    &BTreeSet::new(),
+                )?);
+            }
+        }
+    }
+
     Ok(discovered)
+}
+
+fn read_poetry_dependencies(
+    dependencies: &BTreeMap<String, PoetryDependency>,
+    extras: &BTreeMap<String, Vec<String>>,
+    project_extras: &BTreeSet<String>,
+) -> Result<Vec<PackageSpec>> {
+    let selected_optional_names = extras
+        .iter()
+        .filter(|(extra, _)| project_extras.contains(&normalize_pypi_extra(extra)))
+        .flat_map(|(_, names)| names.iter().map(|name| normalize_pypi_name(name)))
+        .collect::<BTreeSet<_>>();
+    let mut specs = Vec::new();
+
+    for (name, dependency) in dependencies {
+        let name = normalize_pypi_name(name);
+        if name == "python" {
+            continue;
+        }
+        if poetry_dependency_optional(dependency) && !selected_optional_names.contains(&name) {
+            continue;
+        }
+        if let Some(spec) = poetry_dependency_spec(&name, dependency)? {
+            specs.push(spec);
+        }
+    }
+
+    Ok(specs)
+}
+
+fn poetry_dependency_optional(dependency: &PoetryDependency) -> bool {
+    match dependency {
+        PoetryDependency::Version(_) => false,
+        PoetryDependency::Table(table) => table.optional,
+    }
+}
+
+fn poetry_dependency_spec(
+    name: &str,
+    dependency: &PoetryDependency,
+) -> Result<Option<PackageSpec>> {
+    let version = match dependency {
+        PoetryDependency::Version(version) => version.as_str(),
+        PoetryDependency::Table(table) => {
+            if table.path.is_some()
+                || table.git.is_some()
+                || table.url.is_some()
+                || table.file.is_some()
+            {
+                return Err(OmcRegistryError::UnsupportedSpec(format!(
+                    "unsupported Poetry dependency source for `{name}`"
+                )));
+            }
+            table.version.as_deref().unwrap_or("*")
+        }
+    };
+    Ok(poetry_version_requirement(name, version).map(|version| {
+        PackageSpec::new(
+            Ecosystem::Pypi,
+            name.to_owned(),
+            (!version.is_empty()).then_some(version),
+        )
+    }))
+}
+
+fn poetry_version_requirement(_name: &str, version: &str) -> Option<String> {
+    let version = version.trim();
+    if version.is_empty() {
+        return None;
+    }
+    if version == "*" {
+        return Some(String::new());
+    }
+    if let Some(base) = version.strip_prefix('^') {
+        return poetry_caret_requirement(base);
+    }
+    if let Some(base) = version.strip_prefix('~') {
+        return poetry_tilde_requirement(base);
+    }
+    Some(version.replace(' ', ""))
+}
+
+fn poetry_caret_requirement(base: &str) -> Option<String> {
+    let lower = normalize_poetry_partial_version(base)?;
+    let parts = version_parts(&lower);
+    let upper = match parts.as_slice() {
+        [0, 0, patch, ..] => format!("0.0.{}", patch + 1),
+        [0, minor, ..] => format!("0.{}", minor + 1),
+        [major, ..] => format!("{}", major + 1),
+        _ => return None,
+    };
+    Some(format!(">={lower},<{upper}"))
+}
+
+fn poetry_tilde_requirement(base: &str) -> Option<String> {
+    let lower = normalize_poetry_partial_version(base)?;
+    let parts = version_parts(&lower);
+    let upper = match parts.as_slice() {
+        [major] => format!("{}", major + 1),
+        [major, minor, ..] => format!("{}.{}", major, minor + 1),
+        _ => return None,
+    };
+    Some(format!(">={lower},<{upper}"))
+}
+
+fn normalize_poetry_partial_version(version: &str) -> Option<String> {
+    let parts = version_parts(version);
+    if parts.is_empty() {
+        None
+    } else {
+        Some(
+            parts
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join("."),
+        )
+    }
+}
+
+fn version_parts(version: &str) -> Vec<u64> {
+    version
+        .split('.')
+        .filter_map(|part| part.parse::<u64>().ok())
+        .collect()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -3425,6 +3588,7 @@ struct NpmPackageLockDependency {
 #[derive(Debug, Deserialize)]
 struct PyProjectToml {
     project: Option<PyProjectProject>,
+    tool: Option<PyProjectTool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -3433,6 +3597,49 @@ struct PyProjectProject {
     dependencies: Vec<String>,
     #[serde(default, rename = "optional-dependencies")]
     optional_dependencies: BTreeMap<String, Vec<String>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct PyProjectTool {
+    poetry: Option<PoetryProject>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct PoetryProject {
+    #[serde(default)]
+    dependencies: BTreeMap<String, PoetryDependency>,
+    #[serde(default, rename = "dev-dependencies")]
+    dev_dependencies: BTreeMap<String, PoetryDependency>,
+    #[serde(default)]
+    extras: BTreeMap<String, Vec<String>>,
+    #[serde(default)]
+    group: BTreeMap<String, PoetryGroup>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct PoetryGroup {
+    #[serde(default)]
+    optional: bool,
+    #[serde(default)]
+    dependencies: BTreeMap<String, PoetryDependency>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum PoetryDependency {
+    Version(String),
+    Table(PoetryDependencyTable),
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct PoetryDependencyTable {
+    version: Option<String>,
+    #[serde(default)]
+    optional: bool,
+    path: Option<String>,
+    git: Option<String>,
+    url: Option<String>,
+    file: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -4166,7 +4373,7 @@ mod tests {
         )
         .unwrap();
 
-        let base = read_pyproject_requirements(&pyproject, &BTreeSet::new()).unwrap();
+        let base = read_pyproject_requirements(&pyproject, &BTreeSet::new(), true).unwrap();
         assert!(base
             .specs
             .iter()
@@ -4175,7 +4382,8 @@ mod tests {
         assert_eq!(base.specs.len(), 1);
 
         let dev =
-            read_pyproject_requirements(&pyproject, &BTreeSet::from(["dev".to_owned()])).unwrap();
+            read_pyproject_requirements(&pyproject, &BTreeSet::from(["dev".to_owned()]), true)
+                .unwrap();
         assert!(dev.specs.iter().any(|spec| spec.name == "idna"));
         assert!(dev
             .specs
@@ -4187,6 +4395,93 @@ mod tests {
             .iter()
             .any(|spec| spec.name == "urllib3" && spec.version.as_deref() == Some("<3")));
         assert!(!dev.specs.iter().any(|spec| spec.name == "markdown"));
+    }
+
+    #[test]
+    fn reads_poetry_dependencies_and_dev_groups() {
+        let dir = tempfile::tempdir().unwrap();
+        let pyproject = dir.path().join("pyproject.toml");
+        fs::write(
+            &pyproject,
+            r#"
+            [tool.poetry.dependencies]
+            python = "^3.11"
+            requests = "^2.32.0"
+            rich = { version = "^13.0.0", optional = true }
+
+            [tool.poetry.extras]
+            ui = ["rich"]
+
+            [tool.poetry.dev-dependencies]
+            pytest = "^8.0.0"
+
+            [tool.poetry.group.docs]
+            optional = true
+
+            [tool.poetry.group.docs.dependencies]
+            markdown = "^3.6"
+
+            [tool.poetry.group.lint.dependencies]
+            ruff = "^0.5.0"
+            "#,
+        )
+        .unwrap();
+
+        let base = read_pyproject_requirements(&pyproject, &BTreeSet::new(), true).unwrap();
+        assert!(base
+            .specs
+            .iter()
+            .any(|spec| spec.name == "requests" && spec.version.as_deref() == Some(">=2.32.0,<3")));
+        assert!(base
+            .specs
+            .iter()
+            .any(|spec| spec.name == "pytest" && spec.version.as_deref() == Some(">=8.0.0,<9")));
+        assert!(base
+            .specs
+            .iter()
+            .any(|spec| spec.name == "ruff" && spec.version.as_deref() == Some(">=0.5.0,<0.6")));
+        assert!(!base.specs.iter().any(|spec| spec.name == "python"));
+        assert!(!base.specs.iter().any(|spec| spec.name == "rich"));
+        assert!(!base.specs.iter().any(|spec| spec.name == "markdown"));
+
+        let production = read_pyproject_requirements(&pyproject, &BTreeSet::new(), false).unwrap();
+        assert!(!production.specs.iter().any(|spec| spec.name == "pytest"));
+        assert!(production.specs.iter().any(|spec| spec.name == "ruff"));
+
+        let with_extra =
+            read_pyproject_requirements(&pyproject, &BTreeSet::from(["ui".to_owned()]), false)
+                .unwrap();
+        assert!(with_extra
+            .specs
+            .iter()
+            .any(|spec| spec.name == "rich" && spec.version.as_deref() == Some(">=13.0.0,<14")));
+
+        let with_docs =
+            read_pyproject_requirements(&pyproject, &BTreeSet::from(["docs".to_owned()]), false)
+                .unwrap();
+        assert!(with_docs
+            .specs
+            .iter()
+            .any(|spec| spec.name == "markdown" && spec.version.as_deref() == Some(">=3.6,<4")));
+    }
+
+    #[test]
+    fn rejects_poetry_direct_sources() {
+        let dir = tempfile::tempdir().unwrap();
+        let pyproject = dir.path().join("pyproject.toml");
+        fs::write(
+            &pyproject,
+            r#"
+            [tool.poetry.dependencies]
+            local-package = { path = "../local-package" }
+            "#,
+        )
+        .unwrap();
+
+        let error = read_pyproject_requirements(&pyproject, &BTreeSet::new(), true).unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("unsupported Poetry dependency source"));
     }
 
     #[test]
