@@ -113,6 +113,7 @@ cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo install --locked
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo ci
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo run normalizer --version
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm install left-pad@1.3.0
+cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm install --registry https://registry.npmjs.org left-pad@1.3.0
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm ci --omit=dev
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm run test -- --watch
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm root
@@ -381,7 +382,7 @@ Supported now:
   `prefix`, and `list` / `list --json` flows without delegating to npm, plus a
   direct `npm` compatibility binary; direct local npm tarballs and local
   package directories are accepted as install inputs; `--no-save`,
-  `--package-lock-only`, `--package-lock=false`, `--omit=...`,
+  `--package-lock-only`, `--package-lock=false`, `--registry`, `--omit=...`,
   `--include=...`, and common audit/fund/peer/install-strategy flags are
   understood for install/ci compatibility
 - `omc pip` compatibility commands for common `install`, `uninstall`, `freeze`,

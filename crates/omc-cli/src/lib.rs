@@ -224,6 +224,7 @@ enum NpmCompatAction {
         dev: bool,
         omit_dev: bool,
         lock_only: bool,
+        npm_registry: Option<String>,
         allow: Vec<String>,
         allow_all_host: bool,
     },
@@ -697,6 +698,7 @@ fn run_npm_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
             dev,
             omit_dev,
             lock_only,
+            npm_registry,
             allow,
             allow_all_host,
         } => {
@@ -704,6 +706,7 @@ fn run_npm_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
             if specs.is_empty() && archive_references.is_empty() {
                 let mut options = LinkOptions::new(project_dir);
                 options.allowed_capabilities = allowed_capabilities;
+                options.npm_registry_url = npm_registry.clone();
                 options.include_dev_dependencies = !omit_dev;
                 options.npm_local_paths = absolutize_paths(project_dir, local_paths.clone());
                 if save && !local_paths.is_empty() {
@@ -720,6 +723,7 @@ fn run_npm_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
             } else {
                 let mut options = LinkOptions::new(project_dir);
                 options.allowed_capabilities = allowed_capabilities;
+                options.npm_registry_url = npm_registry.clone();
                 options.save_manifest_dependency = save;
                 options.save_dev_dependency = dev;
                 options.include_dev_dependencies = !omit_dev;
@@ -1439,6 +1443,7 @@ fn parse_npm_compat_action(args: &[String]) -> Result<NpmCompatAction, OmcRegist
             dev: false,
             omit_dev: false,
             lock_only: false,
+            npm_registry: None,
             allow: Vec::new(),
             allow_all_host: false,
         });
@@ -1565,6 +1570,7 @@ fn parse_npm_install_args(args: &[String]) -> Result<NpmCompatAction, OmcRegistr
         omit_dev,
         save,
         lock_only,
+        npm_registry,
         allow,
         allow_all_host,
         positionals,
@@ -1578,6 +1584,7 @@ fn parse_npm_install_args(args: &[String]) -> Result<NpmCompatAction, OmcRegistr
         dev,
         omit_dev,
         lock_only,
+        npm_registry,
         allow,
         allow_all_host,
     })
@@ -1955,6 +1962,7 @@ struct CommonCompatFlags {
     omit_dev: bool,
     save: bool,
     lock_only: bool,
+    npm_registry: Option<String>,
     allow: Vec<String>,
     allow_all_host: bool,
     positionals: Vec<String>,
@@ -1967,6 +1975,7 @@ impl Default for CommonCompatFlags {
             omit_dev: false,
             save: true,
             lock_only: false,
+            npm_registry: None,
             allow: Vec::new(),
             allow_all_host: false,
             positionals: Vec::new(),
@@ -2006,17 +2015,28 @@ fn parse_common_compat_flags(
             parsed.save = true;
         } else if npm_mode && arg == "--package-lock-only" {
             parsed.lock_only = true;
-        } else if npm_mode
-            && matches!(
+        } else if npm_mode && arg == "--registry" {
+            index += 1;
+            let Some(registry) = args.get(index) else {
+                return Err(OmcRegistryError::UnsupportedSpec(
+                    "--registry needs a URL".to_owned(),
+                ));
+            };
+            parsed.npm_registry = Some(registry.clone());
+        } else if npm_mode {
+            if let Some(registry) = arg.strip_prefix("--registry=") {
+                parsed.npm_registry = Some(registry.to_owned());
+                index += 1;
+                continue;
+            }
+            if matches!(
                 arg.as_str(),
                 "--omit-dev" | "--production" | "--prod" | "--only=production"
-            )
-        {
-            parsed.omit_dev = true;
-        } else if npm_mode && matches!(arg.as_str(), "--production=false" | "--prod=false") {
-            parsed.omit_dev = false;
-        } else if npm_mode {
-            if let Some(value) = arg.strip_prefix("--omit=") {
+            ) {
+                parsed.omit_dev = true;
+            } else if matches!(arg.as_str(), "--production=false" | "--prod=false") {
+                parsed.omit_dev = false;
+            } else if let Some(value) = arg.strip_prefix("--omit=") {
                 parsed.omit_dev |= npm_dependency_set_contains(value, "dev");
             } else if let Some(value) = arg.strip_prefix("--include=") {
                 if npm_dependency_set_contains(value, "dev") {
@@ -2103,7 +2123,7 @@ fn ignored_compat_flag(npm_mode: bool, arg: &str) -> bool {
 }
 
 fn ignored_npm_value_flag(arg: &str) -> bool {
-    matches!(arg, "--install-strategy" | "--cache")
+    matches!(arg, "--install-strategy" | "--cache" | "--registry")
 }
 
 fn ignored_npm_equals_flag(arg: &str) -> bool {
@@ -2344,6 +2364,8 @@ mod tests {
             "--install-strategy",
             "hoisted",
             "--cache=/tmp/npm-cache",
+            "--registry",
+            "https://registry.example.invalid/npm",
             "--package-lock=false",
             "--no-fund",
             "--legacy-peer-deps=true",
@@ -2364,6 +2386,7 @@ mod tests {
                 dev: true,
                 omit_dev: true,
                 lock_only: false,
+                npm_registry: Some("https://registry.example.invalid/npm".to_owned()),
                 allow: Vec::new(),
                 allow_all_host: true,
             }
@@ -2388,6 +2411,7 @@ mod tests {
                 dev: false,
                 omit_dev: false,
                 lock_only: false,
+                npm_registry: None,
                 allow: Vec::new(),
                 allow_all_host: false,
             }
@@ -2414,6 +2438,7 @@ mod tests {
                 dev: false,
                 omit_dev: false,
                 lock_only: false,
+                npm_registry: None,
                 allow: Vec::new(),
                 allow_all_host: false,
             }
@@ -2433,6 +2458,7 @@ mod tests {
                 dev: false,
                 omit_dev: false,
                 lock_only: true,
+                npm_registry: None,
                 allow: Vec::new(),
                 allow_all_host: false,
             }

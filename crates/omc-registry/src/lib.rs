@@ -551,6 +551,7 @@ pub struct LinkOptions {
     pub hashes: BTreeMap<String, BTreeSet<String>>,
     pub npm_integrities: BTreeMap<String, BTreeSet<String>>,
     pub npm_resolved: BTreeMap<String, String>,
+    pub npm_registry_url: Option<String>,
     pub pypi_index_url: Option<String>,
     pub pypi_extra_index_urls: Vec<String>,
     pub pypi_find_links: Vec<String>,
@@ -580,6 +581,7 @@ impl LinkOptions {
             hashes: BTreeMap::new(),
             npm_integrities: BTreeMap::new(),
             npm_resolved: BTreeMap::new(),
+            npm_registry_url: None,
             pypi_index_url: None,
             pypi_extra_index_urls: Vec::new(),
             pypi_find_links: Vec::new(),
@@ -7069,6 +7071,16 @@ fn read_npm_config(project_dir: &Path) -> Result<NpmConfig> {
     Ok(config)
 }
 
+fn read_npm_config_for_options(project_dir: &Path, options: &LinkOptions) -> Result<NpmConfig> {
+    let mut config = read_npm_config(project_dir)?;
+    if let Some(registry) = &options.npm_registry_url {
+        config.registry = normalize_npm_registry(registry).ok_or_else(|| {
+            OmcRegistryError::UnsupportedSpec(format!("invalid npm registry `{registry}`"))
+        })?;
+    }
+    Ok(config)
+}
+
 fn read_npmrc_into(path: &Path, config: &mut NpmConfig) -> Result<()> {
     if !path.exists() {
         return Ok(());
@@ -7211,7 +7223,7 @@ fn resolve_npm(
         return Ok(resolved);
     }
 
-    let npm_config = read_npm_config(&options.project_dir)?;
+    let npm_config = read_npm_config_for_options(&options.project_dir, options)?;
     let registry = npm_config.registry_for(&registry_name);
     let encoded = urlencoding::encode(&registry_name);
     let constrained_requirement =
@@ -15632,6 +15644,22 @@ wheels = [
                 .auth_token_for_url("https://registry.example.invalid/npm/left-pad/-/left-pad.tgz"),
             Some("default-token")
         );
+    }
+
+    #[test]
+    fn npm_options_override_default_registry() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(
+            dir.path().join(".npmrc"),
+            "registry=https://npmrc.example.invalid/\n",
+        )
+        .unwrap();
+
+        let mut options = LinkOptions::new(dir.path());
+        options.npm_registry_url = Some("https://cli.example.invalid/npm".to_owned());
+        let config = read_npm_config_for_options(dir.path(), &options).unwrap();
+
+        assert_eq!(config.registry, "https://cli.example.invalid/npm/");
     }
 
     #[test]
