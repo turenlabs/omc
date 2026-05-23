@@ -126,7 +126,7 @@ yarn.lock          Yarn Classic exact versions, resolved tarball URLs, and integ
 pnpm-lock.yaml     pnpm importer dependencies, exact versions, resolved tarball URLs, and integrity hashes
 pip.conf           PyPI index-url, extra-index-url, find-links, and no-index configuration
 requirements.txt  PyPI requirements, direct wheel URLs/paths, hashes, extras, local editable/direct/bare directory paths, -r includes, -c constraints, markers, simple indexes, find-links wheelhouses
-Pipfile           Pipenv packages/dev-packages, source indexes, extras, markers, local paths, and wheel file dependencies when no Pipfile.lock is present
+Pipfile           Pipenv packages/dev-packages, source indexes, extras, markers, local paths, wheel file dependencies, and scripts
 Pipfile.lock      Pipenv default/develop package pins, local paths, extras, markers, sources, and sha256 hashes
 uv.lock           uv project requirements, dev requirements, local path sources, exact package pins, and hashes
 pylock.toml       standardized Python lock package pins, markers, and hashes
@@ -270,6 +270,7 @@ Supported now:
 - `Pipfile` ingestion for Pipenv packages/dev-packages, source indexes, extras,
   markers, local path dependencies, and wheel file dependencies when
   `Pipfile.lock` is absent
+- Pipfile `[scripts]` support through `omc script`
 - `Pipfile.lock` ingestion for Pipenv default/develop package pins, local paths,
   extras, markers, `_meta.sources` simple indexes, and sha256 hashes
 - `uv.lock` ingestion for uv project requirements, dev requirements, local path
@@ -314,7 +315,8 @@ Supported now:
   native-extension policy exist
 - npm bin links, including linked workspace/local package bins, and Python
   console/gui script shims from wheels and local path packages
-- `omc node`, `omc python`, `omc script`, and `omc run` wrappers
+- `omc node`, `omc python`, `omc script`, and `omc run` wrappers, including
+  package.json and Pipfile project scripts
 - isolated `omc python` execution that uses OMC site-packages without ambient
   user/global Python site-packages or startup/hook environment variables
 - isolated Node execution wrappers that remove ambient `NODE_PATH` module

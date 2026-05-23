@@ -105,7 +105,7 @@ enum Command {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
-    #[command(about = "Run a package.json script with OMC npm/Python bins and imports")]
+    #[command(about = "Run a package.json or Pipfile script with OMC npm/Python bins and imports")]
     Script {
         name: String,
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
@@ -334,9 +334,9 @@ fn run_package_script(
     let script = scripts.get(name).ok_or_else(|| {
         let available = scripts.keys().cloned().collect::<Vec<_>>().join(", ");
         let detail = if available.is_empty() {
-            format!("missing package.json script `{name}`")
+            format!("missing project script `{name}`")
         } else {
-            format!("missing package.json script `{name}`; available scripts: {available}")
+            format!("missing project script `{name}`; available scripts: {available}")
         };
         OmcRegistryError::UnsupportedSpec(detail)
     })?;

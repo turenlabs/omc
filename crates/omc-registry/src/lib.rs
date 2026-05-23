@@ -863,13 +863,22 @@ pub fn discover_project_specs(project_dir: impl AsRef<Path>) -> Result<Vec<Packa
 }
 
 pub fn read_package_scripts(project_dir: impl AsRef<Path>) -> Result<BTreeMap<String, String>> {
-    let package_json = project_dir.as_ref().join("package.json");
-    if !package_json.exists() {
-        return Ok(BTreeMap::new());
+    let project_dir = project_dir.as_ref();
+    let mut scripts = BTreeMap::new();
+
+    let pipfile = project_dir.join("Pipfile");
+    if pipfile.exists() {
+        scripts.extend(read_pipfile_scripts(&pipfile)?);
     }
 
-    let package = serde_json::from_str::<ProjectPackageJson>(&fs::read_to_string(package_json)?)?;
-    Ok(package.scripts)
+    let package_json = project_dir.join("package.json");
+    if package_json.exists() {
+        let package =
+            serde_json::from_str::<ProjectPackageJson>(&fs::read_to_string(package_json)?)?;
+        scripts.extend(package.scripts);
+    }
+
+    Ok(scripts)
 }
 
 pub fn discover_project_requirements(project_dir: impl AsRef<Path>) -> Result<ProjectRequirements> {
@@ -2578,6 +2587,10 @@ fn read_pipfile_requirements(
     }
 
     Ok(requirements)
+}
+
+fn read_pipfile_scripts(path: &Path) -> Result<BTreeMap<String, String>> {
+    Ok(toml::from_str::<PipfileScripts>(&fs::read_to_string(path)?)?.scripts)
 }
 
 fn collect_pipfile_sources(sources: &[PipfileSource], requirements: &mut ProjectRequirements) {
@@ -8549,6 +8562,12 @@ struct Pipfile {
     dev_packages: BTreeMap<String, PipfilePackage>,
 }
 
+#[derive(Debug, Default, Deserialize)]
+struct PipfileScripts {
+    #[serde(default)]
+    scripts: BTreeMap<String, String>,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(untagged)]
 enum PipfilePackage {
@@ -8988,6 +9007,55 @@ mod tests {
             .iter()
             .any(|spec| spec.name == "is-odd" && spec.version.as_deref() == Some("3.0.1")));
         assert!(!production_specs.iter().any(|spec| spec.name == "which"));
+    }
+
+    #[test]
+    fn reads_pipfile_scripts_and_package_json_overrides() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(
+            dir.path().join("Pipfile"),
+            r#"
+            [packages]
+            idna = "==3.7"
+
+            [scripts]
+            test = "pytest"
+            lint = "ruff check ."
+            "#,
+        )
+        .unwrap();
+
+        let scripts = read_package_scripts(dir.path()).unwrap();
+        assert_eq!(scripts.get("test").map(String::as_str), Some("pytest"));
+        assert_eq!(
+            scripts.get("lint").map(String::as_str),
+            Some("ruff check .")
+        );
+
+        fs::write(
+            dir.path().join("package.json"),
+            r#"{
+                "scripts": {
+                    "test": "node test.js",
+                    "build": "node build.js"
+                }
+            }"#,
+        )
+        .unwrap();
+
+        let scripts = read_package_scripts(dir.path()).unwrap();
+        assert_eq!(
+            scripts.get("test").map(String::as_str),
+            Some("node test.js")
+        );
+        assert_eq!(
+            scripts.get("lint").map(String::as_str),
+            Some("ruff check .")
+        );
+        assert_eq!(
+            scripts.get("build").map(String::as_str),
+            Some("node build.js")
+        );
     }
 
     #[test]
