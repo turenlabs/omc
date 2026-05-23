@@ -312,23 +312,16 @@ fn run() -> Result<ExitCode, OmcRegistryError> {
 }
 
 fn run_node(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRegistryError> {
-    let status = ProcessCommand::new("node")
-        .args(args)
-        .current_dir(project_dir)
-        .env("PATH", project_path(project_dir)?)
-        .status()?;
+    let mut command = ProcessCommand::new("node");
+    apply_project_runtime_env(&mut command, project_dir)?;
+    let status = command.args(args).status()?;
     Ok(exit_code(status.code()))
 }
 
 fn run_python(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRegistryError> {
-    let status = ProcessCommand::new("python3")
-        .arg("-S")
-        .args(args)
-        .current_dir(project_dir)
-        .env("PATH", project_path(project_dir)?)
-        .env("PYTHONPATH", project_python_path(project_dir)?)
-        .env("PYTHONNOUSERSITE", "1")
-        .status()?;
+    let mut command = ProcessCommand::new("python3");
+    apply_project_runtime_env(&mut command, project_dir)?;
+    let status = command.arg("-S").args(args).status()?;
     Ok(exit_code(status.code()))
 }
 
@@ -349,13 +342,8 @@ fn run_package_script(
     })?;
 
     let mut command = package_script_command(script);
-    let status = command
-        .args(args)
-        .current_dir(project_dir)
-        .env("PATH", project_path(project_dir)?)
-        .env("PYTHONPATH", project_python_path(project_dir)?)
-        .env("PYTHONNOUSERSITE", "1")
-        .status()?;
+    apply_project_runtime_env(&mut command, project_dir)?;
+    let status = command.args(args).status()?;
     Ok(exit_code(status.code()))
 }
 
@@ -364,14 +352,23 @@ fn run_project_command(
     command: &str,
     args: &[String],
 ) -> Result<ExitCode, OmcRegistryError> {
-    let status = ProcessCommand::new(command)
-        .args(args)
+    let mut process = ProcessCommand::new(command);
+    apply_project_runtime_env(&mut process, project_dir)?;
+    let status = process.args(args).status()?;
+    Ok(exit_code(status.code()))
+}
+
+fn apply_project_runtime_env(
+    command: &mut ProcessCommand,
+    project_dir: &Path,
+) -> Result<(), OmcRegistryError> {
+    command
         .current_dir(project_dir)
         .env("PATH", project_path(project_dir)?)
         .env("PYTHONPATH", project_python_path(project_dir)?)
         .env("PYTHONNOUSERSITE", "1")
-        .status()?;
-    Ok(exit_code(status.code()))
+        .env_remove("NODE_PATH");
+    Ok(())
 }
 
 fn project_path(project_dir: &Path) -> Result<OsString, OmcRegistryError> {
