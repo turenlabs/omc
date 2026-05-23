@@ -1200,24 +1200,37 @@ fn apply_manifest_config(manifest: &OmcManifest, options: &mut LinkOptions) -> R
             .iter()
             .filter_map(|index_url| normalize_pypi_simple_index_url(index_url)),
     );
-    apply_pypi_environment_config(options);
+    let manifest_or_explicit_index = options.pypi_index_url.is_some();
+    if !manifest_or_explicit_index {
+        let project_dir = options.project_dir.clone();
+        apply_pip_config_files(&project_dir, options)?;
+    }
+    apply_pypi_environment_config(options, !manifest_or_explicit_index);
     dedupe_pypi_extra_index_urls(options);
     Ok(())
 }
 
-fn apply_pypi_environment_config(options: &mut LinkOptions) {
+fn apply_pypi_environment_config(options: &mut LinkOptions, override_index: bool) {
     let index_url = env::var("PIP_INDEX_URL").ok();
     let extra_index_urls = env::var("PIP_EXTRA_INDEX_URL").ok();
-    apply_pypi_environment_values(options, index_url.as_deref(), extra_index_urls.as_deref());
+    apply_pypi_environment_values(
+        options,
+        index_url.as_deref(),
+        extra_index_urls.as_deref(),
+        override_index,
+    );
 }
 
 fn apply_pypi_environment_values(
     options: &mut LinkOptions,
     index_url: Option<&str>,
     extra_index_urls: Option<&str>,
+    override_index: bool,
 ) {
-    if options.pypi_index_url.is_none() {
-        options.pypi_index_url = index_url.and_then(normalize_pypi_simple_index_url);
+    if override_index || options.pypi_index_url.is_none() {
+        if let Some(index_url) = index_url.and_then(normalize_pypi_simple_index_url) {
+            options.pypi_index_url = Some(index_url);
+        }
     }
     if let Some(extra_index_urls) = extra_index_urls {
         options.pypi_extra_index_urls.extend(
@@ -1227,6 +1240,114 @@ fn apply_pypi_environment_values(
         );
     }
     dedupe_pypi_extra_index_urls(options);
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct PipConfig {
+    index_url: Option<String>,
+    extra_index_urls: Vec<String>,
+}
+
+fn apply_pip_config_files(project_dir: &Path, options: &mut LinkOptions) -> Result<()> {
+    let config = read_pip_config(project_dir)?;
+    if options.pypi_index_url.is_none() {
+        options.pypi_index_url = config.index_url;
+    }
+    options
+        .pypi_extra_index_urls
+        .extend(config.extra_index_urls);
+    dedupe_pypi_extra_index_urls(options);
+    Ok(())
+}
+
+fn read_pip_config(project_dir: &Path) -> Result<PipConfig> {
+    let mut config = PipConfig::default();
+    if let Some(home) = env::var_os("HOME") {
+        let home = PathBuf::from(home);
+        read_pip_config_into(&home.join(".pip").join("pip.conf"), &mut config)?;
+        read_pip_config_into(
+            &home.join(".config").join("pip").join("pip.conf"),
+            &mut config,
+        )?;
+    }
+    read_pip_config_into(&project_dir.join("pip.conf"), &mut config)?;
+    if let Some(path) = env::var_os("PIP_CONFIG_FILE") {
+        read_pip_config_into(&PathBuf::from(path), &mut config)?;
+    }
+    Ok(config)
+}
+
+fn read_pip_config_into(path: &Path, config: &mut PipConfig) -> Result<()> {
+    if !path.exists() {
+        return Ok(());
+    }
+    parse_pip_config_content(&fs::read_to_string(path)?, config);
+    Ok(())
+}
+
+fn parse_pip_config_content(content: &str, config: &mut PipConfig) {
+    let mut section = String::new();
+    let mut multiline_key: Option<String> = None;
+    for raw_line in content.lines() {
+        let line = strip_npmrc_comment(raw_line);
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if trimmed.starts_with('[') && trimmed.ends_with(']') {
+            section = trimmed
+                .trim_start_matches('[')
+                .trim_end_matches(']')
+                .trim()
+                .to_ascii_lowercase();
+            multiline_key = None;
+            continue;
+        }
+        let indented = raw_line
+            .chars()
+            .next()
+            .map(char::is_whitespace)
+            .unwrap_or(false);
+        if indented && multiline_key.is_some() {
+            if let Some(key) = multiline_key.as_deref() {
+                apply_pip_config_value(&section, key, trimmed, config);
+            }
+            continue;
+        }
+        let Some((key, value)) = trimmed.split_once('=') else {
+            multiline_key = None;
+            continue;
+        };
+        let key = key.trim().to_ascii_lowercase();
+        let value = value.trim();
+        apply_pip_config_value(&section, &key, value, config);
+        multiline_key = value.is_empty().then_some(key);
+    }
+}
+
+fn apply_pip_config_value(section: &str, key: &str, value: &str, config: &mut PipConfig) {
+    if !matches!(section, "global" | "install") {
+        return;
+    }
+    match key {
+        "index-url" => {
+            if let Some(index_url) = normalize_pypi_simple_index_url(value) {
+                config.index_url = Some(index_url);
+            }
+        }
+        "extra-index-url" => {
+            config.extra_index_urls.extend(
+                pypi_index_url_values(value)
+                    .into_iter()
+                    .filter_map(|index_url| normalize_pypi_simple_index_url(&index_url)),
+            );
+        }
+        _ => {}
+    }
+    let mut seen = BTreeSet::new();
+    config
+        .extra_index_urls
+        .retain(|index_url| seen.insert(index_url.clone()));
 }
 
 fn pypi_index_url_values(value: &str) -> Vec<String> {
@@ -6465,6 +6586,7 @@ mod tests {
             &mut options,
             Some("https://env.example/simple"),
             Some("https://extra.example/simple 'https://quoted.example/simple' https://extra.example/simple"),
+            true,
         );
 
         assert_eq!(
@@ -6483,6 +6605,7 @@ mod tests {
             &mut options,
             Some("https://ignored.example/simple"),
             Some("https://another.example/simple"),
+            false,
         );
         assert_eq!(
             options.pypi_index_url.as_deref(),
@@ -6494,6 +6617,58 @@ mod tests {
                 "https://extra.example/simple/".to_owned(),
                 "https://quoted.example/simple/".to_owned(),
                 "https://another.example/simple/".to_owned(),
+            ]
+        );
+
+        let mut options = LinkOptions::new(".");
+        options.pypi_index_url = Some("https://pip-config.example/simple/".to_owned());
+        apply_pypi_environment_values(&mut options, None, None, true);
+        assert_eq!(
+            options.pypi_index_url.as_deref(),
+            Some("https://pip-config.example/simple/")
+        );
+        apply_pypi_environment_values(
+            &mut options,
+            Some("https://env-override.example/simple"),
+            None,
+            true,
+        );
+        assert_eq!(
+            options.pypi_index_url.as_deref(),
+            Some("https://env-override.example/simple/")
+        );
+    }
+
+    #[test]
+    fn parses_pip_config_indexes() {
+        let mut config = PipConfig::default();
+        parse_pip_config_content(
+            r#"
+            [global]
+            index-url = https://global.example/simple
+            extra-index-url = https://extra.example/simple 'https://quoted.example/simple'
+
+            [install]
+            extra-index-url =
+                https://install-extra.example/simple
+                https://extra.example/simple
+
+            [download]
+            index-url = https://ignored.example/simple
+            "#,
+            &mut config,
+        );
+
+        assert_eq!(
+            config.index_url.as_deref(),
+            Some("https://global.example/simple/")
+        );
+        assert_eq!(
+            config.extra_index_urls,
+            vec![
+                "https://extra.example/simple/".to_owned(),
+                "https://quoted.example/simple/".to_owned(),
+                "https://install-extra.example/simple/".to_owned(),
             ]
         );
     }
