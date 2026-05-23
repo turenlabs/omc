@@ -1,0 +1,16 @@
+[package]
+name = "omc-cli"
+description = "OMC package-manager prototype CLI"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[[bin]]
+name = "omc"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+omc-cap = { path = "../omc-cap" }
+omc-registry = { path = "../omc-registry" }
+thiserror = "2"
