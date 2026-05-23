@@ -132,6 +132,7 @@ pylock.toml       standardized Python lock package pins, markers, and hashes
 pyproject.toml    PEP 621 project dependencies, selected optional groups, dependency-groups
 pyproject.toml    Poetry dependencies, dev groups, optional groups, extras, and wheel URL/path dependencies
 poetry.lock       exact PyPI versions and file hashes for locked Poetry packages
+setup.cfg         legacy setuptools install_requires and selected extras_require
 ```
 
 What `add` does:
@@ -273,6 +274,8 @@ Supported now:
   wheel URLs, and local wheel paths
 - `poetry.lock` exact-version constraints and sha256 file hash verification for
   locked PyPI packages
+- `setup.cfg` `install_requires` ingestion plus selected
+  `[options.extras_require]` extras
 - PyPI extras resolution for dependencies gated by `extra == "..."`
 - source artifact download and cache
 - `omc.toml` and `omc.lock`

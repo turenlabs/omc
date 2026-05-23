@@ -961,6 +961,12 @@ fn discover_project_requirements_with_options(
         project.specs.extend(requirements.specs);
     }
 
+    let setup_cfg = project_dir.join("setup.cfg");
+    if setup_cfg.exists() {
+        let requirements = read_setup_cfg_requirements(&setup_cfg, project_extras)?;
+        project.specs.extend(requirements.specs);
+    }
+
     let poetry_lock = project_dir.join("poetry.lock");
     if poetry_lock.exists() {
         let requirements = read_poetry_lock_requirements(&poetry_lock)?;
@@ -2499,6 +2505,120 @@ fn collect_pylock_dist_hash(
         .entry(key.to_owned())
         .or_default()
         .insert(hash);
+}
+
+fn read_setup_cfg_requirements(
+    path: &Path,
+    project_extras: &BTreeSet<String>,
+) -> Result<ProjectRequirements> {
+    let sections = parse_setup_cfg_sections(&fs::read_to_string(path)?);
+    let mut requirements = ProjectRequirements::default();
+
+    if let Some(options) = sections.get("options") {
+        for requirement in options.get("install_requires").into_iter().flatten() {
+            if let Some(spec) = parse_pypi_requirement_with_extras(requirement, project_extras) {
+                requirements.specs.push(spec);
+            }
+        }
+    }
+
+    if let Some(extras_require) = sections.get("options.extras_require") {
+        for extra in project_extras {
+            if let Some(requirements_for_extra) = extras_require.get(extra) {
+                for requirement in requirements_for_extra {
+                    if let Some(spec) =
+                        parse_pypi_requirement_with_extras(requirement, project_extras)
+                    {
+                        requirements.specs.push(spec);
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(requirements)
+}
+
+fn parse_setup_cfg_sections(content: &str) -> BTreeMap<String, BTreeMap<String, Vec<String>>> {
+    let mut sections = BTreeMap::<String, BTreeMap<String, Vec<String>>>::new();
+    let mut section = String::new();
+    let mut key = None::<String>;
+
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') || trimmed.starts_with(';') {
+            continue;
+        }
+
+        if trimmed.starts_with('[') && trimmed.ends_with(']') {
+            section = trimmed[1..trimmed.len() - 1].trim().to_ascii_lowercase();
+            key = None;
+            continue;
+        }
+
+        if section.is_empty() {
+            continue;
+        }
+
+        if let Some((normalized_key, raw_value)) = setup_cfg_key_value(trimmed) {
+            let normalized_key = if section == "options.extras_require" {
+                normalize_pypi_extra(&normalized_key)
+            } else {
+                normalized_key
+            };
+            push_setup_cfg_value(&mut sections, &section, &normalized_key, raw_value);
+            key = Some(normalized_key);
+            continue;
+        }
+
+        let is_continuation = line
+            .chars()
+            .next()
+            .map(char::is_whitespace)
+            .unwrap_or(false);
+        if is_continuation {
+            if let Some(key) = key.as_deref() {
+                push_setup_cfg_value(&mut sections, &section, key, trimmed);
+            }
+        }
+    }
+
+    sections
+}
+
+fn setup_cfg_key_value(trimmed: &str) -> Option<(String, &str)> {
+    let (raw_key, raw_value) = trimmed.split_once('=')?;
+    let raw_key = raw_key.trim();
+    let raw_value = raw_value.trim();
+    if raw_key.is_empty() || raw_value.starts_with('=') {
+        return None;
+    }
+    if !raw_key
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.'))
+    {
+        return None;
+    }
+    Some((raw_key.replace('-', "_").to_ascii_lowercase(), raw_value))
+}
+
+fn push_setup_cfg_value(
+    sections: &mut BTreeMap<String, BTreeMap<String, Vec<String>>>,
+    section: &str,
+    key: &str,
+    value: &str,
+) {
+    let value = value.trim();
+    if value.is_empty() || value.starts_with('#') || value.starts_with(';') {
+        return;
+    }
+
+    sections
+        .entry(section.to_owned())
+        .or_default()
+        .entry(key.to_owned())
+        .or_default()
+        .push(value.to_owned());
 }
 
 fn read_pyproject_requirements(
@@ -8390,6 +8510,61 @@ wheels = [
         let spec = PackageSpec::parse("pypi:pkg @ git+https://example.invalid/pkg.git").unwrap();
         let error = resolve_pypi_direct_wheel(&spec).unwrap_err();
         assert!(error.to_string().contains("must use https or file"));
+    }
+
+    #[test]
+    fn reads_setup_cfg_requirements_and_selected_extras() {
+        let dir = tempfile::tempdir().unwrap();
+        let setup_cfg = dir.path().join("setup.cfg");
+        fs::write(
+            &setup_cfg,
+            r#"
+            [metadata]
+            name = setup-cfg-demo
+
+            [options]
+            install_requires =
+                idna==3.7
+                colorama; sys_platform == "win32"
+
+            [options.extras_require]
+            dev =
+                charset-normalizer==3.4.0
+            docs =
+                markdown==3.6
+            "#,
+        )
+        .unwrap();
+
+        let base = read_setup_cfg_requirements(&setup_cfg, &BTreeSet::new()).unwrap();
+        assert!(has_spec(&base.specs, "idna", "==3.7"));
+        assert!(!base.specs.iter().any(|spec| spec.name == "colorama"));
+        assert!(!base
+            .specs
+            .iter()
+            .any(|spec| spec.name == "charset-normalizer"));
+
+        let dev =
+            read_setup_cfg_requirements(&setup_cfg, &BTreeSet::from(["dev".to_owned()])).unwrap();
+        assert!(has_spec(&dev.specs, "charset-normalizer", "==3.4.0"));
+        assert!(!dev.specs.iter().any(|spec| spec.name == "markdown"));
+    }
+
+    #[test]
+    fn discovers_setup_cfg_requirements() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(
+            dir.path().join("setup.cfg"),
+            r#"
+            [options]
+            install_requires =
+                idna==3.7
+            "#,
+        )
+        .unwrap();
+
+        let discovered = discover_project_requirements(dir.path()).unwrap();
+        assert!(has_spec(&discovered.specs, "idna", "==3.7"));
     }
 
     #[test]
