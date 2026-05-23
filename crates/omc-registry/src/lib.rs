@@ -7,6 +7,7 @@ use std::str::FromStr;
 use std::sync::OnceLock;
 use std::{env, fmt};
 
+use base64::{engine::general_purpose::STANDARD, Engine as _};
 use flate2::read::GzDecoder;
 use omc_cap::{Capability, Policy};
 use omc_format::{BehaviorType, CapOp, Function, HttpRequest, Module, Op, Value, VirtualPath};
@@ -14,7 +15,8 @@ use omc_verify::{verify_module, VerifyFinding};
 use reqwest::blocking::Client;
 use semver::Version;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
+use sha1::Sha1;
+use sha2::{Digest, Sha256, Sha512};
 use tar::Archive;
 use thiserror::Error;
 
@@ -404,6 +406,7 @@ pub struct LinkOptions {
     pub allowed_capabilities: Vec<Capability>,
     pub constraints: BTreeMap<String, String>,
     pub hashes: BTreeMap<String, BTreeSet<String>>,
+    pub npm_integrities: BTreeMap<String, BTreeSet<String>>,
     pub project_extras: BTreeSet<String>,
     pub include_dev_dependencies: bool,
     pub save_dev_dependency: bool,
@@ -417,6 +420,7 @@ impl LinkOptions {
             allowed_capabilities: Vec::new(),
             constraints: BTreeMap::new(),
             hashes: BTreeMap::new(),
+            npm_integrities: BTreeMap::new(),
             project_extras: BTreeSet::new(),
             include_dev_dependencies: true,
             save_dev_dependency: false,
@@ -449,6 +453,7 @@ pub struct ProjectRequirements {
     pub specs: Vec<PackageSpec>,
     pub constraints: BTreeMap<String, String>,
     pub hashes: BTreeMap<String, BTreeSet<String>>,
+    pub npm_integrities: BTreeMap<String, BTreeSet<String>>,
 }
 
 #[derive(Debug, Clone)]
@@ -459,6 +464,8 @@ struct ResolvedPackage {
     source_url: String,
     filename: String,
     expected_sha256: Option<String>,
+    expected_sha1: Option<String>,
+    expected_integrity: Option<String>,
     npm_scripts: BTreeMap<String, String>,
     platform_compatible: bool,
     dependencies: Vec<PackageDependency>,
@@ -625,6 +632,7 @@ fn project_requested_specs(options: &mut LinkOptions) -> Result<Vec<PackageSpec>
     specs.extend(discovered.specs);
     options.constraints.extend(discovered.constraints);
     options.hashes.extend(discovered.hashes);
+    options.npm_integrities.extend(discovered.npm_integrities);
 
     let mut seen = BTreeSet::new();
     specs.retain(|spec| seen.insert(spec.requested()));
@@ -780,9 +788,11 @@ fn discover_project_requirements_with_options(
 
     let package_lock_json = project_dir.join("package-lock.json");
     if package_lock_json.exists() {
+        let lock_requirements = read_package_lock_requirements(&package_lock_json)?;
+        project.constraints.extend(lock_requirements.constraints);
         project
-            .constraints
-            .extend(read_package_lock_constraints(&package_lock_json)?);
+            .npm_integrities
+            .extend(lock_requirements.npm_integrities);
     }
 
     let requirements_txt = project_dir.join("requirements.txt");
@@ -872,6 +882,26 @@ fn link_package_inner(
                 expected: expected.clone(),
                 actual: sha256,
             });
+        }
+    }
+    if let Some(expected) = &resolved.expected_sha1 {
+        let actual = sha1_hex(&archive_bytes);
+        if !expected.eq_ignore_ascii_case(&actual) {
+            return Err(OmcRegistryError::DigestMismatch {
+                name: resolved.name.clone(),
+                expected: format!("sha1:{expected}"),
+                actual: format!("sha1:{actual}"),
+            });
+        }
+    }
+    if let Some(expected) = &resolved.expected_integrity {
+        verify_npm_integrity(&resolved.name, expected, &archive_bytes)?;
+    }
+    if resolved.ecosystem == Ecosystem::Npm {
+        if let Some(integrities) = options.npm_integrities.get(&spec.constraint_key()) {
+            for integrity in integrities {
+                verify_npm_integrity(&resolved.name, integrity, &archive_bytes)?;
+            }
         }
     }
     if let Some(hashes) = options.hashes.get(&spec.constraint_key()) {
@@ -1106,9 +1136,10 @@ fn required_peer_dependencies(
         .collect()
 }
 
-fn read_package_lock_constraints(path: &Path) -> Result<BTreeMap<String, String>> {
+fn read_package_lock_requirements(path: &Path) -> Result<ProjectRequirements> {
     let lock = serde_json::from_str::<NpmPackageLock>(&fs::read_to_string(path)?)?;
     let mut versions = BTreeMap::<String, BTreeSet<String>>::new();
+    let mut integrities = BTreeMap::<String, BTreeSet<String>>::new();
 
     for (path, package) in lock.packages {
         if path.is_empty() {
@@ -1118,13 +1149,16 @@ fn read_package_lock_constraints(path: &Path) -> Result<BTreeMap<String, String>
             continue;
         };
         if let Some(version) = package.version {
-            versions.entry(name).or_default().insert(version);
+            versions.entry(name.clone()).or_default().insert(version);
+        }
+        if let Some(integrity) = package.integrity {
+            integrities.entry(name).or_default().insert(integrity);
         }
     }
 
-    collect_npm_lock_dependency_versions(lock.dependencies, &mut versions);
+    collect_npm_lock_dependency_requirements(lock.dependencies, &mut versions, &mut integrities);
 
-    Ok(versions
+    let constraints = versions
         .into_iter()
         .filter_map(|(name, versions)| {
             if versions.len() == 1 {
@@ -1136,18 +1170,34 @@ fn read_package_lock_constraints(path: &Path) -> Result<BTreeMap<String, String>
                 None
             }
         })
-        .collect())
+        .collect::<BTreeMap<_, _>>();
+    let npm_integrities = integrities
+        .into_iter()
+        .filter(|(name, _)| constraints.contains_key(&format!("npm:{name}")))
+        .map(|(name, values)| (format!("npm:{name}"), values))
+        .collect();
+
+    Ok(ProjectRequirements {
+        specs: Vec::new(),
+        constraints,
+        hashes: BTreeMap::new(),
+        npm_integrities,
+    })
 }
 
-fn collect_npm_lock_dependency_versions(
+fn collect_npm_lock_dependency_requirements(
     dependencies: BTreeMap<String, NpmPackageLockDependency>,
     versions: &mut BTreeMap<String, BTreeSet<String>>,
+    integrities: &mut BTreeMap<String, BTreeSet<String>>,
 ) {
     for (name, dependency) in dependencies {
         if let Some(version) = dependency.version {
-            versions.entry(name).or_default().insert(version);
+            versions.entry(name.clone()).or_default().insert(version);
         }
-        collect_npm_lock_dependency_versions(dependency.dependencies, versions);
+        if let Some(integrity) = dependency.integrity {
+            integrities.entry(name).or_default().insert(integrity);
+        }
+        collect_npm_lock_dependency_requirements(dependency.dependencies, versions, integrities);
     }
 }
 
@@ -2129,6 +2179,8 @@ fn resolve_npm(
         source_url: version_doc.dist.tarball,
         filename,
         expected_sha256: None,
+        expected_sha1: version_doc.dist.shasum,
+        expected_integrity: version_doc.dist.integrity,
         npm_scripts: version_doc.scripts.unwrap_or_default(),
         platform_compatible,
         dependencies,
@@ -2356,6 +2408,8 @@ fn resolve_pypi(
         source_url,
         filename,
         expected_sha256: Some(expected_sha256),
+        expected_sha1: None,
+        expected_integrity: None,
         npm_scripts: BTreeMap::new(),
         platform_compatible: true,
         dependencies,
@@ -3536,6 +3590,67 @@ fn sha256_hex(bytes: &[u8]) -> String {
     hex::encode(digest.finalize())
 }
 
+fn sha1_hex(bytes: &[u8]) -> String {
+    let mut digest = Sha1::new();
+    digest.update(bytes);
+    hex::encode(digest.finalize())
+}
+
+fn verify_npm_integrity(name: &str, integrity: &str, bytes: &[u8]) -> Result<()> {
+    let mut saw_supported = false;
+    for token in integrity.split_whitespace() {
+        let Some((algorithm, expected_b64)) = token.split_once('-') else {
+            return Err(OmcRegistryError::UnsupportedSpec(format!(
+                "malformed npm integrity for {name}"
+            )));
+        };
+        let expected_b64 = expected_b64.split('?').next().unwrap_or(expected_b64);
+        let expected = STANDARD.decode(expected_b64).map_err(|_| {
+            OmcRegistryError::UnsupportedSpec(format!("malformed npm integrity for {name}"))
+        })?;
+        let Some(actual) = npm_integrity_digest(algorithm, bytes) else {
+            continue;
+        };
+        saw_supported = true;
+        if expected != actual {
+            return Err(OmcRegistryError::DigestMismatch {
+                name: name.to_owned(),
+                expected: format!("{algorithm}-{expected_b64}"),
+                actual: format!("{algorithm}-{}", STANDARD.encode(actual)),
+            });
+        }
+    }
+
+    if !saw_supported {
+        return Err(OmcRegistryError::UnsupportedSpec(format!(
+            "unsupported npm integrity digest for {name}"
+        )));
+    }
+
+    Ok(())
+}
+
+fn npm_integrity_digest(algorithm: &str, bytes: &[u8]) -> Option<Vec<u8>> {
+    match algorithm {
+        "sha1" => {
+            let mut digest = Sha1::new();
+            digest.update(bytes);
+            Some(digest.finalize().to_vec())
+        }
+        "sha256" => {
+            let mut digest = Sha256::new();
+            digest.update(bytes);
+            Some(digest.finalize().to_vec())
+        }
+        "sha512" => {
+            let mut digest = Sha512::new();
+            digest.update(bytes);
+            Some(digest.finalize().to_vec())
+        }
+        _ => None,
+    }
+}
+
 fn archive_extension(filename: &str) -> &'static str {
     if filename.ends_with(".tar.gz") || filename.ends_with(".tgz") {
         "tgz"
@@ -3586,11 +3701,15 @@ struct NpmPackageLock {
 #[derive(Debug, Deserialize)]
 struct NpmPackageLockPackage {
     version: Option<String>,
+    #[serde(default)]
+    integrity: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
 struct NpmPackageLockDependency {
     version: Option<String>,
+    #[serde(default)]
+    integrity: Option<String>,
     #[serde(default)]
     dependencies: BTreeMap<String, NpmPackageLockDependency>,
 }
@@ -3744,6 +3863,10 @@ struct NpmPeerDependencyMeta {
 #[derive(Debug, Deserialize)]
 struct NpmDist {
     tarball: String,
+    #[serde(default)]
+    shasum: Option<String>,
+    #[serde(default)]
+    integrity: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -3988,6 +4111,8 @@ mod tests {
             version: "1.0.0".to_owned(),
             dist: NpmDist {
                 tarball: "https://example.invalid/package.tgz".to_owned(),
+                shasum: None,
+                integrity: None,
             },
             os: None,
             cpu: None,
@@ -4064,6 +4189,8 @@ mod tests {
             version: "1.0.0".to_owned(),
             dist: NpmDist {
                 tarball: "https://example.invalid/package.tgz".to_owned(),
+                shasum: None,
+                integrity: None,
             },
             os: None,
             cpu: None,
@@ -4104,6 +4231,8 @@ mod tests {
             version: "1.0.0".to_owned(),
             dist: NpmDist {
                 tarball: "https://example.invalid/package.tgz".to_owned(),
+                shasum: None,
+                integrity: None,
             },
             os: None,
             cpu: None,
@@ -4142,7 +4271,9 @@ mod tests {
         )
         .unwrap();
 
-        let constraints = read_package_lock_constraints(&package_lock).unwrap();
+        let constraints = read_package_lock_requirements(&package_lock)
+            .unwrap()
+            .constraints;
         assert_eq!(
             constraints.get("npm:is-odd").map(String::as_str),
             Some("3.0.1")
@@ -4152,6 +4283,81 @@ mod tests {
             Some("1.2.3")
         );
         assert!(!constraints.contains_key("npm:dup"));
+    }
+
+    #[test]
+    fn reads_package_lock_integrities_for_unique_versions() {
+        let dir = tempfile::tempdir().unwrap();
+        let package_lock = dir.path().join("package-lock.json");
+        fs::write(
+            &package_lock,
+            r#"{
+                "lockfileVersion": 3,
+                "packages": {
+                    "": { "name": "demo", "version": "0.1.0" },
+                    "node_modules/is-odd": {
+                        "version": "3.0.1",
+                        "integrity": "sha512-FGl0QHAcOIX3yNX6pZ8za0ccqGMyA07/DT/dwC3JsYuDVuhA21SCPI/S8svQkGlpzxMs+Lucc9x2m0/9gXvSPQ=="
+                    },
+                    "node_modules/a/node_modules/dup": {
+                        "version": "1.0.0",
+                        "integrity": "sha512-one"
+                    },
+                    "node_modules/b/node_modules/dup": {
+                        "version": "2.0.0",
+                        "integrity": "sha512-two"
+                    }
+                },
+                "dependencies": {
+                    "legacy": {
+                        "version": "4.0.0",
+                        "integrity": "sha1-Hl3LtZt1PLHUbiNNj2GAKFuLhq0="
+                    }
+                }
+            }"#,
+        )
+        .unwrap();
+
+        let requirements = read_package_lock_requirements(&package_lock).unwrap();
+        assert_eq!(
+            requirements
+                .npm_integrities
+                .get("npm:is-odd")
+                .and_then(|values| values.iter().next())
+                .map(String::as_str),
+            Some(
+                "sha512-FGl0QHAcOIX3yNX6pZ8za0ccqGMyA07/DT/dwC3JsYuDVuhA21SCPI/S8svQkGlpzxMs+Lucc9x2m0/9gXvSPQ=="
+            )
+        );
+        assert_eq!(
+            requirements
+                .npm_integrities
+                .get("npm:legacy")
+                .and_then(|values| values.iter().next())
+                .map(String::as_str),
+            Some("sha1-Hl3LtZt1PLHUbiNNj2GAKFuLhq0=")
+        );
+        assert!(!requirements.npm_integrities.contains_key("npm:dup"));
+    }
+
+    #[test]
+    fn verifies_npm_integrity_hashes() {
+        let bytes = b"artifact";
+        assert!(verify_npm_integrity(
+            "demo",
+            "sha512-FGl0QHAcOIX3yNX6pZ8za0ccqGMyA07/DT/dwC3JsYuDVuhA21SCPI/S8svQkGlpzxMs+Lucc9x2m0/9gXvSPQ==",
+            bytes,
+        )
+        .is_ok());
+        assert!(verify_npm_integrity("demo", "sha1-Hl3LtZt1PLHUbiNNj2GAKFuLhq0=", bytes).is_ok());
+
+        let error = verify_npm_integrity("demo", "sha512-AAAA", bytes).unwrap_err();
+        assert!(matches!(error, OmcRegistryError::DigestMismatch { .. }));
+
+        let error = verify_npm_integrity("demo", "md5-AAAA", bytes).unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("unsupported npm integrity digest"));
     }
 
     #[test]
@@ -4746,6 +4952,8 @@ mod tests {
             source_url: "https://example.invalid/date-helper.tgz".to_owned(),
             filename: "date-helper.tgz".to_owned(),
             expected_sha256: None,
+            expected_sha1: None,
+            expected_integrity: None,
             npm_scripts: BTreeMap::new(),
             platform_compatible: true,
             dependencies: Vec::new(),
