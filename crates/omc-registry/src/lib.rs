@@ -254,6 +254,8 @@ pub struct OmcManifest {
     pub dev_dependencies: BTreeMap<String, String>,
     #[serde(default, skip_serializing_if = "ManifestPolicy::is_empty")]
     pub policy: ManifestPolicy,
+    #[serde(default, skip_serializing_if = "ManifestRegistries::is_empty")]
+    pub registries: ManifestRegistries,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -268,9 +270,23 @@ pub struct ManifestPolicy {
     pub allow: Vec<String>,
 }
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ManifestRegistries {
+    #[serde(default, rename = "pypi-index-url")]
+    pub pypi_index_url: Option<String>,
+    #[serde(default, rename = "pypi-extra-index-urls")]
+    pub pypi_extra_index_urls: Vec<String>,
+}
+
 impl ManifestPolicy {
     fn is_empty(&self) -> bool {
         self.allow.is_empty()
+    }
+}
+
+impl ManifestRegistries {
+    fn is_empty(&self) -> bool {
+        self.pypi_index_url.is_none() && self.pypi_extra_index_urls.is_empty()
     }
 }
 
@@ -284,6 +300,7 @@ impl OmcManifest {
             dependencies: BTreeMap::new(),
             dev_dependencies: BTreeMap::new(),
             policy: ManifestPolicy::default(),
+            registries: ManifestRegistries::default(),
         }
     }
 }
@@ -651,6 +668,7 @@ pub fn install_locked_project(options: &LinkOptions) -> Result<InstallReport> {
 
 fn project_requested_specs(options: &mut LinkOptions) -> Result<Vec<PackageSpec>> {
     let manifest = read_manifest(options.project_dir.join(MANIFEST))?;
+    apply_manifest_config(&manifest, options)?;
     let mut specs = Vec::new();
     for (key, version) in manifest.dependencies {
         specs.push(PackageSpec::parse(&format!("{key}@{version}"))?);
@@ -1157,12 +1175,35 @@ pub fn read_manifest(path: impl AsRef<Path>) -> Result<OmcManifest> {
 fn options_with_manifest_policy(options: &LinkOptions) -> Result<LinkOptions> {
     let mut options = options.clone();
     let manifest = read_manifest(options.project_dir.join(MANIFEST))?;
-    for grant in manifest.policy.allow {
+    apply_manifest_config(&manifest, &mut options)?;
+    Ok(options)
+}
+
+fn apply_manifest_config(manifest: &OmcManifest, options: &mut LinkOptions) -> Result<()> {
+    for grant in &manifest.policy.allow {
         options
             .allowed_capabilities
-            .push(parse_capability_grant(&grant)?);
+            .push(parse_capability_grant(grant)?);
     }
-    Ok(options)
+    if options.pypi_index_url.is_none() {
+        options.pypi_index_url = manifest
+            .registries
+            .pypi_index_url
+            .as_deref()
+            .and_then(normalize_pypi_simple_index_url);
+    }
+    options.pypi_extra_index_urls.extend(
+        manifest
+            .registries
+            .pypi_extra_index_urls
+            .iter()
+            .filter_map(|index_url| normalize_pypi_simple_index_url(index_url)),
+    );
+    let mut seen = BTreeSet::new();
+    options
+        .pypi_extra_index_urls
+        .retain(|index_url| seen.insert(index_url.clone()));
+    Ok(())
 }
 
 fn prune_lockfile(project_dir: &Path, retained: &BTreeSet<String>) -> Result<usize> {
@@ -3892,12 +3933,12 @@ fn parse_requirements_include(line: &str) -> Option<RequirementsInclude> {
 
 fn parse_requirements_index_url(line: &str) -> Option<String> {
     parse_requirements_option_value(line, &["--index-url=", "--index-url", "-i"])
-        .and_then(normalize_pypi_simple_index_url)
+        .and_then(|index_url| normalize_pypi_simple_index_url(&index_url))
 }
 
 fn parse_requirements_extra_index_url(line: &str) -> Option<String> {
     parse_requirements_option_value(line, &["--extra-index-url=", "--extra-index-url"])
-        .and_then(normalize_pypi_simple_index_url)
+        .and_then(|index_url| normalize_pypi_simple_index_url(&index_url))
 }
 
 fn parse_requirements_option_value(line: &str, prefixes: &[&str]) -> Option<String> {
@@ -3920,7 +3961,7 @@ fn parse_requirements_option_value(line: &str, prefixes: &[&str]) -> Option<Stri
     None
 }
 
-fn normalize_pypi_simple_index_url(value: String) -> Option<String> {
+fn normalize_pypi_simple_index_url(value: &str) -> Option<String> {
     let value = value.trim();
     if value.is_empty() {
         None
@@ -5058,6 +5099,7 @@ mod tests {
             policy: ManifestPolicy {
                 allow: vec!["http:api.example.com".to_owned()],
             },
+            registries: ManifestRegistries::default(),
         };
         fs::write(
             dir.path().join("omc.toml"),
@@ -6291,7 +6333,7 @@ mod tests {
     }
 
     #[test]
-    fn reads_manifest_policy_grants() {
+    fn reads_manifest_policy_grants_and_pypi_indexes() {
         let dir = tempfile::tempdir().unwrap();
         fs::write(
             dir.path().join("omc.toml"),
@@ -6302,6 +6344,10 @@ mod tests {
 
             [policy]
             allow = ["http:api.example.com", "env:API_TOKEN"]
+
+            [registries]
+            pypi-index-url = "https://mirror.example/simple"
+            pypi-extra-index-urls = ["https://extra.example/simple"]
             "#,
         )
         .unwrap();
@@ -6313,6 +6359,14 @@ mod tests {
         assert!(options
             .allowed_capabilities
             .contains(&Capability::EnvRead("API_TOKEN".to_owned())));
+        assert_eq!(
+            options.pypi_index_url.as_deref(),
+            Some("https://mirror.example/simple/")
+        );
+        assert_eq!(
+            options.pypi_extra_index_urls,
+            vec!["https://extra.example/simple/".to_owned()]
+        );
     }
 
     #[test]
