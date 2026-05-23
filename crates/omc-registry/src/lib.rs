@@ -894,10 +894,9 @@ fn discover_project_requirements_with_options(
 
     let package_json = project_dir.join("package.json");
     if package_json.exists() {
-        project.specs.extend(read_package_json_specs(
-            &package_json,
-            include_dev_dependencies,
-        )?);
+        let requirements = read_package_json_requirements(&package_json, include_dev_dependencies)?;
+        project.specs.extend(requirements.specs);
+        project.constraints.extend(requirements.constraints);
     }
 
     for lockfile_name in ["package-lock.json", "npm-shrinkwrap.json"] {
@@ -1558,21 +1557,36 @@ fn locked_package_key(package: &LockedPackage) -> String {
     format!("{}:{}@{}", package.ecosystem, package.name, package.version)
 }
 
+#[cfg(test)]
 fn read_package_json_specs(
     path: &Path,
     include_dev_dependencies: bool,
 ) -> Result<Vec<PackageSpec>> {
+    Ok(read_package_json_requirements(path, include_dev_dependencies)?.specs)
+}
+
+fn read_package_json_requirements(
+    path: &Path,
+    include_dev_dependencies: bool,
+) -> Result<ProjectRequirements> {
     let package = serde_json::from_str::<ProjectPackageJson>(&fs::read_to_string(path)?)?;
     let base_dir = path.parent().unwrap_or_else(|| Path::new("."));
     let workspaces = package.workspaces.clone();
-    let mut specs = package_json_dependency_specs(package, include_dev_dependencies, base_dir)?;
+    let mut requirements = ProjectRequirements::default();
+    collect_package_json_constraints(&package, &mut requirements.constraints);
+    requirements.specs.extend(package_json_dependency_specs(
+        package,
+        include_dev_dependencies,
+        base_dir,
+    )?);
 
     if let Some(workspaces) = workspaces {
         for package_json in workspace_package_json_paths(base_dir, &workspaces) {
             let workspace_base_dir = package_json.parent().unwrap_or(base_dir);
             let package =
                 serde_json::from_str::<ProjectPackageJson>(&fs::read_to_string(&package_json)?)?;
-            specs.extend(package_json_dependency_specs(
+            collect_package_json_constraints(&package, &mut requirements.constraints);
+            requirements.specs.extend(package_json_dependency_specs(
                 package,
                 include_dev_dependencies,
                 workspace_base_dir,
@@ -1580,7 +1594,7 @@ fn read_package_json_specs(
         }
     }
 
-    Ok(specs)
+    Ok(requirements)
 }
 
 fn package_json_dependency_specs(
@@ -1609,6 +1623,128 @@ fn package_json_dependency_specs(
     }
 
     Ok(specs)
+}
+
+fn collect_package_json_constraints(
+    package: &ProjectPackageJson,
+    constraints: &mut BTreeMap<String, String>,
+) {
+    collect_npm_override_constraints(&package.overrides, constraints);
+    collect_npm_resolution_constraints(&package.resolutions, constraints);
+}
+
+fn collect_npm_override_constraints(
+    overrides: &BTreeMap<String, serde_json::Value>,
+    constraints: &mut BTreeMap<String, String>,
+) {
+    for (selector, value) in overrides {
+        collect_npm_override_constraint(selector, value, constraints);
+    }
+}
+
+fn collect_npm_override_constraint(
+    selector: &str,
+    value: &serde_json::Value,
+    constraints: &mut BTreeMap<String, String>,
+) {
+    if let Some(version) = value.as_str().and_then(npm_constraint_version) {
+        if let Some(name) = npm_selector_package_name(selector) {
+            constraints.insert(format!("npm:{name}"), version.to_owned());
+        }
+        return;
+    }
+
+    let Some(table) = value.as_object() else {
+        return;
+    };
+    if let Some(version) = table
+        .get(".")
+        .and_then(serde_json::Value::as_str)
+        .and_then(npm_constraint_version)
+    {
+        if let Some(name) = npm_selector_package_name(selector) {
+            constraints.insert(format!("npm:{name}"), version.to_owned());
+        }
+    }
+    for (nested_selector, nested_value) in table {
+        if nested_selector == "." {
+            continue;
+        }
+        collect_npm_override_constraint(nested_selector, nested_value, constraints);
+    }
+}
+
+fn collect_npm_resolution_constraints(
+    resolutions: &BTreeMap<String, serde_json::Value>,
+    constraints: &mut BTreeMap<String, String>,
+) {
+    for (selector, value) in resolutions {
+        let Some(version) = value.as_str().and_then(npm_constraint_version) else {
+            continue;
+        };
+        let Some(name) = npm_selector_package_name(selector) else {
+            continue;
+        };
+        constraints.insert(format!("npm:{name}"), version.to_owned());
+    }
+}
+
+fn npm_constraint_version(version: &str) -> Option<&str> {
+    let version = version.trim();
+    if version.is_empty()
+        || version.starts_with('$')
+        || version.starts_with("file:")
+        || version.starts_with("link:")
+        || version.starts_with("workspace:")
+        || version.contains("://")
+    {
+        None
+    } else {
+        Some(version)
+    }
+}
+
+fn npm_selector_package_name(selector: &str) -> Option<String> {
+    let selector = selector
+        .rsplit('>')
+        .next()
+        .unwrap_or(selector)
+        .trim()
+        .trim_start_matches("**/");
+    let segments = selector
+        .split('/')
+        .filter(|segment| !segment.is_empty() && *segment != "*" && *segment != "**")
+        .collect::<Vec<_>>();
+    let candidate = if segments.len() >= 2 && segments[segments.len() - 2].starts_with('@') {
+        format!(
+            "{}/{}",
+            segments[segments.len() - 2],
+            segments[segments.len() - 1]
+        )
+    } else {
+        segments.last().copied()?.to_owned()
+    };
+    let name = strip_npm_selector_version(&candidate);
+    (!name.is_empty()).then_some(name)
+}
+
+fn strip_npm_selector_version(selector: &str) -> String {
+    if let Some(rest) = selector.strip_prefix('@') {
+        let Some((scope, package)) = rest.split_once('/') else {
+            return selector.to_owned();
+        };
+        let package = package
+            .split_once('@')
+            .map(|(name, _)| name)
+            .unwrap_or(package);
+        format!("@{scope}/{package}")
+    } else {
+        selector
+            .split_once('@')
+            .map(|(name, _)| name)
+            .unwrap_or(selector)
+            .to_owned()
+    }
 }
 
 fn npm_package_json_dependency_spec(
@@ -7186,6 +7322,10 @@ struct ProjectPackageJson {
     peer_dependencies: BTreeMap<String, String>,
     #[serde(default, rename = "peerDependenciesMeta")]
     peer_dependencies_meta: BTreeMap<String, NpmPeerDependencyMeta>,
+    #[serde(default)]
+    overrides: BTreeMap<String, serde_json::Value>,
+    #[serde(default)]
+    resolutions: BTreeMap<String, serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -7816,6 +7956,66 @@ mod tests {
         assert!(error
             .to_string()
             .contains("must be a .tgz/.tar.gz tarball or an existing directory"));
+    }
+
+    #[test]
+    fn reads_package_json_overrides_and_resolutions_as_constraints() {
+        let dir = tempfile::tempdir().unwrap();
+        let package_json = dir.path().join("package.json");
+        fs::write(
+            &package_json,
+            r#"{
+                "dependencies": { "left-pad": "^1.0.0" },
+                "overrides": {
+                    "left-pad": "1.3.0",
+                    "@scope/pkg@^2.0.0": { ".": "2.1.0", "transitive": "3.0.0" },
+                    "ignored": "file:../ignored"
+                },
+                "resolutions": {
+                    "**/ansi-regex": "5.0.1",
+                    "@demo/tool": "4.0.0"
+                }
+            }"#,
+        )
+        .unwrap();
+
+        let requirements = read_package_json_requirements(&package_json, true).unwrap();
+        assert_eq!(
+            requirements
+                .constraints
+                .get("npm:left-pad")
+                .map(String::as_str),
+            Some("1.3.0")
+        );
+        assert_eq!(
+            requirements
+                .constraints
+                .get("npm:@scope/pkg")
+                .map(String::as_str),
+            Some("2.1.0")
+        );
+        assert_eq!(
+            requirements
+                .constraints
+                .get("npm:transitive")
+                .map(String::as_str),
+            Some("3.0.0")
+        );
+        assert_eq!(
+            requirements
+                .constraints
+                .get("npm:ansi-regex")
+                .map(String::as_str),
+            Some("5.0.1")
+        );
+        assert_eq!(
+            requirements
+                .constraints
+                .get("npm:@demo/tool")
+                .map(String::as_str),
+            Some("4.0.0")
+        );
+        assert!(!requirements.constraints.contains_key("npm:ignored"));
     }
 
     #[test]
