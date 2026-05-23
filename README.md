@@ -104,6 +104,7 @@ cargo run -p omc-cli -- --project-dir /tmp/omc-demo script test
 cargo run -p omc-cli -- --project-dir /tmp/omc-demo add pypi:requests==2.32.3 --allow-all-host
 cargo run -p omc-cli -- --project-dir /tmp/omc-demo python -c "import requests; print(requests.__version__)"
 cargo run -p omc-cli -- --project-dir /tmp/omc-demo install --omit-dev
+cargo run -p omc-cli -- --project-dir /tmp/omc-demo install --locked
 cargo run -p omc-cli -- --project-dir /tmp/omc-demo run normalizer --version
 cargo run -p omc-cli -- --project-dir /tmp/omc-demo audit
 cargo run -p omc-cli -- --project-dir /tmp/omc-demo audit --json
@@ -207,6 +208,8 @@ Supported now:
 - persistent `[policy].allow` grants in `omc.toml`
 - install-time pruning so `omc.lock`, `node_modules`, and Python site-packages
   converge to current project manifests
+- locked/offline `omc install --locked` installs that validate `omc.lock`
+  against current project manifests without registry resolution
 - text and JSON audit output for locked package verdicts
 - `node_modules` installation for npm tarballs
 - nested `node_modules` installation for conflicting npm dependency versions

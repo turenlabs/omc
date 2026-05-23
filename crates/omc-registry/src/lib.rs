@@ -45,6 +45,8 @@ pub enum OmcRegistryError {
     UnsatisfiedRequirement { name: String, requirement: String },
     #[error("install requires an accepted lockfile; blocked package remains: {0}")]
     BlockedLockedPackage(String),
+    #[error("omc.lock does not satisfy `{0}`; run omc install without --locked to update it")]
+    LockfileOutOfDate(String),
     #[error("cannot install unsupported artifact type: {0}")]
     UnsupportedInstallArtifact(String),
     #[error("archive contains an unsafe path: {0}")]
@@ -504,19 +506,7 @@ pub fn install_project(options: &LinkOptions) -> Result<InstallReport> {
     init_project(&options.project_dir, None)?;
 
     let mut options = options.clone();
-    let manifest = read_manifest(options.project_dir.join(MANIFEST))?;
-    let mut specs = Vec::new();
-    for (key, version) in manifest.dependencies {
-        specs.push(PackageSpec::parse(&format!("{key}@{version}"))?);
-    }
-    let discovered = discover_project_requirements_with_options(
-        &options.project_dir,
-        &options.project_extras,
-        options.include_dev_dependencies,
-    )?;
-    specs.extend(discovered.specs);
-    options.constraints.extend(discovered.constraints);
-    options.hashes.extend(discovered.hashes);
+    let specs = project_requested_specs(&mut options)?;
 
     let client = Client::builder().user_agent("omc-prototype/0.1").build()?;
     let mut seen_roots = BTreeSet::new();
@@ -532,6 +522,128 @@ pub fn install_project(options: &LinkOptions) -> Result<InstallReport> {
 
     prune_lockfile(&options.project_dir, &retained)?;
     install_locked_packages(&options.project_dir)
+}
+
+pub fn install_locked_project(options: &LinkOptions) -> Result<InstallReport> {
+    init_project(&options.project_dir, None)?;
+
+    let mut options = options.clone();
+    let specs = project_requested_specs(&mut options)?;
+    let lock = read_lockfile(options.project_dir.join(LOCKFILE))?;
+    let retained = locked_reachable_package_keys(&lock, &specs, &options)?;
+    let mut selected = lock;
+    selected
+        .packages
+        .retain(|package| retained.contains(&locked_package_key(package)));
+
+    install_lock(&options.project_dir, &selected)
+}
+
+fn project_requested_specs(options: &mut LinkOptions) -> Result<Vec<PackageSpec>> {
+    let manifest = read_manifest(options.project_dir.join(MANIFEST))?;
+    let mut specs = Vec::new();
+    for (key, version) in manifest.dependencies {
+        specs.push(PackageSpec::parse(&format!("{key}@{version}"))?);
+    }
+    let discovered = discover_project_requirements_with_options(
+        &options.project_dir,
+        &options.project_extras,
+        options.include_dev_dependencies,
+    )?;
+    specs.extend(discovered.specs);
+    options.constraints.extend(discovered.constraints);
+    options.hashes.extend(discovered.hashes);
+
+    let mut seen = BTreeSet::new();
+    specs.retain(|spec| seen.insert(spec.requested()));
+    Ok(specs)
+}
+
+fn locked_reachable_package_keys(
+    lock: &OmcLock,
+    specs: &[PackageSpec],
+    options: &LinkOptions,
+) -> Result<BTreeSet<String>> {
+    let mut retained = BTreeSet::new();
+    for spec in specs {
+        let package =
+            find_locked_package_for_spec(lock, spec, &options.constraints, &options.hashes)
+                .ok_or_else(|| OmcRegistryError::LockfileOutOfDate(spec.requested()))?;
+        collect_locked_dependencies(lock, package, &mut retained)?;
+    }
+    Ok(retained)
+}
+
+fn collect_locked_dependencies(
+    lock: &OmcLock,
+    package: &LockedPackage,
+    retained: &mut BTreeSet<String>,
+) -> Result<()> {
+    if !retained.insert(locked_package_key(package)) {
+        return Ok(());
+    }
+
+    for dependency in &package.dependencies {
+        let spec = PackageSpec::parse(dependency)?;
+        let dependency =
+            find_locked_package_for_spec(lock, &spec, &BTreeMap::new(), &BTreeMap::new())
+                .ok_or_else(|| OmcRegistryError::LockfileOutOfDate(spec.requested()))?;
+        collect_locked_dependencies(lock, dependency, retained)?;
+    }
+
+    Ok(())
+}
+
+fn find_locked_package_for_spec<'a>(
+    lock: &'a OmcLock,
+    spec: &PackageSpec,
+    constraints: &BTreeMap<String, String>,
+    hashes: &BTreeMap<String, BTreeSet<String>>,
+) -> Option<&'a LockedPackage> {
+    lock.packages
+        .iter()
+        .filter(|package| package.ecosystem == spec.ecosystem)
+        .filter(|package| locked_package_name_matches(package, spec))
+        .filter(|package| locked_package_version_matches(package, spec, constraints))
+        .filter(|package| {
+            hashes
+                .get(&spec.constraint_key())
+                .map(|allowed| allowed.contains(&package.sha256))
+                .unwrap_or(true)
+        })
+        .max_by(|left, right| match spec.ecosystem {
+            Ecosystem::Npm => compare_npm_versions(&left.version, &right.version),
+            Ecosystem::Pypi => compare_pypi_versions(&left.version, &right.version),
+        })
+}
+
+fn locked_package_name_matches(package: &LockedPackage, spec: &PackageSpec) -> bool {
+    match spec.ecosystem {
+        Ecosystem::Npm => package.name == spec.name,
+        Ecosystem::Pypi => normalize_pypi_name(&package.name) == spec.name,
+    }
+}
+
+fn locked_package_version_matches(
+    package: &LockedPackage,
+    spec: &PackageSpec,
+    constraints: &BTreeMap<String, String>,
+) -> bool {
+    match spec.ecosystem {
+        Ecosystem::Npm => {
+            let Ok((_, requirement)) = npm_registry_name_and_requirement(spec) else {
+                return false;
+            };
+            constrained_npm_requirement(spec, requirement.as_deref(), constraints)
+                .as_deref()
+                .map(|requirement| npm_version_satisfies(&package.version, requirement))
+                .unwrap_or(true)
+        }
+        Ecosystem::Pypi => constrained_pypi_requirement(spec, constraints)
+            .as_deref()
+            .map(|requirement| pypi_version_satisfies(&package.version, requirement))
+            .unwrap_or(true),
+    }
 }
 
 pub fn discover_project_specs(project_dir: impl AsRef<Path>) -> Result<Vec<PackageSpec>> {
@@ -1186,6 +1298,10 @@ fn normalize_sha256_hash(value: &str) -> Option<String> {
 pub fn install_locked_packages(project_dir: impl AsRef<Path>) -> Result<InstallReport> {
     let project_dir = project_dir.as_ref();
     let lock = read_lockfile(project_dir.join(LOCKFILE))?;
+    install_lock(project_dir, &lock)
+}
+
+fn install_lock(project_dir: &Path, lock: &OmcLock) -> Result<InstallReport> {
     let node_modules = project_dir.join("node_modules");
     let npm_bin_dir = node_modules.join(".bin");
     let python_site_packages = project_dir
@@ -1244,7 +1360,7 @@ pub fn install_locked_packages(project_dir: impl AsRef<Path>) -> Result<InstallR
         }
     }
 
-    install_nested_npm_dependencies(project_dir, &lock, &report.node_modules)?;
+    install_nested_npm_dependencies(project_dir, lock, &report.node_modules)?;
 
     Ok(report)
 }
@@ -3352,6 +3468,44 @@ mod tests {
         assert_eq!(removed, 1);
         assert_eq!(lock.packages.len(), 1);
         assert_eq!(lock.packages[0].name, "left-pad");
+    }
+
+    #[test]
+    fn locked_reachable_packages_include_transitive_dependencies() {
+        let mut root = locked_package_for_test(Ecosystem::Npm, "is-odd", "3.0.1");
+        root.dependencies = vec!["npm:is-number@^6.0.0".to_owned()];
+        let dependency = locked_package_for_test(Ecosystem::Npm, "is-number", "6.0.0");
+        let lock = OmcLock {
+            version: 1,
+            packages: vec![root, dependency],
+        };
+        let options = LinkOptions::new(".");
+        let retained = locked_reachable_package_keys(
+            &lock,
+            &[PackageSpec::parse("npm:is-odd@^3.0.0").unwrap()],
+            &options,
+        )
+        .unwrap();
+
+        assert!(retained.contains("npm:is-odd@3.0.1"));
+        assert!(retained.contains("npm:is-number@6.0.0"));
+    }
+
+    #[test]
+    fn locked_reachable_packages_reject_stale_lockfiles() {
+        let lock = OmcLock {
+            version: 1,
+            packages: vec![locked_package_for_test(Ecosystem::Npm, "left-pad", "1.1.0")],
+        };
+        let options = LinkOptions::new(".");
+        let error = locked_reachable_package_keys(
+            &lock,
+            &[PackageSpec::parse("npm:left-pad@1.3.0").unwrap()],
+            &options,
+        )
+        .unwrap_err();
+
+        assert!(matches!(error, OmcRegistryError::LockfileOutOfDate(_)));
     }
 
     #[test]

@@ -5,9 +5,9 @@ use std::{env, ffi::OsString};
 use clap::{Parser, Subcommand};
 use omc_cap::Capability;
 use omc_registry::{
-    add_package_graph, init_project, install_locked_packages, install_project,
-    parse_capability_grant, read_lockfile, read_package_scripts, LinkOptions, OmcRegistryError,
-    PackageSpec, Verdict,
+    add_package_graph, init_project, install_locked_packages, install_locked_project,
+    install_project, parse_capability_grant, read_lockfile, read_package_scripts, LinkOptions,
+    OmcRegistryError, PackageSpec, Verdict,
 };
 
 #[derive(Debug, Parser)]
@@ -60,6 +60,8 @@ enum Command {
             help = "Skip package.json devDependencies"
         )]
         omit_dev: bool,
+        #[arg(long, help = "Install from omc.lock without registry resolution")]
+        locked: bool,
         #[arg(long, help = "Grant all host capabilities for compatibility testing")]
         allow_all_host: bool,
     },
@@ -149,6 +151,7 @@ fn run() -> Result<ExitCode, OmcRegistryError> {
             allow,
             extra,
             omit_dev,
+            locked,
             allow_all_host,
         } => {
             let mut options = LinkOptions::new(&cli.project_dir);
@@ -158,7 +161,11 @@ fn run() -> Result<ExitCode, OmcRegistryError> {
                 .map(|extra| normalize_extra(&extra))
                 .collect();
             options.include_dev_dependencies = !omit_dev;
-            let install = install_project(&options)?;
+            let install = if locked {
+                install_locked_project(&options)?
+            } else {
+                install_project(&options)?
+            };
             println!(
                 "installed npm={} pypi={} npm_bins={} python_scripts={} node_modules={} python_site_packages={}",
                 install.npm_packages,
