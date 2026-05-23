@@ -121,6 +121,7 @@ cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm install left-p
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm install --save-optional fsevents
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm install --save-peer react
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm ci --omit=optional --omit=peer
+cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm install left-pad --workspace @demo/lib
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm install --registry https://registry.npmjs.org left-pad@1.3.0
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm install --dry-run left-pad@1.3.0
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/local-util npm link
@@ -518,7 +519,9 @@ Supported now:
   verified OMC project before dispatching to the requested executable; `--no-save`,
   `--package-lock-only`, `--package-lock=false`, `--dry-run`, `--registry`,
   `--omit=...`, `--include=...`, and common audit/fund/peer/install-strategy flags are
-  understood for install/ci compatibility; common global npm flags such as
+  understood for install/ci compatibility; `npm install --workspace ...`
+  saves into selected workspace `package.json` files while installing the root
+  OMC graph; common global npm flags such as
   `--silent`, `--loglevel`, and `--cache` are accepted before the subcommand,
   while `--registry`, `--userconfig`, and `--json` are forwarded to subcommands
   that support them; package scripts receive npm-style

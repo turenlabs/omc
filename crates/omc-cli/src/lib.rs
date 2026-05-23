@@ -317,6 +317,9 @@ enum NpmCompatAction {
         npm_registry: Option<String>,
         allow: Vec<String>,
         allow_all_host: bool,
+        workspaces: Vec<String>,
+        all_workspaces: bool,
+        include_workspace_root: bool,
     },
     InstallTest {
         command: String,
@@ -334,6 +337,9 @@ enum NpmCompatAction {
         npm_registry: Option<String>,
         allow: Vec<String>,
         allow_all_host: bool,
+        workspaces: Vec<String>,
+        all_workspaces: bool,
+        include_workspace_root: bool,
         test_args: Vec<String>,
     },
     Ci {
@@ -2231,6 +2237,9 @@ struct NpmInstallCompatRequest {
     npm_registry: Option<String>,
     allow: Vec<String>,
     allow_all_host: bool,
+    workspaces: Vec<String>,
+    all_workspaces: bool,
+    include_workspace_root: bool,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -2272,6 +2281,9 @@ fn run_npm_install_compat(
         npm_registry,
         allow,
         allow_all_host,
+        workspaces,
+        all_workspaces,
+        include_workspace_root,
     } = request;
     if dry_run {
         return run_npm_install_dry_run(
@@ -2290,10 +2302,38 @@ fn run_npm_install_compat(
                 npm_registry,
                 allow,
                 allow_all_host,
+                workspaces,
+                all_workspaces,
+                include_workspace_root,
             },
         );
     }
     let allowed_capabilities = parse_grants(&allow, allow_all_host)?;
+    let workspace_mode = !workspaces.is_empty() || all_workspaces || include_workspace_root;
+    if workspace_mode {
+        return run_npm_install_workspace_compat(
+            project_dir,
+            NpmInstallCompatRequest {
+                specs,
+                archive_references,
+                local_paths,
+                save,
+                dependency_kind,
+                omit_dev,
+                omit_optional,
+                omit_peer,
+                lock_only,
+                dry_run,
+                npm_registry,
+                allow: Vec::new(),
+                allow_all_host: false,
+                workspaces,
+                all_workspaces,
+                include_workspace_root,
+            },
+            allowed_capabilities,
+        );
+    }
     if specs.is_empty() && archive_references.is_empty() {
         let mut options = LinkOptions::new(project_dir);
         options.allowed_capabilities = allowed_capabilities;
@@ -2344,6 +2384,110 @@ fn run_npm_install_compat(
         println!();
         print_install_report(&install);
     }
+    Ok(ExitCode::SUCCESS)
+}
+
+fn run_npm_install_workspace_compat(
+    project_dir: &Path,
+    request: NpmInstallCompatRequest,
+    allowed_capabilities: Vec<Capability>,
+) -> Result<ExitCode, OmcRegistryError> {
+    let NpmInstallCompatRequest {
+        specs,
+        archive_references,
+        local_paths,
+        save,
+        dependency_kind,
+        omit_dev,
+        omit_optional,
+        omit_peer,
+        lock_only,
+        dry_run: _,
+        npm_registry,
+        allow: _,
+        allow_all_host: _,
+        workspaces,
+        all_workspaces,
+        include_workspace_root,
+    } = request;
+
+    let targets = npm_script_target_dirs(
+        project_dir,
+        &workspaces,
+        all_workspaces,
+        include_workspace_root,
+    )?;
+    if targets.is_empty() {
+        return Err(OmcRegistryError::UnsupportedSpec(
+            "npm install workspace selection did not match any package".to_owned(),
+        ));
+    }
+
+    let mut options = LinkOptions::new(project_dir);
+    options.allowed_capabilities = allowed_capabilities;
+    options.npm_registry_url = npm_registry;
+    options.save_manifest_dependency = false;
+    apply_dependency_omit_flags(&mut options, omit_dev, omit_optional, omit_peer);
+    options.npm_local_paths = absolutize_paths(project_dir, local_paths.clone());
+
+    if specs.is_empty() && archive_references.is_empty() && local_paths.is_empty() {
+        let install = if lock_only {
+            let reports = lock_project(&options)?;
+            print_link_reports(&reports);
+            print_lock_only_report(project_dir);
+            return Ok(ExitCode::SUCCESS);
+        } else {
+            install_project(&options)?
+        };
+        print_install_report(&install);
+        return Ok(ExitCode::SUCCESS);
+    }
+
+    let mut specs = parse_package_specs(&specs, Some(Ecosystem::Npm))?;
+    specs.extend(parse_npm_archive_references(
+        project_dir,
+        &archive_references,
+    )?);
+
+    let mut all_reports = Vec::new();
+    let mut root_dependencies = Vec::new();
+    for spec in &specs {
+        let reports = add_package_graph(spec, &options)?;
+        if let Some(root) = reports.first() {
+            let requirement = spec
+                .direct_url
+                .clone()
+                .unwrap_or_else(|| root.locked.version.clone());
+            root_dependencies.push((root.locked.name.clone(), requirement));
+        }
+        all_reports.extend(reports);
+    }
+    print_link_reports(&all_reports);
+
+    if save {
+        for target in &targets {
+            for (name, requirement) in &root_dependencies {
+                save_npm_package_json_dependency(target, name, requirement, dependency_kind)?;
+            }
+            for local_path in &local_paths {
+                save_npm_package_json_local_dependency(
+                    project_dir,
+                    target,
+                    local_path,
+                    dependency_kind,
+                )?;
+            }
+        }
+    }
+
+    if lock_only {
+        print_lock_only_report(project_dir);
+        return Ok(ExitCode::SUCCESS);
+    }
+
+    let install = install_project(&options)?;
+    println!();
+    print_install_report(&install);
     Ok(ExitCode::SUCCESS)
 }
 
@@ -2414,6 +2558,9 @@ fn run_npm_link_compat(
                     npm_registry,
                     allow,
                     allow_all_host,
+                    workspaces: Vec::new(),
+                    all_workspaces: false,
+                    include_workspace_root: false,
                 },
             )
         }
@@ -2539,6 +2686,9 @@ fn run_npm_install_dry_run(
         npm_registry,
         allow,
         allow_all_host,
+        workspaces: _,
+        all_workspaces: _,
+        include_workspace_root: _,
     } = request;
 
     let dry_run_project = TempOmcProject::new("npm-dry-run", project_dir)?;
@@ -2642,6 +2792,9 @@ fn run_npm_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
             npm_registry,
             allow,
             allow_all_host,
+            workspaces,
+            all_workspaces,
+            include_workspace_root,
         } => {
             return run_npm_install_compat(
                 project_dir,
@@ -2659,6 +2812,9 @@ fn run_npm_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
                     npm_registry,
                     allow,
                     allow_all_host,
+                    workspaces,
+                    all_workspaces,
+                    include_workspace_root,
                 },
             )
         }
@@ -2678,8 +2834,14 @@ fn run_npm_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
             npm_registry,
             allow,
             allow_all_host,
+            workspaces,
+            all_workspaces,
+            include_workspace_root,
             test_args,
         } => {
+            let script_workspaces = workspaces.clone();
+            let script_all_workspaces = all_workspaces;
+            let script_include_workspace_root = include_workspace_root;
             let status = if use_ci {
                 run_npm_ci_compat(
                     project_dir,
@@ -2706,6 +2868,9 @@ fn run_npm_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
                         npm_registry,
                         allow,
                         allow_all_host,
+                        workspaces,
+                        all_workspaces,
+                        include_workspace_root,
                     },
                 )?
             };
@@ -2719,9 +2884,9 @@ fn run_npm_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
                 &test_args,
                 false,
                 NpmScriptTargets {
-                    workspaces: &[],
-                    all_workspaces: false,
-                    include_workspace_root: false,
+                    workspaces: &script_workspaces,
+                    all_workspaces: script_all_workspaces,
+                    include_workspace_root: script_include_workspace_root,
                 },
             );
         }
@@ -3515,8 +3680,9 @@ fn npm_help_text(topic: Option<&str>) -> String {
             &[
                 "Resolve, verify, lock, and install npm packages with OMC.",
                 "Aliases: i, add, update, up, upgrade.",
-                "Common flags: --save, --no-save, --save-dev, --save-optional, --save-peer, --omit=dev|optional|peer, --include=dev|optional|peer, --package-lock-only, --dry-run, --registry, --allow, --allow-all-host.",
+                "Common flags: --save, --no-save, --save-dev, --save-optional, --save-peer, --omit=dev|optional|peer, --include=dev|optional|peer, --workspace, --workspaces, --include-workspace-root, --package-lock-only, --dry-run, --registry, --allow, --allow-all-host.",
                 "Direct local inputs are supported for .tgz archives and local package directories.",
+                "Workspace installs save dependencies into selected workspace package.json files and install the root OMC graph.",
             ],
         ),
         Some("link") => npm_command_help(
@@ -9476,6 +9642,57 @@ fn write_npm_pkg_json(path: &Path, value: &serde_json::Value) -> Result<(), OmcR
     Ok(())
 }
 
+fn save_npm_package_json_dependency(
+    package_dir: &Path,
+    name: &str,
+    requirement: &str,
+    kind: ManifestDependencyKind,
+) -> Result<(), OmcRegistryError> {
+    let package_json = package_dir.join("package.json");
+    let mut package = read_npm_pkg_json(&package_json)?;
+    remove_npm_package_json_dependency(&mut package, name);
+    let field = npm_package_json_dependency_field(kind);
+    npm_pkg_set_path(
+        &mut package,
+        &format!("{field}.{name}"),
+        serde_json::Value::String(requirement.to_owned()),
+    )?;
+    write_npm_pkg_json(&package_json, &package)
+}
+
+fn save_npm_package_json_local_dependency(
+    project_dir: &Path,
+    package_dir: &Path,
+    local_path: &Path,
+    kind: ManifestDependencyKind,
+) -> Result<(), OmcRegistryError> {
+    let target = fs::canonicalize(absolutize_path(project_dir, local_path.to_path_buf()))?;
+    let package = read_npm_pkg_json(&target.join("package.json"))?;
+    let name = npm_package_json_name(&package)?;
+    let requirement = format!("file:{}", target.display());
+    save_npm_package_json_dependency(package_dir, &name, &requirement, kind)
+}
+
+fn npm_package_json_dependency_field(kind: ManifestDependencyKind) -> &'static str {
+    match kind {
+        ManifestDependencyKind::Production => "dependencies",
+        ManifestDependencyKind::Dev => "devDependencies",
+        ManifestDependencyKind::Optional => "optionalDependencies",
+        ManifestDependencyKind::Peer => "peerDependencies",
+    }
+}
+
+fn remove_npm_package_json_dependency(package: &mut serde_json::Value, name: &str) {
+    for field in [
+        "dependencies",
+        "devDependencies",
+        "optionalDependencies",
+        "peerDependencies",
+    ] {
+        npm_pkg_delete_path(package, &format!("{field}.{name}"));
+    }
+}
+
 fn npm_pkg_get_path<'a>(value: &'a serde_json::Value, path: &str) -> Option<&'a serde_json::Value> {
     let mut current = value;
     for segment in npm_pkg_path_segments(path) {
@@ -11973,6 +12190,9 @@ fn parse_npm_compat_action(args: &[String]) -> Result<NpmCompatAction, OmcRegist
             npm_registry: None,
             allow: Vec::new(),
             allow_all_host: false,
+            workspaces: Vec::new(),
+            all_workspaces: false,
+            include_workspace_root: false,
         });
     };
 
@@ -12516,7 +12736,18 @@ fn npm_global_arg_supported_by_command(command: &str, arg: &str) -> bool {
     {
         return matches!(
             command,
-            "run"
+            "install"
+                | "i"
+                | "add"
+                | "update"
+                | "up"
+                | "upgrade"
+                | "install-test"
+                | "it"
+                | "install-ci-test"
+                | "cit"
+                | "ci"
+                | "run"
                 | "run-script"
                 | "test"
                 | "start"
@@ -12537,7 +12768,18 @@ fn npm_global_arg_supported_by_command(command: &str, arg: &str) -> bool {
     {
         return matches!(
             command,
-            "run"
+            "install"
+                | "i"
+                | "add"
+                | "update"
+                | "up"
+                | "upgrade"
+                | "install-test"
+                | "it"
+                | "install-ci-test"
+                | "cit"
+                | "ci"
+                | "run"
                 | "run-script"
                 | "test"
                 | "start"
@@ -13238,6 +13480,9 @@ fn parse_npm_install_args(args: &[String]) -> Result<NpmCompatAction, OmcRegistr
         npm_registry,
         allow,
         allow_all_host,
+        workspaces,
+        all_workspaces,
+        include_workspace_root,
         positionals,
     } = parse_common_compat_flags(&filtered, true)?;
 
@@ -13255,6 +13500,9 @@ fn parse_npm_install_args(args: &[String]) -> Result<NpmCompatAction, OmcRegistr
         npm_registry,
         allow,
         allow_all_host,
+        workspaces,
+        all_workspaces,
+        include_workspace_root,
     })
 }
 
@@ -13301,6 +13549,7 @@ fn parse_npm_link_args(args: &[String]) -> Result<NpmCompatAction, OmcRegistryEr
         allow,
         allow_all_host,
         positionals,
+        ..
     } = parse_common_compat_flags(&filtered, true)?;
 
     if positionals.is_empty() && local_paths.is_empty() {
@@ -13370,6 +13619,9 @@ fn parse_npm_install_test_args(
             omit_peer,
             allow,
             allow_all_host,
+            workspaces,
+            all_workspaces,
+            include_workspace_root,
             positionals,
             ..
         } = parse_common_compat_flags(&command_args, true)?;
@@ -13392,6 +13644,9 @@ fn parse_npm_install_test_args(
             npm_registry: None,
             allow,
             allow_all_host,
+            workspaces,
+            all_workspaces,
+            include_workspace_root,
             test_args,
         });
     }
@@ -13411,6 +13666,9 @@ fn parse_npm_install_test_args(
         npm_registry,
         allow,
         allow_all_host,
+        workspaces,
+        all_workspaces,
+        include_workspace_root,
     } = install
     else {
         unreachable!("parse_npm_install_args only returns install actions")
@@ -13431,6 +13689,9 @@ fn parse_npm_install_test_args(
         npm_registry,
         allow,
         allow_all_host,
+        workspaces,
+        all_workspaces,
+        include_workspace_root,
         test_args,
     })
 }
@@ -18883,6 +19144,9 @@ struct CommonCompatFlags {
     npm_registry: Option<String>,
     allow: Vec<String>,
     allow_all_host: bool,
+    workspaces: Vec<String>,
+    all_workspaces: bool,
+    include_workspace_root: bool,
     positionals: Vec<String>,
 }
 
@@ -18898,6 +19162,9 @@ impl Default for CommonCompatFlags {
             npm_registry: None,
             allow: Vec::new(),
             allow_all_host: false,
+            workspaces: Vec::new(),
+            all_workspaces: false,
+            include_workspace_root: false,
             positionals: Vec::new(),
         }
     }
@@ -19003,6 +19270,36 @@ fn parse_common_compat_flags(
                 if npm_dependency_set_contains(value, "peer") {
                     parsed.omit_peer = false;
                 }
+            } else if matches!(arg.as_str(), "--workspace" | "-w") {
+                index += 1;
+                let Some(workspace) = args.get(index) else {
+                    return Err(OmcRegistryError::UnsupportedSpec(format!(
+                        "{arg} needs a workspace"
+                    )));
+                };
+                parsed.workspaces.push(workspace.clone());
+            } else if let Some(workspace) = arg
+                .strip_prefix("--workspace=")
+                .or_else(|| arg.strip_prefix("-w="))
+            {
+                if workspace == "true" {
+                    parsed.all_workspaces = true;
+                } else if workspace == "false" {
+                    parsed.all_workspaces = false;
+                } else {
+                    parsed.workspaces.push(workspace.to_owned());
+                }
+            } else if matches!(arg.as_str(), "--workspaces" | "--workspaces=true") {
+                parsed.all_workspaces = true;
+            } else if arg == "--workspaces=false" {
+                parsed.all_workspaces = false;
+            } else if matches!(
+                arg.as_str(),
+                "--include-workspace-root" | "--include-workspace-root=true"
+            ) {
+                parsed.include_workspace_root = true;
+            } else if arg == "--include-workspace-root=false" {
+                parsed.include_workspace_root = false;
             } else if ignored_npm_value_flag(arg) {
                 index += 1;
                 if args.get(index).is_none() {
@@ -19779,6 +20076,9 @@ mod tests {
                 npm_registry: Some("https://registry.example.invalid/npm".to_owned()),
                 allow: Vec::new(),
                 allow_all_host: false,
+                workspaces: Vec::new(),
+                all_workspaces: false,
+                include_workspace_root: false,
             }
         );
         assert_eq!(
@@ -19971,6 +20271,9 @@ mod tests {
                 npm_registry: Some("https://registry.example.invalid/npm".to_owned()),
                 allow: Vec::new(),
                 allow_all_host: true,
+                workspaces: Vec::new(),
+                all_workspaces: false,
+                include_workspace_root: false,
             }
         );
 
@@ -19990,6 +20293,9 @@ mod tests {
                 npm_registry: None,
                 allow: Vec::new(),
                 allow_all_host: false,
+                workspaces: Vec::new(),
+                all_workspaces: false,
+                include_workspace_root: false,
             }
         );
 
@@ -20009,6 +20315,9 @@ mod tests {
                 npm_registry: None,
                 allow: Vec::new(),
                 allow_all_host: false,
+                workspaces: Vec::new(),
+                all_workspaces: false,
+                include_workspace_root: false,
             }
         );
 
@@ -20037,6 +20346,9 @@ mod tests {
                 npm_registry: None,
                 allow: Vec::new(),
                 allow_all_host: false,
+                workspaces: Vec::new(),
+                all_workspaces: false,
+                include_workspace_root: false,
             }
         );
 
@@ -20119,6 +20431,9 @@ mod tests {
                 npm_registry: None,
                 allow: Vec::new(),
                 allow_all_host: false,
+                workspaces: Vec::new(),
+                all_workspaces: false,
+                include_workspace_root: false,
             }
         );
 
@@ -20142,6 +20457,40 @@ mod tests {
                 npm_registry: None,
                 allow: Vec::new(),
                 allow_all_host: false,
+                workspaces: Vec::new(),
+                all_workspaces: false,
+                include_workspace_root: false,
+            }
+        );
+
+        let action = parse_npm_compat_action(&args(&[
+            "install",
+            "--workspace",
+            "@demo/lib",
+            "--include-workspace-root",
+            "left-pad",
+        ]))
+        .unwrap();
+
+        assert_eq!(
+            action,
+            NpmCompatAction::Install {
+                specs: vec!["left-pad".to_owned()],
+                archive_references: Vec::new(),
+                local_paths: Vec::new(),
+                save: true,
+                dependency_kind: ManifestDependencyKind::Production,
+                omit_dev: false,
+                omit_optional: false,
+                omit_peer: false,
+                lock_only: false,
+                dry_run: false,
+                npm_registry: None,
+                allow: Vec::new(),
+                allow_all_host: false,
+                workspaces: vec!["@demo/lib".to_owned()],
+                all_workspaces: false,
+                include_workspace_root: true,
             }
         );
 
@@ -20171,6 +20520,9 @@ mod tests {
                 npm_registry: Some("https://registry.example.invalid/npm".to_owned()),
                 allow: Vec::new(),
                 allow_all_host: false,
+                workspaces: Vec::new(),
+                all_workspaces: false,
+                include_workspace_root: false,
                 test_args: vec!["--watch".to_owned()],
             }
         );
@@ -20193,6 +20545,9 @@ mod tests {
                 npm_registry: None,
                 allow: Vec::new(),
                 allow_all_host: false,
+                workspaces: Vec::new(),
+                all_workspaces: false,
+                include_workspace_root: false,
                 test_args: vec!["--runInBand".to_owned()],
             }
         );
@@ -20222,6 +20577,9 @@ mod tests {
                 npm_registry: Some("https://registry.example.invalid/npm".to_owned()),
                 allow: Vec::new(),
                 allow_all_host: false,
+                workspaces: Vec::new(),
+                all_workspaces: false,
+                include_workspace_root: false,
             }
         );
     }
@@ -22966,6 +23324,52 @@ verdict = "accepted"
             ]
         );
         assert!(npm_script_target_dirs(&dir, &["missing".to_owned()], false, false).is_err());
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn saves_npm_workspace_package_json_dependencies() {
+        let dir = test_dir("npm-workspace-save");
+        fs::create_dir_all(dir.join("packages/lib")).unwrap();
+        fs::write(
+            dir.join("packages/lib/package.json"),
+            r#"{ "name": "@demo/lib", "dependencies": { "old": "1.0.0" }, "devDependencies": { "left-pad": "0.0.1" } }"#,
+        )
+        .unwrap();
+
+        save_npm_package_json_dependency(
+            &dir.join("packages/lib"),
+            "left-pad",
+            "1.3.0",
+            ManifestDependencyKind::Production,
+        )
+        .unwrap();
+        let package = read_npm_pkg_json(&dir.join("packages/lib/package.json")).unwrap();
+        assert_eq!(
+            npm_pkg_get_path(&package, "dependencies.left-pad").and_then(serde_json::Value::as_str),
+            Some("1.3.0")
+        );
+        assert!(npm_pkg_get_path(&package, "devDependencies.left-pad").is_none());
+
+        fs::create_dir_all(dir.join("vendor/local-pkg")).unwrap();
+        fs::write(
+            dir.join("vendor/local-pkg/package.json"),
+            r#"{ "name": "@demo/local" }"#,
+        )
+        .unwrap();
+        save_npm_package_json_local_dependency(
+            &dir,
+            &dir.join("packages/lib"),
+            &PathBuf::from("vendor/local-pkg"),
+            ManifestDependencyKind::Dev,
+        )
+        .unwrap();
+        let package = read_npm_pkg_json(&dir.join("packages/lib/package.json")).unwrap();
+        let saved = npm_pkg_get_path(&package, "devDependencies.@demo/local")
+            .and_then(serde_json::Value::as_str)
+            .unwrap();
+        assert!(saved.starts_with("file:"));
+        assert!(saved.ends_with("vendor/local-pkg"));
         let _ = fs::remove_dir_all(dir);
     }
 
