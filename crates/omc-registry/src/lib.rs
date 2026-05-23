@@ -5326,6 +5326,7 @@ fn install_lock(project_dir: &Path, lock: &OmcLock) -> Result<InstallReport> {
                 package.ecosystem, package.name, package.version
             )));
         }
+        verify_locked_artifact(project_dir, package)?;
 
         match package.ecosystem {
             Ecosystem::Npm => {
@@ -5423,6 +5424,26 @@ fn read_locked_archive(project_dir: &Path, package: &LockedPackage) -> Result<Ve
         });
     }
     Ok(bytes)
+}
+
+fn verify_locked_artifact(project_dir: &Path, package: &LockedPackage) -> Result<()> {
+    let artifact_path = checked_join(project_dir, Path::new(&package.artifact))?;
+    let artifact = serde_json::from_str::<OmcArtifact>(&fs::read_to_string(&artifact_path)?)?;
+    verify_artifact_signature(&artifact)?;
+    if artifact.package.ecosystem != package.ecosystem
+        || artifact.package.name != package.name
+        || artifact.package.version != package.version
+        || artifact.source_url != package.source_url
+        || artifact.source_sha256 != package.sha256
+        || artifact.behavior != package.behavior
+        || artifact.verdict != package.verdict
+    {
+        return Err(OmcRegistryError::UnsupportedInstallArtifact(format!(
+            "artifact `{}` does not match lock entry for {}:{}@{}",
+            package.artifact, package.ecosystem, package.name, package.version
+        )));
+    }
+    Ok(())
 }
 
 fn install_npm_package(
@@ -11889,6 +11910,7 @@ packages:
         package.source_url = "https://example.invalid/pure-sdist-1.0.0.tar.gz".to_owned();
         package.archive = relative_path(dir.path(), &archive);
         package.sha256 = sha256_hex(&bytes);
+        write_signed_artifact_for_test(dir.path(), &package);
 
         let report = install_lock(
             dir.path(),
@@ -11945,6 +11967,7 @@ packages:
         package.source_url = "https://example.invalid/pure-sdist-1.0.0.zip".to_owned();
         package.archive = relative_path(dir.path(), &archive);
         package.sha256 = sha256_hex(&bytes);
+        write_signed_artifact_for_test(dir.path(), &package);
 
         let report = install_lock(
             dir.path(),
@@ -14840,6 +14863,48 @@ wheels = [
         ));
     }
 
+    #[test]
+    fn install_lock_rejects_tampered_artifact_signature() {
+        let dir = tempfile::tempdir().unwrap();
+        let bytes = npm_tgz_for_test(
+            r#"{
+                "name": "pkg",
+                "version": "1.0.0"
+            }"#,
+        );
+        let archive = dir.path().join(".omc/cache/npm/pkg.tgz");
+        fs::create_dir_all(archive.parent().unwrap()).unwrap();
+        fs::write(&archive, &bytes).unwrap();
+
+        let mut package = locked_package_for_test(Ecosystem::Npm, "pkg", "1.0.0");
+        package.archive = relative_path(dir.path(), &archive);
+        package.sha256 = sha256_hex(&bytes);
+        write_signed_artifact_for_test(dir.path(), &package);
+
+        let artifact_path = dir.path().join(&package.artifact);
+        let mut artifact =
+            serde_json::from_str::<OmcArtifact>(&fs::read_to_string(&artifact_path).unwrap())
+                .unwrap();
+        artifact.source_sha256 = "1".repeat(64);
+        fs::write(
+            &artifact_path,
+            serde_json::to_string_pretty(&artifact).unwrap(),
+        )
+        .unwrap();
+
+        let error = install_lock(
+            dir.path(),
+            &OmcLock {
+                version: 1,
+                packages: vec![package],
+                python_vcs: Vec::new(),
+            },
+        )
+        .unwrap_err();
+
+        assert!(matches!(error, OmcRegistryError::DigestMismatch { .. }));
+    }
+
     fn npm_tgz_for_test(package_json: &str) -> Vec<u8> {
         let mut bytes = Vec::new();
         {
@@ -14944,5 +15009,59 @@ wheels = [
             capabilities: Vec::new(),
             verifier_findings: Vec::new(),
         }
+    }
+
+    fn write_signed_artifact_for_test(project_dir: &Path, package: &LockedPackage) {
+        let resolved = ResolvedPackage {
+            ecosystem: package.ecosystem,
+            name: package.name.clone(),
+            version: package.version.clone(),
+            source_url: package.source_url.clone(),
+            download_url: None,
+            local_path: None,
+            filename: Path::new(&package.archive)
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("package.tgz")
+                .to_owned(),
+            expected_sha256: None,
+            expected_sha1: None,
+            expected_integrity: None,
+            npm_direct_tarball: package.ecosystem == Ecosystem::Npm,
+            pypi_direct_wheel: false,
+            npm_scripts: BTreeMap::new(),
+            platform_compatible: true,
+            dependencies: Vec::new(),
+        };
+        let mut artifact = OmcArtifact {
+            schema: ARTIFACT_SCHEMA,
+            package: ArtifactPackage {
+                ecosystem: package.ecosystem,
+                name: package.name.clone(),
+                version: package.version.clone(),
+            },
+            source_url: package.source_url.clone(),
+            source_sha256: package.sha256.clone(),
+            compiler: "test".to_owned(),
+            microcode: module_from_profile(&resolved, &package.capabilities),
+            behavior: package.behavior,
+            verdict: package.verdict,
+            grants: package.grants.clone(),
+            dependencies: package.dependencies.clone(),
+            optional_dependencies: package.optional_dependencies.clone(),
+            files_scanned: 0,
+            capabilities: package.capabilities.clone(),
+            verifier_findings: package.verifier_findings.clone(),
+            signature: None,
+        };
+        sign_artifact(project_dir, &mut artifact).unwrap();
+
+        let artifact_path = checked_join(project_dir, Path::new(&package.artifact)).unwrap();
+        fs::create_dir_all(artifact_path.parent().unwrap()).unwrap();
+        fs::write(
+            &artifact_path,
+            serde_json::to_string_pretty(&artifact).unwrap(),
+        )
+        .unwrap();
     }
 }

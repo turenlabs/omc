@@ -158,6 +158,7 @@ cache the source artifact under .omc/cache
 profile runtime source files into OMC capability findings
 run the OMC verifier with deny-by-default policy
 write an OMC artifact under .omc/artifacts
+sign generated OMC artifacts and verify signatures during locked installs
 update omc.toml and omc.lock only when accepted
 install npm packages into node_modules
 install PyPI wheels and pure Python sdists into .omc/python/site-packages
@@ -309,7 +310,8 @@ Supported now:
 - source artifact download and cache
 - `omc.toml` and `omc.lock`
 - structured OMC microcode serialization inside generated package artifacts
-- local Ed25519 signatures for generated package artifacts
+- local Ed25519 signatures for generated package artifacts, verified before
+  locked package extraction
 - persistent `[policy].allow` grants in `omc.toml`
 - `omc allow` for editing persistent project policy grants
 - `omc add`, `omc add --dev`, and `omc remove` for one or more OMC-managed
