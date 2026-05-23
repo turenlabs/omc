@@ -13,4 +13,5 @@ path = "src/main.rs"
 clap = { version = "4", features = ["derive"] }
 omc-cap = { path = "../omc-cap" }
 omc-registry = { path = "../omc-registry" }
+serde_json = "1"
 thiserror = "2"

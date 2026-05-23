@@ -64,7 +64,10 @@ enum Command {
         allow_all_host: bool,
     },
     #[command(about = "Summarize locked packages and fail if any are blocked")]
-    Audit,
+    Audit {
+        #[arg(long, help = "Emit machine-readable JSON")]
+        json: bool,
+    },
     #[command(about = "Run node with this project's OMC-installed node_modules")]
     Node {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
@@ -166,23 +169,32 @@ fn run() -> Result<ExitCode, OmcRegistryError> {
                 install.python_site_packages.display()
             );
         }
-        Command::Audit => {
+        Command::Audit { json } => {
             let lock = read_lockfile(cli.project_dir.join("omc.lock"))?;
             let blocked = lock
                 .packages
                 .iter()
                 .filter(|package| package.verdict == Verdict::Blocked)
                 .count();
-            println!("packages: {}", lock.packages.len());
-            println!("blocked: {blocked}");
-            for package in lock.packages {
-                println!(
-                    "{} {}:{}@{}",
-                    verdict_label(package.verdict),
-                    package.ecosystem,
-                    package.name,
-                    package.version
-                );
+            if json {
+                let audit = serde_json::json!({
+                    "packages": lock.packages.len(),
+                    "blocked": blocked,
+                    "lock": lock,
+                });
+                println!("{}", serde_json::to_string_pretty(&audit)?);
+            } else {
+                println!("packages: {}", lock.packages.len());
+                println!("blocked: {blocked}");
+                for package in lock.packages {
+                    println!(
+                        "{} {}:{}@{}",
+                        verdict_label(package.verdict),
+                        package.ecosystem,
+                        package.name,
+                        package.version
+                    );
+                }
             }
 
             if blocked > 0 {

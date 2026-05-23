@@ -106,6 +106,7 @@ cargo run -p omc-cli -- --project-dir /tmp/omc-demo python -c "import requests; 
 cargo run -p omc-cli -- --project-dir /tmp/omc-demo install --omit-dev
 cargo run -p omc-cli -- --project-dir /tmp/omc-demo run normalizer --version
 cargo run -p omc-cli -- --project-dir /tmp/omc-demo audit
+cargo run -p omc-cli -- --project-dir /tmp/omc-demo audit --json
 ```
 
 For existing projects, `install` reads normal project files:
@@ -195,6 +196,7 @@ Supported now:
 - PyPI extras resolution for dependencies gated by `extra == "..."`
 - source artifact download and cache
 - `omc.toml` and `omc.lock`
+- text and JSON audit output for locked package verdicts
 - `node_modules` installation for npm tarballs
 - nested `node_modules` installation for conflicting npm dependency versions
 - npm alias dependencies such as `name: npm:other-name@range`
