@@ -118,6 +118,9 @@ cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm help install
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm install left-pad@1.3.0
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm install --registry https://registry.npmjs.org left-pad@1.3.0
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm install --dry-run left-pad@1.3.0
+cargo run -p omc-cli --bin omc -- --project-dir /tmp/local-util npm link
+cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm link local-util
+cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm link ../local-util --save-dev
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm update --package-lock-only
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm install-test -- --watch
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm ci --omit=dev
@@ -471,7 +474,7 @@ Supported now:
   pyproject/setup.cfg/setup.py metadata exists
 - `omc node`, `omc python`, `omc script`, and `omc run` wrappers, including
   package.json and Pipfile project scripts
-- `omc npm` compatibility commands for common `install`, `update` / `up` /
+- `omc npm` compatibility commands for common `install`, `link` / `ln`, `update` / `up` /
   `upgrade`, `install-test` / `it`, `ci`, `install-ci-test` / `cit`, `prune`, `dedupe`, `rebuild`, `test`, `start`, `stop`, `restart`,
   `run`, `exec`, `init`, `remove`, `bin`, `root`, `prefix`, `audit` / `audit --json`,
   `help`, `fund` / `fund --json`, `cache verify/ls/rm/clean --force`, `pkg get/set/delete`, `version`,
@@ -482,7 +485,9 @@ Supported now:
   and `outdated` / `outdated --json` flows without delegating to npm, plus a direct
   `npm` compatibility binary and direct `npx` compatibility binary for
   project-local executable flows; direct local npm tarballs and local package
-  directories are accepted as install/update inputs; `npm pack` supports local
+  directories are accepted as install/update/link inputs; `npm link`
+  supports current-package registration, local directory shortcut links, and
+  name-based links from OMC's user link store; `npm pack` supports local
   package directories and registry specs; common `npm exec` / `npx`
   flags such as `--yes`,
   `--package`, `--cache`, and `--registry` are parsed before dispatching to

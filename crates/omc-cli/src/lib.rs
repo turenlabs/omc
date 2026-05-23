@@ -272,6 +272,9 @@ enum NpmCompatAction {
     PackageVersion {
         action: NpmVersionAction,
     },
+    Link {
+        action: NpmLinkAction,
+    },
     Install {
         specs: Vec<String>,
         archive_references: Vec<String>,
@@ -1938,6 +1941,25 @@ struct NpmInstallCompatRequest {
     allow_all_host: bool,
 }
 
+#[derive(Debug, PartialEq, Eq)]
+enum NpmLinkAction {
+    Register {
+        dry_run: bool,
+    },
+    Install {
+        names: Vec<String>,
+        local_paths: Vec<PathBuf>,
+        save: bool,
+        dev: bool,
+        omit_dev: bool,
+        lock_only: bool,
+        dry_run: bool,
+        npm_registry: Option<String>,
+        allow: Vec<String>,
+        allow_all_host: bool,
+    },
+}
+
 fn run_npm_install_compat(
     project_dir: &Path,
     request: NpmInstallCompatRequest,
@@ -2025,6 +2047,176 @@ fn run_npm_install_compat(
         print_install_report(&install);
     }
     Ok(ExitCode::SUCCESS)
+}
+
+fn run_npm_link_compat(
+    project_dir: &Path,
+    action: NpmLinkAction,
+) -> Result<ExitCode, OmcRegistryError> {
+    match action {
+        NpmLinkAction::Register { dry_run } => {
+            let (name, target) = npm_current_link_target(project_dir)?;
+            let entry = npm_link_store_entry(&name)?;
+            if dry_run {
+                println!(
+                    "dry-run: would register npm link {} -> {} at {}",
+                    name,
+                    target.display(),
+                    entry.display()
+                );
+                return Ok(ExitCode::SUCCESS);
+            }
+            npm_write_link_store_entry(&entry, &target)?;
+            println!("linked {name} -> {}", target.display());
+            Ok(ExitCode::SUCCESS)
+        }
+        NpmLinkAction::Install {
+            names,
+            mut local_paths,
+            save,
+            dev,
+            omit_dev,
+            lock_only,
+            dry_run,
+            npm_registry,
+            allow,
+            allow_all_host,
+        } => {
+            for path in &local_paths {
+                let (name, target) = npm_link_target_from_path(project_dir, path)?;
+                if dry_run {
+                    println!(
+                        "dry-run: would register npm link {name} -> {}",
+                        target.display()
+                    );
+                } else {
+                    let entry = npm_link_store_entry(&name)?;
+                    npm_write_link_store_entry(&entry, &target)?;
+                }
+            }
+            for name in names {
+                let target = npm_read_link_store_entry(&name)?;
+                local_paths.push(target);
+            }
+            run_npm_install_compat(
+                project_dir,
+                NpmInstallCompatRequest {
+                    specs: Vec::new(),
+                    archive_references: Vec::new(),
+                    local_paths,
+                    save,
+                    dev,
+                    omit_dev,
+                    lock_only,
+                    dry_run,
+                    npm_registry,
+                    allow,
+                    allow_all_host,
+                },
+            )
+        }
+    }
+}
+
+fn npm_current_link_target(project_dir: &Path) -> Result<(String, PathBuf), OmcRegistryError> {
+    npm_link_target_from_path(project_dir, &PathBuf::from("."))
+}
+
+fn npm_link_target_from_path(
+    project_dir: &Path,
+    path: &Path,
+) -> Result<(String, PathBuf), OmcRegistryError> {
+    let target = fs::canonicalize(absolutize_path(project_dir, path.to_path_buf()))?;
+    let package = read_npm_pkg_json(&target.join("package.json"))?;
+    let name = npm_package_json_name(&package)?;
+    npm_link_store_entry(&name)?;
+    Ok((name, target))
+}
+
+fn npm_link_store_home() -> Result<PathBuf, OmcRegistryError> {
+    if let Some(path) = env::var_os("OMC_NPM_LINK_HOME")
+        .map(PathBuf::from)
+        .filter(|path| !path.as_os_str().is_empty())
+    {
+        return Ok(path);
+    }
+    env::var_os("HOME")
+        .map(PathBuf::from)
+        .filter(|path| !path.as_os_str().is_empty())
+        .map(|home| home.join(".omc").join("npm-links"))
+        .ok_or_else(|| {
+            OmcRegistryError::UnsupportedSpec(
+                "npm link needs HOME or OMC_NPM_LINK_HOME for the link store".to_owned(),
+            )
+        })
+}
+
+fn npm_link_store_entry(name: &str) -> Result<PathBuf, OmcRegistryError> {
+    let home = npm_link_store_home()?;
+    let name = name.trim();
+    if name.is_empty() || name.contains('\\') || name.contains("..") {
+        return Err(OmcRegistryError::UnsupportedSpec(format!(
+            "invalid npm link package name `{name}`"
+        )));
+    }
+    if let Some(scoped) = name.strip_prefix('@') {
+        let Some((scope, package)) = scoped.split_once('/') else {
+            return Err(OmcRegistryError::UnsupportedSpec(format!(
+                "invalid npm link package name `{name}`"
+            )));
+        };
+        if scope.is_empty() || package.is_empty() || package.contains('/') {
+            return Err(OmcRegistryError::UnsupportedSpec(format!(
+                "invalid npm link package name `{name}`"
+            )));
+        }
+        Ok(home.join(format!("@{scope}")).join(package))
+    } else {
+        if name.contains('/') {
+            return Err(OmcRegistryError::UnsupportedSpec(format!(
+                "invalid npm link package name `{name}`"
+            )));
+        }
+        Ok(home.join(name))
+    }
+}
+
+fn npm_write_link_store_entry(entry: &Path, target: &Path) -> Result<(), OmcRegistryError> {
+    if let Some(parent) = entry.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(entry, format!("{}\n", target.display()))?;
+    Ok(())
+}
+
+fn npm_read_link_store_entry(name: &str) -> Result<PathBuf, OmcRegistryError> {
+    let entry = npm_link_store_entry(name)?;
+    let content = fs::read_to_string(&entry).map_err(|err| {
+        if err.kind() == std::io::ErrorKind::NotFound {
+            OmcRegistryError::UnsupportedSpec(format!(
+                "npm link `{name}` is not registered; run `npm link` in that package or `npm link <path>` first"
+            ))
+        } else {
+            OmcRegistryError::Io(err)
+        }
+    })?;
+    let target = PathBuf::from(content.trim());
+    if target.as_os_str().is_empty() {
+        return Err(OmcRegistryError::UnsupportedSpec(format!(
+            "npm link `{name}` has an empty target in {}",
+            entry.display()
+        )));
+    }
+    let canonical = fs::canonicalize(&target)?;
+    let package = read_npm_pkg_json(&canonical.join("package.json"))?;
+    let actual_name = npm_package_json_name(&package)?;
+    if actual_name != name {
+        return Err(OmcRegistryError::UnsupportedSpec(format!(
+            "npm link `{name}` points to package `{actual_name}` at {}",
+            canonical.display()
+        )));
+    }
+    Ok(canonical)
 }
 
 fn run_npm_install_dry_run(
@@ -2127,6 +2319,7 @@ fn run_npm_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
         NpmCompatAction::Version => println!("{}", env!("CARGO_PKG_VERSION")),
         NpmCompatAction::Init { action } => print_npm_init(project_dir, action)?,
         NpmCompatAction::PackageVersion { action } => print_npm_version(project_dir, action)?,
+        NpmCompatAction::Link { action } => return run_npm_link_compat(project_dir, action),
         NpmCompatAction::Install {
             specs,
             archive_references,
@@ -2982,6 +3175,15 @@ fn npm_help_text(topic: Option<&str>) -> String {
                 "Direct local inputs are supported for .tgz archives and local package directories.",
             ],
         ),
+        Some("link") => npm_command_help(
+            "npm link [<package-name>|<local-dir>...]",
+            &[
+                "Register or install local npm package links through OMC's link store.",
+                "`npm link` registers the current package; `npm link ../pkg` registers and links a local directory; `npm link <name>` links a previously registered package.",
+                "Links are not saved by default. Use --save or --save-dev to record a local path in omc.toml.",
+                "Supports --dry-run, --package-lock-only, omit/include flags, --registry for dependency refreshes, --allow, and --allow-all-host.",
+            ],
+        ),
         Some("ci") => npm_command_help(
             "npm ci",
             &[
@@ -3248,7 +3450,7 @@ fn npm_general_help_text() -> String {
         "npm <command>",
         &[
             "OMC npm compatibility runs supported npm workflows through OMC's verifier, lockfile, cache, and project-local runtime paths.",
-            "Supported commands: install, install-test, ci, install-ci-test, remove, run, test, start, stop, restart, exec, list, explain, audit, outdated, fund, prune, dedupe, rebuild, cache, pkg, version, pack, publish, unpublish, deprecate, undeprecate, search, ping, whoami, login, adduser, logout, token, profile, owner, access, org, team, dist-tag, sbom, view, docs, repo, bugs, home, config, init, bin, root, prefix.",
+            "Supported commands: install, link, install-test, ci, install-ci-test, remove, run, test, start, stop, restart, exec, list, explain, audit, outdated, fund, prune, dedupe, rebuild, cache, pkg, version, pack, publish, unpublish, deprecate, undeprecate, search, ping, whoami, login, adduser, logout, token, profile, owner, access, org, team, dist-tag, sbom, view, docs, repo, bugs, home, config, init, bin, root, prefix.",
             "Use `npm help <command>` for focused OMC compatibility notes.",
         ],
     )
@@ -3270,6 +3472,7 @@ fn npm_help_topic(topic: &str) -> Option<&'static str> {
     match topic {
         "help" | "--help" | "-h" => None,
         "install" | "i" | "add" | "update" | "up" | "upgrade" => Some("install"),
+        "link" | "ln" => Some("link"),
         "install-test" | "it" => Some("install-test"),
         "ci" => Some("ci"),
         "install-ci-test" | "cit" => Some("install-ci-test"),
@@ -9793,6 +9996,7 @@ fn parse_npm_compat_action(args: &[String]) -> Result<NpmCompatAction, OmcRegist
         "--version" | "-v" => Ok(NpmCompatAction::Version),
         "init" => parse_npm_init_args(&args[1..]),
         "version" => parse_npm_version_args(&args[1..]),
+        "link" | "ln" => parse_npm_link_args(&args[1..]),
         "install-test" | "it" => parse_npm_install_test_args(command, false, &args[1..]),
         "install-ci-test" | "cit" => parse_npm_install_test_args(command, true, &args[1..]),
         "install" | "i" | "add" | "update" | "up" | "upgrade" => parse_npm_install_args(&args[1..]),
@@ -10077,6 +10281,8 @@ fn npm_global_arg_supported_by_command(command: &str, arg: &str) -> bool {
                 | "update"
                 | "up"
                 | "upgrade"
+                | "link"
+                | "ln"
                 | "install-test"
                 | "it"
                 | "ci"
@@ -10150,6 +10356,15 @@ fn npm_global_arg_supported_by_command(command: &str, arg: &str) -> bool {
     }
     if matches!(
         arg,
+        "--save" | "-S" | "--save-prod" | "-D" | "--save-dev" | "--dev" | "--no-save"
+    ) {
+        return matches!(
+            command,
+            "install" | "i" | "add" | "update" | "up" | "upgrade" | "link" | "ln"
+        );
+    }
+    if matches!(
+        arg,
         "--name"
             | "--token-description"
             | "--expires"
@@ -10198,7 +10413,7 @@ fn npm_global_arg_supported_by_command(command: &str, arg: &str) -> bool {
     {
         return matches!(
             command,
-            "publish" | "unpublish" | "deprecate" | "undeprecate"
+            "publish" | "unpublish" | "deprecate" | "undeprecate" | "link" | "ln"
         );
     }
     if matches!(arg, "--force" | "-f") || arg.starts_with("--force=") {
@@ -10211,7 +10426,7 @@ fn npm_global_arg_supported_by_command(command: &str, arg: &str) -> bool {
         return matches!(command, "sbom");
     }
     if matches!(arg, "--package-lock-only") || arg.starts_with("--package-lock-only=") {
-        return matches!(command, "sbom");
+        return matches!(command, "sbom" | "link" | "ln");
     }
     if matches!(arg, "--userconfig") || arg.starts_with("--userconfig=") {
         return matches!(
@@ -10353,6 +10568,8 @@ fn npm_global_arg_supported_by_command(command: &str, arg: &str) -> bool {
                 | "update"
                 | "up"
                 | "upgrade"
+                | "link"
+                | "ln"
                 | "install-test"
                 | "it"
                 | "ci"
@@ -10388,6 +10605,12 @@ fn npm_global_preserved_bool_flag(arg: &str) -> bool {
             | "--no-provenance"
             | "--read-only"
             | "--no-read-only"
+            | "--save"
+            | "-S"
+            | "--save-prod"
+            | "--save-dev"
+            | "--dev"
+            | "--no-save"
             | "--packages-all"
             | "--no-packages-all"
             | "--bypass-2fa"
@@ -10854,6 +11077,80 @@ fn parse_npm_install_args(args: &[String]) -> Result<NpmCompatAction, OmcRegistr
         npm_registry,
         allow,
         allow_all_host,
+    })
+}
+
+fn parse_npm_link_args(args: &[String]) -> Result<NpmCompatAction, OmcRegistryError> {
+    let explicit_save = npm_link_explicit_save(args);
+    let mut local_paths = Vec::new();
+    let mut dry_run = false;
+    let mut filtered = Vec::new();
+    let mut index = 0;
+    while index < args.len() {
+        let arg = &args[index];
+        if arg == "--dry-run" {
+            dry_run = true;
+        } else if matches!(arg.as_str(), "--global" | "-g") {
+        } else if is_npm_archive_arg(arg) {
+            return Err(OmcRegistryError::UnsupportedSpec(
+                "npm link local tarballs are not supported; use npm install <tarball>".to_owned(),
+            ));
+        } else if ignored_npm_value_flag(arg) {
+            filtered.push(arg.clone());
+            index += 1;
+            let Some(value) = args.get(index) else {
+                return Err(OmcRegistryError::UnsupportedSpec(format!(
+                    "{arg} needs a value"
+                )));
+            };
+            filtered.push(value.clone());
+        } else if is_npm_local_directory_arg(arg) {
+            local_paths.push(npm_local_path_arg(arg)?);
+        } else {
+            filtered.push(arg.clone());
+        }
+        index += 1;
+    }
+
+    let CommonCompatFlags {
+        dev,
+        omit_dev,
+        save,
+        lock_only,
+        npm_registry,
+        allow,
+        allow_all_host,
+        positionals,
+    } = parse_common_compat_flags(&filtered, true)?;
+
+    if positionals.is_empty() && local_paths.is_empty() {
+        return Ok(NpmCompatAction::Link {
+            action: NpmLinkAction::Register { dry_run },
+        });
+    }
+
+    Ok(NpmCompatAction::Link {
+        action: NpmLinkAction::Install {
+            names: positionals,
+            local_paths,
+            save: explicit_save && save,
+            dev,
+            omit_dev,
+            lock_only,
+            dry_run,
+            npm_registry,
+            allow,
+            allow_all_host,
+        },
+    })
+}
+
+fn npm_link_explicit_save(args: &[String]) -> bool {
+    args.iter().any(|arg| {
+        matches!(
+            arg.as_str(),
+            "--save" | "-S" | "--save-prod" | "-D" | "--save-dev" | "--dev"
+        )
     })
 }
 
@@ -16437,6 +16734,23 @@ mod tests {
         dir
     }
 
+    fn with_env_var<T>(key: &str, value: &Path, f: impl FnOnce() -> T) -> T {
+        static ENV_MUTEX: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+        let _guard = ENV_MUTEX
+            .get_or_init(|| std::sync::Mutex::new(()))
+            .lock()
+            .unwrap();
+        let old = env::var_os(key);
+        env::set_var(key, value);
+        let result = f();
+        if let Some(old) = old {
+            env::set_var(key, old);
+        } else {
+            env::remove_var(key);
+        }
+        result
+    }
+
     #[test]
     fn detects_direct_compat_binaries() {
         assert_eq!(
@@ -16471,6 +16785,33 @@ mod tests {
             direct_compat_mode(Some(Path::new("/tmp/omc").as_os_str())),
             None
         );
+    }
+
+    #[test]
+    fn npm_link_store_round_trips_registered_package() {
+        let dir = test_dir("npm-link-store");
+        let link_home = dir.join("links");
+        let package = dir.join("local-pkg");
+        fs::create_dir_all(&package).unwrap();
+        fs::write(
+            package.join("package.json"),
+            r#"{"name":"@scope/local-pkg","version":"1.0.0"}"#,
+        )
+        .unwrap();
+
+        with_env_var("OMC_NPM_LINK_HOME", &link_home, || {
+            let (name, target) =
+                npm_link_target_from_path(&dir, &PathBuf::from("local-pkg")).unwrap();
+            assert_eq!(name, "@scope/local-pkg");
+            let entry = npm_link_store_entry(&name).unwrap();
+            npm_write_link_store_entry(&entry, &target).unwrap();
+
+            assert_eq!(entry, link_home.join("@scope").join("local-pkg"));
+            assert_eq!(
+                npm_read_link_store_entry("@scope/local-pkg").unwrap(),
+                target
+            );
+        });
     }
 
     #[test]
@@ -16799,6 +17140,54 @@ mod tests {
                 npm_registry: None,
                 allow: Vec::new(),
                 allow_all_host: false,
+            }
+        );
+
+        assert_eq!(
+            parse_npm_compat_action(&args(&["link"])).unwrap(),
+            NpmCompatAction::Link {
+                action: NpmLinkAction::Register { dry_run: false },
+            }
+        );
+        assert_eq!(
+            parse_npm_compat_action(&args(&["link", "--dry-run", "../local-pkg"])).unwrap(),
+            NpmCompatAction::Link {
+                action: NpmLinkAction::Install {
+                    names: Vec::new(),
+                    local_paths: vec![PathBuf::from("../local-pkg")],
+                    save: false,
+                    dev: false,
+                    omit_dev: false,
+                    lock_only: false,
+                    dry_run: true,
+                    npm_registry: None,
+                    allow: Vec::new(),
+                    allow_all_host: false,
+                },
+            }
+        );
+        assert_eq!(
+            parse_npm_compat_action(&args(&[
+                "--save-dev",
+                "link",
+                "@scope/local-pkg",
+                "--omit=dev",
+                "--registry=https://registry.example.invalid/npm",
+            ]))
+            .unwrap(),
+            NpmCompatAction::Link {
+                action: NpmLinkAction::Install {
+                    names: vec!["@scope/local-pkg".to_owned()],
+                    local_paths: Vec::new(),
+                    save: true,
+                    dev: true,
+                    omit_dev: true,
+                    lock_only: false,
+                    dry_run: false,
+                    npm_registry: Some("https://registry.example.invalid/npm".to_owned()),
+                    allow: Vec::new(),
+                    allow_all_host: false,
+                },
             }
         );
 
