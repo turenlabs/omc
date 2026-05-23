@@ -160,7 +160,7 @@ install PyPI wheels into .omc/python/site-packages
 verify cached archive sha256 from omc.lock before extracting locked installs
 install npm package bins into node_modules/.bin
 link npm workspace/local directory packages into node_modules and node_modules/.bin
-install Python console_scripts/gui_scripts from wheels and pyproject/setup.cfg local path packages into .omc/python/bin
+install Python console_scripts/gui_scripts from wheels and pyproject/setup.cfg/setup.py local path packages into .omc/python/bin
 prune stale lockfile entries and installed packages during install
 ```
 
@@ -314,7 +314,8 @@ Supported now:
 - fail-closed rejection for PyPI source distributions until build isolation and
   native-extension policy exist
 - npm bin links, including linked workspace/local package bins, and Python
-  console/gui script shims from wheels and local path packages
+  console/gui script shims from wheels and pyproject/setup.cfg/setup.py local
+  path packages
 - `omc node`, `omc python`, `omc script`, and `omc run` wrappers, including
   package.json and Pipfile project scripts
 - isolated `omc python` execution that uses OMC site-packages without ambient

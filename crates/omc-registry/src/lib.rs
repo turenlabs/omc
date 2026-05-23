@@ -5166,11 +5166,38 @@ fn read_python_local_entry_points(package_dir: &Path) -> Result<Vec<PythonEntryP
         entries.extend(read_setup_cfg_entry_points(&setup_cfg)?);
     }
 
+    let setup_py = package_dir.join("setup.py");
+    if setup_py.exists() {
+        entries.extend(read_setup_py_entry_points(&setup_py)?);
+    }
+
     Ok(entries)
 }
 
 fn read_setup_cfg_entry_points(path: &Path) -> Result<Vec<PythonEntryPoint>> {
     Ok(parse_setup_cfg_entry_points(&fs::read_to_string(path)?))
+}
+
+fn read_setup_py_entry_points(path: &Path) -> Result<Vec<PythonEntryPoint>> {
+    Ok(parse_setup_py_entry_points(&fs::read_to_string(path)?))
+}
+
+fn parse_setup_py_entry_points(content: &str) -> Vec<PythonEntryPoint> {
+    let selected_groups = BTreeSet::from(["console-scripts".to_owned(), "gui-scripts".to_owned()]);
+    let mut entries = Vec::new();
+
+    for value in python_keyword_assignment_values(content, "entry_points") {
+        entries.extend(
+            python_string_dict_values(value, &selected_groups)
+                .into_iter()
+                .filter_map(|line| python_entry_point_from_assignment(&line)),
+        );
+        for entry_points_ini in python_string_literals(value) {
+            entries.extend(parse_python_entry_points(&entry_points_ini));
+        }
+    }
+
+    entries
 }
 
 fn parse_setup_cfg_entry_points(content: &str) -> Vec<PythonEntryPoint> {
@@ -10419,6 +10446,99 @@ packages:
         assert_eq!(
             String::from_utf8_lossy(&output.stdout).trim(),
             "setup-cfg-cli-ok"
+        );
+    }
+
+    #[test]
+    fn installs_setup_py_python_local_entry_points() {
+        let dir = tempfile::tempdir().unwrap();
+        let local = dir.path().join("setuppkg");
+        let src = local.join("src");
+        fs::create_dir_all(src.join("setuppkg")).unwrap();
+        let site_packages = dir.path().join(".omc").join("python").join("site-packages");
+        let bin_dir = dir.path().join(".omc").join("python").join("bin");
+        fs::create_dir_all(&site_packages).unwrap();
+        fs::write(src.join("setuppkg").join("__init__.py"), "").unwrap();
+        fs::write(
+            src.join("setuppkg").join("cli.py"),
+            "def main():\n    print('setup-py-cli-ok')\n",
+        )
+        .unwrap();
+        fs::write(
+            local.join("setup.py"),
+            r#"
+            from setuptools import setup
+
+            NOTE = "entry_points={'console_scripts': ['ignored-string = ignored:main']}"
+            # entry_points={"console_scripts": ["ignored-comment = ignored:main"]}
+
+            setup(
+                name="setuppkg",
+                entry_points={
+                    "console_scripts": [
+                        "setup-cli = setuppkg.cli:main",
+                    ],
+                    "gui_scripts": ["setup-gui = setuppkg.gui:main"],
+                    "pytest11": ["ignored = ignored:plugin"],
+                },
+            )
+            "#,
+        )
+        .unwrap();
+
+        let scripts =
+            install_python_local_paths(std::slice::from_ref(&local), &site_packages, &bin_dir)
+                .unwrap();
+        assert_eq!(scripts, 2);
+
+        let script = fs::read_to_string(bin_dir.join("setup-cli")).unwrap();
+        assert!(script.contains("from setuppkg.cli import main"));
+        let script = fs::read_to_string(bin_dir.join("setup-gui")).unwrap();
+        assert!(script.contains("from setuppkg.gui import main"));
+        assert!(!bin_dir.join("ignored").exists());
+        assert!(!bin_dir.join("ignored-string").exists());
+        assert!(!bin_dir.join("ignored-comment").exists());
+
+        let output = Command::new(bin_dir.join("setup-cli")).output().unwrap();
+        assert!(output.status.success());
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout).trim(),
+            "setup-py-cli-ok"
+        );
+    }
+
+    #[test]
+    fn parses_setup_py_entry_points_ini_string() {
+        let entries = parse_setup_py_entry_points(
+            r#"
+            from setuptools import setup
+
+            setup(
+                entry_points="""
+                [console_scripts]
+                setup-cli = setuppkg.cli:main
+
+                [gui_scripts]
+                setup-gui = setuppkg.gui:main
+                """,
+            )
+            "#,
+        );
+
+        assert_eq!(
+            entries,
+            vec![
+                PythonEntryPoint {
+                    name: "setup-cli".to_owned(),
+                    module: "setuppkg.cli".to_owned(),
+                    function: "main".to_owned(),
+                },
+                PythonEntryPoint {
+                    name: "setup-gui".to_owned(),
+                    module: "setuppkg.gui".to_owned(),
+                    function: "main".to_owned(),
+                }
+            ]
         );
     }
 
