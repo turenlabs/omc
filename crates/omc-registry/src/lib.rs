@@ -7419,6 +7419,13 @@ pub struct NpmTokenListResult {
     pub response: serde_json::Value,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct NpmTokenRevokeResult {
+    pub registry: String,
+    pub token: String,
+    pub status: u16,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct NpmAccessToken {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -7721,6 +7728,15 @@ fn npm_get(client: &Client, url: &str, config: &NpmConfig) -> reqwest::blocking:
     }
 }
 
+fn npm_delete(client: &Client, url: &str, config: &NpmConfig) -> reqwest::blocking::RequestBuilder {
+    let request = client.delete(url);
+    if let Some(token) = config.auth_token_for_url(url) {
+        request.bearer_auth(token)
+    } else {
+        request
+    }
+}
+
 fn resolve_package(
     client: &Client,
     spec: &PackageSpec,
@@ -7960,6 +7976,38 @@ pub fn read_npm_token_list(
         total,
         urls,
         response,
+    })
+}
+
+pub fn revoke_npm_token(
+    project_dir: &Path,
+    token: &str,
+    registry_override: Option<&str>,
+    userconfig_override: Option<&Path>,
+    otp: Option<&str>,
+) -> Result<NpmTokenRevokeResult> {
+    let token = token.trim();
+    if token.is_empty() {
+        return Err(OmcRegistryError::UnsupportedSpec(
+            "npm token revoke needs a token or token id".to_owned(),
+        ));
+    }
+    let client = Client::new();
+    let npm_config =
+        read_npm_config_with_overrides(project_dir, registry_override, userconfig_override)?;
+    let registry = ensure_trailing_slash(&npm_config.registry);
+    let encoded = urlencoding::encode(token);
+    let url = format!("{registry}-/npm/v1/tokens/token/{encoded}");
+    let mut request = npm_delete(&client, &url, &npm_config);
+    if let Some(otp) = otp.map(str::trim).filter(|otp| !otp.is_empty()) {
+        request = request.header("npm-otp", otp);
+    }
+    let response = request.send()?.error_for_status()?;
+    let status = response.status().as_u16();
+    Ok(NpmTokenRevokeResult {
+        registry,
+        token: token.to_owned(),
+        status,
     })
 }
 
@@ -16819,6 +16867,48 @@ wheels = [
             list.urls.get("next").map(String::as_str),
             Some("https://registry.example.invalid/-/npm/v1/tokens?page=1")
         );
+        handle.join().unwrap();
+    }
+
+    #[test]
+    fn revokes_npm_token_with_userconfig_auth_and_otp() {
+        use std::io::{Read as _, Write as _};
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let handle = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buffer = [0_u8; 4096];
+            let len = stream.read(&mut buffer).unwrap();
+            let request = String::from_utf8_lossy(&buffer[..len]);
+            assert!(request.starts_with("DELETE /-/npm/v1/tokens/token/a1b2c3 "));
+            let lower = request.to_ascii_lowercase();
+            assert!(lower.contains("authorization: bearer registry-token"));
+            assert!(lower.contains("npm-otp: 123456"));
+
+            let response =
+                "HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+            stream.write_all(response.as_bytes()).unwrap();
+        });
+
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(
+            dir.path().join("ci.npmrc"),
+            format!("registry=http://{addr}/\n//{addr}/:_authToken=registry-token\n"),
+        )
+        .unwrap();
+
+        let revoked = revoke_npm_token(
+            dir.path(),
+            "a1b2c3",
+            None,
+            Some(Path::new("ci.npmrc")),
+            Some("123456"),
+        )
+        .unwrap();
+        assert_eq!(revoked.registry, format!("http://{addr}/"));
+        assert_eq!(revoked.token, "a1b2c3");
+        assert_eq!(revoked.status, 204);
         handle.join().unwrap();
     }
 

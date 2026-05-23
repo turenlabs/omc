@@ -16,11 +16,12 @@ use omc_registry::{
     read_lockfile, read_manifest, read_npm_config_snapshot, read_npm_package_metadata,
     read_npm_ping_with_userconfig, read_npm_search, read_npm_token_list, read_npm_whoami,
     read_npm_workspace_packages, read_package_scripts, read_pip_config_snapshot,
-    read_pypi_available_versions, read_requirements_files, remove_manifest_dependency, Behavior,
-    Ecosystem, InstallReport, LinkOptions, LockedPackage, LockedPythonVcsDependency,
-    NpmAccessToken, NpmPingResult, NpmSearchPackage, NpmTokenListResult, NpmWhoamiResult,
-    NpmWorkspacePackage, OmcRegistryError, PackageSpec, ProjectRequirements, PypiBinaryMode,
-    PypiCheckIssue, PythonLocalRequirement, PythonVcsRequirement, Verdict,
+    read_pypi_available_versions, read_requirements_files, remove_manifest_dependency,
+    revoke_npm_token, Behavior, Ecosystem, InstallReport, LinkOptions, LockedPackage,
+    LockedPythonVcsDependency, NpmAccessToken, NpmPingResult, NpmSearchPackage, NpmTokenListResult,
+    NpmTokenRevokeResult, NpmWhoamiResult, NpmWorkspacePackage, OmcRegistryError, PackageSpec,
+    ProjectRequirements, PypiBinaryMode, PypiCheckIssue, PythonLocalRequirement,
+    PythonVcsRequirement, Verdict,
 };
 use sha2::{Digest, Sha256, Sha384, Sha512};
 
@@ -492,6 +493,13 @@ enum NpmTokenAction {
         parseable: bool,
         npm_registry: Option<String>,
         userconfig: Option<PathBuf>,
+    },
+    Revoke {
+        token: String,
+        json: bool,
+        npm_registry: Option<String>,
+        userconfig: Option<PathBuf>,
+        otp: Option<String>,
     },
 }
 
@@ -2356,11 +2364,12 @@ fn npm_help_text(topic: Option<&str>) -> String {
             ],
         ),
         Some("token") => npm_command_help(
-            "npm token list",
+            "npm token <list|revoke>",
             &[
                 "List redacted npm access tokens for the authenticated registry account.",
-                "Supports --json, --parseable, --registry, and --userconfig.",
-                "Token creation and revocation are not implemented yet.",
+                "Revoke tokens by full token or token id.",
+                "Supports --json, --parseable for list, --otp for revoke, --registry, and --userconfig.",
+                "Token creation is not implemented yet.",
             ],
         ),
         Some("view") => npm_command_help(
@@ -3145,6 +3154,29 @@ fn print_npm_token(project_dir: &Path, action: NpmTokenAction) -> Result<(), Omc
                 print_npm_token_list_text(&list);
             }
         }
+        NpmTokenAction::Revoke {
+            token,
+            json,
+            npm_registry,
+            userconfig,
+            otp,
+        } => {
+            let revoked = revoke_npm_token(
+                project_dir,
+                &token,
+                npm_registry.as_deref(),
+                userconfig.as_deref(),
+                otp.as_deref(),
+            )?;
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&npm_token_revoke_json(&revoked))?
+                );
+            } else {
+                println!("Removed 1 token");
+            }
+        }
     }
     Ok(())
 }
@@ -3156,6 +3188,15 @@ fn npm_token_list_json(list: &NpmTokenListResult) -> serde_json::Value {
         "total": list.total.unwrap_or(list.tokens.len() as u64),
         "urls": list.urls,
         "response": list.response,
+    })
+}
+
+fn npm_token_revoke_json(revoked: &NpmTokenRevokeResult) -> serde_json::Value {
+    serde_json::json!({
+        "ok": true,
+        "registry": revoked.registry,
+        "token": revoked.token,
+        "status": revoked.status,
     })
 }
 
@@ -6833,6 +6874,9 @@ fn npm_global_arg_supported_by_command(command: &str, arg: &str) -> bool {
                 | "get"
         );
     }
+    if matches!(arg, "--otp") || arg.starts_with("--otp=") {
+        return matches!(command, "token");
+    }
     if matches!(arg, "--userconfig") || arg.starts_with("--userconfig=") {
         return matches!(
             command,
@@ -6950,6 +6994,7 @@ fn npm_global_preserved_value_flag(arg: &str) -> bool {
             | "--limit"
             | "--workspace"
             | "-w"
+            | "--otp"
     )
 }
 
@@ -6965,6 +7010,7 @@ fn npm_global_preserved_equals_flag(arg: &str) -> bool {
         "--workspace=",
         "-w=",
         "--include-workspace-root=",
+        "--otp=",
     ]
     .iter()
     .any(|prefix| arg.starts_with(prefix))
@@ -7964,7 +8010,10 @@ fn parse_npm_token_args(args: &[String]) -> Result<NpmCompatAction, OmcRegistryE
             command = Some(arg.as_str());
         } else {
             command_args.push(arg.clone());
-            if matches!(arg.as_str(), "--registry" | "--userconfig" | "--loglevel") {
+            if matches!(
+                arg.as_str(),
+                "--registry" | "--userconfig" | "--loglevel" | "--otp"
+            ) {
                 index += 1;
                 let value = args.get(index).ok_or_else(|| {
                     OmcRegistryError::UnsupportedSpec(format!("{arg} needs a value"))
@@ -7997,13 +8046,83 @@ fn parse_npm_token_args(args: &[String]) -> Result<NpmCompatAction, OmcRegistryE
                 },
             })
         }
-        "create" | "revoke" | "rm" | "delete" | "del" => Err(OmcRegistryError::UnsupportedSpec(
-            format!("npm token {command} is not supported by OMC compatibility yet"),
+        "revoke" | "rm" | "delete" | "del" => parse_npm_token_revoke_args(command, &command_args),
+        "create" => Err(OmcRegistryError::UnsupportedSpec(
+            "npm token create is not supported by OMC compatibility yet".to_owned(),
         )),
         other => Err(OmcRegistryError::UnsupportedSpec(format!(
             "unsupported npm token command `{other}`"
         ))),
     }
+}
+
+fn parse_npm_token_revoke_args(
+    command: &str,
+    args: &[String],
+) -> Result<NpmCompatAction, OmcRegistryError> {
+    let mut json = false;
+    let mut otp = None;
+    let mut userconfig = None;
+    let mut filtered = Vec::new();
+    let mut index = 0;
+    while index < args.len() {
+        let arg = &args[index];
+        if arg == "--json" {
+            json = true;
+        } else if arg == "--otp" {
+            index += 1;
+            let value = args
+                .get(index)
+                .ok_or_else(|| OmcRegistryError::UnsupportedSpec(format!("{arg} needs a value")))?;
+            otp = Some(value.clone());
+        } else if let Some(value) = arg.strip_prefix("--otp=") {
+            otp = Some(value.to_owned());
+        } else if arg == "--userconfig" {
+            index += 1;
+            let value = args
+                .get(index)
+                .ok_or_else(|| OmcRegistryError::UnsupportedSpec(format!("{arg} needs a value")))?;
+            userconfig = Some(PathBuf::from(value));
+        } else if let Some(value) = arg.strip_prefix("--userconfig=") {
+            userconfig = Some(PathBuf::from(value));
+        } else if arg == "--loglevel" {
+            index += 1;
+            if args.get(index).is_none() {
+                return Err(OmcRegistryError::UnsupportedSpec(format!(
+                    "{arg} needs a value"
+                )));
+            }
+        } else if npm_registry_identity_equals_value_flag(arg)
+            || matches!(arg.as_str(), "--silent" | "-s" | "--parseable" | "-p")
+        {
+        } else {
+            filtered.push(arg.clone());
+        }
+        index += 1;
+    }
+
+    let CommonCompatFlags {
+        npm_registry,
+        mut positionals,
+        ..
+    } = parse_common_compat_flags(&filtered, true)?;
+    if positionals.is_empty() {
+        return Err(OmcRegistryError::UnsupportedSpec(format!(
+            "npm token {command} needs a token or token id"
+        )));
+    }
+    if positionals.len() > 1 {
+        return Err(unsupported_compat_arg("npm token revoke", &positionals[1]));
+    }
+    Ok(NpmCompatAction::Token {
+        action: NpmTokenAction::Revoke {
+            token: positionals.remove(0),
+            json,
+            npm_registry,
+            userconfig,
+            otp,
+        },
+    })
 }
 
 fn parse_npm_registry_identity_args(
@@ -11506,6 +11625,29 @@ mod tests {
                     parseable: true,
                     npm_registry: Some("https://registry.example.invalid/npm".to_owned()),
                     userconfig: Some(PathBuf::from("ci.npmrc")),
+                },
+            }
+        );
+        assert_eq!(
+            parse_npm_compat_action(&args(&[
+                "--json",
+                "--registry",
+                "https://registry.example.invalid/npm",
+                "--userconfig=ci.npmrc",
+                "--otp",
+                "123456",
+                "token",
+                "revoke",
+                "a1b2c3",
+            ]))
+            .unwrap(),
+            NpmCompatAction::Token {
+                action: NpmTokenAction::Revoke {
+                    token: "a1b2c3".to_owned(),
+                    json: true,
+                    npm_registry: Some("https://registry.example.invalid/npm".to_owned()),
+                    userconfig: Some(PathBuf::from("ci.npmrc")),
+                    otp: Some("123456".to_owned()),
                 },
             }
         );
