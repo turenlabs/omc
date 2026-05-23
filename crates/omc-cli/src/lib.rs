@@ -3885,8 +3885,8 @@ fn npm_help_text(topic: Option<&str>) -> String {
         Some("diff") => npm_command_help(
             "npm diff --diff=<spec-a> --diff=<spec-b> [<paths>...]",
             &[
-                "Compare two npm registry package tarballs and print unified patches.",
-                "This OMC compatibility path currently supports two registry package specs.",
+                "Compare two npm package inputs and print unified patches.",
+                "Each --diff input can be a registry package spec, local package directory, or npm tarball.",
                 "Supports --diff-name-only, --diff-unified, --diff-ignore-all-space, --diff-no-prefix, --diff-src-prefix, --diff-dst-prefix, --diff-text, --registry, and --userconfig.",
             ],
         ),
@@ -8884,25 +8884,8 @@ fn npm_deprecate_json(result: &NpmDeprecateResult) -> serde_json::Value {
 }
 
 fn print_npm_diff(project_dir: &Path, action: NpmDiffAction) -> Result<(), OmcRegistryError> {
-    let left_spec = parse_package_spec(&action.specs[0], Some(Ecosystem::Npm))?;
-    let right_spec = parse_package_spec(&action.specs[1], Some(Ecosystem::Npm))?;
-    if left_spec.direct_url.is_some() || right_spec.direct_url.is_some() {
-        return Err(OmcRegistryError::UnsupportedSpec(
-            "npm diff compatibility currently supports registry package specs, not local paths or direct tarballs".to_owned(),
-        ));
-    }
-    let left = download_npm_package_tarball(
-        project_dir,
-        &left_spec,
-        action.npm_registry.as_deref(),
-        action.userconfig.as_deref(),
-    )?;
-    let right = download_npm_package_tarball(
-        project_dir,
-        &right_spec,
-        action.npm_registry.as_deref(),
-        action.userconfig.as_deref(),
-    )?;
+    let left = npm_diff_package_tarball(project_dir, &action.specs[0], &action)?;
+    let right = npm_diff_package_tarball(project_dir, &action.specs[1], &action)?;
     let files = npm_diff_changed_files(&left, &right, &action)?;
     if action.name_only {
         for file in files {
@@ -8914,6 +8897,100 @@ fn print_npm_diff(project_dir: &Path, action: NpmDiffAction) -> Result<(), OmcRe
         }
     }
     Ok(())
+}
+
+fn npm_diff_package_tarball(
+    project_dir: &Path,
+    input: &str,
+    action: &NpmDiffAction,
+) -> Result<NpmPackageTarball, OmcRegistryError> {
+    if is_npm_local_directory_arg(input) {
+        let path = absolutize_path(project_dir, npm_local_path_arg(input)?);
+        if path.is_dir() {
+            return npm_diff_local_package_tarball(&path);
+        }
+    }
+
+    if let Some(spec) = parse_npm_direct_archive_reference(input, project_dir)? {
+        return npm_diff_direct_tarball(&spec);
+    }
+
+    let spec = parse_package_spec(input, Some(Ecosystem::Npm))?;
+    if let Some(direct_url) = spec.direct_url.as_deref() {
+        if let Some(spec) = parse_npm_direct_archive_reference(direct_url, project_dir)? {
+            return npm_diff_direct_tarball(&spec);
+        }
+        return npm_diff_tarball_from_url(direct_url);
+    }
+
+    download_npm_package_tarball(
+        project_dir,
+        &spec,
+        action.npm_registry.as_deref(),
+        action.userconfig.as_deref(),
+    )
+}
+
+fn npm_diff_local_package_tarball(root: &Path) -> Result<NpmPackageTarball, OmcRegistryError> {
+    let (pack, manifest, bytes) = npm_pack_package_for_publish(root)?;
+    Ok(NpmPackageTarball {
+        metadata: omc_registry::NpmPackageMetadata {
+            name: pack.name,
+            version: pack.version,
+            dist_tags: BTreeMap::new(),
+            versions: Vec::new(),
+            manifest,
+        },
+        bytes,
+    })
+}
+
+fn npm_diff_direct_tarball(spec: &PackageSpec) -> Result<NpmPackageTarball, OmcRegistryError> {
+    let Some(url) = spec.direct_url.as_deref() else {
+        return Err(OmcRegistryError::UnsupportedSpec(spec.requested()));
+    };
+    npm_diff_tarball_from_url(url)
+}
+
+fn npm_diff_tarball_from_url(url: &str) -> Result<NpmPackageTarball, OmcRegistryError> {
+    let parsed =
+        reqwest::Url::parse(url).map_err(|_| OmcRegistryError::UnsupportedSpec(url.to_owned()))?;
+    let bytes = match parsed.scheme() {
+        "file" => {
+            let path = parsed.to_file_path().map_err(|_| {
+                OmcRegistryError::UnsupportedSpec(format!(
+                    "npm diff tarball URL `{url}` must use a valid file path"
+                ))
+            })?;
+            fs::read(path)?
+        }
+        "http" | "https" => reqwest::blocking::get(url)?
+            .error_for_status()?
+            .bytes()?
+            .to_vec(),
+        _ => {
+            return Err(OmcRegistryError::UnsupportedSpec(format!(
+                "npm diff tarball URL `{url}` must use file, http, or https"
+            )))
+        }
+    };
+    npm_diff_tarball_from_bytes(bytes)
+}
+
+fn npm_diff_tarball_from_bytes(bytes: Vec<u8>) -> Result<NpmPackageTarball, OmcRegistryError> {
+    let manifest = npm_manifest_from_tarball(&bytes)?;
+    let name = npm_package_json_name(&manifest)?;
+    let version = npm_package_json_version(&manifest)?;
+    Ok(NpmPackageTarball {
+        metadata: omc_registry::NpmPackageMetadata {
+            name,
+            version,
+            dist_tags: BTreeMap::new(),
+            versions: Vec::new(),
+            manifest,
+        },
+        bytes,
+    })
 }
 
 #[derive(Debug)]
@@ -14642,7 +14719,7 @@ fn parse_npm_diff_args(args: &[String]) -> Result<NpmCompatAction, OmcRegistryEr
     }
     if specs.len() != 2 {
         return Err(OmcRegistryError::UnsupportedSpec(
-            "npm diff compatibility currently needs exactly two --diff package specs".to_owned(),
+            "npm diff compatibility needs exactly two --diff inputs".to_owned(),
         ));
     }
     Ok(NpmCompatAction::Diff {
@@ -23091,6 +23168,56 @@ verdict = "accepted"
                 .map(|file| file.path.as_str())
                 .collect::<Vec<_>>(),
             vec!["index.js"]
+        );
+
+        let local_action = NpmDiffAction {
+            specs: vec!["./left".to_owned(), "./right".to_owned()],
+            paths: Vec::new(),
+            name_only: true,
+            unified: 3,
+            ignore_all_space: false,
+            no_prefix: false,
+            src_prefix: "a/".to_owned(),
+            dst_prefix: "b/".to_owned(),
+            text: false,
+            npm_registry: None,
+            userconfig: None,
+        };
+        let local_left =
+            npm_diff_package_tarball(&root, &local_action.specs[0], &local_action).unwrap();
+        let local_right =
+            npm_diff_package_tarball(&root, &local_action.specs[1], &local_action).unwrap();
+        assert_eq!(
+            npm_diff_changed_files(&local_left, &local_right, &local_action)
+                .unwrap()
+                .iter()
+                .map(|file| file.path.as_str())
+                .collect::<Vec<_>>(),
+            vec!["added.txt", "index.js", "removed.txt"]
+        );
+
+        let left_tgz = root.join("left.tgz");
+        let right_tgz = root.join("right.tgz");
+        fs::write(&left_tgz, &left.bytes).unwrap();
+        fs::write(&right_tgz, &right.bytes).unwrap();
+        let tarball_action = NpmDiffAction {
+            specs: vec![
+                left_tgz.to_string_lossy().into_owned(),
+                right_tgz.to_string_lossy().into_owned(),
+            ],
+            ..local_action
+        };
+        let tarball_left =
+            npm_diff_package_tarball(&root, &tarball_action.specs[0], &tarball_action).unwrap();
+        let tarball_right =
+            npm_diff_package_tarball(&root, &tarball_action.specs[1], &tarball_action).unwrap();
+        assert_eq!(
+            npm_diff_changed_files(&tarball_left, &tarball_right, &tarball_action)
+                .unwrap()
+                .iter()
+                .map(|file| file.path.as_str())
+                .collect::<Vec<_>>(),
+            vec!["added.txt", "index.js", "removed.txt"]
         );
 
         let _ = fs::remove_dir_all(root);

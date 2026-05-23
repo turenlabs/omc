@@ -158,6 +158,7 @@ cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm unpublish left
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm deprecate left-pad@1.x "old release line" --dry-run
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm undeprecate left-pad@1.3.0
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm diff --diff left-pad@1.1.0 --diff left-pad@1.3.0 --diff-name-only
+cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm diff --diff ./packages/lib --diff ./vendor/lib-next --diff-name-only
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm search left-pad --searchlimit=5 --json
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm star left-pad --otp 123456
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm unstar left-pad --otp 123456
@@ -514,7 +515,8 @@ Supported now:
   directories are accepted as install/update/link inputs; `npm link`
   supports current-package registration, local directory shortcut links, and
   name-based links from OMC's user link store; `npm pack` supports local
-  package directories and registry specs; common `npm exec` / `npx`
+  package directories and registry specs; `npm diff` supports registry package
+  specs, local package directories, and npm tarballs; common `npm exec` / `npx`
   flags such as `--yes`, `--no-install`, `--package`, `--cache`,
   `--registry`, `--allow`, and `--allow-all-host` are parsed; direct `npx`
   package specs and explicit `--package` specs are installed into a temporary
