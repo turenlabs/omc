@@ -4894,21 +4894,77 @@ fn install_python_entry_point_scripts(
 }
 
 fn read_python_local_entry_points(package_dir: &Path) -> Result<Vec<PythonEntryPoint>> {
+    let mut entries = Vec::new();
+
     let pyproject = package_dir.join("pyproject.toml");
-    if !pyproject.exists() {
-        return Ok(Vec::new());
+    if pyproject.exists() {
+        let pyproject = toml::from_str::<PyProjectToml>(&fs::read_to_string(pyproject)?)?;
+        if let Some(project) = pyproject.project {
+            collect_python_script_entries(project.scripts, &mut entries);
+            collect_python_script_entries(project.gui_scripts, &mut entries);
+        }
+        if let Some(poetry) = pyproject.tool.and_then(|tool| tool.poetry) {
+            collect_python_script_entries(poetry.scripts, &mut entries);
+        }
     }
 
-    let pyproject = toml::from_str::<PyProjectToml>(&fs::read_to_string(pyproject)?)?;
-    let mut entries = Vec::new();
-    if let Some(project) = pyproject.project {
-        collect_python_script_entries(project.scripts, &mut entries);
-        collect_python_script_entries(project.gui_scripts, &mut entries);
+    let setup_cfg = package_dir.join("setup.cfg");
+    if setup_cfg.exists() {
+        entries.extend(read_setup_cfg_entry_points(&setup_cfg)?);
     }
-    if let Some(poetry) = pyproject.tool.and_then(|tool| tool.poetry) {
-        collect_python_script_entries(poetry.scripts, &mut entries);
-    }
+
     Ok(entries)
+}
+
+fn read_setup_cfg_entry_points(path: &Path) -> Result<Vec<PythonEntryPoint>> {
+    Ok(parse_setup_cfg_entry_points(&fs::read_to_string(path)?))
+}
+
+fn parse_setup_cfg_entry_points(content: &str) -> Vec<PythonEntryPoint> {
+    let mut in_entry_points = false;
+    let mut in_supported_group = false;
+    let mut entries = Vec::new();
+
+    for raw_line in content.lines() {
+        let line = raw_line.trim();
+        if line.is_empty() || line.starts_with('#') || line.starts_with(';') {
+            continue;
+        }
+        if line.starts_with('[') && line.ends_with(']') {
+            in_entry_points = line[1..line.len() - 1]
+                .trim()
+                .eq_ignore_ascii_case("options.entry_points");
+            in_supported_group = false;
+            continue;
+        }
+        if !in_entry_points {
+            continue;
+        }
+
+        if let Some((key, value)) = setup_cfg_key_value(line) {
+            if matches!(key.as_str(), "console_scripts" | "gui_scripts") {
+                in_supported_group = true;
+                if let Some(entry) = python_entry_point_from_assignment(value) {
+                    entries.push(entry);
+                }
+                continue;
+            }
+        }
+
+        let is_continuation = raw_line
+            .chars()
+            .next()
+            .map(char::is_whitespace)
+            .unwrap_or(false);
+        if !in_supported_group || !is_continuation {
+            continue;
+        }
+        if let Some(entry) = python_entry_point_from_assignment(line) {
+            entries.push(entry);
+        }
+    }
+
+    entries
 }
 
 fn collect_python_script_entries(
@@ -4939,22 +4995,17 @@ fn parse_python_entry_points(content: &str) -> Vec<PythonEntryPoint> {
             continue;
         }
 
-        let Some((name, target)) = line.split_once('=') else {
-            continue;
-        };
-        let target = target.trim();
-        let target = target.split('[').next().unwrap_or(target).trim();
-        let Some((module, function)) = target.split_once(':') else {
-            continue;
-        };
-        entries.push(PythonEntryPoint {
-            name: name.trim().to_owned(),
-            module: module.trim().to_owned(),
-            function: function.trim().to_owned(),
-        });
+        if let Some(entry) = python_entry_point_from_assignment(line) {
+            entries.push(entry);
+        }
     }
 
     entries
+}
+
+fn python_entry_point_from_assignment(line: &str) -> Option<PythonEntryPoint> {
+    let (name, target) = line.split_once('=')?;
+    python_entry_point_from_script(name, target)
 }
 
 fn python_entry_point_from_script(name: &str, target: &str) -> Option<PythonEntryPoint> {
@@ -9954,6 +10005,54 @@ packages:
         assert_eq!(
             String::from_utf8_lossy(&output.stdout).trim(),
             "local-cli-ok"
+        );
+    }
+
+    #[test]
+    fn installs_setup_cfg_python_local_entry_points() {
+        let dir = tempfile::tempdir().unwrap();
+        let local = dir.path().join("setuppkg");
+        let src = local.join("src");
+        fs::create_dir_all(src.join("setuppkg")).unwrap();
+        let site_packages = dir.path().join(".omc").join("python").join("site-packages");
+        let bin_dir = dir.path().join(".omc").join("python").join("bin");
+        fs::create_dir_all(&site_packages).unwrap();
+        fs::write(src.join("setuppkg").join("__init__.py"), "").unwrap();
+        fs::write(
+            src.join("setuppkg").join("cli.py"),
+            "def main():\n    print('setup-cfg-cli-ok')\n",
+        )
+        .unwrap();
+        fs::write(
+            local.join("setup.cfg"),
+            r#"
+            [metadata]
+            name = setuppkg
+
+            [options.entry_points]
+            console_scripts =
+                setup-cli = setuppkg.cli:main
+            gui_scripts =
+                setup-gui = setuppkg.gui:main
+            "#,
+        )
+        .unwrap();
+
+        let scripts =
+            install_python_local_paths(std::slice::from_ref(&local), &site_packages, &bin_dir)
+                .unwrap();
+        assert_eq!(scripts, 2);
+
+        let script = fs::read_to_string(bin_dir.join("setup-cli")).unwrap();
+        assert!(script.contains("from setuppkg.cli import main"));
+        let script = fs::read_to_string(bin_dir.join("setup-gui")).unwrap();
+        assert!(script.contains("from setuppkg.gui import main"));
+
+        let output = Command::new(bin_dir.join("setup-cli")).output().unwrap();
+        assert!(output.status.success());
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout).trim(),
+            "setup-cfg-cli-ok"
         );
     }
 

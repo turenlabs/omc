@@ -159,7 +159,7 @@ install PyPI wheels into .omc/python/site-packages
 verify cached archive sha256 from omc.lock before extracting locked installs
 install npm package bins into node_modules/.bin
 link npm workspace/local directory packages into node_modules and node_modules/.bin
-install Python console_scripts/gui_scripts from wheels and local path packages into .omc/python/bin
+install Python console_scripts/gui_scripts from wheels and pyproject/setup.cfg local path packages into .omc/python/bin
 prune stale lockfile entries and installed packages during install
 ```
 
