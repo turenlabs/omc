@@ -145,6 +145,7 @@ cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm ping --json
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm whoami --registry https://registry.npmjs.org/
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm token list --json
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm token revoke a1b2c3 --otp 123456
+cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm dist-tag ls left-pad
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm view left-pad version
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm repo left-pad --browser=false
 cargo run -p omc-cli --bin npx -- --omc-project-dir /tmp/omc-demo eslint -- .
@@ -440,7 +441,7 @@ Supported now:
   `upgrade`, `install-test` / `it`, `ci`, `install-ci-test` / `cit`, `prune`, `dedupe`, `rebuild`, `test`, `start`, `stop`, `restart`,
   `run`, `exec`, `init`, `remove`, `bin`, `root`, `prefix`, `audit` / `audit --json`,
   `help`, `fund` / `fund --json`, `cache verify/ls/rm/clean --force`, `pkg get/set/delete`, `version`,
-  `pack`, `search` / `find`, `ping`, `whoami`, `token list/revoke`, `config get/set/delete/list`, `get`,
+  `pack`, `search` / `find`, `ping`, `whoami`, `token list/revoke`, `dist-tag ls`, `config get/set/delete/list`, `get`,
   `view` / `info` / `show`, `docs`, `repo`, `bugs`, `home`,
   `list` / `ls` / `ll` / `la`, including `--json`, common depth/omit/workspace
   flags, and package-name filters; `explain` / `why`,

@@ -344,6 +344,9 @@ enum NpmCompatAction {
     Token {
         action: NpmTokenAction,
     },
+    DistTag {
+        action: NpmDistTagAction,
+    },
     Config {
         action: NpmConfigAction,
         npm_registry: Option<String>,
@@ -424,6 +427,14 @@ enum NpmMetadataUrlKind {
     Repo,
     Bugs,
     Home,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum NpmDistTagAction {
+    List {
+        spec: Option<String>,
+        npm_registry: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1890,6 +1901,7 @@ fn run_npm_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
             userconfig.as_deref(),
         )?,
         NpmCompatAction::Token { action } => print_npm_token(project_dir, action)?,
+        NpmCompatAction::DistTag { action } => print_npm_dist_tag(project_dir, action)?,
         NpmCompatAction::Config {
             action,
             npm_registry,
@@ -2372,6 +2384,15 @@ fn npm_help_text(topic: Option<&str>) -> String {
                 "Token creation is not implemented yet.",
             ],
         ),
+        Some("dist-tag") => npm_command_help(
+            "npm dist-tag ls [package-spec]",
+            &[
+                "List npm registry distribution tags for a package.",
+                "Defaults to the current package.json name when no package is provided.",
+                "Alias: dist-tags. Supports --registry.",
+                "Adding and removing dist-tags is not implemented yet.",
+            ],
+        ),
         Some("view") => npm_command_help(
             "npm view <package-spec> [field...]",
             &["Read package metadata from the configured npm registry. Aliases: info, show, v. Supports --json."],
@@ -2422,7 +2443,7 @@ fn npm_general_help_text() -> String {
         "npm <command>",
         &[
             "OMC npm compatibility runs supported npm workflows through OMC's verifier, lockfile, cache, and project-local runtime paths.",
-            "Supported commands: install, install-test, ci, install-ci-test, remove, run, test, start, stop, restart, exec, list, explain, audit, outdated, fund, prune, dedupe, rebuild, cache, pkg, version, pack, search, ping, whoami, token, view, docs, repo, bugs, home, config, init, bin, root, prefix.",
+            "Supported commands: install, install-test, ci, install-ci-test, remove, run, test, start, stop, restart, exec, list, explain, audit, outdated, fund, prune, dedupe, rebuild, cache, pkg, version, pack, search, ping, whoami, token, dist-tag, view, docs, repo, bugs, home, config, init, bin, root, prefix.",
             "Use `npm help <command>` for focused OMC compatibility notes.",
         ],
     )
@@ -2462,6 +2483,7 @@ fn npm_help_topic(topic: &str) -> Option<&'static str> {
         "ping" => Some("ping"),
         "whoami" => Some("whoami"),
         "token" => Some("token"),
+        "dist-tag" | "dist-tags" => Some("dist-tag"),
         "view" | "info" | "show" | "v" => Some("view"),
         "docs" | "doc" | "repo" | "repository" | "bugs" | "home" | "homepage" => {
             Some("metadata-url")
@@ -3179,6 +3201,39 @@ fn print_npm_token(project_dir: &Path, action: NpmTokenAction) -> Result<(), Omc
         }
     }
     Ok(())
+}
+
+fn print_npm_dist_tag(
+    project_dir: &Path,
+    action: NpmDistTagAction,
+) -> Result<(), OmcRegistryError> {
+    match action {
+        NpmDistTagAction::List { spec, npm_registry } => {
+            let spec = npm_dist_tag_package_spec(project_dir, spec.as_deref())?;
+            let spec = parse_package_spec(&spec, Some(Ecosystem::Npm))?;
+            let metadata = read_npm_package_metadata(project_dir, &spec, npm_registry.as_deref())?;
+            for (tag, version) in metadata.dist_tags {
+                println!("{tag}: {version}");
+            }
+        }
+    }
+    Ok(())
+}
+
+fn npm_dist_tag_package_spec(
+    project_dir: &Path,
+    spec: Option<&str>,
+) -> Result<String, OmcRegistryError> {
+    if let Some(spec) = spec {
+        return Ok(spec.to_owned());
+    }
+    let package = read_npm_pkg_json(&project_dir.join("package.json"))?;
+    let Some(name) = package.get("name").and_then(serde_json::Value::as_str) else {
+        return Err(OmcRegistryError::UnsupportedSpec(
+            "npm dist-tag ls needs a package or package.json name".to_owned(),
+        ));
+    };
+    Ok(name.to_owned())
 }
 
 fn npm_token_list_json(list: &NpmTokenListResult) -> serde_json::Value {
@@ -6715,6 +6770,7 @@ fn parse_npm_compat_action(args: &[String]) -> Result<NpmCompatAction, OmcRegist
         "ping" => parse_npm_ping_args(&args[1..]),
         "whoami" => parse_npm_whoami_args(&args[1..]),
         "token" => parse_npm_token_args(&args[1..]),
+        "dist-tag" | "dist-tags" => parse_npm_dist_tag_args(&args[1..]),
         "view" | "info" | "show" | "v" => parse_npm_view_args(&args[1..]),
         "docs" | "doc" => {
             parse_npm_metadata_url_args(command, NpmMetadataUrlKind::Docs, &args[1..])
@@ -6865,6 +6921,8 @@ fn npm_global_arg_supported_by_command(command: &str, arg: &str) -> bool {
                 | "ping"
                 | "whoami"
                 | "token"
+                | "dist-tag"
+                | "dist-tags"
                 | "view"
                 | "info"
                 | "show"
@@ -6889,7 +6947,15 @@ fn npm_global_arg_supported_by_command(command: &str, arg: &str) -> bool {
     {
         return matches!(
             command,
-            "run" | "run-script" | "test" | "start" | "stop" | "restart" | "fund"
+            "run"
+                | "run-script"
+                | "test"
+                | "start"
+                | "stop"
+                | "restart"
+                | "fund"
+                | "dist-tag"
+                | "dist-tags"
         );
     }
     if matches!(arg, "--workspaces" | "--include-workspace-root")
@@ -6897,7 +6963,15 @@ fn npm_global_arg_supported_by_command(command: &str, arg: &str) -> bool {
     {
         return matches!(
             command,
-            "run" | "run-script" | "test" | "start" | "stop" | "restart" | "fund"
+            "run"
+                | "run-script"
+                | "test"
+                | "start"
+                | "stop"
+                | "restart"
+                | "fund"
+                | "dist-tag"
+                | "dist-tags"
         );
     }
     if arg == "--json" {
@@ -8123,6 +8197,81 @@ fn parse_npm_token_revoke_args(
             otp,
         },
     })
+}
+
+fn parse_npm_dist_tag_args(args: &[String]) -> Result<NpmCompatAction, OmcRegistryError> {
+    let mut filtered = Vec::new();
+    let mut index = 0;
+    while index < args.len() {
+        let arg = &args[index];
+        if matches!(
+            arg.as_str(),
+            "--json"
+                | "--silent"
+                | "-s"
+                | "--parseable"
+                | "-p"
+                | "--workspaces"
+                | "--include-workspace-root"
+        ) || npm_dist_tag_ignored_equals_flag(arg)
+        {
+        } else if matches!(
+            arg.as_str(),
+            "--userconfig" | "--loglevel" | "--workspace" | "-w"
+        ) {
+            index += 1;
+            if args.get(index).is_none() {
+                return Err(OmcRegistryError::UnsupportedSpec(format!(
+                    "{arg} needs a value"
+                )));
+            }
+        } else {
+            filtered.push(arg.clone());
+        }
+        index += 1;
+    }
+
+    let CommonCompatFlags {
+        npm_registry,
+        mut positionals,
+        ..
+    } = parse_common_compat_flags(&filtered, true)?;
+    if matches!(
+        positionals.first().map(String::as_str),
+        Some("add" | "rm" | "remove" | "delete" | "del")
+    ) {
+        let command = positionals.first().expect("checked positional command");
+        return Err(OmcRegistryError::UnsupportedSpec(format!(
+            "npm dist-tag {command} is not supported by OMC compatibility yet"
+        )));
+    }
+    if matches!(positionals.first().map(String::as_str), Some("ls" | "list")) {
+        positionals.remove(0);
+    }
+    if positionals.len() > 1 {
+        return Err(unsupported_compat_arg("npm dist-tag ls", &positionals[1]));
+    }
+    Ok(NpmCompatAction::DistTag {
+        action: NpmDistTagAction::List {
+            spec: positionals.pop(),
+            npm_registry,
+        },
+    })
+}
+
+fn npm_dist_tag_ignored_equals_flag(arg: &str) -> bool {
+    [
+        "--json=",
+        "--userconfig=",
+        "--loglevel=",
+        "--parseable=",
+        "--workspace=",
+        "-w=",
+        "--workspaces=",
+        "--include-workspace-root=",
+    ]
+    .iter()
+    .any(|prefix| arg.starts_with(prefix))
 }
 
 fn parse_npm_registry_identity_args(
@@ -11652,6 +11801,45 @@ mod tests {
             }
         );
         assert!(parse_npm_compat_action(&args(&["token", "create"])).is_err());
+        assert_eq!(
+            parse_npm_compat_action(&args(&[
+                "--registry",
+                "https://registry.example.invalid/npm",
+                "dist-tag",
+                "ls",
+                "left-pad",
+                "--json",
+                "--workspace",
+                "@demo/app",
+                "--userconfig=ci.npmrc",
+            ]))
+            .unwrap(),
+            NpmCompatAction::DistTag {
+                action: NpmDistTagAction::List {
+                    spec: Some("left-pad".to_owned()),
+                    npm_registry: Some("https://registry.example.invalid/npm".to_owned()),
+                },
+            }
+        );
+        assert_eq!(
+            parse_npm_compat_action(&args(&["dist-tags", "react"])).unwrap(),
+            NpmCompatAction::DistTag {
+                action: NpmDistTagAction::List {
+                    spec: Some("react".to_owned()),
+                    npm_registry: None,
+                },
+            }
+        );
+        assert_eq!(
+            parse_npm_compat_action(&args(&["dist-tag"])).unwrap(),
+            NpmCompatAction::DistTag {
+                action: NpmDistTagAction::List {
+                    spec: None,
+                    npm_registry: None,
+                },
+            }
+        );
+        assert!(parse_npm_compat_action(&args(&["dist-tag", "add", "left-pad@1.3.0"])).is_err());
         assert_eq!(
             parse_npm_compat_action(&args(&[
                 "view",
