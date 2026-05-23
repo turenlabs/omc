@@ -469,8 +469,29 @@ enum PipListFormat {
 
 #[derive(Debug, PartialEq, Eq)]
 enum PipConfigAction {
-    Get { keys: Vec<String>, json: bool },
-    List { json: bool },
+    Get {
+        keys: Vec<String>,
+        json: bool,
+    },
+    List {
+        json: bool,
+    },
+    Set {
+        assignments: Vec<(String, String)>,
+        location: PipConfigLocation,
+    },
+    Unset {
+        keys: Vec<String>,
+        location: PipConfigLocation,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PipConfigLocation {
+    Auto,
+    User,
+    Site,
+    Global,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2587,6 +2608,21 @@ fn wildcard_match(value: &str, pattern: &str) -> bool {
 }
 
 fn print_pip_config(project_dir: &Path, action: PipConfigAction) -> Result<(), OmcRegistryError> {
+    match action {
+        PipConfigAction::Set {
+            assignments,
+            location,
+        } => {
+            write_pip_config_assignments(project_dir, location, &assignments)?;
+            return Ok(());
+        }
+        PipConfigAction::Unset { keys, location } => {
+            unset_pip_config_keys(project_dir, location, &keys)?;
+            return Ok(());
+        }
+        PipConfigAction::Get { .. } | PipConfigAction::List { .. } => {}
+    }
+
     let values = pip_config_values(project_dir)?;
     match action {
         PipConfigAction::Get { keys, json } => {
@@ -2616,6 +2652,7 @@ fn print_pip_config(project_dir: &Path, action: PipConfigAction) -> Result<(), O
                 }
             }
         }
+        PipConfigAction::Set { .. } | PipConfigAction::Unset { .. } => unreachable!(),
     }
     Ok(())
 }
@@ -2697,6 +2734,206 @@ fn pip_config_key_aliases(key: &str) -> Vec<String> {
         format!("global.{normalized}"),
         format!("install.{normalized}"),
     ]
+}
+
+fn write_pip_config_assignments(
+    project_dir: &Path,
+    location: PipConfigLocation,
+    assignments: &[(String, String)],
+) -> Result<(), OmcRegistryError> {
+    let path = pip_config_write_path(project_dir, location)?;
+    let mut lines = read_pip_config_lines(&path)?;
+    for (key, value) in assignments {
+        let (section, key) = normalize_pip_config_key(key)?;
+        upsert_pip_config_line(&mut lines, &section, &key, value);
+    }
+    write_pip_config_lines(&path, &lines)
+}
+
+fn unset_pip_config_keys(
+    project_dir: &Path,
+    location: PipConfigLocation,
+    keys: &[String],
+) -> Result<(), OmcRegistryError> {
+    let path = pip_config_write_path(project_dir, location)?;
+    let mut lines = read_pip_config_lines(&path)?;
+    for key in keys {
+        for (section, key) in pip_config_unset_targets(key)? {
+            remove_pip_config_line(&mut lines, &section, &key);
+        }
+    }
+    write_pip_config_lines(&path, &lines)
+}
+
+fn pip_config_write_path(
+    project_dir: &Path,
+    location: PipConfigLocation,
+) -> Result<PathBuf, OmcRegistryError> {
+    match location {
+        PipConfigLocation::Auto => {
+            if let Some(path) = env::var_os("PIP_CONFIG_FILE")
+                .map(PathBuf::from)
+                .filter(|path| !path.as_os_str().is_empty())
+            {
+                Ok(absolutize_path(project_dir, path))
+            } else {
+                Ok(project_dir.join("pip.conf"))
+            }
+        }
+        PipConfigLocation::Site => Ok(project_dir.join("pip.conf")),
+        PipConfigLocation::User => Ok(pip_user_config_path(project_dir)),
+        PipConfigLocation::Global => Err(OmcRegistryError::UnsupportedSpec(
+            "pip config --global writes are not supported by OMC compatibility".to_owned(),
+        )),
+    }
+}
+
+fn pip_user_config_path(project_dir: &Path) -> PathBuf {
+    if let Some(path) = env::var_os("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .filter(|path| !path.as_os_str().is_empty())
+    {
+        return path.join("pip").join("pip.conf");
+    }
+    if let Some(home) = env::var_os("HOME")
+        .map(PathBuf::from)
+        .filter(|path| !path.as_os_str().is_empty())
+    {
+        return home.join(".config").join("pip").join("pip.conf");
+    }
+    project_dir.join("pip.conf")
+}
+
+fn read_pip_config_lines(path: &Path) -> Result<Vec<String>, OmcRegistryError> {
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+    Ok(fs::read_to_string(path)?
+        .lines()
+        .map(str::to_owned)
+        .collect())
+}
+
+fn write_pip_config_lines(path: &Path, lines: &[String]) -> Result<(), OmcRegistryError> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let mut content = lines.join("\n");
+    if !content.is_empty() {
+        content.push('\n');
+    }
+    fs::write(path, content)?;
+    Ok(())
+}
+
+fn normalize_pip_config_key(key: &str) -> Result<(String, String), OmcRegistryError> {
+    let normalized = key.trim().to_ascii_lowercase().replace('_', "-");
+    let (section, key) = normalized
+        .split_once('.')
+        .map(|(section, key)| (section.trim(), key.trim()))
+        .unwrap_or(("global", normalized.trim()));
+    if section.is_empty() || key.is_empty() {
+        return Err(OmcRegistryError::UnsupportedSpec(format!(
+            "invalid pip config key `{key}`"
+        )));
+    }
+    Ok((section.to_owned(), key.to_owned()))
+}
+
+fn pip_config_unset_targets(key: &str) -> Result<Vec<(String, String)>, OmcRegistryError> {
+    let normalized = key.trim().to_ascii_lowercase().replace('_', "-");
+    if normalized.contains('.') {
+        return normalize_pip_config_key(&normalized).map(|target| vec![target]);
+    }
+    if normalized.is_empty() {
+        return Err(OmcRegistryError::UnsupportedSpec(
+            "pip config key cannot be empty".to_owned(),
+        ));
+    }
+    Ok(vec![
+        ("global".to_owned(), normalized.clone()),
+        ("install".to_owned(), normalized),
+    ])
+}
+
+fn upsert_pip_config_line(lines: &mut Vec<String>, section: &str, key: &str, value: &str) {
+    if let Some((start, end)) = pip_config_section_range(lines, section) {
+        if let Some(line) = lines[start..end]
+            .iter_mut()
+            .find(|line| pip_config_line_key_matches(line, key))
+        {
+            *line = format!("{key} = {value}");
+            return;
+        }
+        let insert_at = pip_config_section_insert_index(lines, start, end);
+        lines.insert(insert_at, format!("{key} = {value}"));
+        return;
+    }
+
+    if !lines.is_empty() && lines.last().is_some_and(|line| !line.trim().is_empty()) {
+        lines.push(String::new());
+    }
+    lines.push(format!("[{section}]"));
+    lines.push(format!("{key} = {value}"));
+}
+
+fn remove_pip_config_line(lines: &mut Vec<String>, section: &str, key: &str) {
+    let Some((start, end)) = pip_config_section_range(lines, section) else {
+        return;
+    };
+    let mut index = start;
+    while index < end && index < lines.len() {
+        if pip_config_line_key_matches(&lines[index], key) {
+            lines.remove(index);
+        } else {
+            index += 1;
+        }
+    }
+}
+
+fn pip_config_section_insert_index(lines: &[String], start: usize, end: usize) -> usize {
+    let mut index = end;
+    while index > start && lines[index - 1].trim().is_empty() {
+        index -= 1;
+    }
+    index
+}
+
+fn pip_config_section_range(lines: &[String], section: &str) -> Option<(usize, usize)> {
+    let mut start = None;
+    for (index, line) in lines.iter().enumerate() {
+        let Some(found) = pip_config_section_name(line) else {
+            continue;
+        };
+        if let Some(start) = start {
+            return Some((start, index));
+        }
+        if found == section {
+            start = Some(index + 1);
+        }
+    }
+    start.map(|start| (start, lines.len()))
+}
+
+fn pip_config_section_name(line: &str) -> Option<String> {
+    let line = strip_pip_config_comment(line).trim();
+    line.strip_prefix('[')
+        .and_then(|line| line.strip_suffix(']'))
+        .map(str::trim)
+        .filter(|section| !section.is_empty())
+        .map(|section| section.to_ascii_lowercase())
+}
+
+fn pip_config_line_key_matches(line: &str, key: &str) -> bool {
+    let line = strip_pip_config_comment(line).trim();
+    let Some((found, _)) = line.split_once('=') else {
+        return false;
+    };
+    found.trim().to_ascii_lowercase().replace('_', "-") == key
+}
+
+fn strip_pip_config_comment(line: &str) -> &str {
+    strip_npm_config_comment(line)
 }
 
 fn print_lock_only_report(project_dir: &Path) {
@@ -4675,6 +4912,7 @@ fn pip_index_ignored_equals_flag(arg: &str) -> bool {
 fn parse_pip_config_args(args: &[String]) -> Result<PipCompatAction, OmcRegistryError> {
     let PipConfigArgs {
         json,
+        location,
         mut positionals,
     } = parse_pip_config_common_args(args)?;
     let command = if positionals.is_empty() {
@@ -4704,6 +4942,28 @@ fn parse_pip_config_args(args: &[String]) -> Result<PipCompatAction, OmcRegistry
                 action: PipConfigAction::List { json },
             })
         }
+        "set" => {
+            let assignments = parse_pip_config_assignments(positionals)?;
+            Ok(PipCompatAction::Config {
+                action: PipConfigAction::Set {
+                    assignments,
+                    location,
+                },
+            })
+        }
+        "unset" | "delete" | "del" | "remove" | "rm" => {
+            if positionals.is_empty() {
+                return Err(OmcRegistryError::UnsupportedSpec(
+                    "pip config unset needs at least one key".to_owned(),
+                ));
+            }
+            Ok(PipCompatAction::Config {
+                action: PipConfigAction::Unset {
+                    keys: positionals,
+                    location,
+                },
+            })
+        }
         other => Err(OmcRegistryError::UnsupportedSpec(format!(
             "unsupported pip config command `{other}`"
         ))),
@@ -4713,20 +4973,28 @@ fn parse_pip_config_args(args: &[String]) -> Result<PipCompatAction, OmcRegistry
 #[derive(Debug)]
 struct PipConfigArgs {
     json: bool,
+    location: PipConfigLocation,
     positionals: Vec<String>,
 }
 
 fn parse_pip_config_common_args(args: &[String]) -> Result<PipConfigArgs, OmcRegistryError> {
     let mut json = false;
+    let mut location = PipConfigLocation::Auto;
     let mut positionals = Vec::new();
     let mut index = 0;
     while index < args.len() {
         let arg = &args[index];
         if arg == "--json" {
             json = true;
+        } else if arg == "--user" {
+            location = PipConfigLocation::User;
+        } else if arg == "--site" {
+            location = PipConfigLocation::Site;
+        } else if arg == "--global" {
+            location = PipConfigLocation::Global;
         } else if matches!(
             arg.as_str(),
-            "--user" | "--global" | "--site" | "--isolated" | "-v" | "--verbose" | "-q" | "--quiet"
+            "--isolated" | "-v" | "--verbose" | "-q" | "--quiet"
         ) {
         } else if arg == "--editor" {
             index += 1;
@@ -4743,7 +5011,50 @@ fn parse_pip_config_common_args(args: &[String]) -> Result<PipConfigArgs, OmcReg
         }
         index += 1;
     }
-    Ok(PipConfigArgs { json, positionals })
+    Ok(PipConfigArgs {
+        json,
+        location,
+        positionals,
+    })
+}
+
+fn parse_pip_config_assignments(
+    positionals: Vec<String>,
+) -> Result<Vec<(String, String)>, OmcRegistryError> {
+    if positionals.is_empty() {
+        return Err(OmcRegistryError::UnsupportedSpec(
+            "pip config set needs a key and value".to_owned(),
+        ));
+    }
+    if positionals.iter().any(|value| value.contains('=')) {
+        return positionals
+            .into_iter()
+            .map(|assignment| {
+                let Some((key, value)) = assignment.split_once('=') else {
+                    return Err(OmcRegistryError::UnsupportedSpec(format!(
+                        "pip config set mixed assignment formats at `{assignment}`"
+                    )));
+                };
+                pip_config_assignment(key, value)
+            })
+            .collect();
+    }
+    if positionals.len() != 2 {
+        return Err(OmcRegistryError::UnsupportedSpec(
+            "pip config set needs either KEY VALUE or KEY=VALUE".to_owned(),
+        ));
+    }
+    pip_config_assignment(&positionals[0], &positionals[1]).map(|assignment| vec![assignment])
+}
+
+fn pip_config_assignment(key: &str, value: &str) -> Result<(String, String), OmcRegistryError> {
+    let key = key.trim();
+    if key.is_empty() {
+        return Err(OmcRegistryError::UnsupportedSpec(
+            "pip config key cannot be empty".to_owned(),
+        ));
+    }
+    Ok((key.to_owned(), value.trim().to_owned()))
 }
 
 fn parse_pip_uninstall_args(args: &[String]) -> Result<PipCompatAction, OmcRegistryError> {
@@ -7250,9 +7561,97 @@ mod tests {
                 action: PipConfigAction::List { json: false },
             }
         );
-        assert!(
-            parse_pip_compat_action(&args(&["config", "set", "global.index-url", "x"])).is_err()
+        assert_eq!(
+            parse_pip_compat_action(&args(&["config", "set", "global.index-url", "x"])).unwrap(),
+            PipCompatAction::Config {
+                action: PipConfigAction::Set {
+                    assignments: vec![("global.index-url".to_owned(), "x".to_owned())],
+                    location: PipConfigLocation::Auto,
+                },
+            }
         );
+        assert_eq!(
+            parse_pip_compat_action(&args(&[
+                "config",
+                "--site",
+                "set",
+                "global.extra-index-url=https://extra.example.invalid/simple",
+            ]))
+            .unwrap(),
+            PipCompatAction::Config {
+                action: PipConfigAction::Set {
+                    assignments: vec![(
+                        "global.extra-index-url".to_owned(),
+                        "https://extra.example.invalid/simple".to_owned(),
+                    )],
+                    location: PipConfigLocation::Site,
+                },
+            }
+        );
+        assert_eq!(
+            parse_pip_compat_action(&args(&["config", "--user", "unset", "global.index-url"]))
+                .unwrap(),
+            PipCompatAction::Config {
+                action: PipConfigAction::Unset {
+                    keys: vec!["global.index-url".to_owned()],
+                    location: PipConfigLocation::User,
+                },
+            }
+        );
+    }
+
+    #[test]
+    fn writes_pip_config_set_and_unset() {
+        let dir = test_dir("pip-config-set-unset");
+        fs::write(
+            dir.join("pip.conf"),
+            "[global]\nindex-url = https://old.example.invalid/simple\n# keep this\n\n[install]\nno-index = false\n",
+        )
+        .unwrap();
+
+        print_pip_config(
+            &dir,
+            PipConfigAction::Set {
+                assignments: vec![
+                    (
+                        "global.index-url".to_owned(),
+                        "https://new.example.invalid/simple".to_owned(),
+                    ),
+                    (
+                        "global.extra-index-url".to_owned(),
+                        "https://extra.example.invalid/simple".to_owned(),
+                    ),
+                ],
+                location: PipConfigLocation::Auto,
+            },
+        )
+        .unwrap();
+
+        let config = fs::read_to_string(dir.join("pip.conf")).unwrap();
+        assert!(config.contains("index-url = https://new.example.invalid/simple\n"));
+        assert!(config.contains("extra-index-url = https://extra.example.invalid/simple\n"));
+        assert!(config.contains("# keep this\n"));
+        let values = pip_config_values(&dir).unwrap();
+        assert_eq!(
+            values.get("global.index-url").map(String::as_str),
+            Some("https://new.example.invalid/simple/")
+        );
+        assert_eq!(
+            values.get("global.extra-index-url").map(String::as_str),
+            Some("https://extra.example.invalid/simple/")
+        );
+
+        print_pip_config(
+            &dir,
+            PipConfigAction::Unset {
+                keys: vec!["global.index-url".to_owned()],
+                location: PipConfigLocation::Auto,
+            },
+        )
+        .unwrap();
+        let config = fs::read_to_string(dir.join("pip.conf")).unwrap();
+        assert!(!config.contains("index-url = https://new.example.invalid/simple\n"));
+        assert!(config.contains("extra-index-url = https://extra.example.invalid/simple\n"));
     }
 
     #[test]
