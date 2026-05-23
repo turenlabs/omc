@@ -1062,21 +1062,28 @@ fn discover_project_requirements_with_options(
 
 fn project_requirements_files(project_dir: &Path, include_dev_dependencies: bool) -> Vec<PathBuf> {
     let mut files = Vec::new();
-    let requirements_txt = project_dir.join("requirements.txt");
-    if requirements_txt.exists() {
-        files.push(requirements_txt);
-    }
+    push_existing_requirement_file(&mut files, project_dir.join("requirements.txt"));
+    push_existing_requirement_file(
+        &mut files,
+        project_dir.join("requirements").join("base.txt"),
+    );
 
     if include_dev_dependencies {
-        for name in ["requirements-dev.txt", "dev-requirements.txt"] {
-            let path = project_dir.join(name);
-            if path.exists() {
-                files.push(path);
-            }
-        }
+        push_existing_requirement_file(&mut files, project_dir.join("requirements-dev.txt"));
+        push_existing_requirement_file(&mut files, project_dir.join("dev-requirements.txt"));
+        push_existing_requirement_file(
+            &mut files,
+            project_dir.join("requirements").join("dev.txt"),
+        );
     }
 
     files
+}
+
+fn push_existing_requirement_file(files: &mut Vec<PathBuf>, path: PathBuf) {
+    if path.exists() && !files.contains(&path) {
+        files.push(path);
+    }
 }
 
 fn add_package_graph_inner(
@@ -10440,6 +10447,36 @@ packages:
         assert!(has_spec(&dev.specs, "idna", "==3.7"));
         assert!(has_spec(&dev.specs, "pytest", "==8.2.0"));
         assert!(has_spec(&dev.specs, "ruff", "==0.5.0"));
+        assert_eq!(
+            dev.specs.iter().filter(|spec| spec.name == "idna").count(),
+            1
+        );
+    }
+
+    #[test]
+    fn discovers_requirements_directory_layout() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir_all(dir.path().join("requirements")).unwrap();
+        fs::write(
+            dir.path().join("requirements").join("base.txt"),
+            "idna==3.7\n",
+        )
+        .unwrap();
+        fs::write(
+            dir.path().join("requirements").join("dev.txt"),
+            "-r base.txt\npytest==8.2.0\n",
+        )
+        .unwrap();
+
+        let production =
+            discover_project_requirements_with_options(dir.path(), &BTreeSet::new(), false)
+                .unwrap();
+        assert!(has_spec(&production.specs, "idna", "==3.7"));
+        assert!(!production.specs.iter().any(|spec| spec.name == "pytest"));
+
+        let dev = discover_project_requirements(dir.path()).unwrap();
+        assert!(has_spec(&dev.specs, "idna", "==3.7"));
+        assert!(has_spec(&dev.specs, "pytest", "==8.2.0"));
         assert_eq!(
             dev.specs.iter().filter(|spec| spec.name == "idna").count(),
             1
