@@ -107,6 +107,7 @@ pub struct PackageSpec {
     pub name: String,
     pub version: Option<String>,
     pub extras: BTreeSet<String>,
+    pub direct_url: Option<String>,
 }
 
 impl PackageSpec {
@@ -116,6 +117,7 @@ impl PackageSpec {
             name: name.into(),
             version,
             extras: BTreeSet::new(),
+            direct_url: None,
         }
     }
 
@@ -130,6 +132,22 @@ impl PackageSpec {
             name: name.into(),
             version,
             extras,
+            direct_url: None,
+        }
+    }
+
+    fn with_direct_url(
+        ecosystem: Ecosystem,
+        name: impl Into<String>,
+        direct_url: impl Into<String>,
+        extras: BTreeSet<String>,
+    ) -> Self {
+        Self {
+            ecosystem,
+            name: name.into(),
+            version: None,
+            extras,
+            direct_url: Some(direct_url.into()),
         }
     }
 
@@ -154,6 +172,9 @@ impl PackageSpec {
     }
 
     pub fn requested(&self) -> String {
+        if let Some(url) = &self.direct_url {
+            return format!("{}:{} @ {}", self.ecosystem, self.name_with_extras(), url);
+        }
         match &self.version {
             Some(version) => format!("{}:{}@{}", self.ecosystem, self.name_with_extras(), version),
             None => self.package_key(),
@@ -197,6 +218,10 @@ fn parse_npm_spec(raw: &str, rest: &str) -> Result<PackageSpec> {
 }
 
 fn parse_pypi_spec(rest: &str) -> Result<PackageSpec> {
+    if let Some((spec, _)) = parse_pypi_direct_requirement(rest, &BTreeSet::new()) {
+        return Ok(spec);
+    }
+
     let (name, version) = if let Some((name, version)) = rest.split_once("==") {
         (name, Some(version.to_owned()))
     } else if let Some((name, version)) = rest.rsplit_once('@') {
@@ -466,6 +491,7 @@ struct ResolvedPackage {
     expected_sha256: Option<String>,
     expected_sha1: Option<String>,
     expected_integrity: Option<String>,
+    pypi_direct_wheel: bool,
     npm_scripts: BTreeMap<String, String>,
     platform_compatible: bool,
     dependencies: Vec<PackageDependency>,
@@ -692,6 +718,12 @@ fn find_locked_package_for_spec<'a>(
         .iter()
         .filter(|package| package.ecosystem == spec.ecosystem)
         .filter(|package| locked_package_name_matches(package, spec))
+        .filter(|package| {
+            spec.direct_url
+                .as_deref()
+                .map(|url| package.source_url == url)
+                .unwrap_or(true)
+        })
         .filter(|package| locked_package_version_matches(package, spec, constraints))
         .filter(|package| {
             hashes
@@ -914,6 +946,11 @@ fn link_package_inner(
         }
     }
 
+    let dependencies = if resolved.pypi_direct_wheel {
+        pypi_wheel_dependencies(&archive_bytes, &spec.extras)?
+    } else {
+        resolved.dependencies.clone()
+    };
     let archive_path = cache_archive(&options.project_dir, &resolved, &sha256, &archive_bytes)?;
     let profile = profile_archive(&resolved, &archive_bytes)?;
     let module = module_from_profile(&resolved, &profile.capabilities);
@@ -961,14 +998,12 @@ fn link_package_inner(
             .iter()
             .map(ToString::to_string)
             .collect(),
-        dependencies: resolved
-            .dependencies
+        dependencies: dependencies
             .iter()
             .filter(|dependency| !dependency.optional)
             .map(|dependency| dependency.spec.requested())
             .collect(),
-        optional_dependencies: resolved
-            .dependencies
+        optional_dependencies: dependencies
             .iter()
             .filter(|dependency| dependency.optional)
             .map(|dependency| dependency.spec.requested())
@@ -1024,7 +1059,7 @@ fn link_package_inner(
             lockfile,
             manifest: manifest_path,
         },
-        resolved.dependencies,
+        dependencies,
     )))
 }
 
@@ -1469,11 +1504,32 @@ fn read_requirements_file_inner(
             continue;
         }
 
-        if line.starts_with('-') || line.contains("://") {
+        if line.starts_with('-') {
             return Err(OmcRegistryError::UnsupportedRequirement(line.to_owned()));
         }
 
         let parsed = parse_requirement_line(line);
+        if let Some((spec, hashes)) =
+            parse_pypi_direct_requirement(&parsed.requirement, &BTreeSet::new())
+        {
+            if mode == RequirementsMode::Constraint {
+                return Err(OmcRegistryError::UnsupportedRequirement(line.to_owned()));
+            }
+            if !parsed.hashes.is_empty() || !hashes.is_empty() {
+                discovered
+                    .hashes
+                    .entry(spec.constraint_key())
+                    .or_default()
+                    .extend(parsed.hashes.into_iter().chain(hashes));
+            }
+            discovered.specs.push(spec);
+            continue;
+        }
+
+        if parsed.requirement.contains("://") {
+            return Err(OmcRegistryError::UnsupportedRequirement(line.to_owned()));
+        }
+
         if let Some(spec) = parse_pypi_requirement(&parsed.requirement) {
             match mode {
                 RequirementsMode::Install => {
@@ -1504,12 +1560,7 @@ fn requirement_logical_lines(content: &str) -> Vec<String> {
     let mut current = String::new();
 
     for raw_line in content.lines() {
-        let mut line = raw_line
-            .split('#')
-            .next()
-            .unwrap_or_default()
-            .trim_end()
-            .to_owned();
+        let mut line = strip_requirement_comment(raw_line).trim_end().to_owned();
         let continued = line.ends_with('\\');
         if continued {
             line.pop();
@@ -1531,6 +1582,29 @@ fn requirement_logical_lines(content: &str) -> Vec<String> {
     }
 
     lines
+}
+
+fn strip_requirement_comment(line: &str) -> &str {
+    let trimmed = line.trim_start();
+    if trimmed.starts_with('#') {
+        return "";
+    }
+
+    let mut quote = None;
+    let mut previous_was_whitespace = false;
+    for (index, ch) in line.char_indices() {
+        if matches!(ch, '\'' | '"') {
+            if quote == Some(ch) {
+                quote = None;
+            } else if quote.is_none() {
+                quote = Some(ch);
+            }
+        } else if ch == '#' && quote.is_none() && previous_was_whitespace {
+            return &line[..index];
+        }
+        previous_was_whitespace = ch.is_whitespace();
+    }
+    line
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -1891,6 +1965,53 @@ fn install_pypi_package(
     install_python_entry_points(&entry_points, bin_dir)
 }
 
+fn pypi_wheel_dependencies(
+    bytes: &[u8],
+    active_extras: &BTreeSet<String>,
+) -> Result<Vec<PackageDependency>> {
+    let reader = Cursor::new(bytes);
+    let mut archive = zip::ZipArchive::new(reader)?;
+    let mut dependencies = Vec::new();
+    for index in 0..archive.len() {
+        let mut file = archive.by_index(index)?;
+        if !file.name().ends_with(".dist-info/METADATA") {
+            continue;
+        }
+        let mut metadata = String::new();
+        file.read_to_string(&mut metadata)?;
+        for line in folded_metadata_lines(&metadata) {
+            let Some(requirement) = line.strip_prefix("Requires-Dist:") else {
+                continue;
+            };
+            if let Some(spec) =
+                parse_pypi_requirement_with_extras(requirement.trim(), active_extras)
+            {
+                dependencies.push(PackageDependency {
+                    spec,
+                    optional: false,
+                });
+            }
+        }
+        break;
+    }
+    Ok(dependencies)
+}
+
+fn folded_metadata_lines(metadata: &str) -> Vec<String> {
+    let mut lines: Vec<String> = Vec::new();
+    for line in metadata.lines() {
+        if line.starts_with(' ') || line.starts_with('\t') {
+            if let Some(previous) = lines.last_mut() {
+                previous.push(' ');
+                previous.push_str(line.trim());
+            }
+        } else {
+            lines.push(line.to_owned());
+        }
+    }
+    lines
+}
+
 fn npm_install_target(node_modules: &Path, name: &str) -> PathBuf {
     if let Some((scope, package)) = name.split_once('/') {
         node_modules.join(scope).join(package)
@@ -2194,6 +2315,7 @@ fn resolve_npm(
         expected_sha256: None,
         expected_sha1: version_doc.dist.shasum,
         expected_integrity: version_doc.dist.integrity,
+        pypi_direct_wheel: false,
         npm_scripts: version_doc.scripts.unwrap_or_default(),
         platform_compatible,
         dependencies,
@@ -2367,6 +2489,10 @@ fn resolve_pypi(
     spec: &PackageSpec,
     options: &LinkOptions,
 ) -> Result<ResolvedPackage> {
+    if spec.direct_url.is_some() {
+        return resolve_pypi_direct_wheel(spec);
+    }
+
     let encoded = urlencoding::encode(&spec.name);
     let target_python = current_python_version();
     let constrained_requirement = constrained_pypi_requirement(spec, &options.constraints);
@@ -2423,10 +2549,71 @@ fn resolve_pypi(
         expected_sha256: Some(expected_sha256),
         expected_sha1: None,
         expected_integrity: None,
+        pypi_direct_wheel: false,
         npm_scripts: BTreeMap::new(),
         platform_compatible: true,
         dependencies,
     })
+}
+
+fn resolve_pypi_direct_wheel(spec: &PackageSpec) -> Result<ResolvedPackage> {
+    let source_url = spec
+        .direct_url
+        .clone()
+        .ok_or_else(|| OmcRegistryError::UnsupportedSpec(spec.requested()))?;
+    let url = reqwest::Url::parse(&source_url)
+        .map_err(|_| OmcRegistryError::UnsupportedSpec(spec.requested()))?;
+    if url.scheme() != "https" {
+        return Err(OmcRegistryError::UnsupportedSpec(format!(
+            "direct PyPI wheel URL for `{}` must use https",
+            spec.name
+        )));
+    }
+    let filename = url
+        .path_segments()
+        .and_then(|mut segments| segments.next_back())
+        .and_then(|filename| urlencoding::decode(filename).ok())
+        .map(|filename| filename.into_owned())
+        .ok_or_else(|| OmcRegistryError::UnsupportedSpec(spec.requested()))?;
+    let (wheel_name, version) = parse_wheel_name_and_version(&filename)
+        .ok_or_else(|| OmcRegistryError::UnsupportedSpec(spec.requested()))?;
+    if wheel_name != spec.name {
+        return Err(OmcRegistryError::UnsupportedSpec(format!(
+            "direct wheel filename `{filename}` does not match `{}`",
+            spec.name
+        )));
+    }
+    if !current_python_wheel_compatibility()
+        .as_ref()
+        .map(|compatibility| wheel_tag_compatible(&filename, compatibility))
+        .unwrap_or(true)
+    {
+        return Err(OmcRegistryError::MissingCompatibleWheel(spec.requested()));
+    }
+
+    Ok(ResolvedPackage {
+        ecosystem: Ecosystem::Pypi,
+        name: spec.name.clone(),
+        version,
+        source_url,
+        filename,
+        expected_sha256: None,
+        expected_sha1: None,
+        expected_integrity: None,
+        pypi_direct_wheel: true,
+        npm_scripts: BTreeMap::new(),
+        platform_compatible: true,
+        dependencies: Vec::new(),
+    })
+}
+
+fn parse_wheel_name_and_version(filename: &str) -> Option<(String, String)> {
+    let filename = filename.strip_suffix(".whl")?;
+    let parts = filename.split('-').collect::<Vec<_>>();
+    if parts.len() < 5 {
+        return None;
+    }
+    Some((normalize_pypi_name(parts[0]), parts[1].to_owned()))
 }
 
 fn constrained_pypi_requirement(
@@ -2894,6 +3081,50 @@ fn comparable_version(version: &str) -> Vec<u64> {
 
 fn parse_pypi_requirement(requirement: &str) -> Option<PackageSpec> {
     parse_pypi_requirement_with_extras(requirement, &BTreeSet::new())
+}
+
+fn parse_pypi_direct_requirement(
+    requirement: &str,
+    active_extras: &BTreeSet<String>,
+) -> Option<(PackageSpec, BTreeSet<String>)> {
+    let mut parts = requirement.splitn(2, ';');
+    let requirement = parts.next()?.trim();
+    if let Some(marker) = parts.next() {
+        if !pypi_marker_applies(marker, active_extras) {
+            return None;
+        }
+    }
+
+    let (name, url) = requirement.split_once(" @ ")?;
+    let (name, extras) = parse_pypi_name_and_extras(name.trim());
+    if name.is_empty() {
+        return None;
+    }
+    let (url, hashes) = direct_requirement_url_and_hashes(url.trim());
+    if !url.contains("://") {
+        return None;
+    }
+    Some((
+        PackageSpec::with_direct_url(Ecosystem::Pypi, name, url, extras),
+        hashes,
+    ))
+}
+
+fn direct_requirement_url_and_hashes(url: &str) -> (String, BTreeSet<String>) {
+    let Some((url, fragment)) = url.split_once('#') else {
+        return (url.to_owned(), BTreeSet::new());
+    };
+    let hashes = fragment
+        .split('&')
+        .filter_map(|part| {
+            let (key, value) = part.split_once('=')?;
+            if key != "sha256" {
+                return None;
+            }
+            normalize_sha256_hash(&format!("sha256:{value}"))
+        })
+        .collect();
+    (url.to_owned(), hashes)
 }
 
 fn parse_pypi_requirement_with_extras(
@@ -3957,6 +4188,16 @@ mod tests {
             BTreeSet::from(["security".to_owned(), "socks".to_owned()])
         );
         assert_eq!(spec.package_key(), "pypi:requests[security,socks]");
+
+        let spec = PackageSpec::parse(
+            "pypi:idna @ https://example.invalid/idna-3.7-py3-none-any.whl#sha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        )
+        .unwrap();
+        assert_eq!(spec.name, "idna");
+        assert_eq!(
+            spec.direct_url.as_deref(),
+            Some("https://example.invalid/idna-3.7-py3-none-any.whl")
+        );
     }
 
     #[test]
@@ -3977,6 +4218,7 @@ mod tests {
             name: "string-width-cjs".to_owned(),
             version: Some("npm:string-width@^4.2.0".to_owned()),
             extras: BTreeSet::new(),
+            direct_url: None,
         };
         let (registry_name, requirement) = npm_registry_name_and_requirement(&spec).unwrap();
         assert_eq!(registry_name, "string-width");
@@ -4584,20 +4826,52 @@ mod tests {
         let requirements = dir.path().join("requirements.txt");
         fs::write(
             &requirements,
-            "idna==3.7\npkg @ https://example.invalid/pkg-1.0.0.whl\n",
-        )
-        .unwrap();
-
-        let error = read_requirements_file(&requirements).unwrap_err();
-        assert!(error.to_string().contains("unsupported requirements entry"));
-
-        fs::write(
-            &requirements,
             "--index-url https://example.invalid/simple\n",
         )
         .unwrap();
         let error = read_requirements_file(&requirements).unwrap_err();
         assert!(error.to_string().contains("unsupported requirements entry"));
+    }
+
+    #[test]
+    fn reads_direct_wheel_requirements() {
+        let dir = tempfile::tempdir().unwrap();
+        let requirements = dir.path().join("requirements.txt");
+        fs::write(
+            &requirements,
+            "idna @ https://example.invalid/idna-3.7-py3-none-any.whl#sha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa --hash=sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\n",
+        )
+        .unwrap();
+
+        let discovered = read_requirements_file(&requirements).unwrap();
+        let spec = discovered
+            .specs
+            .iter()
+            .find(|spec| spec.name == "idna")
+            .unwrap();
+        assert_eq!(
+            spec.direct_url.as_deref(),
+            Some("https://example.invalid/idna-3.7-py3-none-any.whl")
+        );
+        assert_eq!(
+            discovered.hashes.get("pypi:idna").cloned().unwrap(),
+            BTreeSet::from([
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_owned(),
+                "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_owned()
+            ])
+        );
+    }
+
+    #[test]
+    fn rejects_unsupported_direct_pypi_specs() {
+        let spec =
+            PackageSpec::parse("pypi:pkg @ https://example.invalid/pkg-1.0.0.tar.gz").unwrap();
+        let error = resolve_pypi_direct_wheel(&spec).unwrap_err();
+        assert!(error.to_string().contains("unsupported package spec"));
+
+        let spec = PackageSpec::parse("pypi:pkg @ git+https://example.invalid/pkg.git").unwrap();
+        let error = resolve_pypi_direct_wheel(&spec).unwrap_err();
+        assert!(error.to_string().contains("must use https"));
     }
 
     #[test]
@@ -4988,6 +5262,7 @@ mod tests {
             expected_sha256: None,
             expected_sha1: None,
             expected_integrity: None,
+            pypi_direct_wheel: false,
             npm_scripts: BTreeMap::new(),
             platform_compatible: true,
             dependencies: Vec::new(),

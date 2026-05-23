@@ -120,7 +120,7 @@ For existing projects, `install` reads normal project files:
 ```text
 package.json       dependencies, devDependencies, optionalDependencies, peers; use --omit-dev for production installs
 package-lock.json  exact version constraints and integrity hashes for uniquely locked npm packages
-requirements.txt  PyPI requirements, hashes, extras, -r includes, -c constraints, markers
+requirements.txt  PyPI requirements, direct wheel URLs, hashes, extras, -r includes, -c constraints, markers
 pyproject.toml    PEP 621 project dependencies, selected optional groups
 pyproject.toml    Poetry dependencies, dev groups, optional groups, and extras
 ```
@@ -209,10 +209,11 @@ Supported now:
 - `package-lock.json` exact-version constraints and integrity verification for
   uniquely locked npm packages
 - `requirements.txt` ingestion with hashes, line continuations, extras,
-  recursive `-r` includes, `-c` constraints, and common Python environment
-  markers
-- unsupported requirements entries such as direct URLs, editable installs, and
-  index configuration fail closed instead of being silently ignored
+  direct wheel URLs, recursive `-r` includes, `-c` constraints, and common
+  Python environment markers
+- unsupported requirements entries such as editable installs, index
+  configuration, VCS URLs, and non-wheel direct URLs fail closed instead of
+  being silently ignored
 - `pyproject.toml` PEP 621 dependency ingestion with `omc install --extra`
   for selected optional dependency groups
 - Poetry `pyproject.toml` dependency ingestion, including
@@ -257,8 +258,8 @@ Not implemented yet:
 - imports/linking across package cells
 - native/Wasm/Cranelift backend
 - full npm peer placement semantics beyond current required-peer handling
-- advanced requirements-file semantics such as editable installs, direct URLs,
-  and index configuration beyond fail-closed rejection
+- advanced requirements-file semantics such as editable installs, VCS URLs,
+  non-wheel direct URLs, and index configuration beyond fail-closed rejection
 - Poetry direct path/git/url/file dependencies beyond fail-closed rejection
 - Python sdist build isolation and native extension policy beyond fail-closed
   rejection
