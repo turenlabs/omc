@@ -123,6 +123,7 @@ package.json       root/workspace dependencies, devDependencies, optionalDepende
 package-lock.json  exact versions, resolved tarball URLs, and integrity hashes for uniquely locked npm packages
 npm-shrinkwrap.json exact versions, resolved tarball URLs, and integrity hashes for uniquely locked npm packages
 yarn.lock          Yarn Classic exact versions, resolved tarball URLs, and integrity hashes for uniquely locked npm packages
+pnpm-lock.yaml     pnpm importer dependencies, exact versions, resolved tarball URLs, and integrity hashes
 pip.conf           PyPI index-url, extra-index-url, find-links, and no-index configuration
 requirements.txt  PyPI requirements, direct wheel URLs, hashes, extras, -r includes, -c constraints, markers, simple indexes, find-links wheelhouses
 Pipfile.lock      Pipenv default/develop package pins, extras, markers, and sha256 hashes
@@ -143,7 +144,7 @@ use project/user `pip.conf` PyPI simple-index settings when no project index is 
 use `PIP_INDEX_URL` / `PIP_EXTRA_INDEX_URL` when no project PyPI index is set
 use pip-style `find-links` and `no-index` config/env values for wheelhouses
 verify npm shasum/integrity and PyPI sha256 when the registry provides them
-use package-lock.json/npm-shrinkwrap.json/yarn.lock npm resolved tarball URLs and integrity hashes when present
+use package-lock.json/npm-shrinkwrap.json/yarn.lock/pnpm-lock.yaml npm resolved tarball URLs and integrity hashes when present
 cache the source artifact under .omc/cache
 profile runtime source files into OMC capability findings
 run the OMC verifier with deny-by-default policy
@@ -244,6 +245,9 @@ Supported now:
 - `package-lock.json`, `npm-shrinkwrap.json`, and Yarn Classic `yarn.lock`
   exact-version constraints, resolved tarball URLs, and integrity verification
   for uniquely locked npm packages
+- `pnpm-lock.yaml` importer dependency ingestion plus exact-version
+  constraints, resolved tarball URLs, and integrity verification for uniquely
+  locked npm packages
 - `requirements.txt` ingestion with hashes, line continuations, extras,
   direct wheel URLs, recursive `-r` includes, `-c` constraints,
   `--index-url` / `--extra-index-url` simple indexes, `--find-links` / `-f`

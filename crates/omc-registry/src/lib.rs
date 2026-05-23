@@ -886,6 +886,17 @@ fn discover_project_requirements_with_options(
         project.npm_resolved.extend(lock_requirements.npm_resolved);
     }
 
+    let pnpm_lock = project_dir.join("pnpm-lock.yaml");
+    if pnpm_lock.exists() {
+        let lock_requirements = read_pnpm_lock_requirements(&pnpm_lock, include_dev_dependencies)?;
+        project.specs.extend(lock_requirements.specs);
+        project.constraints.extend(lock_requirements.constraints);
+        project
+            .npm_integrities
+            .extend(lock_requirements.npm_integrities);
+        project.npm_resolved.extend(lock_requirements.npm_resolved);
+    }
+
     let requirements_txt = project_dir.join("requirements.txt");
     if requirements_txt.exists() {
         let requirements = read_requirements_file(&requirements_txt)?;
@@ -1797,6 +1808,124 @@ fn read_yarn_lock_requirements(path: &Path) -> Result<ProjectRequirements> {
         integrities,
         resolved,
     ))
+}
+
+fn read_pnpm_lock_requirements(
+    path: &Path,
+    include_dev_dependencies: bool,
+) -> Result<ProjectRequirements> {
+    let lock = serde_yaml::from_str::<PnpmLock>(&fs::read_to_string(path)?)
+        .map_err(|error| OmcRegistryError::UnsupportedRequirement(error.to_string()))?;
+    let mut requirements = ProjectRequirements::default();
+    let mut versions = BTreeMap::<String, BTreeSet<String>>::new();
+    let mut integrities = BTreeMap::<String, BTreeSet<String>>::new();
+    let mut resolved = BTreeMap::<String, BTreeSet<String>>::new();
+
+    for importer in lock.importers.into_values() {
+        collect_pnpm_importer_dependencies(importer.dependencies, &mut requirements, &mut versions);
+        collect_pnpm_importer_dependencies(
+            importer.optional_dependencies,
+            &mut requirements,
+            &mut versions,
+        );
+        if include_dev_dependencies {
+            collect_pnpm_importer_dependencies(
+                importer.dev_dependencies,
+                &mut requirements,
+                &mut versions,
+            );
+        }
+    }
+
+    for (key, package) in lock.packages {
+        let Some((name, version)) = pnpm_package_key_name_and_version(&key) else {
+            continue;
+        };
+        versions.entry(name.clone()).or_default().insert(version);
+        if let Some(integrity) = package.resolution.as_ref().and_then(|resolution| {
+            resolution
+                .integrity
+                .as_deref()
+                .filter(|integrity| !integrity.trim().is_empty())
+        }) {
+            integrities
+                .entry(name.clone())
+                .or_default()
+                .insert(integrity.to_owned());
+        }
+        if let Some(tarball) = package.resolution.as_ref().and_then(|resolution| {
+            resolution
+                .tarball
+                .as_deref()
+                .filter(|tarball| tarball.starts_with("https://"))
+        }) {
+            resolved.entry(name).or_default().insert(tarball.to_owned());
+        }
+    }
+
+    let lock_requirements = npm_requirements_from_lock_maps(versions, integrities, resolved);
+    requirements
+        .constraints
+        .extend(lock_requirements.constraints);
+    requirements
+        .npm_integrities
+        .extend(lock_requirements.npm_integrities);
+    requirements
+        .npm_resolved
+        .extend(lock_requirements.npm_resolved);
+    Ok(requirements)
+}
+
+fn collect_pnpm_importer_dependencies(
+    dependencies: BTreeMap<String, PnpmImporterDependency>,
+    requirements: &mut ProjectRequirements,
+    versions: &mut BTreeMap<String, BTreeSet<String>>,
+) {
+    for (name, dependency) in dependencies {
+        let Some(version) = dependency.locked_version().and_then(pnpm_locked_version) else {
+            continue;
+        };
+        requirements.specs.push(PackageSpec::new(
+            Ecosystem::Npm,
+            name.clone(),
+            Some(version.clone()),
+        ));
+        versions.entry(name).or_default().insert(version);
+    }
+}
+
+fn pnpm_locked_version(version: &str) -> Option<String> {
+    let version = version.trim();
+    if version.is_empty()
+        || version.starts_with("link:")
+        || version.starts_with("workspace:")
+        || version.starts_with("file:")
+        || version.starts_with("patch:")
+    {
+        return None;
+    }
+
+    let version = version.split('(').next().unwrap_or(version).trim();
+    (!version.is_empty()).then_some(version.to_owned())
+}
+
+fn pnpm_package_key_name_and_version(key: &str) -> Option<(String, String)> {
+    let key = key
+        .trim()
+        .trim_start_matches('/')
+        .split('(')
+        .next()
+        .unwrap_or_default();
+    let version_separator = key.rfind('@')?;
+    if version_separator == 0 {
+        return None;
+    }
+    let name = key[..version_separator].to_owned();
+    let version = key[version_separator + 1..].to_owned();
+    if name.is_empty() || version.is_empty() {
+        return None;
+    }
+    Some((name, version))
 }
 
 fn collect_yarn_lock_entry(
@@ -5733,6 +5862,51 @@ struct YarnLockEntry {
     integrity: Option<String>,
 }
 
+#[derive(Debug, Default, Deserialize)]
+struct PnpmLock {
+    #[serde(default)]
+    importers: BTreeMap<String, PnpmImporter>,
+    #[serde(default)]
+    packages: BTreeMap<String, PnpmPackageSnapshot>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct PnpmImporter {
+    #[serde(default)]
+    dependencies: BTreeMap<String, PnpmImporterDependency>,
+    #[serde(default, rename = "devDependencies")]
+    dev_dependencies: BTreeMap<String, PnpmImporterDependency>,
+    #[serde(default, rename = "optionalDependencies")]
+    optional_dependencies: BTreeMap<String, PnpmImporterDependency>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum PnpmImporterDependency {
+    Version(String),
+    Detail { version: Option<String> },
+}
+
+impl PnpmImporterDependency {
+    fn locked_version(&self) -> Option<&str> {
+        match self {
+            Self::Version(version) => Some(version),
+            Self::Detail { version } => version.as_deref(),
+        }
+    }
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct PnpmPackageSnapshot {
+    resolution: Option<PnpmResolution>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct PnpmResolution {
+    integrity: Option<String>,
+    tarball: Option<String>,
+}
+
 #[derive(Debug, Deserialize)]
 struct PyProjectToml {
     project: Option<PyProjectProject>,
@@ -6688,6 +6862,112 @@ dup@^2.0.0:
                 .get("npm:left-pad")
                 .map(String::as_str),
             Some("https://registry.yarnpkg.com/left-pad/-/left-pad-1.1.3.tgz")
+        );
+    }
+
+    #[test]
+    fn reads_pnpm_lock_constraints_integrities_urls_and_importers() {
+        let dir = tempfile::tempdir().unwrap();
+        let pnpm_lock = dir.path().join("pnpm-lock.yaml");
+        fs::write(
+            &pnpm_lock,
+            r#"lockfileVersion: '9.0'
+
+importers:
+  .:
+    dependencies:
+      left-pad:
+        specifier: ^1.0.0
+        version: 1.1.3
+    optionalDependencies:
+      is-even:
+        specifier: ^1.0.0
+        version: 1.0.0
+    devDependencies:
+      which:
+        specifier: ^2.0.0
+        version: 2.0.2
+
+packages:
+  left-pad@1.1.3:
+    resolution:
+      integrity: sha512-leftpad
+      tarball: https://registry.example.invalid/left-pad-1.1.3.tgz
+  is-even@1.0.0:
+    resolution:
+      integrity: sha512-iseven
+  which@2.0.2:
+    resolution:
+      integrity: sha512-which
+  dup@1.0.0:
+    resolution:
+      integrity: sha512-one
+  dup@2.0.0:
+    resolution:
+      integrity: sha512-two
+"#,
+        )
+        .unwrap();
+
+        let production = read_pnpm_lock_requirements(&pnpm_lock, false).unwrap();
+        assert!(has_spec(&production.specs, "left-pad", "1.1.3"));
+        assert!(has_spec(&production.specs, "is-even", "1.0.0"));
+        assert!(!production.specs.iter().any(|spec| spec.name == "which"));
+        assert_eq!(
+            production
+                .constraints
+                .get("npm:left-pad")
+                .map(String::as_str),
+            Some("1.1.3")
+        );
+        assert_eq!(
+            production
+                .npm_integrities
+                .get("npm:left-pad")
+                .and_then(|integrities| integrities.iter().next())
+                .map(String::as_str),
+            Some("sha512-leftpad")
+        );
+        assert_eq!(
+            production
+                .npm_resolved
+                .get("npm:left-pad")
+                .map(String::as_str),
+            Some("https://registry.example.invalid/left-pad-1.1.3.tgz")
+        );
+        assert!(!production.constraints.contains_key("npm:dup"));
+
+        let dev = read_pnpm_lock_requirements(&pnpm_lock, true).unwrap();
+        assert!(has_spec(&dev.specs, "which", "2.0.2"));
+    }
+
+    #[test]
+    fn discovers_pnpm_lock_requirements() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(
+            dir.path().join("pnpm-lock.yaml"),
+            r#"lockfileVersion: '9.0'
+importers:
+  .:
+    dependencies:
+      left-pad:
+        specifier: ^1.0.0
+        version: 1.1.3
+packages:
+  left-pad@1.1.3:
+    resolution: {}
+"#,
+        )
+        .unwrap();
+
+        let discovered = discover_project_requirements(dir.path()).unwrap();
+        assert!(has_spec(&discovered.specs, "left-pad", "1.1.3"));
+        assert_eq!(
+            discovered
+                .constraints
+                .get("npm:left-pad")
+                .map(String::as_str),
+            Some("1.1.3")
         );
     }
 
