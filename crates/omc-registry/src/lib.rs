@@ -683,7 +683,11 @@ pub fn install_project(options: &LinkOptions) -> Result<InstallReport> {
         &report.npm_bin_dir,
         options.include_dev_dependencies,
     )?;
-    install_python_local_paths(&options.python_local_paths, &report.python_site_packages)?;
+    report.python_scripts += install_python_local_paths(
+        &options.python_local_paths,
+        &report.python_site_packages,
+        &report.python_bin_dir,
+    )?;
     Ok(report)
 }
 
@@ -706,7 +710,11 @@ pub fn install_locked_project(options: &LinkOptions) -> Result<InstallReport> {
         &report.npm_bin_dir,
         options.include_dev_dependencies,
     )?;
-    install_python_local_paths(&options.python_local_paths, &report.python_site_packages)?;
+    report.python_scripts += install_python_local_paths(
+        &options.python_local_paths,
+        &report.python_site_packages,
+        &report.python_bin_dir,
+    )?;
     Ok(report)
 }
 
@@ -4051,8 +4059,13 @@ fn install_lock(project_dir: &Path, lock: &OmcLock) -> Result<InstallReport> {
     Ok(report)
 }
 
-fn install_python_local_paths(local_paths: &[PathBuf], site_packages: &Path) -> Result<()> {
+fn install_python_local_paths(
+    local_paths: &[PathBuf],
+    site_packages: &Path,
+    bin_dir: &Path,
+) -> Result<usize> {
     let mut lines = BTreeSet::new();
+    let mut entry_points = Vec::new();
     for path in local_paths {
         let path = fs::canonicalize(path).map_err(|error| {
             OmcRegistryError::UnsupportedRequirement(format!(
@@ -4066,6 +4079,7 @@ fn install_python_local_paths(local_paths: &[PathBuf], site_packages: &Path) -> 
                 path.display()
             )));
         }
+        entry_points.extend(read_python_local_entry_points(&path)?);
         let import_path = if path.join("src").is_dir() {
             path.join("src")
         } else {
@@ -4082,7 +4096,7 @@ fn install_python_local_paths(local_paths: &[PathBuf], site_packages: &Path) -> 
     }
 
     if lines.is_empty() {
-        return Ok(());
+        return Ok(0);
     }
 
     let local_paths_file = site_packages
@@ -4095,7 +4109,7 @@ fn install_python_local_paths(local_paths: &[PathBuf], site_packages: &Path) -> 
         local_paths_file,
         format!("{}\n", lines.into_iter().collect::<Vec<_>>().join("\n")),
     )?;
-    Ok(())
+    install_python_entry_point_scripts(&entry_points, bin_dir)
 }
 
 fn python_local_paths_file(project_dir: &Path) -> PathBuf {
@@ -4582,23 +4596,60 @@ fn install_npm_bins(package_dir: &Path, package_name: &str, bin_dir: &Path) -> R
 }
 
 fn install_python_entry_points(entry_points: &[String], bin_dir: &Path) -> Result<usize> {
+    let entries = entry_points
+        .iter()
+        .flat_map(|content| parse_console_scripts(content))
+        .collect::<Vec<_>>();
+    install_python_entry_point_scripts(&entries, bin_dir)
+}
+
+fn install_python_entry_point_scripts(
+    entry_points: &[PythonEntryPoint],
+    bin_dir: &Path,
+) -> Result<usize> {
     fs::create_dir_all(bin_dir)?;
     let mut installed = 0;
 
-    for content in entry_points {
-        for entry in parse_console_scripts(content) {
-            if !is_safe_script_name(&entry.name) {
-                continue;
-            }
-            let target = bin_dir.join(&entry.name);
-            remove_path_if_exists(&target)?;
-            fs::write(&target, python_entry_point_script(&entry))?;
-            make_executable(&target)?;
-            installed += 1;
+    for entry in entry_points {
+        if !is_safe_script_name(&entry.name) {
+            continue;
         }
+        let target = bin_dir.join(&entry.name);
+        remove_path_if_exists(&target)?;
+        fs::write(&target, python_entry_point_script(entry))?;
+        make_executable(&target)?;
+        installed += 1;
     }
 
     Ok(installed)
+}
+
+fn read_python_local_entry_points(package_dir: &Path) -> Result<Vec<PythonEntryPoint>> {
+    let pyproject = package_dir.join("pyproject.toml");
+    if !pyproject.exists() {
+        return Ok(Vec::new());
+    }
+
+    let pyproject = toml::from_str::<PyProjectToml>(&fs::read_to_string(pyproject)?)?;
+    let mut entries = Vec::new();
+    if let Some(project) = pyproject.project {
+        collect_python_script_entries(project.scripts, &mut entries);
+    }
+    if let Some(poetry) = pyproject.tool.and_then(|tool| tool.poetry) {
+        collect_python_script_entries(poetry.scripts, &mut entries);
+    }
+    Ok(entries)
+}
+
+fn collect_python_script_entries(
+    scripts: BTreeMap<String, String>,
+    entries: &mut Vec<PythonEntryPoint>,
+) {
+    entries.extend(
+        scripts
+            .into_iter()
+            .filter_map(|(name, target)| python_entry_point_from_script(&name, &target)),
+    );
 }
 
 fn parse_console_scripts(content: &str) -> Vec<PythonEntryPoint> {
@@ -4634,6 +4685,21 @@ fn parse_console_scripts(content: &str) -> Vec<PythonEntryPoint> {
     }
 
     entries
+}
+
+fn python_entry_point_from_script(name: &str, target: &str) -> Option<PythonEntryPoint> {
+    let target = target.split('[').next().unwrap_or(target).trim();
+    let (module, function) = target.split_once(':')?;
+    let module = module.trim();
+    let function = function.trim();
+    if module.is_empty() || function.is_empty() {
+        return None;
+    }
+    Some(PythonEntryPoint {
+        name: name.trim().to_owned(),
+        module: module.to_owned(),
+        function: function.to_owned(),
+    })
 }
 
 fn python_entry_point_script(entry: &PythonEntryPoint) -> String {
@@ -7691,6 +7757,8 @@ struct PyProjectProject {
     dependencies: Vec<String>,
     #[serde(default, rename = "optional-dependencies")]
     optional_dependencies: BTreeMap<String, Vec<String>>,
+    #[serde(default)]
+    scripts: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -7716,6 +7784,8 @@ struct PoetryProject {
     dev_dependencies: BTreeMap<String, PoetryDependency>,
     #[serde(default)]
     extras: BTreeMap<String, Vec<String>>,
+    #[serde(default)]
+    scripts: BTreeMap<String, String>,
     #[serde(default)]
     group: BTreeMap<String, PoetryGroup>,
 }
@@ -9457,14 +9527,31 @@ packages:
         let src = local.join("src");
         fs::create_dir_all(src.join("localpkg")).unwrap();
         let site_packages = dir.path().join(".omc").join("python").join("site-packages");
+        let bin_dir = dir.path().join(".omc").join("python").join("bin");
         fs::create_dir_all(&site_packages).unwrap();
+        fs::write(
+            local.join("pyproject.toml"),
+            r#"
+            [project]
+            name = "localpkg"
 
-        install_python_local_paths(std::slice::from_ref(&local), &site_packages).unwrap();
+            [project.scripts]
+            local-cli = "localpkg.cli:main"
+            "#,
+        )
+        .unwrap();
+
+        let scripts =
+            install_python_local_paths(std::slice::from_ref(&local), &site_packages, &bin_dir)
+                .unwrap();
+        assert_eq!(scripts, 1);
 
         let expected = fs::canonicalize(src).unwrap();
         let content =
             fs::read_to_string(dir.path().join(".omc").join("python").join("local-paths")).unwrap();
         assert_eq!(content.trim(), expected.to_string_lossy());
+        let script = fs::read_to_string(bin_dir.join("local-cli")).unwrap();
+        assert!(script.contains("from localpkg.cli import main"));
     }
 
     #[test]
