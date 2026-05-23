@@ -8,10 +8,12 @@ use std::sync::OnceLock;
 use std::{env, fmt};
 
 use base64::{engine::general_purpose::STANDARD, Engine as _};
+use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use flate2::read::GzDecoder;
 use omc_cap::{Capability, Policy};
 use omc_format::{BehaviorType, CapOp, Function, HttpRequest, Module, Op, Value, VirtualPath};
 use omc_verify::{verify_module, VerifyFinding};
+use rand_core::OsRng;
 use reqwest::blocking::Client;
 use semver::Version;
 use serde::{Deserialize, Serialize};
@@ -26,6 +28,7 @@ pub type Result<T> = std::result::Result<T, OmcRegistryError>;
 const LOCKFILE: &str = "omc.lock";
 const MANIFEST: &str = "omc.toml";
 const ARTIFACT_SCHEMA: u32 = 1;
+const ARTIFACT_SIGNING_KEY: &str = "artifact-ed25519.key";
 const MAX_FILE_BYTES: u64 = 2 * 1024 * 1024;
 
 #[derive(Debug, Error)]
@@ -488,6 +491,8 @@ pub struct OmcArtifact {
     pub files_scanned: usize,
     pub capabilities: Vec<CapabilityFinding>,
     pub verifier_findings: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signature: Option<ArtifactSignature>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -495,6 +500,15 @@ pub struct ArtifactPackage {
     pub ecosystem: Ecosystem,
     pub name: String,
     pub version: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ArtifactSignature {
+    pub algorithm: String,
+    pub key_id: String,
+    pub public_key: String,
+    pub payload_sha256: String,
+    pub signature: String,
 }
 
 #[derive(Debug, Clone)]
@@ -1759,7 +1773,7 @@ fn link_package_inner(
         Behavior::HostCapability
     };
 
-    let artifact = OmcArtifact {
+    let mut artifact = OmcArtifact {
         schema: ARTIFACT_SCHEMA,
         package: ArtifactPackage {
             ecosystem: resolved.ecosystem,
@@ -1790,7 +1804,9 @@ fn link_package_inner(
         files_scanned: profile.files_scanned,
         capabilities: profile.capabilities,
         verifier_findings: verifier_findings.clone(),
+        signature: None,
     };
+    sign_artifact(&options.project_dir, &mut artifact)?;
     let artifact_path = write_artifact(&options.project_dir, &resolved, &artifact)?;
 
     let locked = LockedPackage {
@@ -9171,6 +9187,134 @@ fn write_artifact(
     Ok(artifact_path)
 }
 
+fn sign_artifact(project_dir: &Path, artifact: &mut OmcArtifact) -> Result<()> {
+    artifact.signature = None;
+    let payload = serde_json::to_vec(artifact)?;
+    let signing_key = read_or_create_artifact_signing_key(project_dir)?;
+    let verifying_key = signing_key.verifying_key();
+    let signature = signing_key.sign(&payload);
+    let public_key = verifying_key.to_bytes();
+
+    artifact.signature = Some(ArtifactSignature {
+        algorithm: "ed25519".to_owned(),
+        key_id: sha256_hex(&public_key)[..16].to_owned(),
+        public_key: STANDARD.encode(public_key),
+        payload_sha256: sha256_hex(&payload),
+        signature: STANDARD.encode(signature.to_bytes()),
+    });
+    Ok(())
+}
+
+pub fn verify_artifact_signature(artifact: &OmcArtifact) -> Result<()> {
+    let signature = artifact.signature.as_ref().ok_or_else(|| {
+        OmcRegistryError::UnsupportedInstallArtifact("artifact is unsigned".to_owned())
+    })?;
+    if signature.algorithm != "ed25519" {
+        return Err(OmcRegistryError::UnsupportedInstallArtifact(format!(
+            "unsupported artifact signature algorithm `{}`",
+            signature.algorithm
+        )));
+    }
+
+    let mut unsigned = artifact.clone();
+    unsigned.signature = None;
+    let payload = serde_json::to_vec(&unsigned)?;
+    let actual_payload_sha256 = sha256_hex(&payload);
+    if !signature
+        .payload_sha256
+        .eq_ignore_ascii_case(&actual_payload_sha256)
+    {
+        return Err(OmcRegistryError::DigestMismatch {
+            name: artifact.package.name.clone(),
+            expected: format!("sha256:{}", signature.payload_sha256),
+            actual: format!("sha256:{actual_payload_sha256}"),
+        });
+    }
+
+    let public_key = decode_base64_array::<32>(&signature.public_key, "artifact public key")?;
+    let verifying_key = VerifyingKey::from_bytes(&public_key).map_err(|error| {
+        OmcRegistryError::UnsupportedInstallArtifact(format!(
+            "invalid artifact public key: {error}"
+        ))
+    })?;
+    let signature_bytes = STANDARD.decode(&signature.signature).map_err(|error| {
+        OmcRegistryError::UnsupportedInstallArtifact(format!(
+            "invalid artifact signature encoding: {error}"
+        ))
+    })?;
+    let signature = Signature::from_slice(&signature_bytes).map_err(|error| {
+        OmcRegistryError::UnsupportedInstallArtifact(format!("invalid artifact signature: {error}"))
+    })?;
+    verifying_key.verify(&payload, &signature).map_err(|error| {
+        OmcRegistryError::UnsupportedInstallArtifact(format!(
+            "artifact signature verification failed: {error}"
+        ))
+    })
+}
+
+fn read_or_create_artifact_signing_key(project_dir: &Path) -> Result<SigningKey> {
+    let key_path = artifact_signing_key_path(project_dir);
+    if key_path.exists() {
+        let encoded = fs::read_to_string(&key_path)?;
+        let bytes = decode_base64_array::<32>(encoded.trim(), "artifact signing key")?;
+        return Ok(SigningKey::from_bytes(&bytes));
+    }
+
+    if let Some(parent) = key_path.parent() {
+        fs::create_dir_all(parent)?;
+        restrict_private_key_dir(parent)?;
+    }
+    let signing_key = SigningKey::generate(&mut OsRng);
+    fs::write(&key_path, STANDARD.encode(signing_key.to_bytes()))?;
+    restrict_private_key_file(&key_path)?;
+    Ok(signing_key)
+}
+
+fn artifact_signing_key_path(project_dir: &Path) -> PathBuf {
+    project_dir
+        .join(".omc")
+        .join("keys")
+        .join(ARTIFACT_SIGNING_KEY)
+}
+
+fn decode_base64_array<const N: usize>(encoded: &str, description: &str) -> Result<[u8; N]> {
+    let bytes = STANDARD.decode(encoded).map_err(|error| {
+        OmcRegistryError::UnsupportedInstallArtifact(format!("{description} is invalid: {error}"))
+    })?;
+    bytes.try_into().map_err(|bytes: Vec<u8>| {
+        OmcRegistryError::UnsupportedInstallArtifact(format!(
+            "{description} must be {N} bytes, got {}",
+            bytes.len()
+        ))
+    })
+}
+
+#[cfg(unix)]
+fn restrict_private_key_dir(path: &Path) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn restrict_private_key_dir(_path: &Path) -> Result<()> {
+    Ok(())
+}
+
+#[cfg(unix)]
+fn restrict_private_key_file(path: &Path) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn restrict_private_key_file(_path: &Path) -> Result<()> {
+    Ok(())
+}
+
 #[derive(Debug, Clone)]
 struct ArchiveProfile {
     files_scanned: usize,
@@ -14625,6 +14769,7 @@ wheels = [
             files_scanned: 1,
             capabilities: findings,
             verifier_findings: vec!["denied".to_owned()],
+            signature: None,
         };
 
         let json = serde_json::to_string(&artifact).unwrap();
@@ -14636,6 +14781,62 @@ wheels = [
         assert!(matches!(
             decoded.microcode.functions[0].code[0],
             Op::Cap(CapOp::EnvRead { .. })
+        ));
+    }
+
+    #[test]
+    fn signs_and_verifies_artifact_payloads() {
+        let dir = tempfile::tempdir().unwrap();
+        let package = ResolvedPackage {
+            ecosystem: Ecosystem::Npm,
+            name: "signed-pkg".to_owned(),
+            version: "1.0.0".to_owned(),
+            source_url: "https://example.invalid/signed-pkg.tgz".to_owned(),
+            download_url: None,
+            local_path: None,
+            filename: "signed-pkg.tgz".to_owned(),
+            expected_sha256: None,
+            expected_sha1: None,
+            expected_integrity: None,
+            npm_direct_tarball: false,
+            pypi_direct_wheel: false,
+            npm_scripts: BTreeMap::new(),
+            platform_compatible: true,
+            dependencies: Vec::new(),
+        };
+        let mut artifact = OmcArtifact {
+            schema: ARTIFACT_SCHEMA,
+            package: ArtifactPackage {
+                ecosystem: package.ecosystem,
+                name: package.name.clone(),
+                version: package.version.clone(),
+            },
+            source_url: package.source_url.clone(),
+            source_sha256: "0".repeat(64),
+            compiler: "test".to_owned(),
+            microcode: module_from_profile(&package, &[]),
+            behavior: Behavior::Pure,
+            verdict: Verdict::Accepted,
+            grants: Vec::new(),
+            dependencies: Vec::new(),
+            optional_dependencies: Vec::new(),
+            files_scanned: 0,
+            capabilities: Vec::new(),
+            verifier_findings: Vec::new(),
+            signature: None,
+        };
+
+        sign_artifact(dir.path(), &mut artifact).unwrap();
+
+        let signature = artifact.signature.as_ref().unwrap();
+        assert_eq!(signature.algorithm, "ed25519");
+        assert!(dir.path().join(".omc/keys/artifact-ed25519.key").exists());
+        verify_artifact_signature(&artifact).unwrap();
+
+        artifact.source_sha256 = "1".repeat(64);
+        assert!(matches!(
+            verify_artifact_signature(&artifact).unwrap_err(),
+            OmcRegistryError::DigestMismatch { .. }
         ));
     }
 

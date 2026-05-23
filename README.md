@@ -309,6 +309,7 @@ Supported now:
 - source artifact download and cache
 - `omc.toml` and `omc.lock`
 - structured OMC microcode serialization inside generated package artifacts
+- local Ed25519 signatures for generated package artifacts
 - persistent `[policy].allow` grants in `omc.toml`
 - `omc allow` for editing persistent project policy grants
 - `omc add`, `omc add --dev`, and `omc remove` for one or more OMC-managed
@@ -352,7 +353,6 @@ Supported now:
 Not implemented yet:
 
 - real JavaScript or Python frontend
-- package artifact signing
 - full control-flow graph verification
 - imports/linking across package cells
 - native/Wasm/Cranelift backend

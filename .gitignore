@@ -1,3 +1,4 @@
 /target/
 /.omc/cache/
+/.omc/keys/
 .DS_Store
