@@ -2597,6 +2597,8 @@ fn read_uv_lock_requirements(
     include_dev_dependencies: bool,
 ) -> Result<ProjectRequirements> {
     let lock = toml::from_str::<UvLock>(&fs::read_to_string(path)?)?;
+    let base_dir = path.parent().unwrap_or_else(|| Path::new("."));
+    let local_sources = uv_local_sources(&lock, base_dir);
     let mut requirements = ProjectRequirements::default();
     let mut direct_specs = Vec::new();
 
@@ -2617,18 +2619,41 @@ fn read_uv_lock_requirements(
             for wheel in &package.wheels {
                 collect_uv_dist_hash(Some(wheel), &key, &mut requirements);
             }
-        } else if let Some(metadata) = package.metadata {
+        } else {
+            let Some(metadata) = package.metadata else {
+                continue;
+            };
             for requirement in metadata.requires_dist {
-                if let Some(spec) = uv_requirement_spec(requirement) {
-                    direct_specs.push(spec);
+                if let Some(requirement) = uv_dependency_requirement(
+                    requirement,
+                    base_dir,
+                    &BTreeSet::new(),
+                    &local_sources,
+                )? {
+                    match requirement {
+                        PythonDependencyRequirement::Spec(spec) => direct_specs.push(spec),
+                        PythonDependencyRequirement::LocalPath(path) => {
+                            push_python_local_path(&mut requirements, path)
+                        }
+                    }
                 }
             }
 
             if include_dev_dependencies {
                 for requirements_for_group in metadata.requires_dev.into_values() {
                     for requirement in requirements_for_group {
-                        if let Some(spec) = uv_requirement_spec(requirement) {
-                            direct_specs.push(spec);
+                        if let Some(requirement) = uv_dependency_requirement(
+                            requirement,
+                            base_dir,
+                            &BTreeSet::new(),
+                            &local_sources,
+                        )? {
+                            match requirement {
+                                PythonDependencyRequirement::Spec(spec) => direct_specs.push(spec),
+                                PythonDependencyRequirement::LocalPath(path) => {
+                                    push_python_local_path(&mut requirements, path)
+                                }
+                            }
                         }
                     }
                 }
@@ -2651,6 +2676,39 @@ fn read_uv_lock_requirements(
     Ok(requirements)
 }
 
+fn push_python_local_path(requirements: &mut ProjectRequirements, path: PathBuf) {
+    if !requirements.python_local_paths.contains(&path) {
+        requirements.python_local_paths.push(path);
+    }
+}
+
+fn uv_local_sources(lock: &UvLock, base_dir: &Path) -> BTreeMap<String, PathBuf> {
+    lock.package
+        .iter()
+        .filter_map(|package| {
+            let source = package.source.as_ref()?;
+            let path = uv_source_local_path(source, base_dir);
+            path.map(|path| (normalize_pypi_name(&package.name), path))
+        })
+        .collect()
+}
+
+fn uv_local_source_map(
+    sources: &BTreeMap<String, UvProjectSource>,
+    base_dir: &Path,
+) -> BTreeMap<String, PathBuf> {
+    sources
+        .iter()
+        .filter_map(|(name, source)| {
+            let path = source.path.as_deref()?;
+            Some((
+                normalize_pypi_name(name),
+                resolved_local_path(path, base_dir),
+            ))
+        })
+        .collect()
+}
+
 fn collect_uv_dist_hash(
     dist: Option<&UvDistribution>,
     key: &str,
@@ -2670,14 +2728,37 @@ fn collect_uv_dist_hash(
         .insert(hash);
 }
 
-fn uv_requirement_spec(requirement: UvRequirement) -> Option<PackageSpec> {
+enum PythonDependencyRequirement {
+    Spec(PackageSpec),
+    LocalPath(PathBuf),
+}
+
+fn uv_dependency_requirement(
+    requirement: UvRequirement,
+    base_dir: &Path,
+    active_extras: &BTreeSet<String>,
+    local_sources: &BTreeMap<String, PathBuf>,
+) -> Result<Option<PythonDependencyRequirement>> {
     if requirement
         .marker
         .as_deref()
-        .map(|marker| !pypi_marker_applies(marker, &BTreeSet::new()))
+        .map(|marker| !pypi_marker_applies(marker, active_extras))
         .unwrap_or(false)
     {
-        return None;
+        return Ok(None);
+    }
+
+    if let Some(path) = uv_requirement_local_path(&requirement, base_dir)? {
+        return Ok(Some(PythonDependencyRequirement::LocalPath(path)));
+    }
+    if let Some(path) = local_sources.get(&normalize_pypi_name(&requirement.name)) {
+        if !path.is_dir() {
+            return Err(OmcRegistryError::UnsupportedRequirement(format!(
+                "uv local source `{}` must point to an existing directory",
+                path.display()
+            )));
+        }
+        return Ok(Some(PythonDependencyRequirement::LocalPath(path.clone())));
     }
 
     let mut extras = requirement.extras.into_iter().collect::<BTreeSet<_>>();
@@ -2688,14 +2769,54 @@ fn uv_requirement_spec(requirement: UvRequirement) -> Option<PackageSpec> {
         .filter(|extra| !extra.is_empty())
         .collect::<BTreeSet<_>>();
 
-    Some(PackageSpec::with_extras(
-        Ecosystem::Pypi,
-        normalize_pypi_name(&requirement.name),
-        requirement
-            .specifier
-            .filter(|specifier| !specifier.trim().is_empty()),
-        extras,
-    ))
+    Ok(Some(PythonDependencyRequirement::Spec(
+        PackageSpec::with_extras(
+            Ecosystem::Pypi,
+            normalize_pypi_name(&requirement.name),
+            requirement
+                .specifier
+                .filter(|specifier| !specifier.trim().is_empty()),
+            extras,
+        ),
+    )))
+}
+
+fn uv_source_local_path(source: &UvPackageSource, base_dir: &Path) -> Option<PathBuf> {
+    let path = source
+        .editable
+        .as_deref()
+        .or(source.directory.as_deref())
+        .or(source.path.as_deref())?;
+    Some(resolved_local_path(path, base_dir))
+}
+
+fn uv_requirement_local_path(
+    requirement: &UvRequirement,
+    base_dir: &Path,
+) -> Result<Option<PathBuf>> {
+    let Some(path) = requirement
+        .editable
+        .as_deref()
+        .or(requirement.directory.as_deref())
+        .or(requirement.path.as_deref())
+    else {
+        return Ok(None);
+    };
+    uv_local_directory_path(path, base_dir)
+}
+
+fn uv_local_directory_path(path: &str, base_dir: &Path) -> Result<Option<PathBuf>> {
+    let path = resolved_local_path(path, base_dir);
+    if path.extension().and_then(|ext| ext.to_str()) == Some("whl") {
+        return Ok(None);
+    }
+    if path.is_dir() {
+        return Ok(Some(path));
+    }
+    Err(OmcRegistryError::UnsupportedRequirement(format!(
+        "uv local source `{}` must point to an existing directory",
+        path.display()
+    )))
 }
 
 fn read_pylock_requirements(path: &Path) -> Result<ProjectRequirements> {
@@ -3184,6 +3305,12 @@ fn read_pyproject_requirements(
     let pyproject = toml::from_str::<PyProjectToml>(&fs::read_to_string(path)?)?;
     let mut discovered = ProjectRequirements::default();
     let base_dir = path.parent().unwrap_or_else(|| Path::new("."));
+    let uv_sources = pyproject
+        .tool
+        .as_ref()
+        .and_then(|tool| tool.uv.as_ref())
+        .map(|uv| uv_local_source_map(&uv.sources, base_dir))
+        .unwrap_or_default();
 
     if let Some(project) = pyproject.project {
         for dependency in project.dependencies {
@@ -3192,6 +3319,7 @@ fn read_pyproject_requirements(
                 &dependency,
                 &BTreeSet::new(),
                 base_dir,
+                &uv_sources,
             )?;
         }
 
@@ -3209,6 +3337,7 @@ fn read_pyproject_requirements(
                         dependency,
                         project_extras,
                         base_dir,
+                        &uv_sources,
                     )?;
                 }
             }
@@ -3220,6 +3349,7 @@ fn read_pyproject_requirements(
         project_extras,
         include_dev_dependencies,
         base_dir,
+        &uv_sources,
     )?;
     discovered.specs.extend(group_requirements.specs);
     for (key, hashes) in group_requirements.hashes {
@@ -3287,6 +3417,7 @@ fn read_pyproject_dependency_groups(
     project_extras: &BTreeSet<String>,
     include_dev_dependencies: bool,
     base_dir: &Path,
+    local_sources: &BTreeMap<String, PathBuf>,
 ) -> Result<ProjectRequirements> {
     let dependency_groups = dependency_groups
         .into_iter()
@@ -3306,6 +3437,7 @@ fn read_pyproject_dependency_groups(
                 &mut BTreeSet::new(),
                 &mut requirements,
                 base_dir,
+                local_sources,
             )?;
         }
     }
@@ -3318,6 +3450,7 @@ fn collect_pyproject_dependency_group(
     stack: &mut BTreeSet<String>,
     requirements: &mut ProjectRequirements,
     base_dir: &Path,
+    local_sources: &BTreeMap<String, PathBuf>,
 ) -> Result<()> {
     if !stack.insert(group.to_owned()) {
         return Err(OmcRegistryError::UnsupportedRequirement(format!(
@@ -3339,6 +3472,7 @@ fn collect_pyproject_dependency_group(
                     requirement,
                     &BTreeSet::new(),
                     base_dir,
+                    local_sources,
                 )?;
             }
             PyProjectDependencyGroupItem::Include { include_group } => {
@@ -3349,6 +3483,7 @@ fn collect_pyproject_dependency_group(
                     stack,
                     requirements,
                     base_dir,
+                    local_sources,
                 )?;
             }
         }
@@ -6553,8 +6688,10 @@ fn collect_pypi_project_requirement(
     requirement: &str,
     active_extras: &BTreeSet<String>,
     base_dir: &Path,
+    local_sources: &BTreeMap<String, PathBuf>,
 ) -> Result<()> {
-    let Some(requirement) = parse_pypi_project_requirement(requirement, active_extras, base_dir)?
+    let Some(requirement) =
+        parse_pypi_project_requirement(requirement, active_extras, base_dir, local_sources)?
     else {
         return Ok(());
     };
@@ -6582,6 +6719,7 @@ fn parse_pypi_project_requirement(
     requirement: &str,
     active_extras: &BTreeSet<String>,
     base_dir: &Path,
+    local_sources: &BTreeMap<String, PathBuf>,
 ) -> Result<Option<PypiProjectRequirement>> {
     let direct_requirement = parse_pypi_direct_requirement(requirement, active_extras).or(
         parse_pypi_local_direct_requirement(requirement, active_extras, base_dir)?,
@@ -6605,10 +6743,20 @@ fn parse_pypi_project_requirement(
         ));
     }
 
-    Ok(
-        parse_pypi_requirement_with_extras(requirement, active_extras)
-            .map(|spec| PypiProjectRequirement::Spec(spec, BTreeSet::new())),
-    )
+    let Some(spec) = parse_pypi_requirement_with_extras(requirement, active_extras) else {
+        return Ok(None);
+    };
+    if let Some(path) = local_sources.get(&spec.name) {
+        if !path.is_dir() {
+            return Err(OmcRegistryError::UnsupportedRequirement(format!(
+                "uv local source `{}` must point to an existing directory",
+                path.display()
+            )));
+        }
+        return Ok(Some(PypiProjectRequirement::LocalPath(path.clone())));
+    }
+
+    Ok(Some(PypiProjectRequirement::Spec(spec, BTreeSet::new())))
 }
 
 fn pypi_direct_file_url_local_directory(direct_url: Option<&str>) -> Result<Option<PathBuf>> {
@@ -7829,6 +7977,18 @@ enum PyProjectDependencyGroupItem {
 #[derive(Debug, Deserialize)]
 struct PyProjectTool {
     poetry: Option<PoetryProject>,
+    uv: Option<UvProject>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct UvProject {
+    #[serde(default)]
+    sources: BTreeMap<String, UvProjectSource>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct UvProjectSource {
+    path: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -7951,6 +8111,9 @@ struct UvLockedPackage {
 #[derive(Debug, Default, Deserialize)]
 struct UvPackageSource {
     registry: Option<String>,
+    editable: Option<String>,
+    directory: Option<String>,
+    path: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -7971,6 +8134,9 @@ struct UvRequirement {
     name: String,
     specifier: Option<String>,
     marker: Option<String>,
+    editable: Option<String>,
+    directory: Option<String>,
+    path: Option<String>,
     #[serde(default)]
     extras: Vec<String>,
     #[serde(default)]
@@ -9726,6 +9892,10 @@ packages:
     fn reads_uv_lock_specs_constraints_and_hashes() {
         let dir = tempfile::tempdir().unwrap();
         let uv_lock = dir.path().join("uv.lock");
+        let local_pkg = dir.path().join("vendor/localpkg");
+        let dev_local = dir.path().join("vendor/devlocal");
+        fs::create_dir_all(&local_pkg).unwrap();
+        fs::create_dir_all(&dev_local).unwrap();
         let idna_sdist = "a".repeat(64);
         let idna_wheel = "b".repeat(64);
         let requests_wheel = "c".repeat(64);
@@ -9754,6 +9924,16 @@ wheels = [
 ]
 
 [[package]]
+name = "localpkg"
+version = "0.1.0"
+source = {{ editable = "vendor/localpkg" }}
+
+[[package]]
+name = "devlocal"
+version = "0.1.0"
+source = {{ directory = "vendor/devlocal" }}
+
+[[package]]
 name = "omc-uv-demo"
 version = "0.1.0"
 source = {{ virtual = "." }}
@@ -9761,12 +9941,14 @@ source = {{ virtual = "." }}
 [package.metadata]
 requires-dist = [
   {{ name = "requests", extras = ["socks"], specifier = "==2.32.3" }},
+  {{ name = "localpkg", editable = "vendor/localpkg" }},
   {{ name = "old-python-only", specifier = "==0.1.0", marker = "python_version < '2'" }},
 ]
 
 [package.metadata.requires-dev]
 dev = [
   {{ name = "pytest", specifier = "==8.2.0" }},
+  {{ name = "devlocal" }},
 ]
 "#
             ),
@@ -9786,6 +9968,7 @@ dev = [
             .specs
             .iter()
             .any(|spec| spec.name == "old-python-only"));
+        assert_eq!(production.python_local_paths, vec![local_pkg.clone()]);
         assert_eq!(
             production.constraints.get("pypi:idna").map(String::as_str),
             Some("3.7")
@@ -9815,6 +9998,7 @@ dev = [
             .specs
             .iter()
             .any(|spec| spec.name == "pytest" && spec.version.as_deref() == Some("==8.2.0")));
+        assert_eq!(dev.python_local_paths, vec![local_pkg, dev_local]);
     }
 
     #[test]
@@ -10336,6 +10520,7 @@ wheels = [
             .join("local_idna-3.7-py3-none-any.whl");
         fs::create_dir_all(wheel.parent().unwrap()).unwrap();
         fs::create_dir_all(dir.path().join("vendor/local-package")).unwrap();
+        fs::create_dir_all(dir.path().join("vendor/uv-local")).unwrap();
         fs::create_dir_all(dir.path().join("vendor/extra-local")).unwrap();
         fs::create_dir_all(dir.path().join("vendor/group-local")).unwrap();
         fs::write(&wheel, b"not a real wheel").unwrap();
@@ -10347,6 +10532,7 @@ wheels = [
                 "idna==3.7",
                 "local-idna @ ./wheels/local_idna-3.7-py3-none-any.whl#sha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
                 "local-package @ ./vendor/local-package",
+                "uv-local",
                 "skipped-local @ ./missing; sys_platform == 'win32'",
                 "colorama; extra == 'windows'"
             ]
@@ -10363,6 +10549,9 @@ wheels = [
             typing = ["typing-extensions==4.12.2"]
             test = ["pytest==8.2.0", { include-group = "typing" }]
             dev = ["ruff==0.5.0", "group-local @ ./vendor/group-local", { include-group = "test" }]
+
+            [tool.uv.sources]
+            uv-local = { path = "vendor/uv-local" }
             "#,
         )
         .unwrap();
@@ -10383,7 +10572,10 @@ wheels = [
         );
         assert_eq!(
             base.python_local_paths,
-            vec![dir.path().join("vendor/local-package")]
+            vec![
+                dir.path().join("vendor/local-package"),
+                dir.path().join("vendor/uv-local")
+            ]
         );
 
         let default_dev = read_pyproject_requirements(&pyproject, &BTreeSet::new(), true).unwrap();
