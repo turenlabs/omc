@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::io::Read as _;
 use std::net::Ipv4Addr;
 use std::path::{Path, PathBuf};
@@ -345,6 +345,9 @@ enum NpmCompatAction {
     List {
         action: NpmListAction,
     },
+    Query {
+        action: NpmQueryAction,
+    },
     Explain {
         specs: Vec<String>,
         json: bool,
@@ -457,6 +460,17 @@ enum NpmMaintenanceCommand {
 struct NpmListAction {
     json: bool,
     packages: Vec<String>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct NpmQueryAction {
+    selector: String,
+    workspaces: Vec<String>,
+    all_workspaces: bool,
+    include_workspace_root: bool,
+    package_lock_only: bool,
+    expect_results: Option<bool>,
+    expect_result_count: Option<usize>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -2509,6 +2523,7 @@ fn run_npm_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
             action.json,
             &action.packages,
         )?,
+        NpmCompatAction::Query { action } => return print_npm_query(project_dir, action),
         NpmCompatAction::Explain { specs, json } => {
             return print_npm_explain(project_dir, &specs, json)
         }
@@ -3278,6 +3293,14 @@ fn npm_help_text(topic: Option<&str>) -> String {
                 "Aliases: ls, ll, la. Common flags: --json, --depth, --omit, --include.",
             ],
         ),
+        Some("query") => npm_command_help(
+            "npm query <selector>",
+            &[
+                "Return dependency objects from omc.lock and installed package metadata as JSON.",
+                "Supports common selectors: *, :root > *, #name, [name=...], [version=...], .prod, .dev, .optional, .peer, .workspace, :empty, :has(*), :not(...), and :attr(scripts, [name]).",
+                "Supports --workspace, --workspaces, --include-workspace-root, --package-lock-only, --expect-results, and --expect-result-count.",
+            ],
+        ),
         Some("explain") => npm_command_help(
             "npm explain <package-spec>...",
             &[
@@ -3509,7 +3532,7 @@ fn npm_general_help_text() -> String {
         "npm <command>",
         &[
             "OMC npm compatibility runs supported npm workflows through OMC's verifier, lockfile, cache, and project-local runtime paths.",
-            "Supported commands: install, link, install-test, ci, install-ci-test, remove, run, test, start, stop, restart, exec, list, explain, audit, outdated, fund, prune, dedupe, rebuild, cache, pkg, version, pack, publish, unpublish, deprecate, undeprecate, diff, search, star, unstar, stars, ping, whoami, login, adduser, logout, token, profile, owner, access, org, team, dist-tag, sbom, view, docs, repo, bugs, home, config, init, bin, root, prefix.",
+            "Supported commands: install, link, install-test, ci, install-ci-test, remove, run, test, start, stop, restart, exec, list, query, explain, audit, outdated, fund, prune, dedupe, rebuild, cache, pkg, version, pack, publish, unpublish, deprecate, undeprecate, diff, search, star, unstar, stars, ping, whoami, login, adduser, logout, token, profile, owner, access, org, team, dist-tag, sbom, view, docs, repo, bugs, home, config, init, bin, root, prefix.",
             "Use `npm help <command>` for focused OMC compatibility notes.",
         ],
     )
@@ -3539,6 +3562,7 @@ fn npm_help_topic(topic: &str) -> Option<&'static str> {
         "exec" | "x" | "npx" => Some("exec"),
         "remove" | "uninstall" | "rm" | "un" => Some("remove"),
         "list" | "ls" | "ll" | "la" => Some("list"),
+        "query" => Some("query"),
         "explain" | "why" => Some("explain"),
         "audit" => Some("audit"),
         "outdated" => Some("outdated"),
@@ -9557,6 +9581,736 @@ fn print_locked_packages(
     Ok(())
 }
 
+#[derive(Debug, Clone, Default)]
+struct NpmQueryKinds {
+    root_direct: bool,
+    prod: bool,
+    dev: bool,
+    optional: bool,
+    peer: bool,
+    workspace: bool,
+}
+
+#[derive(Debug, Clone)]
+struct NpmQueryItem {
+    package: serde_json::Value,
+    name: String,
+    version: String,
+    location: String,
+    path: PathBuf,
+    realpath: PathBuf,
+    resolved: String,
+    from: Vec<String>,
+    to: Vec<String>,
+    kinds: NpmQueryKinds,
+}
+
+fn print_npm_query(
+    project_dir: &Path,
+    action: NpmQueryAction,
+) -> Result<ExitCode, OmcRegistryError> {
+    let items = npm_query_items(project_dir, &action)?;
+    let mut selected = Vec::new();
+    for item in items {
+        if npm_query_selector_matches(&item, &action.selector)? {
+            selected.push(npm_query_item_json(&item));
+        }
+    }
+    println!("{}", serde_json::to_string_pretty(&selected)?);
+
+    let count = selected.len();
+    if let Some(expected) = action.expect_result_count {
+        if count != expected {
+            return Ok(ExitCode::from(1));
+        }
+    }
+    if let Some(expect_results) = action.expect_results {
+        if expect_results != (count > 0) {
+            return Ok(ExitCode::from(1));
+        }
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+fn npm_query_items(
+    project_dir: &Path,
+    action: &NpmQueryAction,
+) -> Result<Vec<NpmQueryItem>, OmcRegistryError> {
+    let lock = read_lockfile(project_dir.join("omc.lock"))?;
+    let packages = lock
+        .packages
+        .into_iter()
+        .filter(|package| package.ecosystem == Ecosystem::Npm)
+        .collect::<Vec<_>>();
+    let target_dirs = npm_query_target_dirs(project_dir, action)?;
+    let mut kinds = npm_query_dependency_kinds(project_dir, &target_dirs)?;
+    let workspace_packages = if action.package_lock_only {
+        Vec::new()
+    } else {
+        npm_query_workspace_packages(project_dir, &target_dirs)?
+    };
+    for workspace in &workspace_packages {
+        if let Some(name) = &workspace.name {
+            let entry = kinds.entry(name.clone()).or_default();
+            entry.workspace = true;
+            entry.root_direct = true;
+            entry.prod = true;
+        }
+    }
+    npm_query_mark_transitive_kinds(&mut kinds, &packages);
+
+    let workspace_names = workspace_packages
+        .iter()
+        .filter_map(|workspace| workspace.name.clone())
+        .collect::<BTreeSet<_>>();
+    let mut items = Vec::new();
+    for package in &packages {
+        let mut package_kinds = kinds.get(&package.name).cloned().unwrap_or_default();
+        package_kinds.workspace =
+            package_kinds.workspace || workspace_names.contains(&package.name);
+        let direct_query = action.workspaces.is_empty() && !action.all_workspaces;
+        if !direct_query && !package_kinds.root_direct && !package_kinds.workspace {
+            continue;
+        }
+        items.push(npm_query_locked_item(
+            project_dir,
+            package,
+            package_kinds,
+            &packages,
+            action.package_lock_only,
+        )?);
+    }
+    for workspace in workspace_packages {
+        if let Some(item) = npm_query_workspace_item(project_dir, workspace, &kinds)? {
+            if !items
+                .iter()
+                .any(|existing| existing.name == item.name && existing.kinds.workspace)
+            {
+                items.push(item);
+            }
+        }
+    }
+    items.sort_by(|left, right| {
+        (
+            left.location.as_str(),
+            left.name.as_str(),
+            left.version.as_str(),
+        )
+            .cmp(&(
+                right.location.as_str(),
+                right.name.as_str(),
+                right.version.as_str(),
+            ))
+    });
+    Ok(items)
+}
+
+fn npm_query_target_dirs(
+    project_dir: &Path,
+    action: &NpmQueryAction,
+) -> Result<Vec<PathBuf>, OmcRegistryError> {
+    if action.workspaces.is_empty() && !action.all_workspaces {
+        return Ok(vec![project_dir.to_path_buf()]);
+    }
+    npm_script_target_dirs(
+        project_dir,
+        &action.workspaces,
+        action.all_workspaces,
+        action.include_workspace_root,
+    )
+}
+
+fn npm_query_workspace_packages(
+    project_dir: &Path,
+    target_dirs: &[PathBuf],
+) -> Result<Vec<NpmWorkspacePackage>, OmcRegistryError> {
+    let workspaces = read_npm_workspace_packages(project_dir)?;
+    if target_dirs.len() == 1
+        && absolute_project_dir(&target_dirs[0]) == absolute_project_dir(project_dir)
+    {
+        return Ok(workspaces);
+    }
+    let target_dirs = target_dirs
+        .iter()
+        .map(|path| absolute_project_dir(path))
+        .collect::<BTreeSet<_>>();
+    Ok(workspaces
+        .into_iter()
+        .filter(|workspace| target_dirs.contains(&absolute_project_dir(&workspace.path)))
+        .collect())
+}
+
+fn npm_query_dependency_kinds(
+    project_dir: &Path,
+    target_dirs: &[PathBuf],
+) -> Result<BTreeMap<String, NpmQueryKinds>, OmcRegistryError> {
+    let mut kinds = BTreeMap::<String, NpmQueryKinds>::new();
+    for dir in target_dirs {
+        npm_query_collect_package_json_kinds(dir, &mut kinds)?;
+    }
+    let include_root_manifest = target_dirs
+        .iter()
+        .any(|dir| absolute_project_dir(dir) == absolute_project_dir(project_dir));
+    if !include_root_manifest {
+        return Ok(kinds);
+    }
+    let manifest = read_manifest(project_dir.join("omc.toml"))?;
+    for spec in manifest.dependencies.keys() {
+        if let Ok(spec) = PackageSpec::parse(spec) {
+            if spec.ecosystem == Ecosystem::Npm {
+                let entry = kinds.entry(spec.name).or_default();
+                entry.root_direct = true;
+                entry.prod = true;
+            }
+        }
+    }
+    for spec in manifest.dev_dependencies.keys() {
+        if let Ok(spec) = PackageSpec::parse(spec) {
+            if spec.ecosystem == Ecosystem::Npm {
+                let entry = kinds.entry(spec.name).or_default();
+                entry.root_direct = true;
+                entry.dev = true;
+            }
+        }
+    }
+    Ok(kinds)
+}
+
+fn npm_query_collect_package_json_kinds(
+    dir: &Path,
+    kinds: &mut BTreeMap<String, NpmQueryKinds>,
+) -> Result<(), OmcRegistryError> {
+    let package_json = dir.join("package.json");
+    if !package_json.exists() {
+        return Ok(());
+    }
+    let package = read_npm_pkg_json(&package_json)?;
+    npm_query_mark_dependency_field(&package, "dependencies", kinds, |entry| {
+        entry.prod = true;
+    });
+    npm_query_mark_dependency_field(&package, "devDependencies", kinds, |entry| {
+        entry.dev = true;
+    });
+    npm_query_mark_dependency_field(&package, "optionalDependencies", kinds, |entry| {
+        entry.optional = true;
+    });
+    npm_query_mark_dependency_field(&package, "peerDependencies", kinds, |entry| {
+        entry.peer = true;
+    });
+    Ok(())
+}
+
+fn npm_query_mark_dependency_field(
+    package: &serde_json::Value,
+    field: &str,
+    kinds: &mut BTreeMap<String, NpmQueryKinds>,
+    mark: impl Fn(&mut NpmQueryKinds),
+) {
+    let Some(dependencies) = package.get(field).and_then(serde_json::Value::as_object) else {
+        return;
+    };
+    for name in dependencies.keys() {
+        let entry = kinds.entry(name.clone()).or_default();
+        entry.root_direct = true;
+        mark(entry);
+    }
+}
+
+fn npm_query_mark_transitive_kinds(
+    kinds: &mut BTreeMap<String, NpmQueryKinds>,
+    packages: &[LockedPackage],
+) {
+    let mut queue = kinds
+        .iter()
+        .map(|(name, kinds)| (name.clone(), kinds.clone()))
+        .collect::<VecDeque<_>>();
+    while let Some((name, inherited)) = queue.pop_front() {
+        for package in packages.iter().filter(|package| package.name == name) {
+            for dependency in &package.dependencies {
+                if let Some(dependency) = npm_dependency_name(dependency) {
+                    if npm_query_merge_kinds(
+                        kinds.entry(dependency.clone()).or_default(),
+                        &inherited,
+                    ) {
+                        queue.push_back((dependency, inherited.clone()));
+                    }
+                }
+            }
+            for dependency in &package.optional_dependencies {
+                if let Some(dependency) = npm_dependency_name(dependency) {
+                    let mut optional = inherited.clone();
+                    optional.optional = true;
+                    if npm_query_merge_kinds(
+                        kinds.entry(dependency.clone()).or_default(),
+                        &optional,
+                    ) {
+                        queue.push_back((dependency, optional));
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn npm_query_merge_kinds(target: &mut NpmQueryKinds, source: &NpmQueryKinds) -> bool {
+    let before = (
+        target.prod,
+        target.dev,
+        target.optional,
+        target.peer,
+        target.workspace,
+    );
+    target.prod |= source.prod;
+    target.dev |= source.dev;
+    target.optional |= source.optional;
+    target.peer |= source.peer;
+    target.workspace |= source.workspace;
+    before
+        != (
+            target.prod,
+            target.dev,
+            target.optional,
+            target.peer,
+            target.workspace,
+        )
+}
+
+fn npm_query_locked_item(
+    project_dir: &Path,
+    package: &LockedPackage,
+    kinds: NpmQueryKinds,
+    packages: &[LockedPackage],
+    package_lock_only: bool,
+) -> Result<NpmQueryItem, OmcRegistryError> {
+    let location = npm_node_modules_path(&package.name);
+    let path = absolute_project_dir(project_dir).join(&location);
+    let manifest = if package_lock_only {
+        None
+    } else {
+        npm_query_installed_manifest(&path)
+    }
+    .unwrap_or_else(|| {
+        serde_json::json!({
+            "name": package.name,
+            "version": package.version,
+        })
+    });
+    let to = package
+        .dependencies
+        .iter()
+        .chain(package.optional_dependencies.iter())
+        .filter_map(|dependency| {
+            npm_dependency_name(dependency).map(|name| npm_node_modules_path(&name))
+        })
+        .collect::<Vec<_>>();
+    let mut from = npm_query_parent_locations(&package.name, packages);
+    if kinds.root_direct && !from.iter().any(|location| location.is_empty()) {
+        from.push(String::new());
+    }
+    from.sort();
+    from.dedup();
+    Ok(NpmQueryItem {
+        package: manifest,
+        name: package.name.clone(),
+        version: package.version.clone(),
+        location,
+        realpath: path.clone(),
+        path,
+        resolved: package.source_url.clone(),
+        from,
+        to,
+        kinds,
+    })
+}
+
+fn npm_query_workspace_item(
+    project_dir: &Path,
+    workspace: NpmWorkspacePackage,
+    kinds: &BTreeMap<String, NpmQueryKinds>,
+) -> Result<Option<NpmQueryItem>, OmcRegistryError> {
+    let package_json = workspace.path.join("package.json");
+    if !package_json.exists() {
+        return Ok(None);
+    }
+    let manifest = read_npm_pkg_json(&package_json)?;
+    let Some(name) = workspace.name.or_else(|| {
+        manifest
+            .get("name")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned)
+    }) else {
+        return Ok(None);
+    };
+    let version = manifest
+        .get("version")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("0.0.0")
+        .to_owned();
+    let location = workspace
+        .path
+        .strip_prefix(project_dir)
+        .unwrap_or(workspace.path.as_path())
+        .to_string_lossy()
+        .into_owned();
+    let mut item_kinds = kinds.get(&name).cloned().unwrap_or_default();
+    item_kinds.workspace = true;
+    item_kinds.root_direct = true;
+    item_kinds.prod = true;
+    let path = absolute_project_dir(&workspace.path);
+    Ok(Some(NpmQueryItem {
+        to: npm_query_manifest_dependency_locations(&manifest),
+        package: manifest,
+        name,
+        version,
+        location: location.clone(),
+        realpath: path.clone(),
+        path,
+        resolved: format!("file:{location}"),
+        from: vec![String::new()],
+        kinds: item_kinds,
+    }))
+}
+
+fn npm_query_installed_manifest(package_dir: &Path) -> Option<serde_json::Value> {
+    read_npm_pkg_json(&package_dir.join("package.json")).ok()
+}
+
+fn npm_query_manifest_dependency_locations(manifest: &serde_json::Value) -> Vec<String> {
+    ["dependencies", "optionalDependencies", "peerDependencies"]
+        .into_iter()
+        .filter_map(|field| manifest.get(field).and_then(serde_json::Value::as_object))
+        .flat_map(|dependencies| dependencies.keys())
+        .map(|name| npm_node_modules_path(name))
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
+fn npm_query_parent_locations(name: &str, packages: &[LockedPackage]) -> Vec<String> {
+    packages
+        .iter()
+        .filter(|package| npm_lock_package_depends_on(package, name))
+        .map(|package| npm_node_modules_path(&package.name))
+        .collect()
+}
+
+fn npm_query_item_json(item: &NpmQueryItem) -> serde_json::Value {
+    let mut value = item.package.clone();
+    if !value.is_object() {
+        value = serde_json::json!({});
+    }
+    let object = value.as_object_mut().expect("object assigned above");
+    object.insert(
+        "name".to_owned(),
+        serde_json::Value::String(item.name.clone()),
+    );
+    object.insert(
+        "version".to_owned(),
+        serde_json::Value::String(item.version.clone()),
+    );
+    object.insert(
+        "pkgid".to_owned(),
+        serde_json::Value::String(format!("{}@{}", item.name, item.version)),
+    );
+    object.insert(
+        "location".to_owned(),
+        serde_json::Value::String(item.location.clone()),
+    );
+    object.insert(
+        "path".to_owned(),
+        serde_json::Value::String(item.path.display().to_string()),
+    );
+    object.insert(
+        "realpath".to_owned(),
+        serde_json::Value::String(item.realpath.display().to_string()),
+    );
+    object.insert(
+        "resolved".to_owned(),
+        serde_json::Value::String(item.resolved.clone()),
+    );
+    object.insert("from".to_owned(), serde_json::json!(item.from));
+    object.insert("to".to_owned(), serde_json::json!(item.to));
+    object.insert("dev".to_owned(), serde_json::Value::Bool(item.kinds.dev));
+    object.insert(
+        "optional".to_owned(),
+        serde_json::Value::Bool(item.kinds.optional),
+    );
+    object.insert("peer".to_owned(), serde_json::Value::Bool(item.kinds.peer));
+    object.insert(
+        "prod".to_owned(),
+        serde_json::Value::Bool(item.kinds.prod || !item.kinds.dev),
+    );
+    object.insert(
+        "workspace".to_owned(),
+        serde_json::Value::Bool(item.kinds.workspace),
+    );
+    object.insert("inBundle".to_owned(), serde_json::Value::Bool(false));
+    object.insert(
+        "deduped".to_owned(),
+        serde_json::Value::Bool(item.from.len() > 1),
+    );
+    object.insert("overridden".to_owned(), serde_json::Value::Bool(false));
+    object.insert(
+        "queryContext".to_owned(),
+        serde_json::Value::Object(serde_json::Map::new()),
+    );
+    value
+}
+
+fn npm_query_selector_matches(
+    item: &NpmQueryItem,
+    selector: &str,
+) -> Result<bool, OmcRegistryError> {
+    for selector in npm_query_selector_parts(selector) {
+        if npm_query_single_selector_matches(item, selector)? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn npm_query_selector_parts(selector: &str) -> Vec<&str> {
+    let mut parts = Vec::new();
+    let mut start = 0usize;
+    let mut paren_depth = 0usize;
+    let mut bracket_depth = 0usize;
+    for (index, ch) in selector.char_indices() {
+        match ch {
+            '(' => paren_depth += 1,
+            ')' => paren_depth = paren_depth.saturating_sub(1),
+            '[' => bracket_depth += 1,
+            ']' => bracket_depth = bracket_depth.saturating_sub(1),
+            ',' if paren_depth == 0 && bracket_depth == 0 => {
+                let part = selector[start..index].trim();
+                if !part.is_empty() {
+                    parts.push(part);
+                }
+                start = index + 1;
+            }
+            _ => {}
+        }
+    }
+    let part = selector[start..].trim();
+    if !part.is_empty() {
+        parts.push(part);
+    }
+    parts
+}
+
+fn npm_query_single_selector_matches(
+    item: &NpmQueryItem,
+    selector: &str,
+) -> Result<bool, OmcRegistryError> {
+    let selector = selector.split_whitespace().collect::<String>();
+    if selector == "*" {
+        return Ok(true);
+    }
+    let (direct_required, selector) = selector
+        .strip_prefix(":root>")
+        .map(|rest| (true, rest))
+        .unwrap_or((false, selector.as_str()));
+    if direct_required && !item.kinds.root_direct {
+        return Ok(false);
+    }
+    let selector = if selector.is_empty() { "*" } else { selector };
+    npm_query_compound_selector_matches(item, selector)
+}
+
+fn npm_query_compound_selector_matches(
+    item: &NpmQueryItem,
+    mut selector: &str,
+) -> Result<bool, OmcRegistryError> {
+    while !selector.is_empty() {
+        if let Some(rest) = selector.strip_prefix('*') {
+            selector = rest;
+        } else if let Some(rest) = selector.strip_prefix('.') {
+            let (class, rest) = npm_query_take_token(rest);
+            if !npm_query_class_matches(item, class)? {
+                return Ok(false);
+            }
+            selector = rest;
+        } else if let Some(rest) = selector.strip_prefix('#') {
+            let (id, rest) = npm_query_take_token(rest);
+            if !npm_query_id_matches(item, id) {
+                return Ok(false);
+            }
+            selector = rest;
+        } else if let Some(rest) = selector.strip_prefix('[') {
+            let Some(end) = rest.find(']') else {
+                return Err(npm_query_unsupported(selector));
+            };
+            let attr = &rest[..end];
+            if !npm_query_attr_selector_matches(item, attr)? {
+                return Ok(false);
+            }
+            selector = &rest[end + 1..];
+        } else if let Some(rest) = selector.strip_prefix(":not(") {
+            let (inner, rest) = npm_query_take_function(rest, selector)?;
+            if npm_query_compound_selector_matches(item, inner)? {
+                return Ok(false);
+            }
+            selector = rest;
+        } else if let Some(rest) = selector.strip_prefix(":has(*)") {
+            if item.to.is_empty() {
+                return Ok(false);
+            }
+            selector = rest;
+        } else if let Some(rest) = selector.strip_prefix(":empty") {
+            if !item.to.is_empty() {
+                return Ok(false);
+            }
+            selector = rest;
+        } else if let Some(rest) = selector.strip_prefix(":attr(") {
+            let (inner, rest) = npm_query_take_function(rest, selector)?;
+            if !npm_query_attr_function_matches(item, inner)? {
+                return Ok(false);
+            }
+            selector = rest;
+        } else {
+            return Err(npm_query_unsupported(selector));
+        }
+    }
+    Ok(true)
+}
+
+fn npm_query_take_token(value: &str) -> (&str, &str) {
+    let end = value
+        .char_indices()
+        .find_map(|(index, ch)| matches!(ch, '.' | '#' | '[' | ':').then_some(index))
+        .unwrap_or(value.len());
+    (&value[..end], &value[end..])
+}
+
+fn npm_query_take_function<'a>(
+    value: &'a str,
+    selector: &str,
+) -> Result<(&'a str, &'a str), OmcRegistryError> {
+    let mut depth = 1usize;
+    for (index, ch) in value.char_indices() {
+        match ch {
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Ok((&value[..index], &value[index + 1..]));
+                }
+            }
+            _ => {}
+        }
+    }
+    Err(npm_query_unsupported(selector))
+}
+
+fn npm_query_class_matches(item: &NpmQueryItem, class: &str) -> Result<bool, OmcRegistryError> {
+    match class {
+        "prod" => Ok(item.kinds.prod || !item.kinds.dev),
+        "dev" => Ok(item.kinds.dev),
+        "optional" => Ok(item.kinds.optional),
+        "peer" => Ok(item.kinds.peer),
+        "workspace" => Ok(item.kinds.workspace),
+        _ => Err(npm_query_unsupported(&format!(".{class}"))),
+    }
+}
+
+fn npm_query_id_matches(item: &NpmQueryItem, id: &str) -> bool {
+    if item.name == id {
+        return true;
+    }
+    if let Ok(spec) = PackageSpec::parse(id) {
+        if spec.ecosystem != Ecosystem::Npm || spec.name != item.name {
+            return false;
+        }
+        return spec
+            .version
+            .as_deref()
+            .map(|version| version == item.version)
+            .unwrap_or(true);
+    }
+    false
+}
+
+fn npm_query_attr_selector_matches(
+    item: &NpmQueryItem,
+    selector: &str,
+) -> Result<bool, OmcRegistryError> {
+    let Some((field, op, expected)) = npm_query_parse_attr_selector(selector) else {
+        return Err(npm_query_unsupported(&format!("[{selector}]")));
+    };
+    let actual = match field {
+        "name" => Some(item.name.as_str()),
+        "version" => Some(item.version.as_str()),
+        other => npm_query_manifest_string(&item.package, other),
+    };
+    Ok(actual
+        .map(|actual| npm_query_attr_value_matches(actual, op, &expected))
+        .unwrap_or(false))
+}
+
+fn npm_query_parse_attr_selector(selector: &str) -> Option<(&str, &str, String)> {
+    for op in ["^=", "$=", "*=", "="] {
+        if let Some((field, value)) = selector.split_once(op) {
+            let field = field.trim();
+            if field.is_empty() {
+                return None;
+            }
+            return Some((field, op, npm_query_unquote(value.trim())));
+        }
+    }
+    None
+}
+
+fn npm_query_unquote(value: &str) -> String {
+    value.trim_matches('"').trim_matches('\'').trim().to_owned()
+}
+
+fn npm_query_manifest_string<'a>(package: &'a serde_json::Value, field: &str) -> Option<&'a str> {
+    package.get(field).and_then(|value| match value {
+        serde_json::Value::String(value) => Some(value.as_str()),
+        serde_json::Value::Object(object) => object.get("url").and_then(serde_json::Value::as_str),
+        _ => None,
+    })
+}
+
+fn npm_query_attr_value_matches(actual: &str, op: &str, expected: &str) -> bool {
+    match op {
+        "=" => actual == expected,
+        "^=" => actual.starts_with(expected),
+        "$=" => actual.ends_with(expected),
+        "*=" => actual.contains(expected),
+        _ => false,
+    }
+}
+
+fn npm_query_attr_function_matches(
+    item: &NpmQueryItem,
+    inner: &str,
+) -> Result<bool, OmcRegistryError> {
+    let Some((field, nested)) = inner.split_once(',') else {
+        return Err(npm_query_unsupported(&format!(":attr({inner})")));
+    };
+    let field = field.trim();
+    let nested = nested.trim();
+    let Some(key) = nested
+        .strip_prefix('[')
+        .and_then(|value| value.strip_suffix(']'))
+    else {
+        return Err(npm_query_unsupported(&format!(":attr({inner})")));
+    };
+    let key = npm_query_unquote(key);
+    Ok(item
+        .package
+        .get(field)
+        .and_then(serde_json::Value::as_object)
+        .map(|object| object.contains_key(&key))
+        .unwrap_or(false))
+}
+
+fn npm_query_unsupported(selector: &str) -> OmcRegistryError {
+    OmcRegistryError::UnsupportedSpec(format!(
+        "unsupported npm query selector `{selector}`; OMC currently supports common package, class, attribute, :not, :empty, :has(*), and :attr selectors"
+    ))
+}
+
 fn package_list_filter_names(
     filters: &[String],
     ecosystem: Option<Ecosystem>,
@@ -10508,6 +11262,7 @@ fn parse_npm_compat_action(args: &[String]) -> Result<NpmCompatAction, OmcRegist
             })
         }
         "list" | "ls" | "ll" | "la" => parse_npm_list_args(&args[1..]),
+        "query" => parse_npm_query_args(&args[1..]),
         "explain" | "why" => parse_npm_explain_args(&args[1..]),
         "outdated" => parse_npm_outdated_args(&args[1..]),
         "audit" => parse_npm_audit_args(&args[1..]),
@@ -10847,7 +11602,15 @@ fn npm_global_arg_supported_by_command(command: &str, arg: &str) -> bool {
         return matches!(command, "diff");
     }
     if matches!(arg, "--package-lock-only") || arg.starts_with("--package-lock-only=") {
-        return matches!(command, "sbom" | "link" | "ln");
+        return matches!(command, "sbom" | "link" | "ln" | "query");
+    }
+    if matches!(arg, "--expect-results" | "--no-expect-results")
+        || arg.starts_with("--expect-results=")
+    {
+        return matches!(command, "query");
+    }
+    if matches!(arg, "--expect-result-count") || arg.starts_with("--expect-result-count=") {
+        return matches!(command, "query");
     }
     if matches!(arg, "--userconfig") || arg.starts_with("--userconfig=") {
         return matches!(
@@ -10898,6 +11661,7 @@ fn npm_global_arg_supported_by_command(command: &str, arg: &str) -> bool {
                 | "dist-tag"
                 | "dist-tags"
                 | "sbom"
+                | "query"
         );
     }
     if matches!(arg, "--workspaces" | "--include-workspace-root")
@@ -10918,6 +11682,7 @@ fn npm_global_arg_supported_by_command(command: &str, arg: &str) -> bool {
                 | "dist-tag"
                 | "dist-tags"
                 | "sbom"
+                | "query"
         );
     }
     if arg == "--json" {
@@ -10930,6 +11695,7 @@ fn npm_global_arg_supported_by_command(command: &str, arg: &str) -> bool {
                 | "ls"
                 | "ll"
                 | "la"
+                | "query"
                 | "explain"
                 | "why"
                 | "outdated"
@@ -11049,6 +11815,8 @@ fn npm_global_preserved_bool_flag(arg: &str) -> bool {
             | "--workspaces"
             | "--include-workspace-root"
             | "--package-lock-only"
+            | "--expect-results"
+            | "--no-expect-results"
             | "--diff-name-only"
             | "--diff-ignore-all-space"
             | "--diff-no-prefix"
@@ -11088,6 +11856,7 @@ fn npm_global_preserved_value_flag(arg: &str) -> bool {
             | "--password"
             | "--sbom-format"
             | "--sbom-type"
+            | "--expect-result-count"
             | "--diff"
             | "--diff-unified"
             | "--diff-src-prefix"
@@ -11135,6 +11904,8 @@ fn npm_global_preserved_equals_flag(arg: &str) -> bool {
         "--sbom-format=",
         "--sbom-type=",
         "--package-lock-only=",
+        "--expect-results=",
+        "--expect-result-count=",
         "--diff=",
         "--diff-unified=",
         "--diff-name-only=",
@@ -17163,6 +17934,116 @@ fn parse_npm_list_args(args: &[String]) -> Result<NpmCompatAction, OmcRegistryEr
     })
 }
 
+fn parse_npm_query_args(args: &[String]) -> Result<NpmCompatAction, OmcRegistryError> {
+    let mut selector = None;
+    let mut workspaces = Vec::new();
+    let mut all_workspaces = false;
+    let mut include_workspace_root = false;
+    let mut package_lock_only = false;
+    let mut expect_results = None;
+    let mut expect_result_count = None;
+    let mut index = 0;
+    while index < args.len() {
+        let arg = &args[index];
+        if matches!(
+            arg.as_str(),
+            "--json" | "--json=true" | "--json=false" | "--silent" | "-s" | "--parseable" | "-p"
+        ) {
+        } else if matches!(
+            arg.as_str(),
+            "--package-lock-only" | "--package-lock-only=true"
+        ) {
+            package_lock_only = true;
+        } else if arg == "--package-lock-only=false" {
+            package_lock_only = false;
+        } else if matches!(arg.as_str(), "--workspaces" | "--workspaces=true") {
+            all_workspaces = true;
+        } else if arg == "--workspaces=false" {
+            all_workspaces = false;
+        } else if matches!(
+            arg.as_str(),
+            "--include-workspace-root" | "--include-workspace-root=true"
+        ) {
+            include_workspace_root = true;
+        } else if arg == "--include-workspace-root=false" {
+            include_workspace_root = false;
+        } else if matches!(arg.as_str(), "--expect-results" | "--expect-results=true") {
+            expect_results = Some(true);
+        } else if matches!(
+            arg.as_str(),
+            "--no-expect-results" | "--expect-results=false"
+        ) {
+            expect_results = Some(false);
+        } else if arg == "--expect-result-count" {
+            index += 1;
+            expect_result_count = Some(parse_npm_query_expected_count(&npm_query_flag_value(
+                args, index, arg,
+            )?)?);
+        } else if let Some(value) = arg.strip_prefix("--expect-result-count=") {
+            expect_result_count = Some(parse_npm_query_expected_count(value)?);
+        } else if matches!(arg.as_str(), "--workspace" | "-w") {
+            index += 1;
+            workspaces.push(npm_query_flag_value(args, index, arg)?);
+        } else if let Some(value) = arg
+            .strip_prefix("--workspace=")
+            .or_else(|| arg.strip_prefix("-w="))
+        {
+            workspaces.push(value.to_owned());
+        } else if matches!(arg.as_str(), "--loglevel" | "--cache") {
+            index += 1;
+            if args.get(index).is_none() {
+                return Err(OmcRegistryError::UnsupportedSpec(format!(
+                    "{arg} needs a value"
+                )));
+            }
+        } else if npm_query_ignored_equals_flag(arg) {
+        } else if arg.starts_with('-') {
+            return Err(unsupported_compat_arg("npm query", arg));
+        } else if selector.is_none() {
+            selector = Some(arg.clone());
+        } else {
+            return Err(unsupported_compat_arg("npm query", arg));
+        }
+        index += 1;
+    }
+    let selector = selector.ok_or_else(|| {
+        OmcRegistryError::UnsupportedSpec("npm query needs a selector".to_owned())
+    })?;
+    Ok(NpmCompatAction::Query {
+        action: NpmQueryAction {
+            selector,
+            workspaces,
+            all_workspaces,
+            include_workspace_root,
+            package_lock_only,
+            expect_results,
+            expect_result_count,
+        },
+    })
+}
+
+fn parse_npm_query_expected_count(value: &str) -> Result<usize, OmcRegistryError> {
+    value.parse::<usize>().map_err(|_| {
+        OmcRegistryError::UnsupportedSpec(format!("invalid npm query expected count `{value}`"))
+    })
+}
+
+fn npm_query_flag_value(
+    args: &[String],
+    index: usize,
+    flag: &str,
+) -> Result<String, OmcRegistryError> {
+    args.get(index)
+        .cloned()
+        .ok_or_else(|| OmcRegistryError::UnsupportedSpec(format!("{flag} needs a value")))
+}
+
+fn npm_query_ignored_equals_flag(arg: &str) -> bool {
+    ["--loglevel=", "--cache=", "--parseable="]
+        .iter()
+        .any(|prefix| arg.starts_with(prefix))
+}
+
 fn npm_list_ignored_equals_flag(arg: &str) -> bool {
     [
         "--depth=",
@@ -20182,6 +21063,159 @@ mod tests {
     }
 
     #[test]
+    fn queries_npm_locked_packages_with_common_selectors() {
+        fn query_names(items: &[NpmQueryItem], selector: &str) -> Vec<String> {
+            let mut names = items
+                .iter()
+                .filter(|item| npm_query_selector_matches(item, selector).unwrap())
+                .map(|item| item.name.clone())
+                .collect::<Vec<_>>();
+            names.sort();
+            names
+        }
+
+        let dir = test_dir("npm-query");
+        fs::write(
+            dir.join("package.json"),
+            r#"{
+              "name": "query-root",
+              "version": "1.0.0",
+              "dependencies": { "prod-pkg": "1.0.0" },
+              "devDependencies": { "dev-pkg": "1.0.0" },
+              "optionalDependencies": { "optional-pkg": "1.0.0" }
+            }"#,
+        )
+        .unwrap();
+
+        fs::write(
+            dir.join("omc.lock"),
+            r#"
+version = 1
+
+[[packages]]
+ecosystem = "npm"
+name = "prod-pkg"
+version = "1.0.0"
+source_url = "https://registry.example/prod-pkg/-/prod-pkg-1.0.0.tgz"
+archive = ""
+artifact = ""
+sha256 = ""
+behavior = "pure"
+verdict = "accepted"
+dependencies = ["npm:leaf-pkg@1.0.0"]
+
+[[packages]]
+ecosystem = "npm"
+name = "leaf-pkg"
+version = "1.0.0"
+source_url = "https://registry.example/leaf-pkg/-/leaf-pkg-1.0.0.tgz"
+archive = ""
+artifact = ""
+sha256 = ""
+behavior = "pure"
+verdict = "accepted"
+
+[[packages]]
+ecosystem = "npm"
+name = "dev-pkg"
+version = "1.0.0"
+source_url = "https://registry.example/dev-pkg/-/dev-pkg-1.0.0.tgz"
+archive = ""
+artifact = ""
+sha256 = ""
+behavior = "pure"
+verdict = "accepted"
+
+[[packages]]
+ecosystem = "npm"
+name = "optional-pkg"
+version = "1.0.0"
+source_url = "https://registry.example/optional-pkg/-/optional-pkg-1.0.0.tgz"
+archive = ""
+artifact = ""
+sha256 = ""
+behavior = "pure"
+verdict = "accepted"
+optional_dependencies = ["npm:leaf-optional@1.0.0"]
+
+[[packages]]
+ecosystem = "npm"
+name = "leaf-optional"
+version = "1.0.0"
+source_url = "https://registry.example/leaf-optional/-/leaf-optional-1.0.0.tgz"
+archive = ""
+artifact = ""
+sha256 = ""
+behavior = "pure"
+verdict = "accepted"
+"#,
+        )
+        .unwrap();
+        fs::create_dir_all(dir.join("node_modules/prod-pkg")).unwrap();
+        fs::write(
+            dir.join("node_modules/prod-pkg/package.json"),
+            r#"{
+              "name": "prod-pkg",
+              "version": "1.0.0",
+              "license": "MIT",
+              "scripts": { "postinstall": "node postinstall.js" }
+            }"#,
+        )
+        .unwrap();
+
+        let action = NpmQueryAction {
+            selector: "*".to_owned(),
+            workspaces: Vec::new(),
+            all_workspaces: false,
+            include_workspace_root: false,
+            package_lock_only: false,
+            expect_results: None,
+            expect_result_count: None,
+        };
+        let items = npm_query_items(&dir, &action).unwrap();
+
+        assert_eq!(
+            query_names(&items, ":root > *"),
+            vec![
+                "dev-pkg".to_owned(),
+                "optional-pkg".to_owned(),
+                "prod-pkg".to_owned(),
+            ]
+        );
+        assert_eq!(query_names(&items, ".dev"), vec!["dev-pkg".to_owned()]);
+        assert_eq!(
+            query_names(&items, ".optional"),
+            vec!["leaf-optional".to_owned(), "optional-pkg".to_owned()]
+        );
+        assert_eq!(
+            query_names(&items, "#prod-pkg"),
+            vec!["prod-pkg".to_owned()]
+        );
+        assert_eq!(
+            query_names(&items, "[license=MIT]"),
+            vec!["prod-pkg".to_owned()]
+        );
+        assert_eq!(
+            query_names(&items, ":attr(scripts, [postinstall])"),
+            vec!["prod-pkg".to_owned()]
+        );
+        assert_eq!(
+            query_names(&items, ":has(*)"),
+            vec!["optional-pkg".to_owned(), "prod-pkg".to_owned(),]
+        );
+        assert_eq!(
+            query_names(&items, ":empty"),
+            vec![
+                "dev-pkg".to_owned(),
+                "leaf-optional".to_owned(),
+                "leaf-pkg".to_owned(),
+            ]
+        );
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
     fn dry_runs_npm_publish_local_package() {
         let dir = test_dir("npm-publish-dry-run");
         fs::write(
@@ -21036,6 +22070,29 @@ mod tests {
             )
             .unwrap(),
             BTreeSet::from(["@scope/pkg".to_owned(), "left-pad".to_owned()])
+        );
+        assert_eq!(
+            parse_npm_compat_action(&args(&[
+                "--workspaces",
+                "--include-workspace-root=false",
+                "--package-lock-only",
+                "--expect-results=false",
+                "--expect-result-count=0",
+                "query",
+                ":root > *",
+            ]))
+            .unwrap(),
+            NpmCompatAction::Query {
+                action: NpmQueryAction {
+                    selector: ":root > *".to_owned(),
+                    workspaces: Vec::new(),
+                    all_workspaces: true,
+                    include_workspace_root: false,
+                    package_lock_only: true,
+                    expect_results: Some(false),
+                    expect_result_count: Some(0),
+                },
+            }
         );
         assert_eq!(
             parse_pip_compat_action(&args(&[

@@ -131,6 +131,7 @@ cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm run build --wo
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm audit --json
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm outdated --json
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm explain left-pad --json
+cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm query ':root > *'
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm ls --depth 0 left-pad --json
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm prune --omit=dev
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm dedupe
@@ -486,7 +487,7 @@ Supported now:
   `star`, `unstar`, `stars`, `ping`, `whoami`, `login` / `adduser`, `logout`,
   `token list/create/revoke`, `profile get/set`, `owner ls/add/rm`,
   `access list/get/set/grant/revoke`, `org set/rm/ls`, `team create/destroy/add/rm/ls`, `dist-tag ls/add/rm`, `sbom --sbom-format=cyclonedx|spdx`, `config get/set/delete/list`, `get`,
-  `view` / `info` / `show`, `docs`, `repo`, `bugs`, `home`,
+  `view` / `info` / `show`, `query`, `docs`, `repo`, `bugs`, `home`,
   `list` / `ls` / `ll` / `la`, including `--json`, common depth/omit/workspace
   flags, and package-name filters; `explain` / `why`,
   and `outdated` / `outdated --json` flows without delegating to npm, plus a direct
