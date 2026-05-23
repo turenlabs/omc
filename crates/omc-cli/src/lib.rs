@@ -1981,7 +1981,10 @@ fn parse_pip_compat_action(args: &[String]) -> Result<PipCompatAction, OmcRegist
             parse_pip_check_args(&args[1..])?;
             Ok(PipCompatAction::Check)
         }
-        "freeze" => Ok(PipCompatAction::Freeze),
+        "freeze" => {
+            parse_pip_freeze_args(&args[1..])?;
+            Ok(PipCompatAction::Freeze)
+        }
         "list" => Ok(PipCompatAction::List {
             format: parse_pip_list_format(&args[1..])?,
         }),
@@ -2072,6 +2075,41 @@ fn parse_pip_check_args(args: &[String]) -> Result<(), OmcRegistryError> {
             continue;
         }
         return Err(unsupported_compat_arg("pip check", arg));
+    }
+    Ok(())
+}
+
+fn parse_pip_freeze_args(args: &[String]) -> Result<(), OmcRegistryError> {
+    let mut index = 0;
+    while index < args.len() {
+        let arg = &args[index];
+        if matches!(
+            arg.as_str(),
+            "--all"
+                | "--local"
+                | "--user"
+                | "--exclude-editable"
+                | "--disable-pip-version-check"
+                | "-v"
+                | "--verbose"
+                | "-q"
+                | "--quiet"
+        ) {
+        } else if matches!(
+            arg.as_str(),
+            "-r" | "--requirement" | "--path" | "--exclude"
+        ) {
+            index += 1;
+            if args.get(index).is_none() {
+                return Err(OmcRegistryError::UnsupportedSpec(format!(
+                    "{arg} needs a value"
+                )));
+            }
+        } else if pip_freeze_equals_value_flag(arg) {
+        } else {
+            return Err(unsupported_compat_arg("pip freeze", arg));
+        }
+        index += 1;
     }
     Ok(())
 }
@@ -2607,7 +2645,27 @@ fn parse_pip_list_format(args: &[String]) -> Result<PipListFormat, OmcRegistryEr
             format = parse_pip_list_format_value(value)?;
         } else if let Some(value) = arg.strip_prefix("--format=") {
             format = parse_pip_list_format_value(value)?;
-        } else if arg == "--disable-pip-version-check" {
+        } else if matches!(
+            arg.as_str(),
+            "--local"
+                | "--user"
+                | "--editable"
+                | "--include-editable"
+                | "--exclude-editable"
+                | "--disable-pip-version-check"
+                | "-v"
+                | "--verbose"
+                | "-q"
+                | "--quiet"
+        ) {
+        } else if matches!(arg.as_str(), "--path" | "--exclude") {
+            index += 1;
+            if args.get(index).is_none() {
+                return Err(OmcRegistryError::UnsupportedSpec(format!(
+                    "{arg} needs a value"
+                )));
+            }
+        } else if pip_path_or_exclude_equals_value_flag(arg) {
         } else {
             return Err(unsupported_compat_arg("pip list", arg));
         }
@@ -2625,6 +2683,18 @@ fn parse_pip_list_format_value(value: &str) -> Result<PipListFormat, OmcRegistry
             "unsupported pip list format `{other}`"
         ))),
     }
+}
+
+fn pip_freeze_equals_value_flag(arg: &str) -> bool {
+    ["--path=", "--exclude=", "--requirement="]
+        .iter()
+        .any(|prefix| arg.starts_with(prefix))
+}
+
+fn pip_path_or_exclude_equals_value_flag(arg: &str) -> bool {
+    ["--path=", "--exclude="]
+        .iter()
+        .any(|prefix| arg.starts_with(prefix))
 }
 
 fn pip_uninstall_specs_from_requirements(
@@ -3374,6 +3444,20 @@ mod tests {
             NpmCompatAction::List { json: true }
         );
         assert_eq!(
+            parse_pip_compat_action(&args(&[
+                "freeze",
+                "--all",
+                "--local",
+                "--path",
+                "vendor",
+                "--exclude=requests",
+                "-r",
+                "requirements.txt",
+            ]))
+            .unwrap(),
+            PipCompatAction::Freeze
+        );
+        assert_eq!(
             parse_pip_compat_action(&args(&["list", "--format=freeze"])).unwrap(),
             PipCompatAction::List {
                 format: PipListFormat::Freeze,
@@ -3385,6 +3469,22 @@ mod tests {
                 format: PipListFormat::Json,
             }
         );
+        assert_eq!(
+            parse_pip_compat_action(&args(&[
+                "list",
+                "--format=json",
+                "--local",
+                "--path",
+                "vendor",
+                "--exclude=requests",
+                "--exclude-editable",
+            ]))
+            .unwrap(),
+            PipCompatAction::List {
+                format: PipListFormat::Json,
+            }
+        );
+        assert!(parse_pip_compat_action(&args(&["list", "--outdated"])).is_err());
     }
 
     #[test]

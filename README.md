@@ -412,9 +412,11 @@ Supported now:
   require-hashes, no-deps, target-directory, trusted-host, retry/timeout,
   reinstall, warning, build-isolation, and binary-policy install flags without
   delegating to pip; `pip uninstall -r requirements.txt` removes named
-  requirements from the OMC manifest and reinstalls the remaining graph; direct
-  `pip install -e PATH` and `pip install ./path` local directory installs,
-  including selected extras such as
+  requirements from the OMC manifest and reinstalls the remaining graph; common
+  read-only `pip freeze` / `pip list` scope flags such as `--all`, `--local`,
+  `--user`, `--path`, `--exclude`, and `--exclude-editable` are accepted;
+  direct `pip install -e PATH` and `pip install ./path` local directory
+  installs, including selected extras such as
   `pip install -e '.[dev]'`; direct
   `pip install ./archive.whl`, `./archive.tar.gz`, and HTTPS archive URL
   installs; `omc python -m pip ...` dispatches to the same compatibility path;
