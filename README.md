@@ -387,7 +387,11 @@ Supported now:
   package directories are accepted as install inputs; `--no-save`,
   `--package-lock-only`, `--package-lock=false`, `--registry`, `--omit=...`,
   `--include=...`, and common audit/fund/peer/install-strategy flags are
-  understood for install/ci compatibility
+  understood for install/ci compatibility; package scripts receive npm-style
+  lifecycle/package environment variables such as `npm_lifecycle_event`,
+  `npm_lifecycle_script`, `npm_package_name`, `npm_package_version`,
+  `npm_package_config_*`, `npm_package_bin_*`, `npm_package_json`,
+  `npm_config_user_agent`, and `INIT_CWD`
 - `omc pip` compatibility commands for common `install`, `uninstall`, `freeze`,
   `check`, `show`, and `list --format=columns|freeze|json` flows, including
   `-r`, index URL, constraints, extra-index, find-links, no-index,

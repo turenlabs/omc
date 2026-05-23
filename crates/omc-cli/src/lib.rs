@@ -240,6 +240,7 @@ enum NpmCompatAction {
         allow_all_host: bool,
     },
     RunScript {
+        command: String,
         name: String,
         args: Vec<String>,
     },
@@ -665,6 +666,15 @@ fn run_package_script(
     name: &str,
     args: &[String],
 ) -> Result<ExitCode, OmcRegistryError> {
+    run_package_script_with_npm_command(project_dir, "run-script", name, args)
+}
+
+fn run_package_script_with_npm_command(
+    project_dir: &Path,
+    npm_command: &str,
+    name: &str,
+    args: &[String],
+) -> Result<ExitCode, OmcRegistryError> {
     let scripts = read_package_scripts(project_dir)?;
     let script = scripts.get(name).ok_or_else(|| {
         let available = scripts.keys().cloned().collect::<Vec<_>>().join(", ");
@@ -678,6 +688,7 @@ fn run_package_script(
 
     let mut command = package_script_command(script);
     apply_project_runtime_env(&mut command, project_dir)?;
+    apply_npm_lifecycle_env(&mut command, project_dir, npm_command, name, script)?;
     let status = command.args(args).status()?;
     Ok(exit_code(status.code()))
 }
@@ -784,9 +795,11 @@ fn run_npm_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
                 allow_all_host,
             )?;
         }
-        NpmCompatAction::RunScript { name, args } => {
-            return run_package_script(project_dir, &name, &args)
-        }
+        NpmCompatAction::RunScript {
+            command,
+            name,
+            args,
+        } => return run_package_script_with_npm_command(project_dir, &command, &name, &args),
         NpmCompatAction::Exec { command, args } => {
             return run_project_command(project_dir, &command, &args)
         }
@@ -1338,6 +1351,158 @@ fn apply_project_runtime_env(
     Ok(())
 }
 
+fn apply_npm_lifecycle_env(
+    command: &mut ProcessCommand,
+    project_dir: &Path,
+    npm_command: &str,
+    script_name: &str,
+    script: &str,
+) -> Result<(), OmcRegistryError> {
+    for (key, value) in npm_lifecycle_env(project_dir, npm_command, script_name, script)? {
+        command.env(key, value);
+    }
+    Ok(())
+}
+
+fn npm_lifecycle_env(
+    project_dir: &Path,
+    npm_command: &str,
+    script_name: &str,
+    script: &str,
+) -> Result<BTreeMap<String, String>, OmcRegistryError> {
+    let project_dir = absolute_project_dir(project_dir);
+    let init_cwd = env::current_dir().unwrap_or_else(|_| project_dir.clone());
+    let mut vars = BTreeMap::from([
+        (
+            "INIT_CWD".to_owned(),
+            init_cwd.to_string_lossy().into_owned(),
+        ),
+        ("npm_command".to_owned(), npm_command.to_owned()),
+        (
+            "npm_config_local_prefix".to_owned(),
+            project_dir.to_string_lossy().into_owned(),
+        ),
+        (
+            "npm_config_npm_version".to_owned(),
+            env!("CARGO_PKG_VERSION").to_owned(),
+        ),
+        ("npm_config_user_agent".to_owned(), omc_npm_user_agent()),
+        ("npm_lifecycle_event".to_owned(), script_name.to_owned()),
+        ("npm_lifecycle_script".to_owned(), script.to_owned()),
+    ]);
+
+    if let Ok(exe) = env::current_exe() {
+        vars.insert(
+            "npm_execpath".to_owned(),
+            exe.to_string_lossy().into_owned(),
+        );
+    }
+    if let Some(node) = find_program_on_path("node") {
+        vars.insert(
+            "npm_node_execpath".to_owned(),
+            node.to_string_lossy().into_owned(),
+        );
+    }
+
+    let package_json = project_dir.join("package.json");
+    if package_json.exists() {
+        vars.insert(
+            "npm_package_json".to_owned(),
+            package_json.to_string_lossy().into_owned(),
+        );
+        let package =
+            serde_json::from_str::<serde_json::Value>(&fs::read_to_string(package_json)?)?;
+        if let Some(name) = package.get("name").and_then(serde_json::Value::as_str) {
+            vars.insert("npm_package_name".to_owned(), name.to_owned());
+        }
+        if let Some(version) = package.get("version").and_then(serde_json::Value::as_str) {
+            vars.insert("npm_package_version".to_owned(), version.to_owned());
+        }
+        collect_npm_package_bin_env(&package, &mut vars);
+        if let Some(config) = package.get("config") {
+            collect_npm_package_config_env("npm_package_config", config, &mut vars);
+        }
+    }
+
+    Ok(vars)
+}
+
+fn omc_npm_user_agent() -> String {
+    format!(
+        "omc/{} {} {} workspaces/false",
+        env!("CARGO_PKG_VERSION"),
+        env::consts::OS,
+        env::consts::ARCH
+    )
+}
+
+fn find_program_on_path(program: &str) -> Option<PathBuf> {
+    let path = env::var_os("PATH")?;
+    for dir in env::split_paths(&path) {
+        let candidate = dir.join(program);
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
+fn collect_npm_package_bin_env(package: &serde_json::Value, vars: &mut BTreeMap<String, String>) {
+    let Some(bin) = package.get("bin") else {
+        return;
+    };
+    if let Some(path) = bin.as_str() {
+        if let Some(name) = package.get("name").and_then(serde_json::Value::as_str) {
+            if !name.is_empty() {
+                vars.insert(
+                    format!("npm_package_bin_{}", npm_package_bin_name(name)),
+                    path.to_owned(),
+                );
+            }
+        }
+        return;
+    }
+    let Some(entries) = bin.as_object() else {
+        return;
+    };
+    for (name, value) in entries {
+        if let Some(path) = value.as_str() {
+            vars.insert(format!("npm_package_bin_{name}"), path.to_owned());
+        }
+    }
+}
+
+fn npm_package_bin_name(package_name: &str) -> &str {
+    package_name
+        .rsplit_once('/')
+        .map_or(package_name, |(_, name)| name)
+}
+
+fn collect_npm_package_config_env(
+    prefix: &str,
+    value: &serde_json::Value,
+    vars: &mut BTreeMap<String, String>,
+) {
+    if let Some(entries) = value.as_object() {
+        for (key, value) in entries {
+            collect_npm_package_config_env(&format!("{prefix}_{key}"), value, vars);
+        }
+        return;
+    }
+    if let Some(value) = npm_package_env_value(value) {
+        vars.insert(prefix.to_owned(), value);
+    }
+}
+
+fn npm_package_env_value(value: &serde_json::Value) -> Option<String> {
+    match value {
+        serde_json::Value::Bool(value) => Some(value.to_string()),
+        serde_json::Value::Number(value) => Some(value.to_string()),
+        serde_json::Value::String(value) => Some(value.clone()),
+        _ => None,
+    }
+}
+
 fn project_path(project_dir: &Path) -> Result<OsString, OmcRegistryError> {
     let mut paths = vec![
         project_dir.join("node_modules").join(".bin"),
@@ -1502,9 +1667,14 @@ fn parse_npm_compat_action(args: &[String]) -> Result<NpmCompatAction, OmcRegist
         }
         "run" | "run-script" => {
             let (name, rest) = split_first_position("npm run", &args[1..])?;
-            Ok(NpmCompatAction::RunScript { name, args: rest })
+            Ok(NpmCompatAction::RunScript {
+                command: command.to_owned(),
+                name,
+                args: rest,
+            })
         }
         "test" | "start" | "stop" | "restart" => Ok(NpmCompatAction::RunScript {
+            command: command.to_owned(),
             name: command.to_owned(),
             args: strip_optional_double_dash(&args[1..]),
         }),
@@ -2341,6 +2511,17 @@ mod tests {
         values.iter().map(OsString::from).collect()
     }
 
+    fn test_dir(name: &str) -> PathBuf {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = env::temp_dir().join(format!("omc-cli-{name}-{nonce}"));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
     #[test]
     fn detects_direct_npm_and_pip_compat_binaries() {
         assert_eq!(
@@ -2514,6 +2695,7 @@ mod tests {
         assert_eq!(
             parse_npm_compat_action(&args(&["run", "test", "--", "--watch"])).unwrap(),
             NpmCompatAction::RunScript {
+                command: "run".to_owned(),
                 name: "test".to_owned(),
                 args: vec!["--watch".to_owned()],
             }
@@ -2521,6 +2703,7 @@ mod tests {
         assert_eq!(
             parse_npm_compat_action(&args(&["test", "--", "--watch"])).unwrap(),
             NpmCompatAction::RunScript {
+                command: "test".to_owned(),
                 name: "test".to_owned(),
                 args: vec!["--watch".to_owned()],
             }
@@ -2550,6 +2733,74 @@ mod tests {
                 kind: NpmPathKind::Prefix,
             }
         );
+    }
+
+    #[test]
+    fn builds_npm_lifecycle_env_from_package_json() {
+        let dir = test_dir("npm-lifecycle-env");
+        fs::write(
+            dir.join("package.json"),
+            r#"{
+              "name": "@scope/env-demo",
+              "version": "1.2.3",
+              "bin": "cli.js",
+              "config": {
+                "port": 8080,
+                "nested": {"token-name": "DEMO_TOKEN"}
+              },
+              "scripts": {"show": "node show.js"}
+            }"#,
+        )
+        .unwrap();
+
+        let vars = npm_lifecycle_env(&dir, "run", "show", "node show.js").unwrap();
+
+        assert_eq!(vars.get("npm_command").map(String::as_str), Some("run"));
+        assert_eq!(
+            vars.get("npm_lifecycle_event").map(String::as_str),
+            Some("show")
+        );
+        assert_eq!(
+            vars.get("npm_lifecycle_script").map(String::as_str),
+            Some("node show.js")
+        );
+        assert_eq!(
+            vars.get("npm_package_name").map(String::as_str),
+            Some("@scope/env-demo")
+        );
+        assert_eq!(
+            vars.get("npm_package_version").map(String::as_str),
+            Some("1.2.3")
+        );
+        assert_eq!(
+            vars.get("npm_package_bin_env-demo").map(String::as_str),
+            Some("cli.js")
+        );
+        assert_eq!(
+            vars.get("npm_package_config_port").map(String::as_str),
+            Some("8080")
+        );
+        assert_eq!(
+            vars.get("npm_package_config_nested_token-name")
+                .map(String::as_str),
+            Some("DEMO_TOKEN")
+        );
+        let absolute_dir = absolute_project_dir(&dir);
+        let package_json = absolute_dir
+            .join("package.json")
+            .to_string_lossy()
+            .into_owned();
+        let local_prefix = absolute_dir.to_string_lossy().into_owned();
+        assert_eq!(
+            vars.get("npm_package_json").map(String::as_str),
+            Some(package_json.as_str())
+        );
+        assert_eq!(
+            vars.get("npm_config_local_prefix").map(String::as_str),
+            Some(local_prefix.as_str())
+        );
+
+        let _ = fs::remove_dir_all(dir);
     }
 
     #[test]
