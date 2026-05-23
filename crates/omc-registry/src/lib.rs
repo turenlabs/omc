@@ -1046,6 +1046,10 @@ fn discover_project_requirements_with_options(
         project.specs.extend(requirements.specs);
     }
 
+    if root_python_project_has_metadata(project_dir)? {
+        push_python_local_path(&mut project, project_dir.to_path_buf());
+    }
+
     let poetry_lock = project_dir.join("poetry.lock");
     if poetry_lock.exists() {
         let requirements = read_poetry_lock_requirements(&poetry_lock)?;
@@ -3371,6 +3375,64 @@ fn read_setup_py_requirements(
     }
 
     Ok(requirements)
+}
+
+fn root_python_project_has_metadata(project_dir: &Path) -> Result<bool> {
+    let pyproject = project_dir.join("pyproject.toml");
+    if pyproject.exists() && pyproject_declares_python_project(&pyproject)? {
+        return Ok(true);
+    }
+
+    let setup_cfg = project_dir.join("setup.cfg");
+    if setup_cfg.exists() && setup_cfg_declares_python_project(&setup_cfg)? {
+        return Ok(true);
+    }
+
+    let setup_py = project_dir.join("setup.py");
+    if setup_py.exists() && setup_py_declares_python_project(&setup_py)? {
+        return Ok(true);
+    }
+
+    Ok(false)
+}
+
+fn pyproject_declares_python_project(path: &Path) -> Result<bool> {
+    let pyproject = toml::from_str::<PyProjectToml>(&fs::read_to_string(path)?)?;
+    if let Some(project) = pyproject.project {
+        if project.name.is_some() || !project.scripts.is_empty() || !project.gui_scripts.is_empty()
+        {
+            return Ok(true);
+        }
+    }
+    if let Some(poetry) = pyproject.tool.and_then(|tool| tool.poetry) {
+        if poetry.name.is_some() || !poetry.scripts.is_empty() {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn setup_cfg_declares_python_project(path: &Path) -> Result<bool> {
+    let sections = parse_setup_cfg_sections(&fs::read_to_string(path)?);
+    let has_name = sections
+        .get("metadata")
+        .and_then(|metadata| metadata.get("name"))
+        .map(|values| values.iter().any(|value| !value.trim().is_empty()))
+        .unwrap_or(false);
+    let has_entry_points = sections
+        .get("options.entry_points")
+        .map(|entry_points| {
+            entry_points
+                .keys()
+                .any(|key| matches!(key.as_str(), "console_scripts" | "gui_scripts"))
+        })
+        .unwrap_or(false);
+    Ok(has_name || has_entry_points)
+}
+
+fn setup_py_declares_python_project(path: &Path) -> Result<bool> {
+    let content = fs::read_to_string(path)?;
+    Ok(content.contains("setup("))
 }
 
 fn python_keyword_assignment_values<'a>(content: &'a str, keyword: &str) -> Vec<&'a str> {
@@ -8485,6 +8547,7 @@ struct UvWorkspace {
 
 #[derive(Debug, Default, Deserialize)]
 struct PoetryProject {
+    name: Option<String>,
     #[serde(default)]
     dependencies: BTreeMap<String, PoetryDependency>,
     #[serde(default, rename = "dev-dependencies")]
@@ -10504,6 +10567,87 @@ packages:
         assert_eq!(
             String::from_utf8_lossy(&output.stdout).trim(),
             "setup-py-cli-ok"
+        );
+    }
+
+    #[test]
+    fn installs_root_python_project_as_local_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src");
+        fs::create_dir_all(src.join("rootpkg")).unwrap();
+        fs::write(
+            src.join("rootpkg").join("__init__.py"),
+            "VALUE = 'root-ok'\n",
+        )
+        .unwrap();
+        fs::write(
+            src.join("rootpkg").join("cli.py"),
+            "from rootpkg import VALUE\n\ndef main():\n    print(VALUE)\n",
+        )
+        .unwrap();
+        fs::write(
+            dir.path().join("pyproject.toml"),
+            r#"
+            [project]
+            name = "rootpkg"
+            version = "0.1.0"
+
+            [project.scripts]
+            root-cli = "rootpkg.cli:main"
+            "#,
+        )
+        .unwrap();
+
+        let report = install_project(&LinkOptions::new(dir.path())).unwrap();
+        assert_eq!(report.python_scripts, 1);
+
+        let expected = fs::canonicalize(src).unwrap();
+        let content =
+            fs::read_to_string(dir.path().join(".omc").join("python").join("local-paths")).unwrap();
+        assert_eq!(content.trim(), expected.to_string_lossy());
+
+        let output = Command::new(
+            dir.path()
+                .join(".omc")
+                .join("python")
+                .join("bin")
+                .join("root-cli"),
+        )
+        .output()
+        .unwrap();
+        assert!(output.status.success());
+        assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "root-ok");
+    }
+
+    #[test]
+    fn discovers_root_setup_metadata_as_local_path() {
+        let setup_cfg_dir = tempfile::tempdir().unwrap();
+        fs::write(
+            setup_cfg_dir.path().join("setup.cfg"),
+            r#"
+            [metadata]
+            name = setup-cfg-root
+            "#,
+        )
+        .unwrap();
+        let discovered = discover_project_requirements(setup_cfg_dir.path()).unwrap();
+        assert_eq!(
+            discovered.python_local_paths,
+            vec![setup_cfg_dir.path().to_path_buf()]
+        );
+
+        let setup_py_dir = tempfile::tempdir().unwrap();
+        fs::write(
+            setup_py_dir.path().join("setup.py"),
+            r#"from setuptools import setup
+setup(name="setup-py-root")
+"#,
+        )
+        .unwrap();
+        let discovered = discover_project_requirements(setup_py_dir.path()).unwrap();
+        assert_eq!(
+            discovered.python_local_paths,
+            vec![setup_py_dir.path().to_path_buf()]
         );
     }
 
