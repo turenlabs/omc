@@ -121,7 +121,7 @@ For existing projects, `install` reads normal project files:
 package.json       dependencies, devDependencies, optionalDependencies, peers; use --omit-dev for production installs
 .npmrc             npm registry, scoped registry, and host-scoped auth token configuration
 package-lock.json  exact versions, resolved tarball URLs, and integrity hashes for uniquely locked npm packages
-pip.conf           PyPI index-url and extra-index-url simple-index configuration
+pip.conf           PyPI index-url, extra-index-url, find-links, and no-index configuration
 requirements.txt  PyPI requirements, direct wheel URLs, hashes, extras, -r includes, -c constraints, markers, simple indexes, find-links wheelhouses
 pyproject.toml    PEP 621 project dependencies, selected optional groups
 pyproject.toml    Poetry dependencies, dev groups, optional groups, and extras
@@ -138,6 +138,7 @@ use project/user `.npmrc` registry, scoped registry, and auth token settings for
 use `omc.toml` PyPI simple-index settings for OMC-managed PyPI adds
 use project/user `pip.conf` PyPI simple-index settings when no project index is set
 use `PIP_INDEX_URL` / `PIP_EXTRA_INDEX_URL` when no project PyPI index is set
+use pip-style `find-links` and `no-index` config/env values for wheelhouses
 verify npm shasum/integrity and PyPI sha256 when the registry provides them
 use package-lock.json npm resolved tarball URLs and integrity hashes when present
 cache the source artifact under .omc/cache
@@ -193,7 +194,8 @@ pypi-extra-index-urls = ["https://packages.example/simple"]
 
 If the project does not set a PyPI index, OMC also honors pip-style
 project/user `pip.conf`, `PIP_CONFIG_FILE`, `PIP_INDEX_URL`, and
-`PIP_EXTRA_INDEX_URL` settings.
+`PIP_EXTRA_INDEX_URL` settings. Wheelhouse settings such as `find-links`,
+`no-index`, `PIP_FIND_LINKS`, and `PIP_NO_INDEX` feed the same offline resolver.
 
 This is still a prototype. It replaces install-time execution with registry
 resolution, source caching, OMC artifact generation, capability verification,
@@ -219,10 +221,10 @@ Supported now:
   host-scoped `_authToken` npm registry access
 - project `omc.toml` PyPI simple-index support for `pypi-index-url` and
   `pypi-extra-index-urls`
-- project/user `pip.conf` and `PIP_CONFIG_FILE` PyPI simple-index support for
-  `index-url` and `extra-index-url`
-- pip-style `PIP_INDEX_URL` and `PIP_EXTRA_INDEX_URL` support when no project
-  PyPI index is configured
+- project/user `pip.conf` and `PIP_CONFIG_FILE` PyPI support for `index-url`,
+  `extra-index-url`, `find-links`, and `no-index`
+- pip-style `PIP_INDEX_URL`, `PIP_EXTRA_INDEX_URL`, `PIP_FIND_LINKS`, and
+  `PIP_NO_INDEX` support when no project PyPI index is configured
 - credential-bearing PyPI simple-index URLs are used for downloads without
   recording those credentials in `omc.lock`
 - PyPI dependency range resolution with local `python3` `Requires-Python`
