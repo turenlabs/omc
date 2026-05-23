@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::process::{Command as ProcessCommand, ExitCode};
 use std::{env, ffi::OsString, fs};
@@ -8,7 +9,7 @@ use omc_registry::{
     add_manifest_policy_grants, add_package_graph, init_project, install_locked_packages,
     install_locked_project, install_project, parse_capability_grant, read_lockfile,
     read_package_scripts, remove_manifest_dependency, Behavior, Ecosystem, InstallReport,
-    LinkOptions, OmcRegistryError, PackageSpec, Verdict,
+    LinkOptions, LockedPackage, OmcRegistryError, PackageSpec, Verdict,
 };
 
 #[derive(Debug, Parser)]
@@ -237,9 +238,19 @@ enum NpmCompatAction {
         command: String,
         args: Vec<String>,
     },
+    Path {
+        kind: NpmPathKind,
+    },
     List {
         json: bool,
     },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NpmPathKind {
+    Bin,
+    Root,
+    Prefix,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -259,6 +270,10 @@ enum PipCompatAction {
         specs: Vec<String>,
         allow: Vec<String>,
         allow_all_host: bool,
+    },
+    Show {
+        specs: Vec<String>,
+        files: bool,
     },
     Freeze,
     List {
@@ -624,6 +639,7 @@ fn run_npm_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
         NpmCompatAction::Exec { command, args } => {
             return run_project_command(project_dir, &command, &args)
         }
+        NpmCompatAction::Path { kind } => print_npm_path(project_dir, kind)?,
         NpmCompatAction::List { json } => {
             print_locked_packages(project_dir, Some(Ecosystem::Npm), json)?
         }
@@ -702,6 +718,9 @@ fn run_pip_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
                 allow_all_host,
             )?;
         }
+        PipCompatAction::Show { specs, files } => {
+            return print_locked_pip_show(project_dir, &specs, files)
+        }
         PipCompatAction::Freeze => print_locked_freeze(project_dir)?,
         PipCompatAction::List { format } => match format {
             PipListFormat::Columns => {
@@ -713,6 +732,17 @@ fn run_pip_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
     }
 
     Ok(ExitCode::SUCCESS)
+}
+
+fn print_npm_path(project_dir: &Path, kind: NpmPathKind) -> Result<(), OmcRegistryError> {
+    let project_dir = absolute_project_dir(project_dir);
+    let path = match kind {
+        NpmPathKind::Bin => project_dir.join("node_modules").join(".bin"),
+        NpmPathKind::Root => project_dir.join("node_modules"),
+        NpmPathKind::Prefix => project_dir,
+    };
+    println!("{}", path.display());
+    Ok(())
 }
 
 fn remove_specs(
@@ -805,6 +835,181 @@ fn print_locked_pip_json(project_dir: &Path) -> Result<(), OmcRegistryError> {
     Ok(())
 }
 
+fn print_locked_pip_show(
+    project_dir: &Path,
+    specs: &[String],
+    include_files: bool,
+) -> Result<ExitCode, OmcRegistryError> {
+    if specs.is_empty() {
+        return Err(OmcRegistryError::UnsupportedSpec(
+            "pip show needs at least one package".to_owned(),
+        ));
+    }
+
+    let lock = read_lockfile(project_dir.join("omc.lock"))?;
+    let packages = lock
+        .packages
+        .into_iter()
+        .filter(|package| package.ecosystem == Ecosystem::Pypi)
+        .collect::<Vec<_>>();
+    let mut missing = Vec::new();
+    let mut printed = false;
+    for spec in specs {
+        let normalized = normalize_pip_show_name(spec);
+        let Some(package) = packages
+            .iter()
+            .find(|package| normalize_pip_show_name(&package.name) == normalized)
+        else {
+            missing.push(spec.clone());
+            continue;
+        };
+        if printed {
+            println!("---");
+        }
+        print_pip_show_package(project_dir, package, &packages, include_files)?;
+        printed = true;
+    }
+
+    if !missing.is_empty() {
+        eprintln!("WARNING: Package(s) not found: {}", missing.join(", "));
+        return Ok(ExitCode::FAILURE);
+    }
+
+    Ok(ExitCode::SUCCESS)
+}
+
+fn print_pip_show_package(
+    project_dir: &Path,
+    package: &LockedPackage,
+    packages: &[LockedPackage],
+    include_files: bool,
+) -> Result<(), OmcRegistryError> {
+    let site_packages = absolute_project_dir(project_dir)
+        .join(".omc")
+        .join("python")
+        .join("site-packages");
+    println!("Name: {}", package.name);
+    println!("Version: {}", package.version);
+    println!("Summary:");
+    println!("Home-page: {}", package.source_url);
+    println!("Author:");
+    println!("Author-email:");
+    println!("License:");
+    println!("Location: {}", site_packages.display());
+    println!("Requires: {}", pip_dependency_names(package).join(", "));
+    println!(
+        "Required-by: {}",
+        pip_required_by_names(package, packages).join(", ")
+    );
+    if include_files {
+        println!("Files:");
+        for file in pip_installed_files(&site_packages, package)? {
+            println!("  {file}");
+        }
+    }
+    Ok(())
+}
+
+fn pip_dependency_names(package: &LockedPackage) -> Vec<String> {
+    package
+        .dependencies
+        .iter()
+        .filter_map(|dependency| pip_dependency_name(dependency))
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
+fn pip_required_by_names(package: &LockedPackage, packages: &[LockedPackage]) -> Vec<String> {
+    let target = normalize_pip_show_name(&package.name);
+    packages
+        .iter()
+        .filter(|candidate| candidate.name != package.name)
+        .filter(|candidate| {
+            candidate
+                .dependencies
+                .iter()
+                .filter_map(|dependency| pip_dependency_name(dependency))
+                .any(|name| normalize_pip_show_name(&name) == target)
+        })
+        .map(|candidate| candidate.name.clone())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
+fn pip_dependency_name(dependency: &str) -> Option<String> {
+    PackageSpec::parse(dependency)
+        .ok()
+        .filter(|spec| spec.ecosystem == Ecosystem::Pypi)
+        .map(|spec| spec.name)
+}
+
+fn pip_installed_files(
+    site_packages: &Path,
+    package: &LockedPackage,
+) -> Result<Vec<String>, OmcRegistryError> {
+    let Some(dist_info) = match_dist_info_dir(site_packages, package)? else {
+        return Ok(Vec::new());
+    };
+    let record = dist_info.join("RECORD");
+    if !record.exists() {
+        return Ok(Vec::new());
+    }
+    let mut files = Vec::new();
+    for line in fs::read_to_string(record)?.lines() {
+        if let Some((file, _)) = line.split_once(',') {
+            if !file.is_empty() {
+                files.push(file.to_owned());
+            }
+        }
+    }
+    files.sort();
+    Ok(files)
+}
+
+fn match_dist_info_dir(
+    site_packages: &Path,
+    package: &LockedPackage,
+) -> Result<Option<PathBuf>, OmcRegistryError> {
+    if !site_packages.exists() {
+        return Ok(None);
+    }
+    let prefix = format!(
+        "{}-{}",
+        normalize_pip_show_name(&package.name),
+        normalize_pip_show_name(&package.version)
+    );
+    for entry in fs::read_dir(site_packages)? {
+        let entry = entry?;
+        if !entry.file_type()?.is_dir() {
+            continue;
+        }
+        let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+            continue;
+        };
+        if name.ends_with(".dist-info") && normalize_pip_show_name(&name).starts_with(&prefix) {
+            return Ok(Some(entry.path()));
+        }
+    }
+    Ok(None)
+}
+
+fn normalize_pip_show_name(name: &str) -> String {
+    let name = name
+        .strip_prefix("pypi:")
+        .or_else(|| name.strip_prefix("py:"))
+        .or_else(|| name.strip_prefix("python:"))
+        .unwrap_or(name);
+    let name = name.split_once('[').map(|(name, _)| name).unwrap_or(name);
+    name.chars()
+        .map(|ch| match ch {
+            '_' | '.' => '-',
+            other => other.to_ascii_lowercase(),
+        })
+        .collect()
+}
+
 fn absolutize_paths(project_dir: &Path, paths: Vec<PathBuf>) -> Vec<PathBuf> {
     paths
         .into_iter()
@@ -818,6 +1023,18 @@ fn absolutize_path(project_dir: &Path, path: PathBuf) -> PathBuf {
     } else {
         project_dir.join(path)
     }
+}
+
+fn absolute_project_dir(project_dir: &Path) -> PathBuf {
+    if let Ok(path) = fs::canonicalize(project_dir) {
+        return path;
+    }
+    if project_dir.is_absolute() {
+        return project_dir.to_path_buf();
+    }
+    env::current_dir()
+        .map(|cwd| cwd.join(project_dir))
+        .unwrap_or_else(|_| project_dir.to_path_buf())
 }
 
 fn apply_pip_compat_index_options(
@@ -1028,6 +1245,24 @@ fn parse_npm_compat_action(args: &[String]) -> Result<NpmCompatAction, OmcRegist
                 args: rest,
             })
         }
+        "bin" => {
+            parse_npm_path_args("npm bin", &args[1..])?;
+            Ok(NpmCompatAction::Path {
+                kind: NpmPathKind::Bin,
+            })
+        }
+        "root" => {
+            parse_npm_path_args("npm root", &args[1..])?;
+            Ok(NpmCompatAction::Path {
+                kind: NpmPathKind::Root,
+            })
+        }
+        "prefix" => {
+            parse_npm_path_args("npm prefix", &args[1..])?;
+            Ok(NpmCompatAction::Path {
+                kind: NpmPathKind::Prefix,
+            })
+        }
         "list" | "ls" => Ok(NpmCompatAction::List {
             json: parse_json_list_flag("npm list", &args[1..])?,
         }),
@@ -1035,6 +1270,16 @@ fn parse_npm_compat_action(args: &[String]) -> Result<NpmCompatAction, OmcRegist
             "unsupported npm compatibility command `{other}`"
         ))),
     }
+}
+
+fn parse_npm_path_args(command: &str, args: &[String]) -> Result<(), OmcRegistryError> {
+    for arg in args {
+        if matches!(arg.as_str(), "--silent" | "-s" | "--parseable" | "-p") {
+            continue;
+        }
+        return Err(unsupported_compat_arg(command, arg));
+    }
+    Ok(())
 }
 
 fn parse_npm_install_args(args: &[String]) -> Result<NpmCompatAction, OmcRegistryError> {
@@ -1083,6 +1328,7 @@ fn parse_pip_compat_action(args: &[String]) -> Result<PipCompatAction, OmcRegist
                 allow_all_host,
             })
         }
+        "show" => parse_pip_show_args(&args[1..]),
         "freeze" => Ok(PipCompatAction::Freeze),
         "list" => Ok(PipCompatAction::List {
             format: parse_pip_list_format(&args[1..])?,
@@ -1091,6 +1337,33 @@ fn parse_pip_compat_action(args: &[String]) -> Result<PipCompatAction, OmcRegist
             "unsupported pip compatibility command `{other}`"
         ))),
     }
+}
+
+fn parse_pip_show_args(args: &[String]) -> Result<PipCompatAction, OmcRegistryError> {
+    let mut specs = Vec::new();
+    let mut files = false;
+    for arg in args {
+        if matches!(
+            arg.as_str(),
+            "--disable-pip-version-check" | "-v" | "--verbose"
+        ) {
+            continue;
+        }
+        if matches!(arg.as_str(), "-f" | "--files") {
+            files = true;
+            continue;
+        }
+        if arg.starts_with('-') {
+            return Err(unsupported_compat_arg("pip show", arg));
+        }
+        specs.push(arg.clone());
+    }
+    if specs.is_empty() {
+        return Err(OmcRegistryError::UnsupportedSpec(
+            "pip show needs at least one package".to_owned(),
+        ));
+    }
+    Ok(PipCompatAction::Show { specs, files })
 }
 
 fn parse_pip_install_args(args: &[String]) -> Result<PipCompatAction, OmcRegistryError> {
@@ -1490,6 +1763,24 @@ mod tests {
                 args: vec![".".to_owned()],
             }
         );
+        assert_eq!(
+            parse_npm_compat_action(&args(&["bin", "--silent"])).unwrap(),
+            NpmCompatAction::Path {
+                kind: NpmPathKind::Bin,
+            }
+        );
+        assert_eq!(
+            parse_npm_compat_action(&args(&["root"])).unwrap(),
+            NpmCompatAction::Path {
+                kind: NpmPathKind::Root,
+            }
+        );
+        assert_eq!(
+            parse_npm_compat_action(&args(&["prefix", "--parseable"])).unwrap(),
+            NpmCompatAction::Path {
+                kind: NpmPathKind::Prefix,
+            }
+        );
     }
 
     #[test]
@@ -1541,6 +1832,13 @@ mod tests {
             parse_pip_compat_action(&args(&["freeze"])).unwrap(),
             PipCompatAction::Freeze
         );
+        assert_eq!(
+            parse_pip_compat_action(&args(&["show", "-f", "requests"])).unwrap(),
+            PipCompatAction::Show {
+                specs: vec!["requests".to_owned()],
+                files: true,
+            }
+        );
     }
 
     #[test]
@@ -1561,5 +1859,75 @@ mod tests {
                 format: PipListFormat::Json,
             }
         );
+    }
+
+    #[test]
+    fn reports_pip_show_dependency_and_file_metadata() {
+        let package = locked_pypi_package(
+            "charset-normalizer",
+            "3.4.0",
+            vec!["pypi:idna@>=3".to_owned()],
+        );
+        let dependent = locked_pypi_package(
+            "requests",
+            "2.32.3",
+            vec!["pypi:charset-normalizer@>=2".to_owned()],
+        );
+
+        assert_eq!(pip_dependency_names(&package), vec!["idna".to_owned()]);
+        assert_eq!(
+            pip_required_by_names(&package, &[package.clone(), dependent]),
+            vec!["requests".to_owned()]
+        );
+
+        let site_packages = temp_test_dir().join("site-packages");
+        let dist_info = site_packages.join("charset_normalizer-3.4.0.dist-info");
+        fs::create_dir_all(&dist_info).unwrap();
+        fs::write(
+            dist_info.join("RECORD"),
+            "charset_normalizer/__init__.py,,\ncharset_normalizer-3.4.0.dist-info/METADATA,,\n",
+        )
+        .unwrap();
+
+        assert_eq!(
+            pip_installed_files(&site_packages, &package).unwrap(),
+            vec![
+                "charset_normalizer-3.4.0.dist-info/METADATA".to_owned(),
+                "charset_normalizer/__init__.py".to_owned(),
+            ]
+        );
+        fs::remove_dir_all(site_packages.parent().unwrap()).unwrap();
+    }
+
+    fn locked_pypi_package(name: &str, version: &str, dependencies: Vec<String>) -> LockedPackage {
+        LockedPackage {
+            ecosystem: Ecosystem::Pypi,
+            name: name.to_owned(),
+            version: version.to_owned(),
+            source_url: format!("https://files.example/{name}-{version}.whl"),
+            archive: String::new(),
+            artifact: String::new(),
+            sha256: String::new(),
+            behavior: Behavior::Pure,
+            verdict: Verdict::Accepted,
+            dependencies,
+            optional_dependencies: Vec::new(),
+            grants: Vec::new(),
+            capabilities: Vec::new(),
+            verifier_findings: Vec::new(),
+        }
+    }
+
+    fn temp_test_dir() -> PathBuf {
+        let mut path = env::temp_dir();
+        path.push(format!(
+            "omc-cli-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        path
     }
 }

@@ -113,9 +113,12 @@ cargo run -p omc-cli -- --project-dir /tmp/omc-demo run normalizer --version
 cargo run -p omc-cli -- --project-dir /tmp/omc-demo npm install left-pad@1.3.0
 cargo run -p omc-cli -- --project-dir /tmp/omc-demo npm ci --omit=dev
 cargo run -p omc-cli -- --project-dir /tmp/omc-demo npm run test -- --watch
+cargo run -p omc-cli -- --project-dir /tmp/omc-demo npm root
+cargo run -p omc-cli -- --project-dir /tmp/omc-demo npm bin
 cargo run -p omc-cli -- --project-dir /tmp/omc-demo pip install -r requirements.txt -c constraints.txt
 cargo run -p omc-cli -- --project-dir /tmp/omc-demo pip install requests==2.32.3 --allow-all-host
 cargo run -p omc-cli -- --project-dir /tmp/omc-demo pip freeze
+cargo run -p omc-cli -- --project-dir /tmp/omc-demo pip show requests
 cargo run -p omc-cli -- --project-dir /tmp/omc-demo pip list --format=json
 cargo run -p omc-cli -- --project-dir /tmp/omc-demo list
 cargo run -p omc-cli -- --project-dir /tmp/omc-demo list --json
@@ -353,11 +356,11 @@ Supported now:
 - `omc node`, `omc python`, `omc script`, and `omc run` wrappers, including
   package.json and Pipfile project scripts
 - `omc npm` compatibility commands for common `install`, `ci`, `test`,
-  `start`, `stop`, `restart`, `run`, `exec`, `remove`, and `list` /
-  `list --json` flows without delegating to npm
+  `start`, `stop`, `restart`, `run`, `exec`, `remove`, `bin`, `root`,
+  `prefix`, and `list` / `list --json` flows without delegating to npm
 - `omc pip` compatibility commands for common `install`, `uninstall`, `freeze`,
-  and `list --format=columns|freeze|json` flows, including `-r`, index URL,
-  constraints, extra-index, find-links, and no-index install flags without
+  `show`, and `list --format=columns|freeze|json` flows, including `-r`, index
+  URL, constraints, extra-index, find-links, and no-index install flags without
   delegating to pip
 - isolated `omc python` execution that uses OMC site-packages without ambient
   user/global Python site-packages or startup/hook environment variables
