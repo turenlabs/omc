@@ -259,8 +259,9 @@ Supported now:
 - `requirements.txt` ingestion with hashes, line continuations, extras,
   direct wheel URLs/paths, recursive `-r` includes, `-c` constraints,
   `--index-url` / `--extra-index-url` simple indexes, `--find-links` / `-f`
-  local wheelhouses or HTML pages, `--no-index`, local editable paths, and
-  common Python environment markers
+  local wheelhouses or HTML pages, `--no-index`, `--trusted-host`,
+  `--only-binary`, `--prefer-binary`, enforced `--require-hashes`, local
+  editable paths, and common Python environment markers
 - unsupported requirements entries such as VCS URLs and non-wheel direct URLs
   fail closed instead of being silently ignored
 - `Pipfile.lock` ingestion for Pipenv default/develop package pins, extras,

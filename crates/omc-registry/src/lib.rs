@@ -528,6 +528,7 @@ pub struct ProjectRequirements {
     pub pypi_extra_index_urls: Vec<String>,
     pub pypi_find_links: Vec<String>,
     pub pypi_no_index: bool,
+    pub pypi_require_hashes: bool,
     pub python_local_paths: Vec<PathBuf>,
 }
 
@@ -2302,6 +2303,7 @@ fn npm_requirements_from_lock_maps(
         pypi_extra_index_urls: Vec::new(),
         pypi_find_links: Vec::new(),
         pypi_no_index: false,
+        pypi_require_hashes: false,
         python_local_paths: Vec::new(),
     }
 }
@@ -2362,6 +2364,9 @@ fn read_requirements_file(path: &Path) -> Result<ProjectRequirements> {
         &mut BTreeSet::new(),
         &mut discovered,
     )?;
+    if discovered.pypi_require_hashes {
+        enforce_requirements_hashes(&discovered)?;
+    }
     Ok(discovered)
 }
 
@@ -3443,6 +3448,17 @@ fn read_requirements_file_inner(
             continue;
         }
 
+        if parse_requirements_require_hashes(line) {
+            if mode == RequirementsMode::Install {
+                discovered.pypi_require_hashes = true;
+            }
+            continue;
+        }
+
+        if parse_requirements_compatible_global_option(line) {
+            continue;
+        }
+
         if let Some(editable) = parse_requirements_editable_value(line) {
             if mode == RequirementsMode::Constraint {
                 return Err(OmcRegistryError::UnsupportedRequirement(line.to_owned()));
@@ -3682,6 +3698,35 @@ fn shell_like_tokens(value: &str) -> Vec<String> {
 fn normalize_sha256_hash(value: &str) -> Option<String> {
     let hash = value.strip_prefix("sha256:")?.to_ascii_lowercase();
     (hash.len() == 64 && hash.chars().all(|ch| ch.is_ascii_hexdigit())).then_some(hash)
+}
+
+fn enforce_requirements_hashes(requirements: &ProjectRequirements) -> Result<()> {
+    for spec in &requirements.specs {
+        if !requirements.hashes.contains_key(&spec.constraint_key()) {
+            return Err(OmcRegistryError::UnsupportedRequirement(format!(
+                "--require-hashes needs a hash for `{}`",
+                spec.requested()
+            )));
+        }
+
+        if spec.direct_url.is_none() {
+            let requirement =
+                constrained_pypi_requirement(spec, &requirements.constraints).unwrap_or_default();
+            if !is_exact_pypi_requirement(&requirement) {
+                return Err(OmcRegistryError::UnsupportedRequirement(format!(
+                    "--require-hashes needs an exact pin for `{}`",
+                    spec.requested()
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn is_exact_pypi_requirement(requirement: &str) -> bool {
+    requirement
+        .split(',')
+        .any(|part| part.trim_start().starts_with("==") || part.trim_start().starts_with("==="))
 }
 
 pub fn install_locked_packages(project_dir: impl AsRef<Path>) -> Result<InstallReport> {
@@ -6331,6 +6376,16 @@ fn parse_requirements_find_links(line: &str, base_dir: &Path) -> Option<String> 
 
 fn parse_requirements_no_index(line: &str) -> bool {
     line == "--no-index"
+}
+
+fn parse_requirements_require_hashes(line: &str) -> bool {
+    line == "--require-hashes"
+}
+
+fn parse_requirements_compatible_global_option(line: &str) -> bool {
+    line == "--prefer-binary"
+        || parse_requirements_option_value(line, &["--trusted-host=", "--trusted-host"]).is_some()
+        || parse_requirements_option_value(line, &["--only-binary=", "--only-binary"]).is_some()
 }
 
 fn parse_requirements_editable_value(line: &str) -> Option<String> {
@@ -9252,9 +9307,49 @@ wheels = [
     fn rejects_unsupported_requirements_entries() {
         let dir = tempfile::tempdir().unwrap();
         let requirements = dir.path().join("requirements.txt");
-        fs::write(&requirements, "--trusted-host example.invalid\n").unwrap();
+        fs::write(&requirements, "--no-deps\n").unwrap();
         let error = read_requirements_file(&requirements).unwrap_err();
         assert!(error.to_string().contains("unsupported requirements entry"));
+    }
+
+    #[test]
+    fn reads_requirements_global_options_and_enforces_hashes() {
+        let dir = tempfile::tempdir().unwrap();
+        let requirements = dir.path().join("requirements.txt");
+        fs::write(
+            &requirements,
+            "--trusted-host example.invalid\n--only-binary=:all:\n--only-binary idna\n--prefer-binary\n--require-hashes\nidna==3.7 --hash=sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n",
+        )
+        .unwrap();
+
+        let discovered = read_requirements_file(&requirements).unwrap();
+        assert!(discovered.pypi_require_hashes);
+        assert!(has_spec(&discovered.specs, "idna", "==3.7"));
+        assert_eq!(
+            discovered
+                .hashes
+                .get("pypi:idna")
+                .and_then(|hashes| hashes.iter().next())
+                .map(String::as_str),
+            Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+        );
+    }
+
+    #[test]
+    fn rejects_require_hashes_without_hashes_or_exact_pins() {
+        let dir = tempfile::tempdir().unwrap();
+        let requirements = dir.path().join("requirements.txt");
+        fs::write(&requirements, "--require-hashes\nidna==3.7\n").unwrap();
+        let error = read_requirements_file(&requirements).unwrap_err();
+        assert!(error.to_string().contains("needs a hash"));
+
+        fs::write(
+            &requirements,
+            "--require-hashes\nidna>=3 --hash=sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n",
+        )
+        .unwrap();
+        let error = read_requirements_file(&requirements).unwrap_err();
+        assert!(error.to_string().contains("needs an exact pin"));
     }
 
     #[test]
