@@ -1834,7 +1834,7 @@ fn parse_npm_compat_action(args: &[String]) -> Result<NpmCompatAction, OmcRegist
 
     match command {
         "--version" | "-v" => Ok(NpmCompatAction::Version),
-        "install" | "i" | "add" => parse_npm_install_args(&args[1..]),
+        "install" | "i" | "add" | "update" | "up" | "upgrade" => parse_npm_install_args(&args[1..]),
         "ci" => {
             let CommonCompatFlags {
                 omit_dev,
@@ -3206,6 +3206,31 @@ mod tests {
                 omit_dev: false,
                 lock_only: true,
                 npm_registry: None,
+                allow: Vec::new(),
+                allow_all_host: false,
+            }
+        );
+
+        let action = parse_npm_compat_action(&args(&[
+            "update",
+            "--package-lock-only",
+            "--omit=dev",
+            "--registry=https://registry.example.invalid/npm",
+            "left-pad",
+        ]))
+        .unwrap();
+
+        assert_eq!(
+            action,
+            NpmCompatAction::Install {
+                specs: vec!["left-pad".to_owned()],
+                archive_references: Vec::new(),
+                local_paths: Vec::new(),
+                save: true,
+                dev: false,
+                omit_dev: true,
+                lock_only: true,
+                npm_registry: Some("https://registry.example.invalid/npm".to_owned()),
                 allow: Vec::new(),
                 allow_all_host: false,
             }

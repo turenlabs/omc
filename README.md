@@ -115,6 +115,7 @@ cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo ci
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo run normalizer --version
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm install left-pad@1.3.0
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm install --registry https://registry.npmjs.org left-pad@1.3.0
+cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm update --package-lock-only
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm ci --omit=dev
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm run test -- --watch
 cargo run -p omc-cli --bin npx -- --omc-project-dir /tmp/omc-demo eslint -- .
@@ -392,14 +393,15 @@ Supported now:
   pyproject/setup.cfg/setup.py metadata exists
 - `omc node`, `omc python`, `omc script`, and `omc run` wrappers, including
   package.json and Pipfile project scripts
-- `omc npm` compatibility commands for common `install`, `ci`, `test`,
-  `start`, `stop`, `restart`, `run`, `exec`, `remove`, `bin`, `root`,
-  `prefix`, and `list` / `list --json` flows without delegating to npm, plus a
-  direct `npm` compatibility binary and direct `npx` compatibility binary for
-  project-local executable flows; direct local npm tarballs and local package
-  directories are accepted as install inputs; common `npm exec` / `npx` flags
-  such as `--yes`, `--package`, `--cache`, and `--registry` are parsed before
-  dispatching to project-local executables; `--no-save`,
+- `omc npm` compatibility commands for common `install`, `update` / `up` /
+  `upgrade`, `ci`, `test`, `start`, `stop`, `restart`, `run`, `exec`,
+  `remove`, `bin`, `root`, `prefix`, and `list` / `list --json` flows without
+  delegating to npm, plus a direct `npm` compatibility binary and direct `npx`
+  compatibility binary for project-local executable flows; direct local npm
+  tarballs and local package directories are accepted as install/update inputs;
+  common `npm exec` / `npx` flags such as `--yes`, `--package`, `--cache`, and
+  `--registry` are parsed before dispatching to project-local executables;
+  `--no-save`,
   `--package-lock-only`, `--package-lock=false`, `--registry`, `--omit=...`,
   `--include=...`, and common audit/fund/peer/install-strategy flags are
   understood for install/ci compatibility; package scripts receive npm-style
