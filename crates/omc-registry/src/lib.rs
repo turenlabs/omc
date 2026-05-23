@@ -4556,6 +4556,16 @@ fn read_requirements_file_inner(
         }
 
         let parsed = parse_requirement_line(line);
+        if let Some(vcs) =
+            parse_requirements_bare_vcs_requirement(&parsed.requirement, &BTreeSet::new())?
+        {
+            if mode == RequirementsMode::Constraint || !parsed.hashes.is_empty() {
+                return Err(OmcRegistryError::UnsupportedRequirement(line.to_owned()));
+            }
+            discovered.python_vcs_requirements.push(vcs);
+            continue;
+        }
+
         if let Some(vcs) = parse_pypi_vcs_direct_requirement(&parsed.requirement, &BTreeSet::new())?
         {
             if mode == RequirementsMode::Constraint || !parsed.hashes.is_empty() {
@@ -7976,6 +7986,20 @@ fn parse_requirements_editable_vcs_requirement(
     value: &str,
 ) -> Result<Option<PythonVcsRequirement>> {
     parse_python_vcs_requirement(None, value, None, false)
+}
+
+fn parse_requirements_bare_vcs_requirement(
+    requirement: &str,
+    active_extras: &BTreeSet<String>,
+) -> Result<Option<PythonVcsRequirement>> {
+    let mut parts = requirement.splitn(2, ';');
+    let requirement = parts.next().unwrap_or_default().trim();
+    if let Some(marker) = parts.next() {
+        if !pypi_marker_applies(marker, active_extras) {
+            return Ok(None);
+        }
+    }
+    parse_python_vcs_requirement(None, requirement, None, false)
 }
 
 fn parse_python_vcs_requirement(
@@ -11471,14 +11495,14 @@ packages:
         fs::write(
             &requirements,
             format!(
-                "-e git+{repo_url}@v1#egg=demo[cli]&subdirectory=src\nother[http] @ git+{repo_url}@main#subdirectory=package\n"
+                "-e git+{repo_url}@v1#egg=demo[cli]&subdirectory=src\nother[http] @ git+{repo_url}@main#subdirectory=package\ngit+{repo_url}@release#egg=bare&subdirectory=barepkg; python_version >= '3'\n"
             ),
         )
         .unwrap();
         let discovered = read_requirements_file(&requirements).unwrap();
         assert!(discovered.specs.is_empty());
         assert!(discovered.python_local_paths.is_empty());
-        assert_eq!(discovered.python_vcs_requirements.len(), 2);
+        assert_eq!(discovered.python_vcs_requirements.len(), 3);
 
         let editable = &discovered.python_vcs_requirements[0];
         assert_eq!(editable.name, "demo");
@@ -11492,6 +11516,11 @@ packages:
         assert_eq!(direct.reference.as_deref(), Some("main"));
         assert_eq!(direct.subdirectory.as_deref(), Some(Path::new("package")));
         assert_eq!(direct.extras, BTreeSet::from(["http".to_owned()]));
+
+        let bare = &discovered.python_vcs_requirements[2];
+        assert_eq!(bare.name, "bare");
+        assert_eq!(bare.reference.as_deref(), Some("release"));
+        assert_eq!(bare.subdirectory.as_deref(), Some(Path::new("barepkg")));
     }
 
     #[test]
