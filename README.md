@@ -127,7 +127,7 @@ npm-shrinkwrap.json exact versions, resolved tarball URLs, and integrity hashes 
 yarn.lock          Yarn Classic exact versions, resolved tarball URLs, and integrity hashes for uniquely locked npm packages
 pnpm-lock.yaml     pnpm importer dependencies, exact versions, resolved tarball URLs, and integrity hashes
 pip.conf           PyPI index-url, extra-index-url, find-links, and no-index configuration
-requirements.txt  PyPI requirements, direct wheel URLs/paths, hashes, extras, local editable/direct/bare directory paths, -r includes, -c constraints, markers, simple indexes, find-links wheelhouses
+requirements.txt  PyPI requirements, direct wheel/sdist URLs, direct wheel paths, hashes, extras, local editable/direct/bare directory paths, -r includes, -c constraints, markers, simple indexes, find-links wheel/sdist archives
 requirements-dev.txt / dev-requirements.txt  dev requirements read unless --omit-dev is set
 requirements/base.txt / requirements/dev.txt  common requirements directory layout; dev is read unless --omit-dev is set
 Pipfile           Pipenv packages/dev-packages, source indexes, extras, markers, local paths, wheel file dependencies, and scripts
@@ -160,7 +160,7 @@ run the OMC verifier with deny-by-default policy
 write an OMC artifact under .omc/artifacts
 update omc.toml and omc.lock only when accepted
 install npm packages into node_modules
-install PyPI wheels into .omc/python/site-packages
+install PyPI wheels and pure Python sdists into .omc/python/site-packages
 verify cached archive sha256 from omc.lock before extracting locked installs
 install npm package bins, including root project bins, into node_modules/.bin
 link npm workspace/local directory packages into node_modules and node_modules/.bin
@@ -215,7 +215,7 @@ This is still a prototype. It replaces install-time execution with registry
 resolution, source caching, OMC artifact generation, capability verification,
 lockfile recording, and local install trees for Node/Python imports. It does
 not yet execute package code inside OMC cells for real applications, implement
-the complete npm/PyPI resolver surface, or build native/sdist packages.
+the complete npm/PyPI resolver surface, or build native Python packages.
 
 ## Current MVP Boundaries
 
@@ -267,13 +267,13 @@ Supported now:
 - `requirements.txt`, `requirements/base.txt`, `requirements-dev.txt`,
   `dev-requirements.txt`, and `requirements/dev.txt` ingestion with hashes,
   line continuations, extras,
-  direct wheel URLs/paths, recursive `-r` includes, `-c` constraints,
+  direct wheel/sdist URLs, direct wheel paths, recursive `-r` includes, `-c` constraints,
   `--index-url` / `--extra-index-url` simple indexes, `--find-links` / `-f`
-  local wheelhouses or HTML pages, `--no-index`, `--trusted-host`,
+  local wheel/sdist archives or HTML pages, `--no-index`, `--trusted-host`,
   `--only-binary`, `--prefer-binary`, enforced `--require-hashes`, local
   editable/direct/bare directory paths, and common Python environment markers
-- unsupported requirements entries such as VCS URLs and non-wheel direct URLs
-  fail closed instead of being silently ignored
+- unsupported requirements entries such as VCS URLs and unsupported direct
+  archive formats fail closed instead of being silently ignored
 - `Pipfile` ingestion for Pipenv packages/dev-packages, source indexes, extras,
   markers, local path dependencies, and wheel file dependencies when
   `Pipfile.lock` is absent
@@ -318,9 +318,10 @@ Supported now:
 - `node_modules` installation for npm tarballs
 - nested `node_modules` installation for conflicting npm dependency versions
 - npm alias dependencies such as `name: npm:other-name@range`
-- `.omc/python/site-packages` installation for PyPI wheels
+- `.omc/python/site-packages` installation for PyPI wheels and pure Python
+  `.tar.gz` source distributions without executing build scripts
 - platform-compatible PyPI wheel selection for native wheels
-- fail-closed rejection for PyPI source distributions until build isolation and
+- native/source build execution remains denied until build isolation and
   native-extension policy exist
 - npm bin links, including root project bins and linked workspace/local package
   bins, and Python console/gui script shims from wheels and
@@ -345,12 +346,12 @@ Not implemented yet:
 - imports/linking across package cells
 - native/Wasm/Cranelift backend
 - full npm peer placement semantics beyond current required-peer handling
-- advanced requirements-file semantics such as VCS URLs, non-wheel direct URLs,
-  and finder/link options beyond fail-closed rejection
+- advanced requirements-file semantics such as VCS URLs, unsupported direct
+  archive formats, and finder/link options beyond fail-closed rejection
 - Poetry git/file dependencies beyond direct wheel URLs, local wheel files, and
   local path directories
-- Python sdist build isolation and native extension policy beyond fail-closed
-  rejection
+- Python sdist build isolation and native extension policy beyond pure source
+  extraction
 - execution of package code inside OMC cells for real applications
 
 ## Useful Commands

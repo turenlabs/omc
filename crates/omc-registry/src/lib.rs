@@ -4634,17 +4634,20 @@ fn install_lock(project_dir: &Path, lock: &OmcLock) -> Result<InstallReport> {
         .join("python")
         .join("site-packages");
     let python_bin_dir = project_dir.join(".omc").join("python").join("bin");
+    let python_sdists_dir = project_dir.join(".omc").join("python").join("sdists");
     let python_local_paths = python_local_paths_file(project_dir);
 
     remove_path_if_exists(&node_modules)?;
     remove_path_if_exists(&python_site_packages)?;
     remove_path_if_exists(&python_bin_dir)?;
+    remove_path_if_exists(&python_sdists_dir)?;
     remove_path_if_exists(&python_local_paths)?;
 
     fs::create_dir_all(&node_modules)?;
     fs::create_dir_all(&npm_bin_dir)?;
     fs::create_dir_all(&python_site_packages)?;
     fs::create_dir_all(&python_bin_dir)?;
+    fs::create_dir_all(&python_sdists_dir)?;
 
     let mut report = InstallReport {
         npm_packages: 0,
@@ -4790,6 +4793,9 @@ fn install_npm_package_to(
     for entry in archive.entries()? {
         let mut entry = entry?;
         let raw_path = entry.path()?.to_string_lossy().into_owned();
+        if is_ignorable_archive_metadata_path(&raw_path) {
+            continue;
+        }
         let Some(stripped) = strip_first_path_component(Path::new(&raw_path)) else {
             if entry.header().entry_type().is_dir() {
                 continue;
@@ -5071,6 +5077,30 @@ fn install_pypi_package(
     bin_dir: &Path,
 ) -> Result<usize> {
     let archive_path = project_dir.join(&package.archive);
+    if archive_path.extension().and_then(|ext| ext.to_str()) == Some("whl") {
+        return install_pypi_wheel_package(project_dir, package, site_packages, bin_dir);
+    }
+    if archive_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .map(is_python_sdist_filename)
+        .unwrap_or(false)
+    {
+        return install_pypi_sdist_package(project_dir, package, site_packages, bin_dir);
+    }
+
+    Err(OmcRegistryError::UnsupportedInstallArtifact(
+        archive_path.display().to_string(),
+    ))
+}
+
+fn install_pypi_wheel_package(
+    project_dir: &Path,
+    package: &LockedPackage,
+    site_packages: &Path,
+    bin_dir: &Path,
+) -> Result<usize> {
+    let archive_path = project_dir.join(&package.archive);
     if archive_path.extension().and_then(|ext| ext.to_str()) != Some("whl") {
         return Err(OmcRegistryError::UnsupportedInstallArtifact(
             archive_path.display().to_string(),
@@ -5104,6 +5134,113 @@ fn install_pypi_package(
     }
 
     install_python_entry_points(&entry_points, bin_dir)
+}
+
+fn install_pypi_sdist_package(
+    project_dir: &Path,
+    package: &LockedPackage,
+    site_packages: &Path,
+    bin_dir: &Path,
+) -> Result<usize> {
+    let source_dir = project_dir
+        .join(".omc")
+        .join("python")
+        .join("sdists")
+        .join(safe_name(&package.name))
+        .join(&package.version);
+    remove_path_if_exists(&source_dir)?;
+    fs::create_dir_all(&source_dir)?;
+
+    unpack_python_sdist(&read_locked_archive(project_dir, package)?, &source_dir)?;
+    let import_root = if source_dir.join("src").is_dir() {
+        source_dir.join("src")
+    } else {
+        source_dir.clone()
+    };
+    copy_python_sdist_import_tree(&import_root, site_packages)?;
+    let entry_points = read_python_local_entry_points(&source_dir)?;
+    install_python_entry_point_scripts(&entry_points, bin_dir)
+}
+
+fn unpack_python_sdist(bytes: &[u8], target: &Path) -> Result<()> {
+    let decoder = GzDecoder::new(Cursor::new(bytes));
+    let mut archive = Archive::new(decoder);
+    for entry in archive.entries()? {
+        let mut entry = entry?;
+        let raw_path = entry.path()?.to_string_lossy().into_owned();
+        if is_ignorable_archive_metadata_path(&raw_path) {
+            continue;
+        }
+        let Some(stripped) = strip_first_path_component(Path::new(&raw_path)) else {
+            if entry.header().entry_type().is_dir() {
+                continue;
+            }
+            return Err(OmcRegistryError::UnsafeArchivePath(raw_path));
+        };
+        let output = checked_join(target, &stripped)?;
+
+        if entry.header().entry_type().is_dir() {
+            fs::create_dir_all(output)?;
+        } else if entry.header().entry_type().is_file() {
+            if let Some(parent) = output.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            entry.unpack(output)?;
+        }
+    }
+    Ok(())
+}
+
+fn copy_python_sdist_import_tree(source: &Path, site_packages: &Path) -> Result<()> {
+    for entry in WalkDir::new(source)
+        .into_iter()
+        .filter_map(|entry| entry.ok())
+    {
+        if !entry.file_type().is_file() {
+            continue;
+        }
+        let relative = entry.path().strip_prefix(source).unwrap_or(entry.path());
+        if !should_copy_python_sdist_path(relative) {
+            continue;
+        }
+        let output = checked_join(site_packages, relative)?;
+        if let Some(parent) = output.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::copy(entry.path(), output)?;
+    }
+    Ok(())
+}
+
+fn should_copy_python_sdist_path(path: &Path) -> bool {
+    let mut components = path.components();
+    let Some(first) = components
+        .next()
+        .and_then(|component| component.as_os_str().to_str())
+    else {
+        return false;
+    };
+    if first.ends_with(".egg-info") || first.ends_with(".dist-info") {
+        return false;
+    }
+    if components.next().is_none()
+        && matches!(
+            first,
+            "PKG-INFO" | "pyproject.toml" | "setup.cfg" | "setup.py" | "setup_requires.py"
+        )
+    {
+        return false;
+    }
+    true
+}
+
+fn is_ignorable_archive_metadata_path(path: &str) -> bool {
+    Path::new(path).components().any(|component| {
+        let Some(name) = component.as_os_str().to_str() else {
+            return false;
+        };
+        name == "__MACOSX" || name.starts_with("._")
+    })
 }
 
 fn pypi_wheel_dependencies(
@@ -6361,7 +6498,10 @@ fn pypi_candidate_to_resolved(
     let candidate = candidates
         .into_iter()
         .filter(|candidate| pypi_version_satisfies(&candidate.version, &requirement))
-        .max_by(|left, right| compare_pypi_versions(&left.version, &right.version))
+        .max_by(|left, right| {
+            compare_pypi_versions(&left.version, &right.version)
+                .then_with(|| right.sdist.cmp(&left.sdist))
+        })
         .ok_or_else(|| OmcRegistryError::UnsatisfiedRequirement {
             name: spec.name.clone(),
             requirement,
@@ -6379,7 +6519,7 @@ fn pypi_candidate_to_resolved(
         expected_sha1: None,
         expected_integrity: None,
         npm_direct_tarball: false,
-        pypi_direct_wheel: true,
+        pypi_direct_wheel: !candidate.sdist,
         npm_scripts: BTreeMap::new(),
         platform_compatible: true,
         dependencies: Vec::new(),
@@ -6401,6 +6541,7 @@ struct PypiSimpleCandidate {
     filename: String,
     version: String,
     sha256: Option<String>,
+    sdist: bool,
 }
 
 fn pypi_find_link_candidates(
@@ -6451,7 +6592,7 @@ fn pypi_http_find_link_candidates(
     if url
         .path_segments()
         .and_then(|mut segments| segments.next_back())
-        .map(|filename| filename.ends_with(".whl"))
+        .map(|filename| filename.ends_with(".whl") || is_python_sdist_filename(filename))
         .unwrap_or(false)
     {
         return Ok(
@@ -6498,6 +6639,16 @@ fn pypi_local_find_link_candidates(
         return Ok(Vec::new());
     }
     if source.extension().and_then(|ext| ext.to_str()) == Some("whl") {
+        return Ok(pypi_local_wheel_candidate(source, package, target_python)
+            .into_iter()
+            .collect());
+    }
+    if source
+        .file_name()
+        .and_then(|name| name.to_str())
+        .map(is_python_sdist_filename)
+        .unwrap_or(false)
+    {
         return Ok(pypi_local_wheel_candidate(source, package, target_python)
             .into_iter()
             .collect());
@@ -6561,7 +6712,14 @@ fn pypi_candidate_from_url(
         .and_then(|mut segments| segments.next_back())
         .and_then(|filename| urlencoding::decode(filename).ok())
         .map(|filename| filename.into_owned())?;
-    let (name, version) = parse_wheel_name_and_version(&filename)?;
+    let (name, version, sdist) =
+        if let Some((name, version)) = parse_wheel_name_and_version(&filename) {
+            (name, version, false)
+        } else if let Some((name, version)) = parse_sdist_name_and_version(&filename) {
+            (name, version, true)
+        } else {
+            return None;
+        };
     if name != normalize_pypi_name(package) {
         return None;
     }
@@ -6575,10 +6733,11 @@ fn pypi_candidate_from_url(
     {
         return None;
     }
-    if !current_python_wheel_compatibility()
-        .as_ref()
-        .map(|compatibility| wheel_tag_compatible(&filename, compatibility))
-        .unwrap_or(true)
+    if !sdist
+        && !current_python_wheel_compatibility()
+            .as_ref()
+            .map(|compatibility| wheel_tag_compatible(&filename, compatibility))
+            .unwrap_or(true)
     {
         return None;
     }
@@ -6594,6 +6753,7 @@ fn pypi_candidate_from_url(
         filename,
         version,
         sha256,
+        sdist,
     })
 }
 
@@ -6715,18 +6875,25 @@ fn resolve_pypi_direct_wheel(spec: &PackageSpec) -> Result<ResolvedPackage> {
         .and_then(|filename| urlencoding::decode(filename).ok())
         .map(|filename| filename.into_owned())
         .ok_or_else(|| OmcRegistryError::UnsupportedSpec(spec.requested()))?;
-    let (wheel_name, version) = parse_wheel_name_and_version(&filename)
-        .ok_or_else(|| OmcRegistryError::UnsupportedSpec(spec.requested()))?;
-    if wheel_name != spec.name {
+    let (archive_name, version, pypi_sdist) =
+        if let Some((name, version)) = parse_wheel_name_and_version(&filename) {
+            (name, version, false)
+        } else if let Some((name, version)) = parse_sdist_name_and_version(&filename) {
+            (name, version, true)
+        } else {
+            return Err(OmcRegistryError::UnsupportedSpec(spec.requested()));
+        };
+    if archive_name != spec.name {
         return Err(OmcRegistryError::UnsupportedSpec(format!(
-            "direct wheel filename `{filename}` does not match `{}`",
+            "direct PyPI archive filename `{filename}` does not match `{}`",
             spec.name
         )));
     }
-    if !current_python_wheel_compatibility()
-        .as_ref()
-        .map(|compatibility| wheel_tag_compatible(&filename, compatibility))
-        .unwrap_or(true)
+    if !pypi_sdist
+        && !current_python_wheel_compatibility()
+            .as_ref()
+            .map(|compatibility| wheel_tag_compatible(&filename, compatibility))
+            .unwrap_or(true)
     {
         return Err(OmcRegistryError::MissingCompatibleWheel(spec.requested()));
     }
@@ -6743,7 +6910,7 @@ fn resolve_pypi_direct_wheel(spec: &PackageSpec) -> Result<ResolvedPackage> {
         expected_sha1: None,
         expected_integrity: None,
         npm_direct_tarball: false,
-        pypi_direct_wheel: true,
+        pypi_direct_wheel: !pypi_sdist,
         npm_scripts: BTreeMap::new(),
         platform_compatible: true,
         dependencies: Vec::new(),
@@ -6757,6 +6924,15 @@ fn parse_wheel_name_and_version(filename: &str) -> Option<(String, String)> {
         return None;
     }
     Some((normalize_pypi_name(parts[0]), parts[1].to_owned()))
+}
+
+fn parse_sdist_name_and_version(filename: &str) -> Option<(String, String)> {
+    let filename = filename
+        .strip_suffix(".tar.gz")
+        .or_else(|| filename.strip_suffix(".tgz"))?;
+    let (name, version) = filename.rsplit_once('-')?;
+    (!name.is_empty() && !version.is_empty())
+        .then(|| (normalize_pypi_name(name), version.to_owned()))
 }
 
 fn constrained_pypi_requirement(
@@ -6812,6 +6988,18 @@ fn choose_pypi_file<'a>(
                 .filter(|file| pypi_file_python_compatible(file, target_python))
                 .find(|file| file.packagetype == "bdist_wheel")
         })
+        .or_else(|| {
+            doc.urls
+                .iter()
+                .filter(|file| pypi_file_python_compatible(file, target_python))
+                .find(|file| {
+                    file.packagetype == "sdist" && is_python_sdist_filename(&file.filename)
+                })
+        })
+}
+
+fn is_python_sdist_filename(filename: &str) -> bool {
+    filename.ends_with(".tar.gz") || filename.ends_with(".tgz")
 }
 
 fn choose_npm_version(name: &str, requirement: &str, root: &NpmRoot) -> Result<String> {
@@ -10537,6 +10725,61 @@ packages:
     }
 
     #[test]
+    fn installs_pure_python_sdist_archives() {
+        let dir = tempfile::tempdir().unwrap();
+        let bytes = python_sdist_for_test(&[
+            (
+                "pyproject.toml",
+                r#"
+                [project]
+                name = "pure-sdist"
+                version = "1.0.0"
+
+                [project.scripts]
+                pure-sdist-cli = "puresdist.cli:main"
+                "#,
+            ),
+            ("src/puresdist/__init__.py", "VALUE = 'sdist-ok'\n"),
+            (
+                "src/puresdist/cli.py",
+                "from puresdist import VALUE\n\ndef main():\n    print(VALUE)\n",
+            ),
+        ]);
+        let archive = dir
+            .path()
+            .join(".omc")
+            .join("cache")
+            .join("pure-sdist-1.0.0.tar.gz");
+        fs::create_dir_all(archive.parent().unwrap()).unwrap();
+        fs::write(&archive, &bytes).unwrap();
+
+        let mut package = locked_package_for_test(Ecosystem::Pypi, "pure-sdist", "1.0.0");
+        package.source_url = "https://example.invalid/pure-sdist-1.0.0.tar.gz".to_owned();
+        package.archive = relative_path(dir.path(), &archive);
+        package.sha256 = sha256_hex(&bytes);
+
+        let report = install_lock(
+            dir.path(),
+            &OmcLock {
+                version: 1,
+                packages: vec![package],
+            },
+        )
+        .unwrap();
+        assert_eq!(report.pypi_packages, 1);
+        assert!(dir
+            .path()
+            .join(".omc/python/site-packages/puresdist/__init__.py")
+            .exists());
+
+        let output = Command::new(dir.path().join(".omc/python/bin/pure-sdist-cli"))
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "sdist-ok");
+    }
+
+    #[test]
     fn reads_requirements_local_editable_paths() {
         let dir = tempfile::tempdir().unwrap();
         let requirements = dir.path().join("requirements.txt");
@@ -11757,18 +12000,37 @@ wheels = [
         let candidates = pypi_simple_index_candidates(&base_url, html, "idna", Some("3.11.0"));
         assert_eq!(
             candidates,
-            vec![PypiSimpleCandidate {
-                url: "https://index.example/packages/idna-3.7-py3-none-any.whl".to_owned(),
-                download_url: None,
-                local_path: None,
-                filename: "idna-3.7-py3-none-any.whl".to_owned(),
-                version: "3.7".to_owned(),
-                sha256: Some(
-                    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_owned()
-                ),
-            }]
+            vec![
+                PypiSimpleCandidate {
+                    url: "https://index.example/packages/idna-3.7-py3-none-any.whl".to_owned(),
+                    download_url: None,
+                    local_path: None,
+                    filename: "idna-3.7-py3-none-any.whl".to_owned(),
+                    version: "3.7".to_owned(),
+                    sha256: Some(
+                        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                            .to_owned()
+                    ),
+                    sdist: false,
+                },
+                PypiSimpleCandidate {
+                    url: "https://index.example/simple/idna/idna-3.6.tar.gz".to_owned(),
+                    download_url: None,
+                    local_path: None,
+                    filename: "idna-3.6.tar.gz".to_owned(),
+                    version: "3.6".to_owned(),
+                    sha256: Some(
+                        "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+                            .to_owned()
+                    ),
+                    sdist: true,
+                }
+            ]
         );
-        assert!(pypi_simple_index_candidates(&base_url, html, "idna", Some("3.7.0")).is_empty());
+        let legacy_candidates =
+            pypi_simple_index_candidates(&base_url, html, "idna", Some("3.7.0"));
+        assert_eq!(legacy_candidates.len(), 1);
+        assert!(legacy_candidates[0].sdist);
     }
 
     #[test]
@@ -11788,6 +12050,7 @@ wheels = [
                 filename: "idna-3.7-py3-none-any.whl".to_owned(),
                 version: "3.7".to_owned(),
                 sha256: None,
+                sdist: false,
             }]
         );
     }
@@ -11808,11 +12071,14 @@ wheels = [
     }
 
     #[test]
-    fn rejects_unsupported_direct_pypi_specs() {
+    fn reads_direct_pypi_sdist_specs() {
         let spec =
             PackageSpec::parse("pypi:pkg @ https://example.invalid/pkg-1.0.0.tar.gz").unwrap();
-        let error = resolve_pypi_direct_wheel(&spec).unwrap_err();
-        assert!(error.to_string().contains("unsupported package spec"));
+        let resolved = resolve_pypi_direct_wheel(&spec).unwrap();
+        assert_eq!(resolved.name, "pkg");
+        assert_eq!(resolved.version, "1.0.0");
+        assert!(!resolved.pypi_direct_wheel);
+        assert_eq!(resolved.filename, "pkg-1.0.0.tar.gz");
 
         let spec = PackageSpec::parse("pypi:pkg @ git+https://example.invalid/pkg.git").unwrap();
         let error = resolve_pypi_direct_wheel(&spec).unwrap_err();
@@ -12466,7 +12732,7 @@ wheels = [
     }
 
     #[test]
-    fn skips_pypi_source_distributions() {
+    fn chooses_pypi_source_distributions_when_no_wheel_exists() {
         let doc = PypiResponse {
             info: PypiInfo {
                 name: "source-only".to_owned(),
@@ -12484,7 +12750,8 @@ wheels = [
             }],
         };
 
-        assert!(choose_pypi_file(&doc, Some("3.11.0")).is_none());
+        let file = choose_pypi_file(&doc, Some("3.11.0")).unwrap();
+        assert_eq!(file.filename, "source-only-1.0.0.tar.gz");
     }
 
     #[test]
@@ -12847,6 +13114,14 @@ wheels = [
         {
             let encoder = flate2::write::GzEncoder::new(&mut bytes, flate2::Compression::default());
             let mut archive = tar::Builder::new(encoder);
+            let mut metadata_header = tar::Header::new_gnu();
+            metadata_header.set_size(0);
+            metadata_header.set_mode(0o644);
+            metadata_header.set_cksum();
+            archive
+                .append_data(&mut metadata_header, "._pure-sdist-1.0.0", std::io::empty())
+                .unwrap();
+
             let mut root_header = tar::Header::new_gnu();
             root_header.set_entry_type(tar::EntryType::Directory);
             root_header.set_size(0);
@@ -12863,6 +13138,40 @@ wheels = [
             archive
                 .append_data(&mut header, "package/package.json", package_json.as_bytes())
                 .unwrap();
+            let encoder = archive.into_inner().unwrap();
+            encoder.finish().unwrap();
+        }
+        bytes
+    }
+
+    fn python_sdist_for_test(files: &[(&str, &str)]) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        {
+            let encoder = flate2::write::GzEncoder::new(&mut bytes, flate2::Compression::default());
+            let mut archive = tar::Builder::new(encoder);
+            let mut root_header = tar::Header::new_gnu();
+            root_header.set_entry_type(tar::EntryType::Directory);
+            root_header.set_size(0);
+            root_header.set_mode(0o755);
+            root_header.set_cksum();
+            archive
+                .append_data(&mut root_header, "pure-sdist-1.0.0/", std::io::empty())
+                .unwrap();
+
+            for (path, content) in files {
+                let mut header = tar::Header::new_gnu();
+                header.set_size(content.len() as u64);
+                header.set_mode(0o644);
+                header.set_cksum();
+                archive
+                    .append_data(
+                        &mut header,
+                        format!("pure-sdist-1.0.0/{path}"),
+                        content.as_bytes(),
+                    )
+                    .unwrap();
+            }
+
             let encoder = archive.into_inner().unwrap();
             encoder.finish().unwrap();
         }
