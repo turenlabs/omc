@@ -31,8 +31,12 @@ enum Command {
     },
     #[command(about = "Resolve, verify, lock, and install a package plus dependencies")]
     Add {
-        #[arg(help = "Package spec such as npm:left-pad@1.3.0 or pypi:idna==3.7")]
-        spec: String,
+        #[arg(
+            required = true,
+            num_args = 1..,
+            help = "Package specs such as npm:left-pad@1.3.0 or pypi:idna==3.7"
+        )]
+        specs: Vec<String>,
         #[arg(long, help = "Save the package as a development dependency")]
         dev: bool,
         #[arg(long, help = "Write blocked packages into omc.lock for review")]
@@ -47,8 +51,12 @@ enum Command {
     },
     #[command(about = "Remove an OMC-managed dependency and reinstall current project inputs")]
     Remove {
-        #[arg(help = "Package spec such as npm:left-pad or pypi:idna")]
-        spec: String,
+        #[arg(
+            required = true,
+            num_args = 1..,
+            help = "Package specs such as npm:left-pad or pypi:idna"
+        )]
+        specs: Vec<String>,
         #[arg(
             long = "allow",
             help = "Grant a capability while reinstalling remaining dependencies"
@@ -141,56 +149,62 @@ fn run() -> Result<ExitCode, OmcRegistryError> {
             println!("initialized {}", manifest.display());
         }
         Command::Add {
-            spec,
+            specs,
             dev,
             record_blocked,
             allow,
             allow_all_host,
         } => {
-            let spec = PackageSpec::parse(&spec)?;
+            let specs = parse_package_specs(&specs)?;
             let mut options = LinkOptions::new(&cli.project_dir);
             options.record_blocked = record_blocked;
             options.allowed_capabilities = parse_grants(&allow, allow_all_host)?;
             options.save_dev_dependency = dev;
 
-            match add_package_graph(&spec, &options) {
-                Ok(reports) => {
-                    print_link_reports(&reports);
-                    let install = install_locked_packages(&cli.project_dir)?;
-                    println!();
-                    println!(
-                        "installed npm={} pypi={} npm_bins={} python_scripts={} node_modules={} python_site_packages={}",
-                        install.npm_packages,
-                        install.pypi_packages,
-                        install.npm_bins,
-                        install.python_scripts,
-                        install.node_modules.display(),
-                        install.python_site_packages.display()
-                    );
+            let mut all_reports = Vec::new();
+            for spec in &specs {
+                match add_package_graph(spec, &options) {
+                    Ok(reports) => all_reports.extend(reports),
+                    Err(OmcRegistryError::BlockedPackage { spec }) => {
+                        return Err(OmcRegistryError::BlockedPackage { spec });
+                    }
+                    Err(error) => return Err(error),
                 }
-                Err(OmcRegistryError::BlockedPackage { spec }) => {
-                    return Err(OmcRegistryError::BlockedPackage { spec });
-                }
-                Err(error) => return Err(error),
             }
+            print_link_reports(&all_reports);
+            let install = install_locked_packages(&cli.project_dir)?;
+            println!();
+            println!(
+                "installed npm={} pypi={} npm_bins={} python_scripts={} node_modules={} python_site_packages={}",
+                install.npm_packages,
+                install.pypi_packages,
+                install.npm_bins,
+                install.python_scripts,
+                install.node_modules.display(),
+                install.python_site_packages.display()
+            );
         }
         Command::Remove {
-            spec,
+            specs,
             allow,
             allow_all_host,
         } => {
-            let spec = PackageSpec::parse(&spec)?;
-            if !remove_manifest_dependency(&cli.project_dir, &spec)? {
-                return Err(OmcRegistryError::UnsupportedSpec(format!(
-                    "dependency `{}` is not in omc.toml",
-                    spec.package_key()
-                )));
+            let specs = parse_package_specs(&specs)?;
+            let mut removed = Vec::new();
+            for spec in &specs {
+                if !remove_manifest_dependency(&cli.project_dir, spec)? {
+                    return Err(OmcRegistryError::UnsupportedSpec(format!(
+                        "dependency `{}` is not in omc.toml",
+                        spec.package_key()
+                    )));
+                }
+                removed.push(spec.package_key());
             }
 
             let mut options = LinkOptions::new(&cli.project_dir);
             options.allowed_capabilities = parse_grants(&allow, allow_all_host)?;
             let install = install_project(&options)?;
-            println!("removed {}", spec.package_key());
+            println!("removed {}", removed.join(", "));
             println!(
                 "installed npm={} pypi={} npm_bins={} python_scripts={} node_modules={} python_site_packages={}",
                 install.npm_packages,
@@ -512,6 +526,13 @@ fn parse_grants(
     }
 
     Ok(grants)
+}
+
+fn parse_package_specs(specs: &[String]) -> Result<Vec<PackageSpec>, OmcRegistryError> {
+    specs
+        .iter()
+        .map(|spec| PackageSpec::parse(spec))
+        .collect::<Result<Vec<_>, _>>()
 }
 
 fn normalize_extra(extra: &str) -> String {
