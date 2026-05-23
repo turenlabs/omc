@@ -102,7 +102,15 @@ cargo run -p omc-cli -- --project-dir /tmp/omc-demo add npm:is-odd@3.0.1
 cargo run -p omc-cli -- --project-dir /tmp/omc-demo node -e "console.log(require('is-odd')(3))"
 cargo run -p omc-cli -- --project-dir /tmp/omc-demo add pypi:requests==2.32.3 --allow-all-host
 cargo run -p omc-cli -- --project-dir /tmp/omc-demo python -c "import requests; print(requests.__version__)"
+cargo run -p omc-cli -- --project-dir /tmp/omc-demo run normalizer --version
 cargo run -p omc-cli -- --project-dir /tmp/omc-demo audit
+```
+
+For existing projects, `install` reads normal project files:
+
+```text
+package.json       dependencies and devDependencies
+requirements.txt  simple PyPI requirements
 ```
 
 What `add` does:
@@ -119,6 +127,8 @@ write an OMC artifact under .omc/artifacts
 update omc.toml and omc.lock only when accepted
 install npm packages into node_modules
 install PyPI wheels into .omc/python/site-packages
+install npm package bins into node_modules/.bin
+install Python console_scripts into .omc/python/bin
 ```
 
 Default policy denies host authority. A package such as `esbuild`, which has a
@@ -166,11 +176,16 @@ Supported now:
 - PyPI dependency range resolution with local `python3` `Requires-Python`
   filtering
 - recursive runtime dependency locking
+- `package.json` dependency/devDependency ingestion
+- `requirements.txt` ingestion for simple PyPI requirements
 - source artifact download and cache
 - `omc.toml` and `omc.lock`
 - `node_modules` installation for npm tarballs
+- nested `node_modules` installation for conflicting npm dependency versions
+- npm alias dependencies such as `name: npm:other-name@range`
 - `.omc/python/site-packages` installation for PyPI wheels
-- `omc node` and `omc python` wrappers
+- npm bin links and Python console script shims
+- `omc node`, `omc python`, and `omc run` wrappers
 - runtime source profiling into capability findings
 - explicit CLI grants for accepted host authority
 
@@ -183,6 +198,7 @@ Not implemented yet:
 - imports/linking across package cells
 - native/Wasm/Cranelift backend
 - full npm peer/optional/bundled dependency semantics
+- full Python marker/extras and recursive requirements semantics
 - Python sdist build isolation and native wheel policy
 - execution of package code inside OMC cells for real applications
 

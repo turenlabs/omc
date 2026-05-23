@@ -355,8 +355,12 @@ pub struct LinkReport {
 pub struct InstallReport {
     pub npm_packages: usize,
     pub pypi_packages: usize,
+    pub npm_bins: usize,
+    pub python_scripts: usize,
     pub node_modules: PathBuf,
+    pub npm_bin_dir: PathBuf,
     pub python_site_packages: PathBuf,
+    pub python_bin_dir: PathBuf,
 }
 
 #[derive(Debug, Clone)]
@@ -423,12 +427,38 @@ pub fn install_project(options: &LinkOptions) -> Result<InstallReport> {
     init_project(&options.project_dir, None)?;
 
     let manifest = read_manifest(options.project_dir.join(MANIFEST))?;
-    for (key, version) in &manifest.dependencies {
-        let spec = PackageSpec::parse(&format!("{key}@{version}"))?;
+    let mut specs = Vec::new();
+    for (key, version) in manifest.dependencies {
+        specs.push(PackageSpec::parse(&format!("{key}@{version}"))?);
+    }
+    specs.extend(discover_project_specs(&options.project_dir)?);
+
+    let mut seen_roots = BTreeSet::new();
+    for spec in specs {
+        if !seen_roots.insert(spec.requested()) {
+            continue;
+        }
         add_package_graph(&spec, options)?;
     }
 
     install_locked_packages(&options.project_dir)
+}
+
+pub fn discover_project_specs(project_dir: impl AsRef<Path>) -> Result<Vec<PackageSpec>> {
+    let project_dir = project_dir.as_ref();
+    let mut specs = Vec::new();
+
+    let package_json = project_dir.join("package.json");
+    if package_json.exists() {
+        specs.extend(read_package_json_specs(&package_json)?);
+    }
+
+    let requirements_txt = project_dir.join("requirements.txt");
+    if requirements_txt.exists() {
+        specs.extend(read_requirements_specs(&requirements_txt)?);
+    }
+
+    Ok(specs)
 }
 
 fn add_package_graph_inner(
@@ -604,22 +634,61 @@ pub fn read_manifest(path: impl AsRef<Path>) -> Result<OmcManifest> {
     Ok(toml::from_str(&fs::read_to_string(path)?)?)
 }
 
+fn read_package_json_specs(path: &Path) -> Result<Vec<PackageSpec>> {
+    let package = serde_json::from_str::<ProjectPackageJson>(&fs::read_to_string(path)?)?;
+    let mut specs = Vec::new();
+
+    for dependencies in [package.dependencies, package.dev_dependencies] {
+        for (name, requirement) in dependencies {
+            specs.push(PackageSpec {
+                ecosystem: Ecosystem::Npm,
+                name,
+                version: Some(requirement),
+            });
+        }
+    }
+
+    Ok(specs)
+}
+
+fn read_requirements_specs(path: &Path) -> Result<Vec<PackageSpec>> {
+    let mut specs = Vec::new();
+    for raw_line in fs::read_to_string(path)?.lines() {
+        let line = raw_line.split('#').next().unwrap_or_default().trim();
+        if line.is_empty() || line.starts_with('-') || line.contains("://") {
+            continue;
+        }
+        if let Some(spec) = parse_pypi_requirement(line) {
+            specs.push(spec);
+        }
+    }
+    Ok(specs)
+}
+
 pub fn install_locked_packages(project_dir: impl AsRef<Path>) -> Result<InstallReport> {
     let project_dir = project_dir.as_ref();
     let lock = read_lockfile(project_dir.join(LOCKFILE))?;
     let node_modules = project_dir.join("node_modules");
+    let npm_bin_dir = node_modules.join(".bin");
     let python_site_packages = project_dir
         .join(".omc")
         .join("python")
         .join("site-packages");
+    let python_bin_dir = project_dir.join(".omc").join("python").join("bin");
     fs::create_dir_all(&node_modules)?;
+    fs::create_dir_all(&npm_bin_dir)?;
     fs::create_dir_all(&python_site_packages)?;
+    fs::create_dir_all(&python_bin_dir)?;
 
     let mut report = InstallReport {
         npm_packages: 0,
         pypi_packages: 0,
+        npm_bins: 0,
+        python_scripts: 0,
         node_modules,
+        npm_bin_dir,
         python_site_packages,
+        python_bin_dir,
     };
 
     for package in &lock.packages {
@@ -632,15 +701,27 @@ pub fn install_locked_packages(project_dir: impl AsRef<Path>) -> Result<InstallR
 
         match package.ecosystem {
             Ecosystem::Npm => {
-                install_npm_package(project_dir, package, &report.node_modules)?;
+                report.npm_bins += install_npm_package(
+                    project_dir,
+                    package,
+                    &report.node_modules,
+                    &report.npm_bin_dir,
+                )?;
                 report.npm_packages += 1;
             }
             Ecosystem::Pypi => {
-                install_pypi_package(project_dir, package, &report.python_site_packages)?;
+                report.python_scripts += install_pypi_package(
+                    project_dir,
+                    package,
+                    &report.python_site_packages,
+                    &report.python_bin_dir,
+                )?;
                 report.pypi_packages += 1;
             }
         }
     }
+
+    install_nested_npm_dependencies(project_dir, &lock, &report.node_modules)?;
 
     Ok(report)
 }
@@ -649,7 +730,17 @@ fn install_npm_package(
     project_dir: &Path,
     package: &LockedPackage,
     node_modules: &Path,
-) -> Result<()> {
+    bin_dir: &Path,
+) -> Result<usize> {
+    let target = install_npm_package_to(project_dir, package, node_modules)?;
+    install_npm_bins(&target, &package.name, bin_dir)
+}
+
+fn install_npm_package_to(
+    project_dir: &Path,
+    package: &LockedPackage,
+    node_modules: &Path,
+) -> Result<PathBuf> {
     let archive_path = project_dir.join(&package.archive);
     let target = npm_install_target(node_modules, &package.name);
     if target.exists() {
@@ -677,14 +768,94 @@ fn install_npm_package(
         }
     }
 
+    Ok(target)
+}
+
+fn install_nested_npm_dependencies(
+    project_dir: &Path,
+    lock: &OmcLock,
+    node_modules: &Path,
+) -> Result<()> {
+    for package in lock
+        .packages
+        .iter()
+        .filter(|package| package.ecosystem == Ecosystem::Npm)
+    {
+        let parent = npm_install_target(node_modules, &package.name);
+        install_nested_npm_dependencies_for_package(
+            project_dir,
+            lock,
+            &parent,
+            package,
+            &mut Vec::new(),
+        )?;
+    }
+
     Ok(())
+}
+
+fn install_nested_npm_dependencies_for_package(
+    project_dir: &Path,
+    lock: &OmcLock,
+    installed_dir: &Path,
+    package: &LockedPackage,
+    stack: &mut Vec<String>,
+) -> Result<()> {
+    let key = format!("{}@{}", package.name, package.version);
+    if stack.contains(&key) {
+        return Ok(());
+    }
+    stack.push(key);
+
+    let nested_node_modules = installed_dir.join("node_modules");
+    for dependency in &package.dependencies {
+        let Ok(spec) = PackageSpec::parse(dependency) else {
+            continue;
+        };
+        if spec.ecosystem != Ecosystem::Npm {
+            continue;
+        }
+        let Some(locked_dependency) = find_locked_npm_dependency(lock, &spec) else {
+            continue;
+        };
+        let dependency_dir =
+            install_npm_package_to(project_dir, locked_dependency, &nested_node_modules)?;
+        install_nested_npm_dependencies_for_package(
+            project_dir,
+            lock,
+            &dependency_dir,
+            locked_dependency,
+            stack,
+        )?;
+    }
+
+    stack.pop();
+    Ok(())
+}
+
+fn find_locked_npm_dependency<'a>(
+    lock: &'a OmcLock,
+    spec: &PackageSpec,
+) -> Option<&'a LockedPackage> {
+    let (_, requirement) = npm_registry_name_and_requirement(spec).ok()?;
+    lock.packages
+        .iter()
+        .filter(|package| package.ecosystem == Ecosystem::Npm && package.name == spec.name)
+        .filter(|package| {
+            requirement
+                .as_deref()
+                .map(|requirement| npm_version_satisfies(&package.version, requirement))
+                .unwrap_or(true)
+        })
+        .max_by(|left, right| compare_npm_versions(&left.version, &right.version))
 }
 
 fn install_pypi_package(
     project_dir: &Path,
     package: &LockedPackage,
     site_packages: &Path,
-) -> Result<()> {
+    bin_dir: &Path,
+) -> Result<usize> {
     let archive_path = project_dir.join(&package.archive);
     if archive_path.extension().and_then(|ext| ext.to_str()) != Some("whl") {
         return Err(OmcRegistryError::UnsupportedInstallArtifact(
@@ -694,6 +865,7 @@ fn install_pypi_package(
 
     let reader = Cursor::new(fs::read(&archive_path)?);
     let mut archive = zip::ZipArchive::new(reader)?;
+    let mut entry_points = Vec::new();
     for index in 0..archive.len() {
         let mut file = archive.by_index(index)?;
         let output = checked_join(site_packages, Path::new(file.name()))?;
@@ -701,15 +873,23 @@ fn install_pypi_package(
         if file.is_dir() {
             fs::create_dir_all(output)?;
         } else {
+            let name = file.name().to_owned();
+            let mut bytes = Vec::new();
+            file.read_to_end(&mut bytes)?;
             if let Some(parent) = output.parent() {
                 fs::create_dir_all(parent)?;
             }
-            let mut out = fs::File::create(output)?;
-            std::io::copy(&mut file, &mut out)?;
+            fs::write(output, &bytes)?;
+
+            if name.ends_with(".dist-info/entry_points.txt") {
+                if let Ok(content) = String::from_utf8(bytes) {
+                    entry_points.push(content);
+                }
+            }
         }
     }
 
-    Ok(())
+    install_python_entry_points(&entry_points, bin_dir)
 }
 
 fn npm_install_target(node_modules: &Path, name: &str) -> PathBuf {
@@ -718,6 +898,177 @@ fn npm_install_target(node_modules: &Path, name: &str) -> PathBuf {
     } else {
         node_modules.join(name)
     }
+}
+
+fn install_npm_bins(package_dir: &Path, package_name: &str, bin_dir: &Path) -> Result<usize> {
+    let package_json = package_dir.join("package.json");
+    if !package_json.exists() {
+        return Ok(0);
+    }
+
+    let package =
+        serde_json::from_str::<NpmInstalledPackageJson>(&fs::read_to_string(package_json)?)?;
+    let Some(bin) = package.bin else {
+        return Ok(0);
+    };
+
+    fs::create_dir_all(bin_dir)?;
+    let bins = match bin {
+        NpmBinField::String(path) => vec![(
+            npm_default_bin_name(package.name.as_deref().unwrap_or(package_name)),
+            path,
+        )],
+        NpmBinField::Map(map) => map.into_iter().collect(),
+    };
+
+    let mut installed = 0;
+    for (name, relative) in bins {
+        if !is_safe_script_name(&name) {
+            continue;
+        }
+        let source = checked_join(package_dir, Path::new(&relative))?;
+        if !source.exists() {
+            continue;
+        }
+        let target = bin_dir.join(&name);
+        remove_path_if_exists(&target)?;
+        create_command_link(&source, &target)?;
+        installed += 1;
+    }
+
+    Ok(installed)
+}
+
+fn install_python_entry_points(entry_points: &[String], bin_dir: &Path) -> Result<usize> {
+    fs::create_dir_all(bin_dir)?;
+    let mut installed = 0;
+
+    for content in entry_points {
+        for entry in parse_console_scripts(content) {
+            if !is_safe_script_name(&entry.name) {
+                continue;
+            }
+            let target = bin_dir.join(&entry.name);
+            remove_path_if_exists(&target)?;
+            fs::write(&target, python_entry_point_script(&entry))?;
+            make_executable(&target)?;
+            installed += 1;
+        }
+    }
+
+    Ok(installed)
+}
+
+fn parse_console_scripts(content: &str) -> Vec<PythonEntryPoint> {
+    let mut in_console_scripts = false;
+    let mut entries = Vec::new();
+
+    for raw_line in content.lines() {
+        let line = raw_line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        if line.starts_with('[') && line.ends_with(']') {
+            in_console_scripts = line == "[console_scripts]";
+            continue;
+        }
+        if !in_console_scripts {
+            continue;
+        }
+
+        let Some((name, target)) = line.split_once('=') else {
+            continue;
+        };
+        let target = target.trim();
+        let target = target.split('[').next().unwrap_or(target).trim();
+        let Some((module, function)) = target.split_once(':') else {
+            continue;
+        };
+        entries.push(PythonEntryPoint {
+            name: name.trim().to_owned(),
+            module: module.trim().to_owned(),
+            function: function.trim().to_owned(),
+        });
+    }
+
+    entries
+}
+
+fn python_entry_point_script(entry: &PythonEntryPoint) -> String {
+    format!(
+        r#"#!/usr/bin/env python3
+import re
+import sys
+from {module} import {function}
+
+if __name__ == "__main__":
+    sys.argv[0] = re.sub(r"(-script\.pyw|\.exe)?$", "", sys.argv[0])
+    sys.exit({function}())
+"#,
+        module = entry.module,
+        function = entry.function
+    )
+}
+
+fn npm_default_bin_name(package_name: &str) -> String {
+    package_name
+        .rsplit('/')
+        .next()
+        .unwrap_or(package_name)
+        .to_owned()
+}
+
+fn is_safe_script_name(name: &str) -> bool {
+    !name.is_empty()
+        && !name.contains('/')
+        && !name.contains('\\')
+        && !name.contains(std::path::MAIN_SEPARATOR)
+        && name != "."
+        && name != ".."
+}
+
+fn remove_path_if_exists(path: &Path) -> Result<()> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {
+            fs::remove_dir_all(path)?;
+        }
+        Ok(_) => {
+            fs::remove_file(path)?;
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn create_command_link(source: &Path, target: &Path) -> Result<()> {
+    std::os::unix::fs::symlink(source, target)?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn create_command_link(source: &Path, target: &Path) -> Result<()> {
+    fs::write(
+        target,
+        format!("@echo off\r\nnode \"{}\" %*\r\n", source.display()),
+    )?;
+    Ok(())
+}
+
+#[cfg(unix)]
+fn make_executable(path: &Path) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let mut permissions = fs::metadata(path)?.permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(path, permissions)?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn make_executable(_path: &Path) -> Result<()> {
+    Ok(())
 }
 
 fn strip_first_path_component(path: &Path) -> Option<PathBuf> {
@@ -775,8 +1126,10 @@ fn resolve_package(client: &Client, spec: &PackageSpec) -> Result<ResolvedPackag
 }
 
 fn resolve_npm(client: &Client, spec: &PackageSpec) -> Result<ResolvedPackage> {
-    let encoded = urlencoding::encode(&spec.name);
-    let version = match spec.version.as_deref() {
+    let (registry_name, version_requirement) = npm_registry_name_and_requirement(spec)?;
+    let install_name = spec.name.clone();
+    let encoded = urlencoding::encode(&registry_name);
+    let version = match version_requirement.as_deref() {
         Some(requirement) if is_exact_npm_version(requirement) => requirement.to_owned(),
         Some(requirement) => {
             let url = format!("https://registry.npmjs.org/{encoded}");
@@ -785,7 +1138,7 @@ fn resolve_npm(client: &Client, spec: &PackageSpec) -> Result<ResolvedPackage> {
                 .send()?
                 .error_for_status()?
                 .json::<NpmRoot>()?;
-            choose_npm_version(&spec.name, requirement, &root)?
+            choose_npm_version(&registry_name, requirement, &root)?
         }
         None => {
             let url = format!("https://registry.npmjs.org/{encoded}");
@@ -824,7 +1177,7 @@ fn resolve_npm(client: &Client, spec: &PackageSpec) -> Result<ResolvedPackage> {
 
     Ok(ResolvedPackage {
         ecosystem: Ecosystem::Npm,
-        name: version_doc.name,
+        name: install_name,
         version: version_doc.version,
         source_url: version_doc.dist.tarball,
         filename,
@@ -832,6 +1185,17 @@ fn resolve_npm(client: &Client, spec: &PackageSpec) -> Result<ResolvedPackage> {
         npm_scripts: version_doc.scripts.unwrap_or_default(),
         dependencies,
     })
+}
+
+fn npm_registry_name_and_requirement(spec: &PackageSpec) -> Result<(String, Option<String>)> {
+    let Some(requirement) = spec.version.as_deref() else {
+        return Ok((spec.name.clone(), None));
+    };
+    let Some(alias) = requirement.strip_prefix("npm:") else {
+        return Ok((spec.name.clone(), Some(requirement.to_owned())));
+    };
+    let alias_spec = parse_npm_spec(requirement, alias)?;
+    Ok((alias_spec.name, alias_spec.version))
 }
 
 fn resolve_pypi(client: &Client, spec: &PackageSpec) -> Result<ResolvedPackage> {
@@ -1517,6 +1881,34 @@ fn relative_path(base: &Path, path: &Path) -> String {
 }
 
 #[derive(Debug, Deserialize)]
+struct ProjectPackageJson {
+    #[serde(default)]
+    dependencies: BTreeMap<String, String>,
+    #[serde(default, rename = "devDependencies")]
+    dev_dependencies: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct NpmInstalledPackageJson {
+    name: Option<String>,
+    bin: Option<NpmBinField>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum NpmBinField {
+    String(String),
+    Map(BTreeMap<String, String>),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PythonEntryPoint {
+    name: String,
+    module: String,
+    function: String,
+}
+
+#[derive(Debug, Deserialize)]
 struct NpmRoot {
     #[serde(rename = "dist-tags")]
     dist_tags: NpmDistTags,
@@ -1530,7 +1922,6 @@ struct NpmDistTags {
 
 #[derive(Debug, Deserialize)]
 struct NpmVersion {
-    name: String,
     version: String,
     dist: NpmDist,
     #[serde(default)]
@@ -1617,6 +2008,58 @@ mod tests {
     }
 
     #[test]
+    fn parses_npm_alias_requirements() {
+        let spec = PackageSpec {
+            ecosystem: Ecosystem::Npm,
+            name: "string-width-cjs".to_owned(),
+            version: Some("npm:string-width@^4.2.0".to_owned()),
+        };
+        let (registry_name, requirement) = npm_registry_name_and_requirement(&spec).unwrap();
+        assert_eq!(registry_name, "string-width");
+        assert_eq!(requirement.as_deref(), Some("^4.2.0"));
+    }
+
+    #[test]
+    fn reads_project_package_json_specs() {
+        let dir = tempfile::tempdir().unwrap();
+        let package_json = dir.path().join("package.json");
+        fs::write(
+            &package_json,
+            r#"{
+                "dependencies": { "is-odd": "3.0.1" },
+                "devDependencies": { "which": "^2.0.2" }
+            }"#,
+        )
+        .unwrap();
+        let specs = read_package_json_specs(&package_json).unwrap();
+        assert!(specs
+            .iter()
+            .any(|spec| spec.name == "is-odd" && spec.version.as_deref() == Some("3.0.1")));
+        assert!(specs
+            .iter()
+            .any(|spec| spec.name == "which" && spec.version.as_deref() == Some("^2.0.2")));
+    }
+
+    #[test]
+    fn reads_requirements_specs() {
+        let dir = tempfile::tempdir().unwrap();
+        let requirements = dir.path().join("requirements.txt");
+        fs::write(
+            &requirements,
+            "requests==2.32.3\n# ignored\nidna>=2,<4\n-r other.txt\n",
+        )
+        .unwrap();
+        let specs = read_requirements_specs(&requirements).unwrap();
+        assert!(specs
+            .iter()
+            .any(|spec| spec.name == "requests" && spec.version.as_deref() == Some("==2.32.3")));
+        assert!(specs
+            .iter()
+            .any(|spec| spec.name == "idna" && spec.version.as_deref() == Some(">=2,<4")));
+        assert_eq!(specs.len(), 2);
+    }
+
+    #[test]
     fn parses_pypi_requires_dist_without_extras() {
         let spec = parse_pypi_requirement("urllib3<3,>=1.21.1").unwrap();
         assert_eq!(spec.name, "urllib3");
@@ -1666,6 +2109,27 @@ mod tests {
         let profile = profiler.finish();
         assert!(profile.capabilities.is_empty());
         assert_eq!(profile.files_scanned, 0);
+    }
+
+    #[test]
+    fn parses_console_script_entry_points() {
+        let entries = parse_console_scripts(
+            r#"
+            [console_scripts]
+            normalizer = charset_normalizer.cli.normalizer:cli_detect
+
+            [gui_scripts]
+            ignored = ignored:main
+            "#,
+        );
+        assert_eq!(
+            entries,
+            vec![PythonEntryPoint {
+                name: "normalizer".to_owned(),
+                module: "charset_normalizer.cli.normalizer".to_owned(),
+                function: "cli_detect".to_owned(),
+            }]
+        );
     }
 
     #[test]

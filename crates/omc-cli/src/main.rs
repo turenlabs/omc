@@ -1,6 +1,6 @@
-use std::env;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command as ProcessCommand, ExitCode};
+use std::{env, ffi::OsString};
 
 use clap::{Parser, Subcommand};
 use omc_cap::Capability;
@@ -63,6 +63,12 @@ enum Command {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
+    #[command(about = "Run a command with OMC npm/Python bins and imports on PATH")]
+    Run {
+        command: String,
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
 }
 
 fn main() -> ExitCode {
@@ -103,9 +109,11 @@ fn run() -> Result<ExitCode, OmcRegistryError> {
                     let install = install_locked_packages(&cli.project_dir)?;
                     println!();
                     println!(
-                        "installed npm={} pypi={} node_modules={} python_site_packages={}",
+                        "installed npm={} pypi={} npm_bins={} python_scripts={} node_modules={} python_site_packages={}",
                         install.npm_packages,
                         install.pypi_packages,
+                        install.npm_bins,
+                        install.python_scripts,
                         install.node_modules.display(),
                         install.python_site_packages.display()
                     );
@@ -124,9 +132,11 @@ fn run() -> Result<ExitCode, OmcRegistryError> {
             options.allowed_capabilities = parse_grants(&allow, allow_all_host)?;
             let install = install_project(&options)?;
             println!(
-                "installed npm={} pypi={} node_modules={} python_site_packages={}",
+                "installed npm={} pypi={} npm_bins={} python_scripts={} node_modules={} python_site_packages={}",
                 install.npm_packages,
                 install.pypi_packages,
+                install.npm_bins,
+                install.python_scripts,
                 install.node_modules.display(),
                 install.python_site_packages.display()
             );
@@ -158,20 +168,24 @@ fn run() -> Result<ExitCode, OmcRegistryError> {
         }
         Command::Node { args } => return run_node(&cli.project_dir, &args),
         Command::Python { args } => return run_python(&cli.project_dir, &args),
+        Command::Run { command, args } => {
+            return run_project_command(&cli.project_dir, &command, &args)
+        }
     }
 
     Ok(ExitCode::SUCCESS)
 }
 
-fn run_node(project_dir: &PathBuf, args: &[String]) -> Result<ExitCode, OmcRegistryError> {
+fn run_node(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRegistryError> {
     let status = ProcessCommand::new("node")
         .args(args)
         .current_dir(project_dir)
+        .env("PATH", project_path(project_dir)?)
         .status()?;
     Ok(exit_code(status.code()))
 }
 
-fn run_python(project_dir: &PathBuf, args: &[String]) -> Result<ExitCode, OmcRegistryError> {
+fn run_python(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRegistryError> {
     let site_packages = project_dir
         .join(".omc")
         .join("python")
@@ -186,9 +200,46 @@ fn run_python(project_dir: &PathBuf, args: &[String]) -> Result<ExitCode, OmcReg
     let status = ProcessCommand::new("python3")
         .args(args)
         .current_dir(project_dir)
+        .env("PATH", project_path(project_dir)?)
         .env("PYTHONPATH", joined)
         .status()?;
     Ok(exit_code(status.code()))
+}
+
+fn run_project_command(
+    project_dir: &Path,
+    command: &str,
+    args: &[String],
+) -> Result<ExitCode, OmcRegistryError> {
+    let site_packages = project_dir
+        .join(".omc")
+        .join("python")
+        .join("site-packages");
+    let mut python_paths = vec![site_packages];
+    if let Some(existing) = env::var_os("PYTHONPATH") {
+        python_paths.extend(env::split_paths(&existing));
+    }
+    let python_path = env::join_paths(python_paths)
+        .map_err(|error| OmcRegistryError::UnsupportedSpec(error.to_string()))?;
+
+    let status = ProcessCommand::new(command)
+        .args(args)
+        .current_dir(project_dir)
+        .env("PATH", project_path(project_dir)?)
+        .env("PYTHONPATH", python_path)
+        .status()?;
+    Ok(exit_code(status.code()))
+}
+
+fn project_path(project_dir: &Path) -> Result<OsString, OmcRegistryError> {
+    let mut paths = vec![
+        project_dir.join("node_modules").join(".bin"),
+        project_dir.join(".omc").join("python").join("bin"),
+    ];
+    if let Some(existing) = env::var_os("PATH") {
+        paths.extend(env::split_paths(&existing));
+    }
+    env::join_paths(paths).map_err(|error| OmcRegistryError::UnsupportedSpec(error.to_string()))
 }
 
 fn exit_code(code: Option<i32>) -> ExitCode {
