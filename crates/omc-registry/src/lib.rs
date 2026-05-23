@@ -849,22 +849,7 @@ pub fn install_project(options: &LinkOptions) -> Result<InstallReport> {
     init_project(&options.project_dir, None)?;
 
     let mut options = options.clone();
-    let specs = project_requested_specs(&mut options, false)?;
-
-    let client = Client::builder().user_agent("omc-prototype/0.1").build()?;
-    let mut seen_roots = BTreeSet::new();
-    let mut retained = BTreeSet::new();
-    for spec in specs {
-        if !seen_roots.insert(spec.requested()) {
-            continue;
-        }
-        for report in resolve_package_graph(&client, &spec, &options)? {
-            retained.insert(locked_package_key(&report.locked));
-        }
-    }
-
-    prune_lockfile(&options.project_dir, &retained)?;
-    sync_python_vcs_lockfile(&options.project_dir, options.python_vcs_locks.clone())?;
+    lock_project_options(&mut options)?;
     let lock = read_lockfile(options.project_dir.join(LOCKFILE))?;
     let mut report = install_lock(&options.project_dir, &lock)?;
     report.npm_bins += install_npm_project_links(
@@ -884,6 +869,35 @@ pub fn install_project(options: &LinkOptions) -> Result<InstallReport> {
         &report.python_bin_dir,
     )?;
     Ok(report)
+}
+
+pub fn lock_project(options: &LinkOptions) -> Result<Vec<LinkReport>> {
+    init_project(&options.project_dir, None)?;
+
+    let mut options = options.clone();
+    lock_project_options(&mut options)
+}
+
+fn lock_project_options(options: &mut LinkOptions) -> Result<Vec<LinkReport>> {
+    let specs = project_requested_specs(options, false)?;
+
+    let client = Client::builder().user_agent("omc-prototype/0.1").build()?;
+    let mut seen_roots = BTreeSet::new();
+    let mut retained = BTreeSet::new();
+    let mut reports = Vec::new();
+    for spec in specs {
+        if !seen_roots.insert(spec.requested()) {
+            continue;
+        }
+        for report in resolve_package_graph(&client, &spec, options)? {
+            retained.insert(locked_package_key(&report.locked));
+            reports.push(report);
+        }
+    }
+
+    prune_lockfile(&options.project_dir, &retained)?;
+    sync_python_vcs_lockfile(&options.project_dir, options.python_vcs_locks.clone())?;
+    Ok(reports)
 }
 
 pub fn install_locked_project(options: &LinkOptions) -> Result<InstallReport> {
@@ -11439,6 +11453,34 @@ mod tests {
         assert!(dir.path().join("node_modules/dev-pkg").exists());
         let manifest = read_manifest(dir.path().join("omc.toml")).unwrap();
         assert_eq!(manifest.npm_dev_local_paths, vec!["vendor/dev-pkg"]);
+    }
+
+    #[test]
+    fn lock_project_updates_lock_without_installing_packages() {
+        let dir = tempfile::tempdir().unwrap();
+        let archive = dir.path().join("local-pkg-1.0.0.tgz");
+        fs::write(
+            &archive,
+            npm_tgz_for_test(r#"{ "name": "local-pkg", "version": "1.0.0" }"#),
+        )
+        .unwrap();
+        fs::write(
+            dir.path().join("package.json"),
+            r#"{ "dependencies": { "local-pkg": "file:local-pkg-1.0.0.tgz" } }"#,
+        )
+        .unwrap();
+
+        let reports = lock_project(&LinkOptions::new(dir.path())).unwrap();
+
+        assert!(reports
+            .iter()
+            .any(|report| report.locked.name == "local-pkg"));
+        let lock = read_lockfile(dir.path().join("omc.lock")).unwrap();
+        assert!(lock
+            .packages
+            .iter()
+            .any(|package| package.name == "local-pkg"));
+        assert!(!dir.path().join("node_modules").exists());
     }
 
     #[test]

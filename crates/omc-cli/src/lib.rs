@@ -7,10 +7,11 @@ use clap::{Parser, Subcommand};
 use omc_cap::Capability;
 use omc_registry::{
     add_manifest_npm_local_paths, add_manifest_policy_grants, add_package_graph, init_project,
-    install_locked_packages, install_locked_project, install_project, parse_capability_grant,
-    parse_npm_direct_archive_reference, parse_pypi_direct_archive_reference, read_lockfile,
-    read_package_scripts, remove_manifest_dependency, Behavior, Ecosystem, InstallReport,
-    LinkOptions, LockedPackage, OmcRegistryError, PackageSpec, Verdict,
+    install_locked_packages, install_locked_project, install_project, lock_project,
+    parse_capability_grant, parse_npm_direct_archive_reference,
+    parse_pypi_direct_archive_reference, read_lockfile, read_package_scripts,
+    remove_manifest_dependency, Behavior, Ecosystem, InstallReport, LinkOptions, LockedPackage,
+    OmcRegistryError, PackageSpec, Verdict,
 };
 
 #[derive(Debug, Parser)]
@@ -222,6 +223,7 @@ enum NpmCompatAction {
         save: bool,
         dev: bool,
         omit_dev: bool,
+        lock_only: bool,
         allow: Vec<String>,
         allow_all_host: bool,
     },
@@ -690,6 +692,7 @@ fn run_npm_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
             save,
             dev,
             omit_dev,
+            lock_only,
             allow,
             allow_all_host,
         } => {
@@ -702,8 +705,14 @@ fn run_npm_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
                 if save && !local_paths.is_empty() {
                     add_manifest_npm_local_paths(project_dir, &local_paths, dev)?;
                 }
-                let install = install_project(&options)?;
-                print_install_report(&install);
+                if lock_only {
+                    let reports = lock_project(&options)?;
+                    print_link_reports(&reports);
+                    print_lock_only_report(project_dir);
+                } else {
+                    let install = install_project(&options)?;
+                    print_install_report(&install);
+                }
             } else {
                 let mut options = LinkOptions::new(project_dir);
                 options.allowed_capabilities = allowed_capabilities;
@@ -724,6 +733,10 @@ fn run_npm_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
                     all_reports.extend(add_package_graph(spec, &options)?);
                 }
                 print_link_reports(&all_reports);
+                if lock_only {
+                    print_lock_only_report(project_dir);
+                    return Ok(ExitCode::SUCCESS);
+                }
                 let install = if options.npm_local_paths.is_empty() {
                     install_locked_packages(project_dir)?
                 } else {
@@ -878,6 +891,10 @@ fn print_npm_path(project_dir: &Path, kind: NpmPathKind) -> Result<(), OmcRegist
     };
     println!("{}", path.display());
     Ok(())
+}
+
+fn print_lock_only_report(project_dir: &Path) {
+    println!("lockfile {}", project_dir.join("omc.lock").display());
 }
 
 fn remove_specs(
@@ -1367,6 +1384,7 @@ fn parse_npm_compat_action(args: &[String]) -> Result<NpmCompatAction, OmcRegist
             save: true,
             dev: false,
             omit_dev: false,
+            lock_only: false,
             allow: Vec::new(),
             allow_all_host: false,
         });
@@ -1480,6 +1498,7 @@ fn parse_npm_install_args(args: &[String]) -> Result<NpmCompatAction, OmcRegistr
         dev,
         omit_dev,
         save,
+        lock_only,
         allow,
         allow_all_host,
         positionals,
@@ -1492,6 +1511,7 @@ fn parse_npm_install_args(args: &[String]) -> Result<NpmCompatAction, OmcRegistr
         save,
         dev,
         omit_dev,
+        lock_only,
         allow,
         allow_all_host,
     })
@@ -1779,6 +1799,7 @@ struct CommonCompatFlags {
     dev: bool,
     omit_dev: bool,
     save: bool,
+    lock_only: bool,
     allow: Vec<String>,
     allow_all_host: bool,
     positionals: Vec<String>,
@@ -1790,6 +1811,7 @@ impl Default for CommonCompatFlags {
             dev: false,
             omit_dev: false,
             save: true,
+            lock_only: false,
             allow: Vec::new(),
             allow_all_host: false,
             positionals: Vec::new(),
@@ -1827,6 +1849,8 @@ fn parse_common_compat_flags(
             parsed.save = false;
         } else if npm_mode && matches!(arg.as_str(), "--save" | "-S" | "--save-prod") {
             parsed.save = true;
+        } else if npm_mode && arg == "--package-lock-only" {
+            parsed.lock_only = true;
         } else if npm_mode
             && matches!(
                 arg.as_str(),
@@ -2147,6 +2171,7 @@ mod tests {
                 save: true,
                 dev: true,
                 omit_dev: true,
+                lock_only: false,
                 allow: Vec::new(),
                 allow_all_host: true,
             }
@@ -2170,6 +2195,7 @@ mod tests {
                 save: true,
                 dev: false,
                 omit_dev: false,
+                lock_only: false,
                 allow: Vec::new(),
                 allow_all_host: false,
             }
@@ -2195,6 +2221,26 @@ mod tests {
                 save: false,
                 dev: false,
                 omit_dev: false,
+                lock_only: false,
+                allow: Vec::new(),
+                allow_all_host: false,
+            }
+        );
+
+        let action =
+            parse_npm_compat_action(&args(&["install", "--package-lock-only", "left-pad"]))
+                .unwrap();
+
+        assert_eq!(
+            action,
+            NpmCompatAction::Install {
+                specs: vec!["left-pad".to_owned()],
+                archive_references: Vec::new(),
+                local_paths: Vec::new(),
+                save: true,
+                dev: false,
+                omit_dev: false,
+                lock_only: true,
                 allow: Vec::new(),
                 allow_all_host: false,
             }
