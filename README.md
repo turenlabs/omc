@@ -148,6 +148,7 @@ cargo run -p omc-cli --bin python3 -- --omc-project-dir /tmp/omc-demo -m pip fre
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip freeze
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip show requests
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip list --format=json
+cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip inspect
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip list --outdated --format=json
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip index versions requests
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip hash ./dist/local_pkg-1.0.0-py3-none-any.whl
@@ -441,7 +442,7 @@ Supported now:
   such as `--if-present`, `--silent`, `-s`, and `--loglevel=silent` are
   understood
 - `omc pip` compatibility commands for common `install`, `uninstall`, `freeze`,
-  `download`, `check`, `show`, `hash`, `cache dir/list/remove/purge`,
+  `download`, `check`, `inspect`, `show`, `hash`, `cache dir/list/remove/purge`,
   `wheel`, `index versions`, `config get/set/unset/list`, and
   `list --format=columns|freeze|json` flows, including `pip list --outdated`,
   `-r`, index URL,

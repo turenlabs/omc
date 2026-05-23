@@ -406,6 +406,7 @@ enum PipCompatAction {
         action: PipCacheAction,
     },
     Check,
+    Inspect,
     Freeze,
     List {
         format: PipListFormat,
@@ -1309,6 +1310,7 @@ fn run_pip_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
         }
         PipCompatAction::Cache { action } => print_pip_cache(project_dir, action)?,
         PipCompatAction::Check => return print_locked_pip_check(project_dir),
+        PipCompatAction::Inspect => print_locked_pip_inspect(project_dir)?,
         PipCompatAction::Freeze => print_locked_freeze(project_dir)?,
         PipCompatAction::List {
             format,
@@ -3614,6 +3616,42 @@ fn print_locked_pip_json(project_dir: &Path) -> Result<(), OmcRegistryError> {
     Ok(())
 }
 
+fn print_locked_pip_inspect(project_dir: &Path) -> Result<(), OmcRegistryError> {
+    let lock = read_lockfile(project_dir.join("omc.lock"))?;
+    let site_packages = project_dir
+        .join(".omc")
+        .join("python")
+        .join("site-packages");
+    let installed = lock
+        .packages
+        .into_iter()
+        .filter(|package| package.ecosystem == Ecosystem::Pypi)
+        .map(|package| {
+            let metadata_location = match_dist_info_dir(&site_packages, &package)?
+                .map(|path| path.display().to_string())
+                .unwrap_or_else(|| site_packages.display().to_string());
+            Ok(serde_json::json!({
+                "metadata": {
+                    "name": package.name,
+                    "version": package.version,
+                },
+                "metadata_location": metadata_location,
+                "installer": "omc",
+                "requested": false,
+                "dependencies": package.dependencies,
+            }))
+        })
+        .collect::<Result<Vec<_>, OmcRegistryError>>()?;
+    let value = serde_json::json!({
+        "version": "1",
+        "pip_version": format!("omc-{}", env!("CARGO_PKG_VERSION")),
+        "installed": installed,
+        "environment": {},
+    });
+    println!("{}", serde_json::to_string_pretty(&value)?);
+    Ok(())
+}
+
 #[derive(Debug)]
 struct PipOutdatedPackage {
     name: String,
@@ -5658,6 +5696,10 @@ fn parse_pip_compat_action(args: &[String]) -> Result<PipCompatAction, OmcRegist
             parse_pip_check_args(&args[1..])?;
             Ok(PipCompatAction::Check)
         }
+        "inspect" => {
+            parse_pip_inspect_args(&args[1..])?;
+            Ok(PipCompatAction::Inspect)
+        }
         "freeze" => {
             parse_pip_freeze_args(&args[1..])?;
             Ok(PipCompatAction::Freeze)
@@ -6243,6 +6285,36 @@ fn parse_pip_check_args(args: &[String]) -> Result<(), OmcRegistryError> {
             continue;
         }
         return Err(unsupported_compat_arg("pip check", arg));
+    }
+    Ok(())
+}
+
+fn parse_pip_inspect_args(args: &[String]) -> Result<(), OmcRegistryError> {
+    let mut index = 0;
+    while index < args.len() {
+        let arg = &args[index];
+        if matches!(
+            arg.as_str(),
+            "--local"
+                | "--user"
+                | "--verbose"
+                | "-v"
+                | "--quiet"
+                | "-q"
+                | "--disable-pip-version-check"
+        ) {
+        } else if arg == "--path" {
+            index += 1;
+            if args.get(index).is_none() {
+                return Err(OmcRegistryError::UnsupportedSpec(format!(
+                    "{arg} needs a value"
+                )));
+            }
+        } else if arg.starts_with("--path=") {
+        } else {
+            return Err(unsupported_compat_arg("pip inspect", arg));
+        }
+        index += 1;
     }
     Ok(())
 }
@@ -8715,6 +8787,17 @@ mod tests {
         assert_eq!(
             parse_pip_compat_action(&args(&["check", "--disable-pip-version-check"])).unwrap(),
             PipCompatAction::Check
+        );
+        assert_eq!(
+            parse_pip_compat_action(&args(&[
+                "inspect",
+                "--local",
+                "--path",
+                ".omc/python/site-packages",
+                "--disable-pip-version-check",
+            ]))
+            .unwrap(),
+            PipCompatAction::Inspect
         );
         assert_eq!(
             parse_pip_compat_action(&args(&["show", "-f", "requests"])).unwrap(),
