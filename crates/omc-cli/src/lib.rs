@@ -342,6 +342,9 @@ enum NpmCompatAction {
         npm_registry: Option<String>,
         userconfig: Option<PathBuf>,
     },
+    Login {
+        action: NpmLoginAction,
+    },
     Logout {
         action: NpmLogoutAction,
     },
@@ -448,6 +451,15 @@ enum NpmDistTagAction {
 struct NpmSbomAction {
     format: NpmSbomFormat,
     sbom_type: NpmSbomType,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct NpmLoginAction {
+    scope: Option<String>,
+    json: bool,
+    npm_registry: Option<String>,
+    userconfig: Option<PathBuf>,
+    token: Option<String>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -1934,6 +1946,7 @@ fn run_npm_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
             npm_registry.as_deref(),
             userconfig.as_deref(),
         )?,
+        NpmCompatAction::Login { action } => print_npm_login(project_dir, action)?,
         NpmCompatAction::Logout { action } => print_npm_logout(project_dir, action)?,
         NpmCompatAction::Token { action } => print_npm_token(project_dir, action)?,
         NpmCompatAction::DistTag { action } => print_npm_dist_tag(project_dir, action)?,
@@ -2411,6 +2424,15 @@ fn npm_help_text(topic: Option<&str>) -> String {
                 "Supports --json, --registry, and --userconfig.",
             ],
         ),
+        Some("login") => npm_command_help(
+            "npm login",
+            &[
+                "Write an npm registry auth token to OMC's writable .npmrc.",
+                "Supports --json, --registry, --scope, --userconfig, and OMC's --token / --auth-token.",
+                "Without --token / --auth-token, OMC reads NODE_AUTH_TOKEN or NPM_TOKEN. Interactive web and legacy prompts are not implemented.",
+                "Aliases: adduser, add-user.",
+            ],
+        ),
         Some("logout") => npm_command_help(
             "npm logout",
             &[
@@ -2493,7 +2515,7 @@ fn npm_general_help_text() -> String {
         "npm <command>",
         &[
             "OMC npm compatibility runs supported npm workflows through OMC's verifier, lockfile, cache, and project-local runtime paths.",
-            "Supported commands: install, install-test, ci, install-ci-test, remove, run, test, start, stop, restart, exec, list, explain, audit, outdated, fund, prune, dedupe, rebuild, cache, pkg, version, pack, search, ping, whoami, logout, token, dist-tag, sbom, view, docs, repo, bugs, home, config, init, bin, root, prefix.",
+            "Supported commands: install, install-test, ci, install-ci-test, remove, run, test, start, stop, restart, exec, list, explain, audit, outdated, fund, prune, dedupe, rebuild, cache, pkg, version, pack, search, ping, whoami, login, adduser, logout, token, dist-tag, sbom, view, docs, repo, bugs, home, config, init, bin, root, prefix.",
             "Use `npm help <command>` for focused OMC compatibility notes.",
         ],
     )
@@ -2532,6 +2554,7 @@ fn npm_help_topic(topic: &str) -> Option<&'static str> {
         "search" | "s" | "se" | "find" => Some("search"),
         "ping" => Some("ping"),
         "whoami" => Some("whoami"),
+        "login" | "adduser" | "add-user" => Some("login"),
         "logout" => Some("logout"),
         "token" => Some("token"),
         "dist-tag" | "dist-tags" => Some("dist-tag"),
@@ -3207,8 +3230,76 @@ fn npm_whoami_json(whoami: &NpmWhoamiResult) -> serde_json::Value {
     })
 }
 
+fn print_npm_login(project_dir: &Path, action: NpmLoginAction) -> Result<(), OmcRegistryError> {
+    let token = npm_login_token(action.token.as_deref())?;
+    let target = npm_auth_target(
+        project_dir,
+        action.npm_registry.as_deref(),
+        action.userconfig.as_deref(),
+        action.scope.as_deref(),
+    )?;
+    let written =
+        write_npm_login_credentials(project_dir, action.userconfig.as_deref(), &target, &token)?;
+    if action.json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "ok": true,
+                "registry": target.registry,
+                "scope": target.scope,
+                "written": written,
+            }))?
+        );
+    } else {
+        println!("Logged in to {}", target.registry);
+    }
+    Ok(())
+}
+
+fn npm_login_token(explicit: Option<&str>) -> Result<String, OmcRegistryError> {
+    let token = explicit
+        .map(str::to_owned)
+        .or_else(|| env::var("NODE_AUTH_TOKEN").ok())
+        .or_else(|| env::var("NPM_TOKEN").ok())
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            OmcRegistryError::UnsupportedSpec(
+                "npm login compatibility needs a token; pass --token/--auth-token or set NODE_AUTH_TOKEN/NPM_TOKEN. Interactive web and legacy prompts are not supported by OMC".to_owned(),
+            )
+        })?;
+    Ok(token)
+}
+
+fn write_npm_login_credentials(
+    project_dir: &Path,
+    userconfig: Option<&Path>,
+    target: &NpmAuthTarget,
+    token: &str,
+) -> Result<usize, OmcRegistryError> {
+    let path = npm_config_write_path(project_dir, userconfig);
+    let mut lines = read_npm_config_lines(&path)?;
+    let mut written = 0usize;
+    if let Some(scope) = &target.scope {
+        upsert_npm_config_line(&mut lines, &format!("{scope}:registry"), &target.registry);
+        written += 1;
+    }
+    let prefix = npm_registry_auth_key_prefix(&target.registry).ok_or_else(|| {
+        OmcRegistryError::UnsupportedSpec(format!("invalid npm registry `{}`", target.registry))
+    })?;
+    upsert_npm_config_line(&mut lines, &format!("{prefix}_authToken"), token);
+    written += 1;
+    write_npm_config_lines(&path, &lines)?;
+    Ok(written)
+}
+
 fn print_npm_logout(project_dir: &Path, action: NpmLogoutAction) -> Result<(), OmcRegistryError> {
-    let target = npm_logout_target(project_dir, &action)?;
+    let target = npm_auth_target(
+        project_dir,
+        action.npm_registry.as_deref(),
+        action.userconfig.as_deref(),
+        action.scope.as_deref(),
+    )?;
     let removed = clear_npm_logout_credentials(project_dir, action.userconfig.as_deref(), &target)?;
     if action.json {
         println!(
@@ -3227,22 +3318,20 @@ fn print_npm_logout(project_dir: &Path, action: NpmLogoutAction) -> Result<(), O
 }
 
 #[derive(Debug)]
-struct NpmLogoutTarget {
+struct NpmAuthTarget {
     registry: String,
     scope: Option<String>,
 }
 
-fn npm_logout_target(
+fn npm_auth_target(
     project_dir: &Path,
-    action: &NpmLogoutAction,
-) -> Result<NpmLogoutTarget, OmcRegistryError> {
-    let values = npm_config_values(
-        project_dir,
-        action.npm_registry.as_deref(),
-        action.userconfig.as_deref(),
-    )?;
-    let scope = action.scope.as_deref().map(normalize_npm_scope);
-    let registry = if action.npm_registry.is_some() {
+    npm_registry: Option<&str>,
+    userconfig: Option<&Path>,
+    scope: Option<&str>,
+) -> Result<NpmAuthTarget, OmcRegistryError> {
+    let values = npm_config_values(project_dir, npm_registry, userconfig)?;
+    let scope = scope.map(normalize_npm_scope);
+    let registry = if npm_registry.is_some() {
         npm_config_value_for_key(&values, "registry")
     } else if let Some(scope) = &scope {
         let scoped_key = format!("{scope}:registry");
@@ -3255,13 +3344,13 @@ fn npm_logout_target(
     } else {
         npm_config_value_for_key(&values, "registry")
     };
-    Ok(NpmLogoutTarget { registry, scope })
+    Ok(NpmAuthTarget { registry, scope })
 }
 
 fn clear_npm_logout_credentials(
     project_dir: &Path,
     userconfig: Option<&Path>,
-    target: &NpmLogoutTarget,
+    target: &NpmAuthTarget,
 ) -> Result<usize, OmcRegistryError> {
     let path = npm_config_write_path(project_dir, userconfig);
     let mut lines = read_npm_config_lines(&path)?;
@@ -7467,6 +7556,7 @@ fn parse_npm_compat_action(args: &[String]) -> Result<NpmCompatAction, OmcRegist
         "search" | "s" | "se" | "find" => parse_npm_search_args(&args[1..]),
         "ping" => parse_npm_ping_args(&args[1..]),
         "whoami" => parse_npm_whoami_args(&args[1..]),
+        "login" | "adduser" | "add-user" => parse_npm_login_args(&args[1..]),
         "logout" => parse_npm_logout_args(&args[1..]),
         "token" => parse_npm_token_args(&args[1..]),
         "dist-tag" | "dist-tags" => parse_npm_dist_tag_args(&args[1..]),
@@ -7620,6 +7710,9 @@ fn npm_global_arg_supported_by_command(command: &str, arg: &str) -> bool {
                 | "find"
                 | "ping"
                 | "whoami"
+                | "login"
+                | "adduser"
+                | "add-user"
                 | "logout"
                 | "token"
                 | "dist-tag"
@@ -7635,10 +7728,19 @@ fn npm_global_arg_supported_by_command(command: &str, arg: &str) -> bool {
         );
     }
     if matches!(arg, "--otp") || arg.starts_with("--otp=") {
-        return matches!(command, "token");
+        return matches!(command, "login" | "adduser" | "add-user" | "token");
+    }
+    if matches!(arg, "--auth-type") || arg.starts_with("--auth-type=") {
+        return matches!(command, "login" | "adduser" | "add-user");
+    }
+    if matches!(arg, "--token" | "--auth-token")
+        || arg.starts_with("--token=")
+        || arg.starts_with("--auth-token=")
+    {
+        return matches!(command, "login" | "adduser" | "add-user");
     }
     if matches!(arg, "--scope") || arg.starts_with("--scope=") {
-        return matches!(command, "logout");
+        return matches!(command, "login" | "adduser" | "add-user" | "logout");
     }
     if matches!(arg, "--sbom-format" | "--sbom-type")
         || arg.starts_with("--sbom-format=")
@@ -7652,7 +7754,16 @@ fn npm_global_arg_supported_by_command(command: &str, arg: &str) -> bool {
     if matches!(arg, "--userconfig") || arg.starts_with("--userconfig=") {
         return matches!(
             command,
-            "config" | "c" | "get" | "ping" | "whoami" | "logout" | "token"
+            "config"
+                | "c"
+                | "get"
+                | "ping"
+                | "whoami"
+                | "login"
+                | "adduser"
+                | "add-user"
+                | "logout"
+                | "token"
         );
     }
     if matches!(arg, "--workspace" | "-w")
@@ -7713,6 +7824,9 @@ fn npm_global_arg_supported_by_command(command: &str, arg: &str) -> bool {
                 | "find"
                 | "ping"
                 | "whoami"
+                | "login"
+                | "adduser"
+                | "add-user"
                 | "logout"
                 | "token"
                 | "view"
@@ -7793,6 +7907,9 @@ fn npm_global_preserved_value_flag(arg: &str) -> bool {
             | "--workspace"
             | "-w"
             | "--otp"
+            | "--auth-type"
+            | "--token"
+            | "--auth-token"
             | "--scope"
             | "--sbom-format"
             | "--sbom-type"
@@ -7812,6 +7929,9 @@ fn npm_global_preserved_equals_flag(arg: &str) -> bool {
         "-w=",
         "--include-workspace-root=",
         "--otp=",
+        "--auth-type=",
+        "--token=",
+        "--auth-token=",
         "--scope=",
         "--sbom-format=",
         "--sbom-type=",
@@ -8803,6 +8923,113 @@ fn parse_npm_whoami_args(args: &[String]) -> Result<NpmCompatAction, OmcRegistry
         npm_registry,
         userconfig,
     })
+}
+
+fn parse_npm_login_args(args: &[String]) -> Result<NpmCompatAction, OmcRegistryError> {
+    let mut json = false;
+    let mut userconfig = None;
+    let mut scope = None;
+    let mut token = None;
+    let mut filtered = Vec::new();
+    let mut index = 0;
+    while index < args.len() {
+        let arg = &args[index];
+        if arg == "--json" {
+            json = true;
+        } else if arg == "--scope" {
+            index += 1;
+            let value = args
+                .get(index)
+                .ok_or_else(|| OmcRegistryError::UnsupportedSpec(format!("{arg} needs a value")))?;
+            scope = Some(value.clone());
+        } else if let Some(value) = arg.strip_prefix("--scope=") {
+            scope = Some(value.to_owned());
+        } else if matches!(arg.as_str(), "--token" | "--auth-token") {
+            index += 1;
+            let value = args
+                .get(index)
+                .ok_or_else(|| OmcRegistryError::UnsupportedSpec(format!("{arg} needs a value")))?;
+            token = Some(value.clone());
+        } else if let Some(value) = arg
+            .strip_prefix("--token=")
+            .or_else(|| arg.strip_prefix("--auth-token="))
+        {
+            token = Some(value.to_owned());
+        } else if arg == "--userconfig" {
+            index += 1;
+            let value = args
+                .get(index)
+                .ok_or_else(|| OmcRegistryError::UnsupportedSpec(format!("{arg} needs a value")))?;
+            userconfig = Some(PathBuf::from(value));
+        } else if let Some(value) = arg.strip_prefix("--userconfig=") {
+            userconfig = Some(PathBuf::from(value));
+        } else if matches!(arg.as_str(), "--auth-type" | "--otp" | "--loglevel") {
+            index += 1;
+            if args.get(index).is_none() {
+                return Err(OmcRegistryError::UnsupportedSpec(format!(
+                    "{arg} needs a value"
+                )));
+            }
+        } else if npm_login_ignored_equals_flag(arg)
+            || matches!(
+                arg.as_str(),
+                "--silent"
+                    | "-s"
+                    | "--always-auth"
+                    | "--no-always-auth"
+                    | "--workspaces"
+                    | "--include-workspace-root"
+                    | "--workspace"
+                    | "-w"
+            )
+        {
+            if matches!(arg.as_str(), "--workspace" | "-w") {
+                index += 1;
+                if args.get(index).is_none() {
+                    return Err(OmcRegistryError::UnsupportedSpec(format!(
+                        "{arg} needs a value"
+                    )));
+                }
+            }
+        } else {
+            filtered.push(arg.clone());
+        }
+        index += 1;
+    }
+
+    let CommonCompatFlags {
+        npm_registry,
+        positionals,
+        ..
+    } = parse_common_compat_flags(&filtered, true)?;
+    if !positionals.is_empty() {
+        return Err(unsupported_compat_arg("npm login", &positionals[0]));
+    }
+    Ok(NpmCompatAction::Login {
+        action: NpmLoginAction {
+            scope,
+            json,
+            npm_registry,
+            userconfig,
+            token,
+        },
+    })
+}
+
+fn npm_login_ignored_equals_flag(arg: &str) -> bool {
+    [
+        "--userconfig=",
+        "--auth-type=",
+        "--otp=",
+        "--loglevel=",
+        "--workspace=",
+        "-w=",
+        "--workspaces=",
+        "--include-workspace-root=",
+        "--always-auth=",
+    ]
+    .iter()
+    .any(|prefix| arg.starts_with(prefix))
 }
 
 fn parse_npm_logout_args(args: &[String]) -> Result<NpmCompatAction, OmcRegistryError> {
@@ -12686,6 +12913,44 @@ mod tests {
                 "--userconfig=ci.npmrc",
                 "--scope",
                 "@demo",
+                "login",
+                "--auth-type=legacy",
+                "--token",
+                "npm_abc123",
+                "--loglevel=silent",
+            ]))
+            .unwrap(),
+            NpmCompatAction::Login {
+                action: NpmLoginAction {
+                    scope: Some("@demo".to_owned()),
+                    json: true,
+                    npm_registry: Some("https://registry.example.invalid/npm".to_owned()),
+                    userconfig: Some(PathBuf::from("ci.npmrc")),
+                    token: Some("npm_abc123".to_owned()),
+                },
+            }
+        );
+        assert_eq!(
+            parse_npm_compat_action(&args(&["adduser", "--scope=demo", "--auth-token=npm_xyz"]))
+                .unwrap(),
+            NpmCompatAction::Login {
+                action: NpmLoginAction {
+                    scope: Some("demo".to_owned()),
+                    json: false,
+                    npm_registry: None,
+                    userconfig: None,
+                    token: Some("npm_xyz".to_owned()),
+                },
+            }
+        );
+        assert_eq!(
+            parse_npm_compat_action(&args(&[
+                "--json",
+                "--registry",
+                "https://registry.example.invalid/npm",
+                "--userconfig=ci.npmrc",
+                "--scope",
+                "@demo",
                 "logout",
                 "--loglevel=silent",
             ]))
@@ -13047,6 +13312,51 @@ mod tests {
             fs::read_to_string(dir.join("ci.npmrc")).unwrap(),
             "registry=https://ci.example.invalid\n"
         );
+    }
+
+    #[test]
+    fn logs_in_npm_registry_credentials_to_config() {
+        let dir = test_dir("npm-login");
+        fs::write(
+            dir.join("ci.npmrc"),
+            "registry=https://registry.example.invalid/npm\n//scope.example.invalid/npm/:_authToken=old-scope-token\nkeep=true\n",
+        )
+        .unwrap();
+
+        print_npm_login(
+            &dir,
+            NpmLoginAction {
+                scope: Some("demo".to_owned()),
+                json: true,
+                npm_registry: Some("https://scope.example.invalid/npm".to_owned()),
+                userconfig: Some(PathBuf::from("ci.npmrc")),
+                token: Some("scope-token".to_owned()),
+            },
+        )
+        .unwrap();
+
+        let config = fs::read_to_string(dir.join("ci.npmrc")).unwrap();
+        assert!(config.contains("@demo:registry=https://scope.example.invalid/npm/\n"));
+        assert!(config.contains("//scope.example.invalid/npm/:_authToken=scope-token\n"));
+        assert!(!config.contains("old-scope-token"));
+        assert!(config.contains("registry=https://registry.example.invalid/npm\n"));
+        assert!(config.contains("keep=true\n"));
+
+        print_npm_login(
+            &dir,
+            NpmLoginAction {
+                scope: None,
+                json: false,
+                npm_registry: Some("https://registry.example.invalid/npm".to_owned()),
+                userconfig: Some(PathBuf::from("ci.npmrc")),
+                token: Some("registry-token".to_owned()),
+            },
+        )
+        .unwrap();
+        let config = fs::read_to_string(dir.join("ci.npmrc")).unwrap();
+        assert!(config.contains("//registry.example.invalid/npm/:_authToken=registry-token\n"));
+        assert!(config.contains("//scope.example.invalid/npm/:_authToken=scope-token\n"));
+        assert!(config.contains("keep=true\n"));
     }
 
     #[test]

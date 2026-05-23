@@ -143,6 +143,7 @@ cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm pack left-pad@
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm search left-pad --searchlimit=5 --json
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm ping --json
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm whoami --registry https://registry.npmjs.org/
+cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm login --scope=@company --userconfig=ci.npmrc --auth-token "$NPM_TOKEN"
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm logout --scope=@company --userconfig=ci.npmrc
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm token list --json
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm token revoke a1b2c3 --otp 123456
@@ -443,7 +444,7 @@ Supported now:
   `upgrade`, `install-test` / `it`, `ci`, `install-ci-test` / `cit`, `prune`, `dedupe`, `rebuild`, `test`, `start`, `stop`, `restart`,
   `run`, `exec`, `init`, `remove`, `bin`, `root`, `prefix`, `audit` / `audit --json`,
   `help`, `fund` / `fund --json`, `cache verify/ls/rm/clean --force`, `pkg get/set/delete`, `version`,
-  `pack`, `search` / `find`, `ping`, `whoami`, `logout`, `token list/revoke`, `dist-tag ls`, `sbom --sbom-format=cyclonedx|spdx`, `config get/set/delete/list`, `get`,
+  `pack`, `search` / `find`, `ping`, `whoami`, `login` / `adduser`, `logout`, `token list/revoke`, `dist-tag ls`, `sbom --sbom-format=cyclonedx|spdx`, `config get/set/delete/list`, `get`,
   `view` / `info` / `show`, `docs`, `repo`, `bugs`, `home`,
   `list` / `ls` / `ll` / `la`, including `--json`, common depth/omit/workspace
   flags, and package-name filters; `explain` / `why`,
