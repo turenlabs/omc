@@ -13,23 +13,26 @@ use omc_cap::Capability;
 use omc_registry::{
     add_manifest_npm_local_paths, add_manifest_policy_grants, add_npm_dist_tag, add_package_graph,
     apply_pypi_binary_option, check_pypi_lock, compare_npm_versions, compare_pypi_versions,
-    create_npm_token, deprecate_npm_package, init_project, install_locked_packages,
-    install_locked_project, install_project, lock_project, mutate_npm_package_owner,
-    parse_capability_grant, parse_npm_direct_archive_reference,
+    create_npm_token, deprecate_npm_package, grant_npm_access, init_project,
+    install_locked_packages, install_locked_project, install_project, lock_project,
+    mutate_npm_package_owner, parse_capability_grant, parse_npm_direct_archive_reference,
     parse_pypi_direct_archive_reference, parse_pypi_vcs_requirement, publish_npm_package,
-    read_constraint_files, read_lockfile, read_manifest, read_npm_config_snapshot,
+    read_constraint_files, read_lockfile, read_manifest, read_npm_access_collaborators,
+    read_npm_access_packages, read_npm_access_status, read_npm_config_snapshot,
     read_npm_package_metadata, read_npm_package_metadata_with_userconfig, read_npm_package_owners,
     read_npm_ping_with_userconfig, read_npm_search, read_npm_token_list, read_npm_whoami,
     read_npm_workspace_packages, read_package_scripts, read_pip_config_snapshot,
     read_pypi_available_versions, read_requirements_files, remove_manifest_dependency,
-    remove_npm_dist_tag, revoke_npm_token, unpublish_npm_package, upload_pypi_distribution,
-    Behavior, Ecosystem, InstallReport, LinkOptions, LockedPackage, LockedPythonVcsDependency,
-    NpmAccessToken, NpmDeprecateResult, NpmDistTagMutationResult, NpmOwnerListResult,
-    NpmOwnerMutationResult, NpmPingResult, NpmPublishPackage, NpmPublishResult, NpmSearchPackage,
-    NpmTokenCreateOptions, NpmTokenCreateResult, NpmTokenListResult, NpmTokenRevokeResult,
-    NpmUnpublishResult, NpmWhoamiResult, NpmWorkspacePackage, OmcRegistryError, PackageSpec,
-    ProjectRequirements, PypiBinaryMode, PypiCheckIssue, PypiUploadOptions, PypiUploadResult,
-    PythonLocalRequirement, PythonVcsRequirement, Verdict,
+    remove_npm_dist_tag, revoke_npm_access, revoke_npm_token, set_npm_access_mfa,
+    set_npm_access_status, unpublish_npm_package, upload_pypi_distribution, Behavior, Ecosystem,
+    InstallReport, LinkOptions, LockedPackage, LockedPythonVcsDependency, NpmAccessMapResult,
+    NpmAccessMutationResult, NpmAccessStatusResult, NpmAccessToken, NpmDeprecateResult,
+    NpmDistTagMutationResult, NpmOwnerListResult, NpmOwnerMutationResult, NpmPingResult,
+    NpmPublishPackage, NpmPublishResult, NpmSearchPackage, NpmTokenCreateOptions,
+    NpmTokenCreateResult, NpmTokenListResult, NpmTokenRevokeResult, NpmUnpublishResult,
+    NpmWhoamiResult, NpmWorkspacePackage, OmcRegistryError, PackageSpec, ProjectRequirements,
+    PypiBinaryMode, PypiCheckIssue, PypiUploadOptions, PypiUploadResult, PythonLocalRequirement,
+    PythonVcsRequirement, Verdict,
 };
 use sha2::{Digest, Sha256, Sha384, Sha512};
 
@@ -375,6 +378,9 @@ enum NpmCompatAction {
     Owner {
         action: NpmOwnerAction,
     },
+    Access {
+        action: NpmAccessAction,
+    },
     DistTag {
         action: NpmDistTagAction,
     },
@@ -505,6 +511,63 @@ enum NpmOwnerAction {
     Remove {
         user: String,
         spec: Option<String>,
+        json: bool,
+        npm_registry: Option<String>,
+        userconfig: Option<PathBuf>,
+        otp: Option<String>,
+    },
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum NpmAccessAction {
+    ListPackages {
+        owner: Option<String>,
+        package: Option<String>,
+        json: bool,
+        npm_registry: Option<String>,
+        userconfig: Option<PathBuf>,
+    },
+    ListCollaborators {
+        package: Option<String>,
+        user: Option<String>,
+        json: bool,
+        npm_registry: Option<String>,
+        userconfig: Option<PathBuf>,
+    },
+    GetStatus {
+        package: Option<String>,
+        json: bool,
+        npm_registry: Option<String>,
+        userconfig: Option<PathBuf>,
+    },
+    SetStatus {
+        package: Option<String>,
+        status: String,
+        json: bool,
+        npm_registry: Option<String>,
+        userconfig: Option<PathBuf>,
+        otp: Option<String>,
+    },
+    SetMfa {
+        package: Option<String>,
+        level: String,
+        json: bool,
+        npm_registry: Option<String>,
+        userconfig: Option<PathBuf>,
+        otp: Option<String>,
+    },
+    Grant {
+        permission: String,
+        scope_team: String,
+        package: Option<String>,
+        json: bool,
+        npm_registry: Option<String>,
+        userconfig: Option<PathBuf>,
+        otp: Option<String>,
+    },
+    Revoke {
+        scope_team: String,
+        package: Option<String>,
         json: bool,
         npm_registry: Option<String>,
         userconfig: Option<PathBuf>,
@@ -2121,6 +2184,7 @@ fn run_npm_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
         NpmCompatAction::Logout { action } => print_npm_logout(project_dir, action)?,
         NpmCompatAction::Token { action } => print_npm_token(project_dir, action)?,
         NpmCompatAction::Owner { action } => print_npm_owner(project_dir, action)?,
+        NpmCompatAction::Access { action } => print_npm_access(project_dir, action)?,
         NpmCompatAction::DistTag { action } => print_npm_dist_tag(project_dir, action)?,
         NpmCompatAction::Sbom { action } => print_npm_sbom(project_dir, action)?,
         NpmCompatAction::Config {
@@ -2904,6 +2968,15 @@ fn npm_help_text(topic: Option<&str>) -> String {
                 "Supports --json, --registry, --userconfig, and --otp for owner mutations.",
             ],
         ),
+        Some("access") => npm_command_help(
+            "npm access <list|get|set|grant|revoke> ...",
+            &[
+                "Manage npm package visibility, publish MFA, and team package access through the configured registry.",
+                "Supports list packages, list collaborators, get status, set status=public|private, set mfa=none|publish|automation, grant, and revoke.",
+                "Legacy aliases public, restricted, 2fa-required, 2fa-not-required, ls-packages, and ls-collaborators are accepted.",
+                "Supports --json, --registry, --userconfig, and --otp for mutations.",
+            ],
+        ),
         Some("dist-tag") => npm_command_help(
             "npm dist-tag <add|rm|ls> ...",
             &[
@@ -2969,7 +3042,7 @@ fn npm_general_help_text() -> String {
         "npm <command>",
         &[
             "OMC npm compatibility runs supported npm workflows through OMC's verifier, lockfile, cache, and project-local runtime paths.",
-            "Supported commands: install, install-test, ci, install-ci-test, remove, run, test, start, stop, restart, exec, list, explain, audit, outdated, fund, prune, dedupe, rebuild, cache, pkg, version, pack, publish, unpublish, deprecate, undeprecate, search, ping, whoami, login, adduser, logout, token, owner, dist-tag, sbom, view, docs, repo, bugs, home, config, init, bin, root, prefix.",
+            "Supported commands: install, install-test, ci, install-ci-test, remove, run, test, start, stop, restart, exec, list, explain, audit, outdated, fund, prune, dedupe, rebuild, cache, pkg, version, pack, publish, unpublish, deprecate, undeprecate, search, ping, whoami, login, adduser, logout, token, owner, access, dist-tag, sbom, view, docs, repo, bugs, home, config, init, bin, root, prefix.",
             "Use `npm help <command>` for focused OMC compatibility notes.",
         ],
     )
@@ -3015,6 +3088,7 @@ fn npm_help_topic(topic: &str) -> Option<&'static str> {
         "logout" => Some("logout"),
         "token" => Some("token"),
         "owner" => Some("owner"),
+        "access" => Some("access"),
         "dist-tag" | "dist-tags" => Some("dist-tag"),
         "sbom" => Some("sbom"),
         "view" | "info" | "show" | "v" => Some("view"),
@@ -4004,6 +4078,209 @@ fn print_npm_token(project_dir: &Path, action: NpmTokenAction) -> Result<(), Omc
         }
     }
     Ok(())
+}
+
+fn print_npm_access(project_dir: &Path, action: NpmAccessAction) -> Result<(), OmcRegistryError> {
+    match action {
+        NpmAccessAction::ListPackages {
+            owner,
+            package,
+            json,
+            npm_registry,
+            userconfig,
+        } => {
+            let owner = match owner {
+                Some(owner) => owner,
+                None => {
+                    read_npm_whoami(project_dir, npm_registry.as_deref(), userconfig.as_deref())?
+                        .username
+                }
+            };
+            let result = read_npm_access_packages(
+                project_dir,
+                &owner,
+                package.as_deref(),
+                npm_registry.as_deref(),
+                userconfig.as_deref(),
+            )?;
+            print_npm_access_map(result, json)?;
+        }
+        NpmAccessAction::ListCollaborators {
+            package,
+            user,
+            json,
+            npm_registry,
+            userconfig,
+        } => {
+            let package = npm_access_package_arg(project_dir, package.as_deref())?;
+            let result = read_npm_access_collaborators(
+                project_dir,
+                &package,
+                user.as_deref(),
+                npm_registry.as_deref(),
+                userconfig.as_deref(),
+            )?;
+            print_npm_access_map(result, json)?;
+        }
+        NpmAccessAction::GetStatus {
+            package,
+            json,
+            npm_registry,
+            userconfig,
+        } => {
+            let package = npm_access_package_arg(project_dir, package.as_deref())?;
+            let result = read_npm_access_status(
+                project_dir,
+                &package,
+                npm_registry.as_deref(),
+                userconfig.as_deref(),
+            )?;
+            print_npm_access_status(result, json)?;
+        }
+        NpmAccessAction::SetStatus {
+            package,
+            status,
+            json,
+            npm_registry,
+            userconfig,
+            otp,
+        } => {
+            let package = npm_access_package_arg(project_dir, package.as_deref())?;
+            let result = set_npm_access_status(
+                project_dir,
+                &package,
+                &status,
+                npm_registry.as_deref(),
+                userconfig.as_deref(),
+                otp.as_deref(),
+            )?;
+            print_npm_access_mutation(result, json)?;
+        }
+        NpmAccessAction::SetMfa {
+            package,
+            level,
+            json,
+            npm_registry,
+            userconfig,
+            otp,
+        } => {
+            let package = npm_access_package_arg(project_dir, package.as_deref())?;
+            let result = set_npm_access_mfa(
+                project_dir,
+                &package,
+                &level,
+                npm_registry.as_deref(),
+                userconfig.as_deref(),
+                otp.as_deref(),
+            )?;
+            print_npm_access_mutation(result, json)?;
+        }
+        NpmAccessAction::Grant {
+            permission,
+            scope_team,
+            package,
+            json,
+            npm_registry,
+            userconfig,
+            otp,
+        } => {
+            let package = npm_access_package_arg(project_dir, package.as_deref())?;
+            let result = grant_npm_access(
+                project_dir,
+                &scope_team,
+                &package,
+                &permission,
+                npm_registry.as_deref(),
+                userconfig.as_deref(),
+                otp.as_deref(),
+            )?;
+            print_npm_access_mutation(result, json)?;
+        }
+        NpmAccessAction::Revoke {
+            scope_team,
+            package,
+            json,
+            npm_registry,
+            userconfig,
+            otp,
+        } => {
+            let package = npm_access_package_arg(project_dir, package.as_deref())?;
+            let result = revoke_npm_access(
+                project_dir,
+                &scope_team,
+                &package,
+                npm_registry.as_deref(),
+                userconfig.as_deref(),
+                otp.as_deref(),
+            )?;
+            print_npm_access_mutation(result, json)?;
+        }
+    }
+    Ok(())
+}
+
+fn print_npm_access_map(result: NpmAccessMapResult, json: bool) -> Result<(), OmcRegistryError> {
+    if json {
+        println!("{}", serde_json::to_string_pretty(&result.items)?);
+    } else {
+        for (item, value) in result.items {
+            println!("{item}: {value}");
+        }
+    }
+    Ok(())
+}
+
+fn print_npm_access_status(
+    result: NpmAccessStatusResult,
+    json: bool,
+) -> Result<(), OmcRegistryError> {
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                result.package: result.status,
+            }))?
+        );
+    } else {
+        println!("{}: {}", result.package, result.status);
+    }
+    Ok(())
+}
+
+fn print_npm_access_mutation(
+    result: NpmAccessMutationResult,
+    json: bool,
+) -> Result<(), OmcRegistryError> {
+    if json {
+        println!("{}", serde_json::to_string_pretty(&result)?);
+    } else {
+        match result.action.as_str() {
+            "grant" => println!(
+                "+ {} {} {}",
+                result.permission.as_deref().unwrap_or_default(),
+                result.scope_team.as_deref().unwrap_or_default(),
+                result.package
+            ),
+            "revoke" => println!(
+                "- {} {}",
+                result.scope_team.as_deref().unwrap_or_default(),
+                result.package
+            ),
+            action => println!("{action} {}", result.package),
+        }
+    }
+    Ok(())
+}
+
+fn npm_access_package_arg(
+    project_dir: &Path,
+    package: Option<&str>,
+) -> Result<String, OmcRegistryError> {
+    if let Some(package) = package.map(str::trim).filter(|package| !package.is_empty()) {
+        return Ok(package.to_owned());
+    }
+    let package = read_npm_pkg_json(&project_dir.join("package.json"))?;
+    npm_package_json_name(&package)
 }
 
 fn print_npm_owner(project_dir: &Path, action: NpmOwnerAction) -> Result<(), OmcRegistryError> {
@@ -8868,6 +9145,7 @@ fn parse_npm_compat_action(args: &[String]) -> Result<NpmCompatAction, OmcRegist
         "logout" => parse_npm_logout_args(&args[1..]),
         "token" => parse_npm_token_args(&args[1..]),
         "owner" => parse_npm_owner_args(&args[1..]),
+        "access" => parse_npm_access_args(&args[1..]),
         "dist-tag" | "dist-tags" => parse_npm_dist_tag_args(&args[1..]),
         "sbom" => parse_npm_sbom_args(&args[1..]),
         "view" | "info" | "show" | "v" => parse_npm_view_args(&args[1..]),
@@ -9029,6 +9307,7 @@ fn npm_global_arg_supported_by_command(command: &str, arg: &str) -> bool {
                 | "logout"
                 | "token"
                 | "owner"
+                | "access"
                 | "dist-tag"
                 | "dist-tags"
                 | "sbom"
@@ -9053,6 +9332,7 @@ fn npm_global_arg_supported_by_command(command: &str, arg: &str) -> bool {
                 | "undeprecate"
                 | "token"
                 | "owner"
+                | "access"
                 | "dist-tag"
                 | "dist-tags"
         );
@@ -9154,6 +9434,7 @@ fn npm_global_arg_supported_by_command(command: &str, arg: &str) -> bool {
                 | "logout"
                 | "token"
                 | "owner"
+                | "access"
                 | "dist-tag"
                 | "dist-tags"
         );
@@ -9232,6 +9513,7 @@ fn npm_global_arg_supported_by_command(command: &str, arg: &str) -> bool {
                 | "logout"
                 | "token"
                 | "owner"
+                | "access"
                 | "dist-tag"
                 | "dist-tags"
                 | "view"
@@ -11426,6 +11708,406 @@ fn npm_owner_ignored_equals_flag(arg: &str) -> bool {
 }
 
 fn npm_owner_flag_value(
+    args: &[String],
+    index: usize,
+    flag: &str,
+) -> Result<String, OmcRegistryError> {
+    args.get(index)
+        .cloned()
+        .ok_or_else(|| OmcRegistryError::UnsupportedSpec(format!("{flag} needs a value")))
+}
+
+fn parse_npm_access_args(args: &[String]) -> Result<NpmCompatAction, OmcRegistryError> {
+    let mut positionals = Vec::new();
+    let mut json = false;
+    let mut npm_registry = None;
+    let mut userconfig = None;
+    let mut otp = None;
+    let mut index = 0;
+    while index < args.len() {
+        let arg = &args[index];
+        if arg == "--json" || arg == "--json=true" {
+            json = true;
+        } else if arg == "--json=false" {
+            json = false;
+        } else if arg == "--registry" {
+            index += 1;
+            npm_registry = Some(npm_access_flag_value(args, index, arg)?);
+        } else if let Some(value) = arg.strip_prefix("--registry=") {
+            npm_registry = Some(value.to_owned());
+        } else if arg == "--userconfig" {
+            index += 1;
+            userconfig = Some(PathBuf::from(npm_access_flag_value(args, index, arg)?));
+        } else if let Some(value) = arg.strip_prefix("--userconfig=") {
+            userconfig = Some(PathBuf::from(value));
+        } else if arg == "--otp" {
+            index += 1;
+            otp = Some(npm_access_flag_value(args, index, arg)?);
+        } else if let Some(value) = arg.strip_prefix("--otp=") {
+            otp = Some(value.to_owned());
+        } else if matches!(
+            arg.as_str(),
+            "--silent" | "-s" | "--parseable" | "-p" | "--workspaces" | "--include-workspace-root"
+        ) || npm_access_ignored_equals_flag(arg)
+        {
+        } else if matches!(
+            arg.as_str(),
+            "--loglevel" | "--cache" | "--workspace" | "-w"
+        ) {
+            index += 1;
+            let _ = npm_access_flag_value(args, index, arg)?;
+        } else if arg.starts_with('-') {
+            return Err(unsupported_compat_arg("npm access", arg));
+        } else {
+            positionals.push(arg.clone());
+        }
+        index += 1;
+    }
+
+    let Some(command) = positionals.first().map(String::as_str) else {
+        return Err(OmcRegistryError::UnsupportedSpec(
+            "npm access needs a command".to_owned(),
+        ));
+    };
+
+    match command {
+        "list" | "ls" => {
+            parse_npm_access_list_args(&positionals[1..], json, npm_registry, userconfig)
+        }
+        "ls-packages" => {
+            if positionals.len() > 3 {
+                return Err(unsupported_compat_arg(
+                    "npm access ls-packages",
+                    &positionals[3],
+                ));
+            }
+            Ok(NpmCompatAction::Access {
+                action: NpmAccessAction::ListPackages {
+                    owner: positionals.get(1).cloned(),
+                    package: positionals.get(2).cloned(),
+                    json,
+                    npm_registry,
+                    userconfig,
+                },
+            })
+        }
+        "ls-collaborators" => {
+            if positionals.len() > 3 {
+                return Err(unsupported_compat_arg(
+                    "npm access ls-collaborators",
+                    &positionals[3],
+                ));
+            }
+            Ok(NpmCompatAction::Access {
+                action: NpmAccessAction::ListCollaborators {
+                    package: positionals.get(1).cloned(),
+                    user: positionals.get(2).cloned(),
+                    json,
+                    npm_registry,
+                    userconfig,
+                },
+            })
+        }
+        "get" => {
+            if positionals.get(1).map(String::as_str) != Some("status") {
+                return Err(OmcRegistryError::UnsupportedSpec(format!(
+                    "get {} is not a valid access command",
+                    positionals.get(1).map(String::as_str).unwrap_or("")
+                )));
+            }
+            if positionals.len() > 3 {
+                return Err(unsupported_compat_arg(
+                    "npm access get status",
+                    &positionals[3],
+                ));
+            }
+            Ok(NpmCompatAction::Access {
+                action: NpmAccessAction::GetStatus {
+                    package: positionals.get(2).cloned(),
+                    json,
+                    npm_registry,
+                    userconfig,
+                },
+            })
+        }
+        "set" => {
+            let Some(setting) = positionals.get(1).map(String::as_str) else {
+                return Err(OmcRegistryError::UnsupportedSpec(
+                    "npm access set needs a setting".to_owned(),
+                ));
+            };
+            if positionals.len() > 3 {
+                return Err(unsupported_compat_arg("npm access set", &positionals[3]));
+            }
+            parse_npm_access_set_action(
+                setting,
+                positionals.get(2).cloned(),
+                json,
+                npm_registry,
+                userconfig,
+                otp,
+            )
+        }
+        "public" => npm_access_status_action(
+            "public",
+            positionals.get(1).cloned(),
+            &positionals,
+            json,
+            npm_registry,
+            userconfig,
+            otp,
+        ),
+        "restricted" | "private" => npm_access_status_action(
+            "private",
+            positionals.get(1).cloned(),
+            &positionals,
+            json,
+            npm_registry,
+            userconfig,
+            otp,
+        ),
+        "2fa-required" => npm_access_mfa_action(
+            "publish",
+            positionals.get(1).cloned(),
+            &positionals,
+            json,
+            npm_registry,
+            userconfig,
+            otp,
+        ),
+        "2fa-not-required" => npm_access_mfa_action(
+            "none",
+            positionals.get(1).cloned(),
+            &positionals,
+            json,
+            npm_registry,
+            userconfig,
+            otp,
+        ),
+        "grant" => {
+            if positionals.len() < 3 {
+                return Err(OmcRegistryError::UnsupportedSpec(
+                    "npm access grant needs a permission and scope:team".to_owned(),
+                ));
+            }
+            if !matches!(positionals[1].as_str(), "read-only" | "read-write") {
+                return Err(OmcRegistryError::UnsupportedSpec(
+                    "grant must be either `read-only` or `read-write`".to_owned(),
+                ));
+            }
+            if positionals.len() > 4 {
+                return Err(unsupported_compat_arg("npm access grant", &positionals[4]));
+            }
+            Ok(NpmCompatAction::Access {
+                action: NpmAccessAction::Grant {
+                    permission: positionals[1].clone(),
+                    scope_team: positionals[2].clone(),
+                    package: positionals.get(3).cloned(),
+                    json,
+                    npm_registry,
+                    userconfig,
+                    otp,
+                },
+            })
+        }
+        "revoke" => {
+            if positionals.len() < 2 {
+                return Err(OmcRegistryError::UnsupportedSpec(
+                    "npm access revoke needs a scope:team".to_owned(),
+                ));
+            }
+            if positionals.len() > 3 {
+                return Err(unsupported_compat_arg("npm access revoke", &positionals[3]));
+            }
+            Ok(NpmCompatAction::Access {
+                action: NpmAccessAction::Revoke {
+                    scope_team: positionals[1].clone(),
+                    package: positionals.get(2).cloned(),
+                    json,
+                    npm_registry,
+                    userconfig,
+                    otp,
+                },
+            })
+        }
+        "edit" => Err(OmcRegistryError::UnsupportedSpec(
+            "npm access edit is not implemented".to_owned(),
+        )),
+        other => Err(OmcRegistryError::UnsupportedSpec(format!(
+            "{other} is not a valid access command"
+        ))),
+    }
+}
+
+fn parse_npm_access_list_args(
+    args: &[String],
+    json: bool,
+    npm_registry: Option<String>,
+    userconfig: Option<PathBuf>,
+) -> Result<NpmCompatAction, OmcRegistryError> {
+    match args.first().map(String::as_str) {
+        Some("packages") => {
+            if args.len() > 3 {
+                return Err(unsupported_compat_arg("npm access list packages", &args[3]));
+            }
+            Ok(NpmCompatAction::Access {
+                action: NpmAccessAction::ListPackages {
+                    owner: args.get(1).cloned(),
+                    package: args.get(2).cloned(),
+                    json,
+                    npm_registry,
+                    userconfig,
+                },
+            })
+        }
+        Some("collaborators") => {
+            if args.len() > 3 {
+                return Err(unsupported_compat_arg(
+                    "npm access list collaborators",
+                    &args[3],
+                ));
+            }
+            Ok(NpmCompatAction::Access {
+                action: NpmAccessAction::ListCollaborators {
+                    package: args.get(1).cloned(),
+                    user: args.get(2).cloned(),
+                    json,
+                    npm_registry,
+                    userconfig,
+                },
+            })
+        }
+        Some(other) => Err(OmcRegistryError::UnsupportedSpec(format!(
+            "list {other} is not a valid access command"
+        ))),
+        None => Err(OmcRegistryError::UnsupportedSpec(
+            "npm access list needs packages or collaborators".to_owned(),
+        )),
+    }
+}
+
+fn parse_npm_access_set_action(
+    setting: &str,
+    package: Option<String>,
+    json: bool,
+    npm_registry: Option<String>,
+    userconfig: Option<PathBuf>,
+    otp: Option<String>,
+) -> Result<NpmCompatAction, OmcRegistryError> {
+    let Some((key, value)) = setting.split_once('=') else {
+        return Err(OmcRegistryError::UnsupportedSpec(format!(
+            "set {setting} is not a valid access command"
+        )));
+    };
+    match key {
+        "status" => {
+            let status = match value {
+                "public" => "public",
+                "private" | "restricted" => "private",
+                _ => {
+                    return Err(OmcRegistryError::UnsupportedSpec(format!(
+                        "set {setting} is not a valid access command"
+                    )))
+                }
+            };
+            Ok(NpmCompatAction::Access {
+                action: NpmAccessAction::SetStatus {
+                    package,
+                    status: status.to_owned(),
+                    json,
+                    npm_registry,
+                    userconfig,
+                    otp,
+                },
+            })
+        }
+        "mfa" | "2fa" => {
+            if !matches!(value, "none" | "publish" | "automation") {
+                return Err(OmcRegistryError::UnsupportedSpec(format!(
+                    "set {setting} is not a valid access command"
+                )));
+            }
+            Ok(NpmCompatAction::Access {
+                action: NpmAccessAction::SetMfa {
+                    package,
+                    level: value.to_owned(),
+                    json,
+                    npm_registry,
+                    userconfig,
+                    otp,
+                },
+            })
+        }
+        _ => Err(OmcRegistryError::UnsupportedSpec(format!(
+            "set {setting} is not a valid access command"
+        ))),
+    }
+}
+
+fn npm_access_status_action(
+    status: &str,
+    package: Option<String>,
+    positionals: &[String],
+    json: bool,
+    npm_registry: Option<String>,
+    userconfig: Option<PathBuf>,
+    otp: Option<String>,
+) -> Result<NpmCompatAction, OmcRegistryError> {
+    if positionals.len() > 2 {
+        return Err(unsupported_compat_arg("npm access", &positionals[2]));
+    }
+    Ok(NpmCompatAction::Access {
+        action: NpmAccessAction::SetStatus {
+            package,
+            status: status.to_owned(),
+            json,
+            npm_registry,
+            userconfig,
+            otp,
+        },
+    })
+}
+
+fn npm_access_mfa_action(
+    level: &str,
+    package: Option<String>,
+    positionals: &[String],
+    json: bool,
+    npm_registry: Option<String>,
+    userconfig: Option<PathBuf>,
+    otp: Option<String>,
+) -> Result<NpmCompatAction, OmcRegistryError> {
+    if positionals.len() > 2 {
+        return Err(unsupported_compat_arg("npm access", &positionals[2]));
+    }
+    Ok(NpmCompatAction::Access {
+        action: NpmAccessAction::SetMfa {
+            package,
+            level: level.to_owned(),
+            json,
+            npm_registry,
+            userconfig,
+            otp,
+        },
+    })
+}
+
+fn npm_access_ignored_equals_flag(arg: &str) -> bool {
+    [
+        "--json=",
+        "--loglevel=",
+        "--cache=",
+        "--parseable=",
+        "--workspace=",
+        "-w=",
+        "--workspaces=",
+        "--include-workspace-root=",
+    ]
+    .iter()
+    .any(|prefix| arg.starts_with(prefix))
+}
+
+fn npm_access_flag_value(
     args: &[String],
     index: usize,
     flag: &str,
@@ -15773,6 +16455,141 @@ mod tests {
             }
         );
         assert!(parse_npm_compat_action(&args(&["owner", "add"])).is_err());
+        assert_eq!(
+            parse_npm_compat_action(&args(&[
+                "--json",
+                "--registry=https://registry.example.invalid/npm",
+                "--userconfig=ci.npmrc",
+                "access",
+                "list",
+                "packages",
+                "@demo:publishers",
+                "@demo/pkg",
+            ]))
+            .unwrap(),
+            NpmCompatAction::Access {
+                action: NpmAccessAction::ListPackages {
+                    owner: Some("@demo:publishers".to_owned()),
+                    package: Some("@demo/pkg".to_owned()),
+                    json: true,
+                    npm_registry: Some("https://registry.example.invalid/npm".to_owned()),
+                    userconfig: Some(PathBuf::from("ci.npmrc")),
+                },
+            }
+        );
+        assert_eq!(
+            parse_npm_compat_action(&args(&["access", "ls-collaborators", "@demo/pkg", "alice"]))
+                .unwrap(),
+            NpmCompatAction::Access {
+                action: NpmAccessAction::ListCollaborators {
+                    package: Some("@demo/pkg".to_owned()),
+                    user: Some("alice".to_owned()),
+                    json: false,
+                    npm_registry: None,
+                    userconfig: None,
+                },
+            }
+        );
+        assert_eq!(
+            parse_npm_compat_action(&args(&["access", "get", "status", "@demo/pkg"])).unwrap(),
+            NpmCompatAction::Access {
+                action: NpmAccessAction::GetStatus {
+                    package: Some("@demo/pkg".to_owned()),
+                    json: false,
+                    npm_registry: None,
+                    userconfig: None,
+                },
+            }
+        );
+        assert_eq!(
+            parse_npm_compat_action(&args(&[
+                "--otp=123456",
+                "access",
+                "set",
+                "status=public",
+                "@demo/pkg",
+                "--json",
+            ]))
+            .unwrap(),
+            NpmCompatAction::Access {
+                action: NpmAccessAction::SetStatus {
+                    package: Some("@demo/pkg".to_owned()),
+                    status: "public".to_owned(),
+                    json: true,
+                    npm_registry: None,
+                    userconfig: None,
+                    otp: Some("123456".to_owned()),
+                },
+            }
+        );
+        assert_eq!(
+            parse_npm_compat_action(&args(&["access", "restricted", "@demo/pkg"])).unwrap(),
+            NpmCompatAction::Access {
+                action: NpmAccessAction::SetStatus {
+                    package: Some("@demo/pkg".to_owned()),
+                    status: "private".to_owned(),
+                    json: false,
+                    npm_registry: None,
+                    userconfig: None,
+                    otp: None,
+                },
+            }
+        );
+        assert_eq!(
+            parse_npm_compat_action(&args(&["access", "set", "mfa=automation", "@demo/pkg"]))
+                .unwrap(),
+            NpmCompatAction::Access {
+                action: NpmAccessAction::SetMfa {
+                    package: Some("@demo/pkg".to_owned()),
+                    level: "automation".to_owned(),
+                    json: false,
+                    npm_registry: None,
+                    userconfig: None,
+                    otp: None,
+                },
+            }
+        );
+        assert_eq!(
+            parse_npm_compat_action(&args(&[
+                "access",
+                "grant",
+                "read-write",
+                "@demo:publishers",
+                "@demo/pkg",
+            ]))
+            .unwrap(),
+            NpmCompatAction::Access {
+                action: NpmAccessAction::Grant {
+                    permission: "read-write".to_owned(),
+                    scope_team: "@demo:publishers".to_owned(),
+                    package: Some("@demo/pkg".to_owned()),
+                    json: false,
+                    npm_registry: None,
+                    userconfig: None,
+                    otp: None,
+                },
+            }
+        );
+        assert_eq!(
+            parse_npm_compat_action(&args(&[
+                "access",
+                "revoke",
+                "@demo:publishers",
+                "@demo/pkg",
+            ]))
+            .unwrap(),
+            NpmCompatAction::Access {
+                action: NpmAccessAction::Revoke {
+                    scope_team: "@demo:publishers".to_owned(),
+                    package: Some("@demo/pkg".to_owned()),
+                    json: false,
+                    npm_registry: None,
+                    userconfig: None,
+                    otp: None,
+                },
+            }
+        );
+        assert!(parse_npm_compat_action(&args(&["access", "grant", "write"])).is_err());
         assert_eq!(
             parse_npm_compat_action(&args(&[
                 "--registry",

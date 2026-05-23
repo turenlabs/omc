@@ -7484,6 +7484,36 @@ pub struct NpmOwnerMutationResult {
     pub response: serde_json::Value,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct NpmAccessMapResult {
+    pub registry: String,
+    pub subject: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub package: Option<String>,
+    pub items: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct NpmAccessStatusResult {
+    pub registry: String,
+    pub package: String,
+    pub status: String,
+    pub response: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct NpmAccessMutationResult {
+    pub registry: String,
+    pub package: String,
+    pub action: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope_team: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub permission: Option<String>,
+    pub status: u16,
+    pub response: serde_json::Value,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct NpmDeprecateResult {
     pub registry: String,
@@ -8627,6 +8657,427 @@ fn npm_owner_json(owner: &NpmSearchUser) -> serde_json::Value {
         "name": owner.username,
         "email": owner.email,
     })
+}
+
+pub fn read_npm_access_packages(
+    project_dir: &Path,
+    owner: &str,
+    package_filter: Option<&str>,
+    registry_override: Option<&str>,
+    userconfig_override: Option<&Path>,
+) -> Result<NpmAccessMapResult> {
+    let owner = owner.trim();
+    if owner.is_empty() {
+        return Err(OmcRegistryError::UnsupportedSpec(
+            "npm access list packages needs an owner, scope, or team".to_owned(),
+        ));
+    }
+    let client = Client::new();
+    let npm_config =
+        read_npm_config_with_overrides(project_dir, registry_override, userconfig_override)?;
+    let registry = ensure_trailing_slash(&npm_config.registry);
+    let (scope, team) = npm_access_scope_team(owner)?;
+    let primary_url = if let Some(team) = team.as_deref() {
+        format!(
+            "{}-/team/{}/{}/package",
+            registry,
+            urlencoding::encode(&scope),
+            urlencoding::encode(team)
+        )
+    } else {
+        format!("{}-/org/{}/package", registry, urlencoding::encode(&scope))
+    };
+    let response = npm_get(&client, &primary_url, &npm_config).send()?;
+    let value = if response.status().as_u16() == 404 && team.is_none() {
+        let fallback_url = format!("{}-/user/{}/package", registry, urlencoding::encode(&scope));
+        npm_get(&client, &fallback_url, &npm_config)
+            .send()?
+            .error_for_status()?
+            .json::<serde_json::Value>()?
+    } else {
+        response.error_for_status()?.json::<serde_json::Value>()?
+    };
+    let items = npm_access_items(&value, package_filter)?;
+    Ok(NpmAccessMapResult {
+        registry,
+        subject: owner.to_owned(),
+        package: package_filter.map(str::to_owned),
+        items,
+    })
+}
+
+pub fn read_npm_access_collaborators(
+    project_dir: &Path,
+    package: &str,
+    user_filter: Option<&str>,
+    registry_override: Option<&str>,
+    userconfig_override: Option<&Path>,
+) -> Result<NpmAccessMapResult> {
+    let package = npm_access_package_name(package)?;
+    let client = Client::new();
+    let npm_config =
+        read_npm_config_with_overrides(project_dir, registry_override, userconfig_override)?;
+    let registry = ensure_trailing_slash(npm_config.registry_for(&package));
+    let url = npm_access_package_url(&registry, &package, "collaborators");
+    let value = npm_get(&client, &url, &npm_config)
+        .send()?
+        .error_for_status()?
+        .json::<serde_json::Value>()?;
+    let items = npm_access_items(&value, user_filter)?;
+    Ok(NpmAccessMapResult {
+        registry,
+        subject: "collaborators".to_owned(),
+        package: Some(package),
+        items,
+    })
+}
+
+pub fn read_npm_access_status(
+    project_dir: &Path,
+    package: &str,
+    registry_override: Option<&str>,
+    userconfig_override: Option<&Path>,
+) -> Result<NpmAccessStatusResult> {
+    let package = npm_access_package_name(package)?;
+    let client = Client::new();
+    let npm_config =
+        read_npm_config_with_overrides(project_dir, registry_override, userconfig_override)?;
+    let registry = ensure_trailing_slash(npm_config.registry_for(&package));
+    let url = npm_access_package_url(&registry, &package, "visibility");
+    let response = npm_get(&client, &url, &npm_config)
+        .send()?
+        .error_for_status()?
+        .json::<serde_json::Value>()?;
+    let public = response
+        .get("public")
+        .and_then(serde_json::Value::as_bool)
+        .ok_or_else(|| {
+            OmcRegistryError::UnsupportedSpec(format!(
+                "npm access visibility response for `{package}` did not include public"
+            ))
+        })?;
+    Ok(NpmAccessStatusResult {
+        registry,
+        package,
+        status: if public { "public" } else { "private" }.to_owned(),
+        response,
+    })
+}
+
+pub fn set_npm_access_status(
+    project_dir: &Path,
+    package: &str,
+    status: &str,
+    registry_override: Option<&str>,
+    userconfig_override: Option<&Path>,
+    otp: Option<&str>,
+) -> Result<NpmAccessMutationResult> {
+    let package = npm_access_scoped_package_name(package)?;
+    let access = match status {
+        "public" => "public",
+        "private" | "restricted" => "restricted",
+        _ => {
+            return Err(OmcRegistryError::UnsupportedSpec(format!(
+                "npm access status must be public or private, got `{status}`"
+            )))
+        }
+    };
+    npm_access_post_package(
+        project_dir,
+        &package,
+        "status",
+        serde_json::json!({ "access": access }),
+        registry_override,
+        userconfig_override,
+        otp,
+    )
+}
+
+pub fn set_npm_access_mfa(
+    project_dir: &Path,
+    package: &str,
+    level: &str,
+    registry_override: Option<&str>,
+    userconfig_override: Option<&Path>,
+    otp: Option<&str>,
+) -> Result<NpmAccessMutationResult> {
+    let package = npm_access_package_name(package)?;
+    let body = match level {
+        "none" => serde_json::json!({ "publish_requires_tfa": false }),
+        "publish" => serde_json::json!({
+            "publish_requires_tfa": true,
+            "automation_token_overrides_tfa": false,
+        }),
+        "automation" => serde_json::json!({
+            "publish_requires_tfa": true,
+            "automation_token_overrides_tfa": true,
+        }),
+        _ => {
+            return Err(OmcRegistryError::UnsupportedSpec(format!(
+                "npm access mfa must be none, publish, or automation, got `{level}`"
+            )))
+        }
+    };
+    npm_access_post_package(
+        project_dir,
+        &package,
+        "mfa",
+        body,
+        registry_override,
+        userconfig_override,
+        otp,
+    )
+}
+
+pub fn grant_npm_access(
+    project_dir: &Path,
+    scope_team: &str,
+    package: &str,
+    permission: &str,
+    registry_override: Option<&str>,
+    userconfig_override: Option<&Path>,
+    otp: Option<&str>,
+) -> Result<NpmAccessMutationResult> {
+    if !matches!(permission, "read-only" | "read-write") {
+        return Err(OmcRegistryError::UnsupportedSpec(format!(
+            "npm access grant permission must be read-only or read-write, got `{permission}`"
+        )));
+    }
+    let package = npm_access_package_name(package)?;
+    let (scope, team) = npm_access_scope_team(scope_team)?;
+    let team = team.ok_or_else(|| {
+        OmcRegistryError::UnsupportedSpec("team must be in format `scope:team`".to_owned())
+    })?;
+    let (registry, status, response) = npm_access_team_request(
+        project_dir,
+        NpmAccessTeamRequest {
+            scope: &scope,
+            team: &team,
+            method: "PUT",
+            body: serde_json::json!({ "package": package, "permissions": permission }),
+            registry_override,
+            userconfig_override,
+            otp,
+        },
+    )?;
+    Ok(NpmAccessMutationResult {
+        registry,
+        package,
+        action: "grant".to_owned(),
+        scope_team: Some(scope_team.to_owned()),
+        permission: Some(permission.to_owned()),
+        status,
+        response,
+    })
+}
+
+pub fn revoke_npm_access(
+    project_dir: &Path,
+    scope_team: &str,
+    package: &str,
+    registry_override: Option<&str>,
+    userconfig_override: Option<&Path>,
+    otp: Option<&str>,
+) -> Result<NpmAccessMutationResult> {
+    let package = npm_access_package_name(package)?;
+    let (scope, team) = npm_access_scope_team(scope_team)?;
+    let team = team.ok_or_else(|| {
+        OmcRegistryError::UnsupportedSpec("team must be in format `scope:team`".to_owned())
+    })?;
+    let (registry, status, response) = npm_access_team_request(
+        project_dir,
+        NpmAccessTeamRequest {
+            scope: &scope,
+            team: &team,
+            method: "DELETE",
+            body: serde_json::json!({ "package": package }),
+            registry_override,
+            userconfig_override,
+            otp,
+        },
+    )?;
+    Ok(NpmAccessMutationResult {
+        registry,
+        package,
+        action: "revoke".to_owned(),
+        scope_team: Some(scope_team.to_owned()),
+        permission: None,
+        status,
+        response,
+    })
+}
+
+fn npm_access_package_url(registry: &str, package: &str, suffix: &str) -> String {
+    format!(
+        "{}-/package/{}/{}",
+        registry,
+        urlencoding::encode(package),
+        suffix
+    )
+}
+
+fn npm_access_post_package(
+    project_dir: &Path,
+    package: &str,
+    action: &str,
+    body: serde_json::Value,
+    registry_override: Option<&str>,
+    userconfig_override: Option<&Path>,
+    otp: Option<&str>,
+) -> Result<NpmAccessMutationResult> {
+    let client = Client::new();
+    let npm_config =
+        read_npm_config_with_overrides(project_dir, registry_override, userconfig_override)?;
+    let registry = ensure_trailing_slash(npm_config.registry_for(package));
+    let url = npm_access_package_url(&registry, package, "access");
+    if npm_config.auth_token_for_url(&url).is_none() {
+        return Err(OmcRegistryError::UnsupportedSpec(
+            "npm access needs authentication; run npm login or configure a registry _authToken"
+                .to_owned(),
+        ));
+    }
+    let mut request = npm_post(&client, &url, &npm_config).json(&body);
+    if let Some(otp) = otp.map(str::trim).filter(|otp| !otp.is_empty()) {
+        request = request.header("npm-otp", otp);
+    }
+    let response = request.send()?;
+    response.error_for_status_ref()?;
+    let status = response.status().as_u16();
+    let response = npm_optional_json_response(response)?;
+    Ok(NpmAccessMutationResult {
+        registry,
+        package: package.to_owned(),
+        action: action.to_owned(),
+        scope_team: None,
+        permission: None,
+        status,
+        response,
+    })
+}
+
+struct NpmAccessTeamRequest<'a> {
+    scope: &'a str,
+    team: &'a str,
+    method: &'a str,
+    body: serde_json::Value,
+    registry_override: Option<&'a str>,
+    userconfig_override: Option<&'a Path>,
+    otp: Option<&'a str>,
+}
+
+fn npm_access_team_request(
+    project_dir: &Path,
+    request: NpmAccessTeamRequest<'_>,
+) -> Result<(String, u16, serde_json::Value)> {
+    let client = Client::new();
+    let npm_config = read_npm_config_with_overrides(
+        project_dir,
+        request.registry_override,
+        request.userconfig_override,
+    )?;
+    let registry = ensure_trailing_slash(&npm_config.registry);
+    let url = format!(
+        "{}-/team/{}/{}/package",
+        registry,
+        urlencoding::encode(request.scope),
+        urlencoding::encode(request.team)
+    );
+    if npm_config.auth_token_for_url(&url).is_none() {
+        return Err(OmcRegistryError::UnsupportedSpec(
+            "npm access needs authentication; run npm login or configure a registry _authToken"
+                .to_owned(),
+        ));
+    }
+    let http_request = if request.method == "DELETE" {
+        npm_delete(&client, &url, &npm_config).json(&request.body)
+    } else {
+        npm_put(&client, &url, &npm_config).json(&request.body)
+    };
+    let mut http_request = http_request;
+    if let Some(otp) = request.otp.map(str::trim).filter(|otp| !otp.is_empty()) {
+        http_request = http_request.header("npm-otp", otp);
+    }
+    let response = http_request.send()?;
+    response.error_for_status_ref()?;
+    let status = response.status().as_u16();
+    let response = npm_optional_json_response(response)?;
+    Ok((registry, status, response))
+}
+
+fn npm_access_scope_team(value: &str) -> Result<(String, Option<String>)> {
+    let value = value.trim().trim_start_matches('@');
+    if value.is_empty() {
+        return Err(OmcRegistryError::UnsupportedSpec(
+            "npm access scope/team cannot be empty".to_owned(),
+        ));
+    }
+    let (scope, team) = value
+        .split_once(':')
+        .map(|(scope, team)| (scope, Some(team)))
+        .unwrap_or((value, None));
+    if scope.is_empty() || team == Some("") {
+        return Err(OmcRegistryError::UnsupportedSpec(format!(
+            "invalid npm access scope/team `{value}`"
+        )));
+    }
+    Ok((scope.to_owned(), team.map(str::to_owned)))
+}
+
+fn npm_access_package_name(value: &str) -> Result<String> {
+    let spec = PackageSpec::parse(&format!("npm:{value}"))?;
+    if spec.direct_url.is_some() || spec.version.is_some() {
+        return Err(OmcRegistryError::UnsupportedSpec(format!(
+            "npm access needs a package name, got `{value}`"
+        )));
+    }
+    Ok(spec.name)
+}
+
+fn npm_access_scoped_package_name(value: &str) -> Result<String> {
+    let package = npm_access_package_name(value)?;
+    if !npm_access_package_is_scoped(&package) {
+        return Err(OmcRegistryError::UnsupportedSpec(
+            "This command is only available for scoped packages.".to_owned(),
+        ));
+    }
+    Ok(package)
+}
+
+fn npm_access_package_is_scoped(package: &str) -> bool {
+    package
+        .strip_prefix('@')
+        .and_then(|rest| rest.split_once('/'))
+        .map(|(scope, name)| !scope.is_empty() && !name.is_empty())
+        .unwrap_or(false)
+}
+
+fn npm_access_items(
+    value: &serde_json::Value,
+    limiter: Option<&str>,
+) -> Result<BTreeMap<String, String>> {
+    let object = value.as_object().ok_or_else(|| {
+        OmcRegistryError::UnsupportedSpec("npm access response was not an object".to_owned())
+    })?;
+    let mut items = BTreeMap::new();
+    for (key, value) in object {
+        if limiter.map(|limiter| limiter != key).unwrap_or(false) {
+            continue;
+        }
+        let value = value
+            .as_str()
+            .map(npm_access_permission_text)
+            .unwrap_or_else(|| value.to_string());
+        items.insert(key.clone(), value);
+    }
+    Ok(items)
+}
+
+fn npm_access_permission_text(value: &str) -> String {
+    match value {
+        "read" => "read-only".to_owned(),
+        "write" => "read-write".to_owned(),
+        other => other.to_owned(),
+    }
 }
 
 fn npm_dist_tag_url(registry: &str, package: &str, tag: &str) -> String {
@@ -18584,6 +19035,260 @@ wheels = [
         assert_eq!(revoked.registry, format!("http://{addr}/"));
         assert_eq!(revoked.token, "a1b2c3");
         assert_eq!(revoked.status, 204);
+        handle.join().unwrap();
+    }
+
+    #[test]
+    fn reads_and_sets_npm_access_status_and_mfa() {
+        use std::io::Write as _;
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let handle = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let buffer = read_http_request_bytes(&mut stream);
+            let body_start = http_body_start(&buffer).unwrap();
+            let headers = String::from_utf8_lossy(&buffer[..body_start]);
+            assert!(headers.starts_with("GET /-/package/%40demo%2Fpkg/visibility "));
+            assert!(headers
+                .to_ascii_lowercase()
+                .contains("authorization: bearer registry-token"));
+            let body = r#"{"public":false}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+
+            let (mut stream, _) = listener.accept().unwrap();
+            let buffer = read_http_request_bytes(&mut stream);
+            let body_start = http_body_start(&buffer).unwrap();
+            let headers = String::from_utf8_lossy(&buffer[..body_start]);
+            assert!(headers.starts_with("POST /-/package/%40demo%2Fpkg/access "));
+            let lower = headers.to_ascii_lowercase();
+            assert!(lower.contains("authorization: bearer registry-token"));
+            assert!(lower.contains("npm-otp: 123456"));
+            let body: serde_json::Value = serde_json::from_slice(&buffer[body_start..]).unwrap();
+            assert_eq!(body, serde_json::json!({"access": "public"}));
+            let response_body = r#"{"ok":true}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                response_body.len(),
+                response_body
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+
+            let (mut stream, _) = listener.accept().unwrap();
+            let buffer = read_http_request_bytes(&mut stream);
+            let body_start = http_body_start(&buffer).unwrap();
+            let headers = String::from_utf8_lossy(&buffer[..body_start]);
+            assert!(headers.starts_with("POST /-/package/%40demo%2Fpkg/access "));
+            let lower = headers.to_ascii_lowercase();
+            assert!(lower.contains("authorization: bearer registry-token"));
+            assert!(lower.contains("npm-otp: 123456"));
+            let body: serde_json::Value = serde_json::from_slice(&buffer[body_start..]).unwrap();
+            assert_eq!(
+                body,
+                serde_json::json!({
+                    "publish_requires_tfa": true,
+                    "automation_token_overrides_tfa": true
+                })
+            );
+            let response_body = r#"{"ok":true}"#;
+            let response = format!(
+                "HTTP/1.1 202 Accepted\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                response_body.len(),
+                response_body
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+        });
+
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(
+            dir.path().join("ci.npmrc"),
+            format!("registry=http://{addr}/\n//{addr}/:_authToken=registry-token\n"),
+        )
+        .unwrap();
+
+        let status =
+            read_npm_access_status(dir.path(), "@demo/pkg", None, Some(Path::new("ci.npmrc")))
+                .unwrap();
+        assert_eq!(status.registry, format!("http://{addr}/"));
+        assert_eq!(status.package, "@demo/pkg");
+        assert_eq!(status.status, "private");
+
+        let changed = set_npm_access_status(
+            dir.path(),
+            "@demo/pkg",
+            "public",
+            None,
+            Some(Path::new("ci.npmrc")),
+            Some("123456"),
+        )
+        .unwrap();
+        assert_eq!(changed.registry, format!("http://{addr}/"));
+        assert_eq!(changed.package, "@demo/pkg");
+        assert_eq!(changed.action, "status");
+        assert_eq!(changed.status, 200);
+        assert_eq!(changed.response["ok"], true);
+
+        let mfa = set_npm_access_mfa(
+            dir.path(),
+            "@demo/pkg",
+            "automation",
+            None,
+            Some(Path::new("ci.npmrc")),
+            Some("123456"),
+        )
+        .unwrap();
+        assert_eq!(mfa.action, "mfa");
+        assert_eq!(mfa.status, 202);
+        handle.join().unwrap();
+    }
+
+    #[test]
+    fn lists_and_mutates_npm_access_team_permissions() {
+        use std::io::Write as _;
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let handle = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let buffer = read_http_request_bytes(&mut stream);
+            let body_start = http_body_start(&buffer).unwrap();
+            let headers = String::from_utf8_lossy(&buffer[..body_start]);
+            assert!(headers.starts_with("GET /-/team/demo/publishers/package "));
+            assert!(headers
+                .to_ascii_lowercase()
+                .contains("authorization: bearer registry-token"));
+            let body = r#"{"@demo/pkg":"write","@demo/readme":"read"}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+
+            let (mut stream, _) = listener.accept().unwrap();
+            let buffer = read_http_request_bytes(&mut stream);
+            let body_start = http_body_start(&buffer).unwrap();
+            let headers = String::from_utf8_lossy(&buffer[..body_start]);
+            assert!(headers.starts_with("GET /-/package/%40demo%2Fpkg/collaborators "));
+            assert!(headers
+                .to_ascii_lowercase()
+                .contains("authorization: bearer registry-token"));
+            let body = r#"{"alice":"write","bob":"read"}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+
+            let (mut stream, _) = listener.accept().unwrap();
+            let buffer = read_http_request_bytes(&mut stream);
+            let body_start = http_body_start(&buffer).unwrap();
+            let headers = String::from_utf8_lossy(&buffer[..body_start]);
+            assert!(headers.starts_with("PUT /-/team/demo/publishers/package "));
+            let lower = headers.to_ascii_lowercase();
+            assert!(lower.contains("authorization: bearer registry-token"));
+            assert!(lower.contains("npm-otp: 123456"));
+            let body: serde_json::Value = serde_json::from_slice(&buffer[body_start..]).unwrap();
+            assert_eq!(
+                body,
+                serde_json::json!({
+                    "package": "@demo/pkg",
+                    "permissions": "read-write"
+                })
+            );
+            let response_body = r#"{"ok":true}"#;
+            let response = format!(
+                "HTTP/1.1 201 Created\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                response_body.len(),
+                response_body
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+
+            let (mut stream, _) = listener.accept().unwrap();
+            let buffer = read_http_request_bytes(&mut stream);
+            let body_start = http_body_start(&buffer).unwrap();
+            let headers = String::from_utf8_lossy(&buffer[..body_start]);
+            assert!(headers.starts_with("DELETE /-/team/demo/publishers/package "));
+            let lower = headers.to_ascii_lowercase();
+            assert!(lower.contains("authorization: bearer registry-token"));
+            assert!(lower.contains("npm-otp: 123456"));
+            let body: serde_json::Value = serde_json::from_slice(&buffer[body_start..]).unwrap();
+            assert_eq!(body, serde_json::json!({"package": "@demo/pkg"}));
+            let response =
+                "HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+            stream.write_all(response.as_bytes()).unwrap();
+        });
+
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(
+            dir.path().join("ci.npmrc"),
+            format!("registry=http://{addr}/\n//{addr}/:_authToken=registry-token\n"),
+        )
+        .unwrap();
+
+        let packages = read_npm_access_packages(
+            dir.path(),
+            "@demo:publishers",
+            None,
+            None,
+            Some(Path::new("ci.npmrc")),
+        )
+        .unwrap();
+        assert_eq!(packages.registry, format!("http://{addr}/"));
+        assert_eq!(
+            packages.items.get("@demo/pkg").map(String::as_str),
+            Some("read-write")
+        );
+        assert_eq!(
+            packages.items.get("@demo/readme").map(String::as_str),
+            Some("read-only")
+        );
+
+        let collaborators = read_npm_access_collaborators(
+            dir.path(),
+            "@demo/pkg",
+            Some("bob"),
+            None,
+            Some(Path::new("ci.npmrc")),
+        )
+        .unwrap();
+        assert_eq!(collaborators.package.as_deref(), Some("@demo/pkg"));
+        assert_eq!(collaborators.items.len(), 1);
+        assert_eq!(
+            collaborators.items.get("bob").map(String::as_str),
+            Some("read-only")
+        );
+
+        let grant = grant_npm_access(
+            dir.path(),
+            "@demo:publishers",
+            "@demo/pkg",
+            "read-write",
+            None,
+            Some(Path::new("ci.npmrc")),
+            Some("123456"),
+        )
+        .unwrap();
+        assert_eq!(grant.action, "grant");
+        assert_eq!(grant.status, 201);
+
+        let revoke = revoke_npm_access(
+            dir.path(),
+            "@demo:publishers",
+            "@demo/pkg",
+            None,
+            Some(Path::new("ci.npmrc")),
+            Some("123456"),
+        )
+        .unwrap();
+        assert_eq!(revoke.action, "revoke");
+        assert_eq!(revoke.status, 204);
         handle.join().unwrap();
     }
 
