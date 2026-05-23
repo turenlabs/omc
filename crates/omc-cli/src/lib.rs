@@ -255,6 +255,9 @@ enum NpmCompatAction {
     List {
         json: bool,
     },
+    Audit {
+        json: bool,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -564,40 +567,7 @@ fn run() -> Result<ExitCode, OmcRegistryError> {
             let install = install_locked_project(&options)?;
             print_install_report(&install);
         }
-        Command::Audit { json } => {
-            let lock = read_lockfile(cli.project_dir.join("omc.lock"))?;
-            let blocked = lock
-                .packages
-                .iter()
-                .filter(|package| package.verdict == Verdict::Blocked)
-                .count();
-            if json {
-                let audit = serde_json::json!({
-                    "packages": lock.packages.len(),
-                    "blocked": blocked,
-                    "lock": lock,
-                });
-                println!("{}", serde_json::to_string_pretty(&audit)?);
-            } else {
-                println!("packages: {}", lock.packages.len());
-                println!("blocked: {blocked}");
-                for package in lock.packages {
-                    println!(
-                        "{} {}:{}@{}",
-                        verdict_label(package.verdict),
-                        package.ecosystem,
-                        package.name,
-                        package.version
-                    );
-                }
-            }
-
-            if blocked > 0 {
-                return Err(OmcRegistryError::BlockedPackage {
-                    spec: format!("{blocked} locked package(s)"),
-                });
-            }
-        }
+        Command::Audit { json } => return print_audit_report(&cli.project_dir, json),
         Command::List { json } => {
             let lock = read_lockfile(cli.project_dir.join("omc.lock"))?;
             if json {
@@ -953,6 +923,7 @@ fn run_npm_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
         NpmCompatAction::List { json } => {
             print_locked_packages(project_dir, Some(Ecosystem::Npm), json)?
         }
+        NpmCompatAction::Audit { json } => return print_audit_report(project_dir, json),
     }
 
     Ok(ExitCode::SUCCESS)
@@ -1097,6 +1068,43 @@ fn print_npm_path(project_dir: &Path, kind: NpmPathKind) -> Result<(), OmcRegist
     };
     println!("{}", path.display());
     Ok(())
+}
+
+fn print_audit_report(project_dir: &Path, json: bool) -> Result<ExitCode, OmcRegistryError> {
+    let lock = read_lockfile(project_dir.join("omc.lock"))?;
+    let blocked = lock
+        .packages
+        .iter()
+        .filter(|package| package.verdict == Verdict::Blocked)
+        .count();
+    if json {
+        let audit = serde_json::json!({
+            "packages": lock.packages.len(),
+            "blocked": blocked,
+            "lock": lock,
+        });
+        println!("{}", serde_json::to_string_pretty(&audit)?);
+    } else {
+        println!("packages: {}", lock.packages.len());
+        println!("blocked: {blocked}");
+        for package in lock.packages {
+            println!(
+                "{} {}:{}@{}",
+                verdict_label(package.verdict),
+                package.ecosystem,
+                package.name,
+                package.version
+            );
+        }
+    }
+
+    if blocked > 0 {
+        return Err(OmcRegistryError::BlockedPackage {
+            spec: format!("{blocked} locked package(s)"),
+        });
+    }
+
+    Ok(ExitCode::SUCCESS)
 }
 
 fn print_lock_only_report(project_dir: &Path) {
@@ -1924,6 +1932,7 @@ fn parse_npm_compat_action(args: &[String]) -> Result<NpmCompatAction, OmcRegist
         "list" | "ls" => Ok(NpmCompatAction::List {
             json: parse_json_list_flag("npm list", &args[1..])?,
         }),
+        "audit" => parse_npm_audit_args(&args[1..]),
         other => Err(OmcRegistryError::UnsupportedSpec(format!(
             "unsupported npm compatibility command `{other}`"
         ))),
@@ -1989,6 +1998,44 @@ fn parse_npm_install_args(args: &[String]) -> Result<NpmCompatAction, OmcRegistr
         allow,
         allow_all_host,
     })
+}
+
+fn parse_npm_audit_args(args: &[String]) -> Result<NpmCompatAction, OmcRegistryError> {
+    let mut json = false;
+    let mut filtered = Vec::new();
+    let mut index = 0;
+    while index < args.len() {
+        let arg = &args[index];
+        if arg == "--json" {
+            json = true;
+        } else if matches!(arg.as_str(), "--audit-level" | "--audit-levels") {
+            index += 1;
+            if args.get(index).is_none() {
+                return Err(OmcRegistryError::UnsupportedSpec(format!(
+                    "{arg} needs a value"
+                )));
+            }
+        } else if matches!(arg.as_str(), "--parseable" | "--long")
+            || npm_audit_equals_value_flag(arg)
+        {
+        } else {
+            filtered.push(arg.clone());
+        }
+        index += 1;
+    }
+
+    let CommonCompatFlags { positionals, .. } = parse_common_compat_flags(&filtered, true)?;
+    if !positionals.is_empty() {
+        return Err(unsupported_compat_arg("npm audit", &positionals[0]));
+    }
+
+    Ok(NpmCompatAction::Audit { json })
+}
+
+fn npm_audit_equals_value_flag(arg: &str) -> bool {
+    ["--audit-level=", "--audit-levels="]
+        .iter()
+        .any(|prefix| arg.starts_with(prefix))
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -3332,6 +3379,20 @@ mod tests {
                 kind: NpmPathKind::Prefix,
             }
         );
+        assert_eq!(
+            parse_npm_compat_action(&args(&[
+                "audit",
+                "--json",
+                "--audit-level=high",
+                "--omit",
+                "dev",
+                "--registry",
+                "https://registry.example.invalid/npm",
+            ]))
+            .unwrap(),
+            NpmCompatAction::Audit { json: true }
+        );
+        assert!(parse_npm_compat_action(&args(&["audit", "fix"])).is_err());
     }
 
     #[test]
