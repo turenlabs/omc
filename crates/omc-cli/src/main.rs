@@ -223,7 +223,9 @@ enum NpmCompatAction {
         command: String,
         args: Vec<String>,
     },
-    List,
+    List {
+        json: bool,
+    },
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -244,7 +246,16 @@ enum PipCompatAction {
         allow_all_host: bool,
     },
     Freeze,
-    List,
+    List {
+        format: PipListFormat,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PipListFormat {
+    Columns,
+    Freeze,
+    Json,
 }
 
 fn main() -> ExitCode {
@@ -595,7 +606,9 @@ fn run_npm_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
         NpmCompatAction::Exec { command, args } => {
             return run_project_command(project_dir, &command, &args)
         }
-        NpmCompatAction::List => print_locked_packages(project_dir, Some(Ecosystem::Npm), false)?,
+        NpmCompatAction::List { json } => {
+            print_locked_packages(project_dir, Some(Ecosystem::Npm), json)?
+        }
     }
 
     Ok(ExitCode::SUCCESS)
@@ -667,7 +680,13 @@ fn run_pip_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
             )?;
         }
         PipCompatAction::Freeze => print_locked_freeze(project_dir)?,
-        PipCompatAction::List => print_locked_packages(project_dir, Some(Ecosystem::Pypi), false)?,
+        PipCompatAction::List { format } => match format {
+            PipListFormat::Columns => {
+                print_locked_packages(project_dir, Some(Ecosystem::Pypi), false)?
+            }
+            PipListFormat::Freeze => print_locked_freeze(project_dir)?,
+            PipListFormat::Json => print_locked_pip_json(project_dir)?,
+        },
     }
 
     Ok(ExitCode::SUCCESS)
@@ -743,6 +762,23 @@ fn print_locked_freeze(project_dir: &Path) -> Result<(), OmcRegistryError> {
     {
         println!("{}=={}", package.name, package.version);
     }
+    Ok(())
+}
+
+fn print_locked_pip_json(project_dir: &Path) -> Result<(), OmcRegistryError> {
+    let lock = read_lockfile(project_dir.join("omc.lock"))?;
+    let packages = lock
+        .packages
+        .into_iter()
+        .filter(|package| package.ecosystem == Ecosystem::Pypi)
+        .map(|package| {
+            serde_json::json!({
+                "name": package.name,
+                "version": package.version,
+            })
+        })
+        .collect::<Vec<_>>();
+    println!("{}", serde_json::to_string_pretty(&packages)?);
     Ok(())
 }
 
@@ -963,7 +999,9 @@ fn parse_npm_compat_action(args: &[String]) -> Result<NpmCompatAction, OmcRegist
                 args: rest,
             })
         }
-        "list" | "ls" => Ok(NpmCompatAction::List),
+        "list" | "ls" => Ok(NpmCompatAction::List {
+            json: parse_json_list_flag("npm list", &args[1..])?,
+        }),
         other => Err(OmcRegistryError::UnsupportedSpec(format!(
             "unsupported npm compatibility command `{other}`"
         ))),
@@ -1017,7 +1055,9 @@ fn parse_pip_compat_action(args: &[String]) -> Result<PipCompatAction, OmcRegist
             })
         }
         "freeze" => Ok(PipCompatAction::Freeze),
-        "list" => Ok(PipCompatAction::List),
+        "list" => Ok(PipCompatAction::List {
+            format: parse_pip_list_format(&args[1..])?,
+        }),
         other => Err(OmcRegistryError::UnsupportedSpec(format!(
             "unsupported pip compatibility command `{other}`"
         ))),
@@ -1199,6 +1239,54 @@ fn ignored_compat_flag(npm_mode: bool, arg: &str) -> bool {
         )
     } else {
         arg == "-y"
+    }
+}
+
+fn parse_json_list_flag(command: &str, args: &[String]) -> Result<bool, OmcRegistryError> {
+    let mut json = false;
+    for arg in args {
+        if arg == "--json" {
+            json = true;
+        } else if arg == "--depth=0" || arg == "--all" {
+        } else {
+            return Err(unsupported_compat_arg(command, arg));
+        }
+    }
+    Ok(json)
+}
+
+fn parse_pip_list_format(args: &[String]) -> Result<PipListFormat, OmcRegistryError> {
+    let mut format = PipListFormat::Columns;
+    let mut index = 0;
+    while index < args.len() {
+        let arg = &args[index];
+        if arg == "--format" {
+            index += 1;
+            let Some(value) = args.get(index) else {
+                return Err(OmcRegistryError::UnsupportedSpec(
+                    "pip list --format needs a value".to_owned(),
+                ));
+            };
+            format = parse_pip_list_format_value(value)?;
+        } else if let Some(value) = arg.strip_prefix("--format=") {
+            format = parse_pip_list_format_value(value)?;
+        } else if arg == "--disable-pip-version-check" {
+        } else {
+            return Err(unsupported_compat_arg("pip list", arg));
+        }
+        index += 1;
+    }
+    Ok(format)
+}
+
+fn parse_pip_list_format_value(value: &str) -> Result<PipListFormat, OmcRegistryError> {
+    match value {
+        "columns" => Ok(PipListFormat::Columns),
+        "freeze" => Ok(PipListFormat::Freeze),
+        "json" => Ok(PipListFormat::Json),
+        other => Err(OmcRegistryError::UnsupportedSpec(format!(
+            "unsupported pip list format `{other}`"
+        ))),
     }
 }
 
@@ -1393,6 +1481,26 @@ mod tests {
         assert_eq!(
             parse_pip_compat_action(&args(&["freeze"])).unwrap(),
             PipCompatAction::Freeze
+        );
+    }
+
+    #[test]
+    fn parses_npm_and_pip_machine_readable_lists() {
+        assert_eq!(
+            parse_npm_compat_action(&args(&["list", "--json"])).unwrap(),
+            NpmCompatAction::List { json: true }
+        );
+        assert_eq!(
+            parse_pip_compat_action(&args(&["list", "--format=freeze"])).unwrap(),
+            PipCompatAction::List {
+                format: PipListFormat::Freeze,
+            }
+        );
+        assert_eq!(
+            parse_pip_compat_action(&args(&["list", "--format", "json"])).unwrap(),
+            PipCompatAction::List {
+                format: PipListFormat::Json,
+            }
         );
     }
 }
