@@ -3458,8 +3458,31 @@ fn read_requirements_file_inner(
         }
 
         let parsed = parse_requirement_line(line);
+        let direct_requirement =
+            parse_pypi_direct_requirement(&parsed.requirement, &BTreeSet::new()).or(
+                parse_pypi_local_direct_requirement(
+                    &parsed.requirement,
+                    &BTreeSet::new(),
+                    base_dir,
+                )?,
+            );
+        if let Some((spec, hashes)) = direct_requirement {
+            if mode == RequirementsMode::Constraint {
+                return Err(OmcRegistryError::UnsupportedRequirement(line.to_owned()));
+            }
+            if !parsed.hashes.is_empty() || !hashes.is_empty() {
+                discovered
+                    .hashes
+                    .entry(spec.constraint_key())
+                    .or_default()
+                    .extend(parsed.hashes.into_iter().chain(hashes));
+            }
+            discovered.specs.push(spec);
+            continue;
+        }
+
         if let Some((spec, hashes)) =
-            parse_pypi_direct_requirement(&parsed.requirement, &BTreeSet::new())
+            parse_pypi_local_wheel_requirement(&parsed.requirement, base_dir)?
         {
             if mode == RequirementsMode::Constraint {
                 return Err(OmcRegistryError::UnsupportedRequirement(line.to_owned()));
@@ -6103,6 +6126,77 @@ fn parse_pypi_direct_requirement(
         PackageSpec::with_direct_url(Ecosystem::Pypi, name, url, extras),
         hashes,
     ))
+}
+
+fn parse_pypi_local_direct_requirement(
+    requirement: &str,
+    active_extras: &BTreeSet<String>,
+    base_dir: &Path,
+) -> Result<Option<(PackageSpec, BTreeSet<String>)>> {
+    let mut parts = requirement.splitn(2, ';');
+    let requirement = parts.next().unwrap_or_default().trim();
+    if let Some(marker) = parts.next() {
+        if !pypi_marker_applies(marker, active_extras) {
+            return Ok(None);
+        }
+    }
+
+    let Some((name, path)) = requirement.split_once(" @ ") else {
+        return Ok(None);
+    };
+    let (name, extras) = parse_pypi_name_and_extras(name.trim());
+    if name.is_empty() {
+        return Ok(None);
+    }
+    let Some((url, hashes, _)) = local_wheel_url_and_hashes(path.trim(), base_dir)? else {
+        return Ok(None);
+    };
+    Ok(Some((
+        PackageSpec::with_direct_url(Ecosystem::Pypi, name, url, extras),
+        hashes,
+    )))
+}
+
+fn parse_pypi_local_wheel_requirement(
+    requirement: &str,
+    base_dir: &Path,
+) -> Result<Option<(PackageSpec, BTreeSet<String>)>> {
+    let Some((url, hashes, filename)) = local_wheel_url_and_hashes(requirement.trim(), base_dir)?
+    else {
+        return Ok(None);
+    };
+    let Some((name, _version)) = parse_wheel_name_and_version(&filename) else {
+        return Ok(None);
+    };
+    Ok(Some((
+        PackageSpec::with_direct_url(Ecosystem::Pypi, name, url, BTreeSet::new()),
+        hashes,
+    )))
+}
+
+fn local_wheel_url_and_hashes(
+    value: &str,
+    base_dir: &Path,
+) -> Result<Option<(String, BTreeSet<String>, String)>> {
+    let (path, hashes) = direct_requirement_url_and_hashes(value);
+    if path.contains("://") || !path.to_ascii_lowercase().ends_with(".whl") {
+        return Ok(None);
+    }
+
+    let path = Path::new(&path);
+    let path = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        base_dir.join(path)
+    };
+    let filename = path
+        .file_name()
+        .and_then(|filename| filename.to_str())
+        .ok_or_else(|| OmcRegistryError::UnsupportedRequirement(value.to_owned()))?
+        .to_owned();
+    let url = reqwest::Url::from_file_path(&path)
+        .map_err(|_| OmcRegistryError::UnsupportedRequirement(value.to_owned()))?;
+    Ok(Some((url.to_string(), hashes, filename)))
 }
 
 fn direct_requirement_url_and_hashes(url: &str) -> (String, BTreeSet<String>) {
@@ -9217,6 +9311,54 @@ wheels = [
             spec.direct_url.as_deref(),
             Some("https://example.invalid/idna-3.7-py3-none-any.whl")
         );
+        assert_eq!(
+            discovered.hashes.get("pypi:idna").cloned().unwrap(),
+            BTreeSet::from([
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_owned(),
+                "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_owned()
+            ])
+        );
+    }
+
+    #[test]
+    fn reads_local_wheel_requirements() {
+        let dir = tempfile::tempdir().unwrap();
+        let wheels = dir.path().join("wheels");
+        fs::create_dir_all(&wheels).unwrap();
+        fs::write(
+            wheels.join("idna-3.7-py3-none-any.whl"),
+            b"not a real wheel",
+        )
+        .unwrap();
+        fs::write(
+            wheels.join("typing_extensions-4.12.2-py3-none-any.whl"),
+            b"not a real wheel",
+        )
+        .unwrap();
+        let requirements = dir.path().join("requirements.txt");
+        fs::write(
+            &requirements,
+            "idna @ ./wheels/idna-3.7-py3-none-any.whl#sha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa --hash=sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\n./wheels/typing_extensions-4.12.2-py3-none-any.whl\n",
+        )
+        .unwrap();
+
+        let discovered = read_requirements_file(&requirements).unwrap();
+        let idna = discovered
+            .specs
+            .iter()
+            .find(|spec| spec.name == "idna")
+            .unwrap();
+        assert!(idna.direct_url.as_deref().unwrap().starts_with("file://"));
+        assert!(idna
+            .direct_url
+            .as_deref()
+            .unwrap()
+            .ends_with("/wheels/idna-3.7-py3-none-any.whl"));
+        assert!(discovered
+            .specs
+            .iter()
+            .any(|spec| spec.name == "typing-extensions"
+                && spec.direct_url.as_deref().unwrap().starts_with("file://")));
         assert_eq!(
             discovered.hashes.get("pypi:idna").cloned().unwrap(),
             BTreeSet::from([

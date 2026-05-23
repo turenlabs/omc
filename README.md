@@ -125,7 +125,7 @@ npm-shrinkwrap.json exact versions, resolved tarball URLs, and integrity hashes 
 yarn.lock          Yarn Classic exact versions, resolved tarball URLs, and integrity hashes for uniquely locked npm packages
 pnpm-lock.yaml     pnpm importer dependencies, exact versions, resolved tarball URLs, and integrity hashes
 pip.conf           PyPI index-url, extra-index-url, find-links, and no-index configuration
-requirements.txt  PyPI requirements, direct wheel URLs, hashes, extras, local editable paths, -r includes, -c constraints, markers, simple indexes, find-links wheelhouses
+requirements.txt  PyPI requirements, direct wheel URLs/paths, hashes, extras, local editable paths, -r includes, -c constraints, markers, simple indexes, find-links wheelhouses
 Pipfile.lock      Pipenv default/develop package pins, extras, markers, and sha256 hashes
 uv.lock           uv project requirements, dev requirements, exact package pins, and hashes
 pylock.toml       standardized Python lock package pins, markers, and hashes
@@ -257,7 +257,7 @@ Supported now:
   constraints, resolved tarball URLs, and integrity verification for uniquely
   locked npm packages
 - `requirements.txt` ingestion with hashes, line continuations, extras,
-  direct wheel URLs, recursive `-r` includes, `-c` constraints,
+  direct wheel URLs/paths, recursive `-r` includes, `-c` constraints,
   `--index-url` / `--extra-index-url` simple indexes, `--find-links` / `-f`
   local wheelhouses or HTML pages, `--no-index`, local editable paths, and
   common Python environment markers
