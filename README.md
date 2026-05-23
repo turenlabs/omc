@@ -212,6 +212,8 @@ Supported now:
   host-scoped `_authToken` npm registry access
 - project `omc.toml` PyPI simple-index support for `pypi-index-url` and
   `pypi-extra-index-urls`
+- credential-bearing PyPI simple-index URLs are used for downloads without
+  recording those credentials in `omc.lock`
 - PyPI dependency range resolution with local `python3` `Requires-Python`
   filtering
 - recursive runtime dependency locking

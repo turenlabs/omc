@@ -513,6 +513,7 @@ struct ResolvedPackage {
     name: String,
     version: String,
     source_url: String,
+    download_url: Option<String>,
     filename: String,
     expected_sha256: Option<String>,
     expected_sha1: Option<String>,
@@ -2710,6 +2711,7 @@ fn resolve_npm(
         name: install_name,
         version: version_doc.version,
         source_url: version_doc.dist.tarball,
+        download_url: None,
         filename,
         expected_sha256: None,
         expected_sha1: version_doc.dist.shasum,
@@ -2772,6 +2774,7 @@ fn npm_direct_tarball_package(
         name: install_name.to_owned(),
         version: version.to_owned(),
         source_url: source_url.to_owned(),
+        download_url: None,
         filename,
         expected_sha256: None,
         expected_sha1: None,
@@ -3039,6 +3042,7 @@ fn resolve_pypi(
         name: doc.info.name,
         version: doc.info.version,
         source_url,
+        download_url: None,
         filename,
         expected_sha256: Some(expected_sha256),
         expected_sha1: None,
@@ -3108,6 +3112,7 @@ fn resolve_pypi_from_simple_indexes(
         name: spec.name.clone(),
         version: candidate.version,
         source_url: candidate.url,
+        download_url: candidate.download_url,
         filename: candidate.filename,
         expected_sha256: candidate.sha256,
         expected_sha1: None,
@@ -3130,6 +3135,7 @@ fn pypi_simple_package_url(index: &str, package: &str) -> Result<reqwest::Url> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct PypiSimpleCandidate {
     url: String,
+    download_url: Option<String>,
     filename: String,
     version: String,
     sha256: Option<String>,
@@ -3171,8 +3177,12 @@ fn pypi_simple_index_candidates(
             let mut url = link.url;
             let sha256 = url.fragment().and_then(simple_index_sha256_fragment);
             url.set_fragment(None);
+            let mut source_url = url.clone();
+            strip_url_credentials(&mut source_url);
+            let download_url = (source_url != url).then(|| url.to_string());
             Some(PypiSimpleCandidate {
-                url: url.to_string(),
+                url: source_url.to_string(),
+                download_url,
                 filename,
                 version,
                 sha256,
@@ -3210,9 +3220,10 @@ fn simple_index_links(base_url: &reqwest::Url, html: &str) -> Vec<SimpleIndexLin
         let Some(href) = html_attr(tag, "href") else {
             continue;
         };
-        let Ok(url) = base_url.join(&html_unescape(&href)) else {
+        let Ok(mut url) = base_url.join(&html_unescape(&href)) else {
             continue;
         };
+        inherit_url_credentials(base_url, &mut url);
         links.push(SimpleIndexLink {
             url,
             requires_python: html_attr(tag, "data-requires-python")
@@ -3220,6 +3231,25 @@ fn simple_index_links(base_url: &reqwest::Url, html: &str) -> Vec<SimpleIndexLin
         });
     }
     links
+}
+
+fn inherit_url_credentials(base_url: &reqwest::Url, url: &mut reqwest::Url) {
+    if base_url.username().is_empty()
+        || !url.username().is_empty()
+        || base_url.scheme() != url.scheme()
+        || base_url.host_str() != url.host_str()
+        || base_url.port_or_known_default() != url.port_or_known_default()
+    {
+        return;
+    }
+
+    let _ = url.set_username(base_url.username());
+    let _ = url.set_password(base_url.password());
+}
+
+fn strip_url_credentials(url: &mut reqwest::Url) {
+    let _ = url.set_username("");
+    let _ = url.set_password(None);
 }
 
 fn html_attr(tag: &str, attr: &str) -> Option<String> {
@@ -3301,6 +3331,7 @@ fn resolve_pypi_direct_wheel(spec: &PackageSpec) -> Result<ResolvedPackage> {
         name: spec.name.clone(),
         version,
         source_url,
+        download_url: None,
         filename,
         expected_sha256: None,
         expected_sha1: None,
@@ -4251,15 +4282,19 @@ fn download_artifact(
     package: &ResolvedPackage,
     project_dir: &Path,
 ) -> Result<Vec<u8>> {
+    let source_url = package
+        .download_url
+        .as_deref()
+        .unwrap_or(&package.source_url);
     let config = if package.ecosystem == Ecosystem::Npm {
         Some(read_npm_config(project_dir)?)
     } else {
         None
     };
     let request = if let Some(config) = config.as_ref() {
-        npm_get(client, &package.source_url, config)
+        npm_get(client, source_url, config)
     } else {
-        client.get(&package.source_url)
+        client.get(source_url)
     };
     Ok(request.send()?.error_for_status()?.bytes()?.to_vec())
 }
@@ -5819,6 +5854,7 @@ mod tests {
             candidates,
             vec![PypiSimpleCandidate {
                 url: "https://index.example/packages/idna-3.7-py3-none-any.whl".to_owned(),
+                download_url: None,
                 filename: "idna-3.7-py3-none-any.whl".to_owned(),
                 version: "3.7".to_owned(),
                 sha256: Some(
@@ -5827,6 +5863,26 @@ mod tests {
             }]
         );
         assert!(pypi_simple_index_candidates(&base_url, html, "idna", Some("3.7.0")).is_empty());
+    }
+
+    #[test]
+    fn pypi_simple_index_candidates_do_not_record_credentials() {
+        let base_url = reqwest::Url::parse("https://user:pass@index.example/simple/idna/").unwrap();
+        let html = r#"<a href="../../packages/idna-3.7-py3-none-any.whl">idna</a>"#;
+
+        let candidates = pypi_simple_index_candidates(&base_url, html, "idna", Some("3.11.0"));
+        assert_eq!(
+            candidates,
+            vec![PypiSimpleCandidate {
+                url: "https://index.example/packages/idna-3.7-py3-none-any.whl".to_owned(),
+                download_url: Some(
+                    "https://user:pass@index.example/packages/idna-3.7-py3-none-any.whl".to_owned()
+                ),
+                filename: "idna-3.7-py3-none-any.whl".to_owned(),
+                version: "3.7".to_owned(),
+                sha256: None,
+            }]
+        );
     }
 
     #[test]
@@ -6376,6 +6432,7 @@ mod tests {
             name: "date-helper".to_owned(),
             version: "1.2.4".to_owned(),
             source_url: "https://example.invalid/date-helper.tgz".to_owned(),
+            download_url: None,
             filename: "date-helper.tgz".to_owned(),
             expected_sha256: None,
             expected_sha1: None,
