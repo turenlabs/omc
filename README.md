@@ -121,7 +121,7 @@ For existing projects, `install` reads normal project files:
 package.json       dependencies, devDependencies, optionalDependencies, peers; use --omit-dev for production installs
 .npmrc             npm registry, scoped registry, and host-scoped auth token configuration
 package-lock.json  exact versions, resolved tarball URLs, and integrity hashes for uniquely locked npm packages
-requirements.txt  PyPI requirements, direct wheel URLs, hashes, extras, -r includes, -c constraints, markers
+requirements.txt  PyPI requirements, direct wheel URLs, hashes, extras, -r includes, -c constraints, markers, simple indexes
 pyproject.toml    PEP 621 project dependencies, selected optional groups
 pyproject.toml    Poetry dependencies, dev groups, optional groups, and extras
 poetry.lock       exact PyPI versions and file hashes for locked Poetry packages
@@ -214,11 +214,12 @@ Supported now:
 - `package-lock.json` exact-version constraints, resolved tarball URLs, and
   integrity verification for uniquely locked npm packages
 - `requirements.txt` ingestion with hashes, line continuations, extras,
-  direct wheel URLs, recursive `-r` includes, `-c` constraints, and common
-  Python environment markers
-- unsupported requirements entries such as editable installs, index
-  configuration, VCS URLs, and non-wheel direct URLs fail closed instead of
-  being silently ignored
+  direct wheel URLs, recursive `-r` includes, `-c` constraints,
+  `--index-url` / `--extra-index-url` simple indexes, and common Python
+  environment markers
+- unsupported requirements entries such as editable installs, `--find-links`,
+  VCS URLs, and non-wheel direct URLs fail closed instead of being silently
+  ignored
 - `pyproject.toml` PEP 621 dependency ingestion with `omc install --extra`
   for selected optional dependency groups
 - Poetry `pyproject.toml` dependency ingestion, including
@@ -266,7 +267,8 @@ Not implemented yet:
 - native/Wasm/Cranelift backend
 - full npm peer placement semantics beyond current required-peer handling
 - advanced requirements-file semantics such as editable installs, VCS URLs,
-  non-wheel direct URLs, and index configuration beyond fail-closed rejection
+  non-wheel direct URLs, `--find-links`, and finder/link options beyond
+  fail-closed rejection
 - Poetry direct path/git/url/file dependencies beyond fail-closed rejection
 - Python sdist build isolation and native extension policy beyond fail-closed
   rejection
