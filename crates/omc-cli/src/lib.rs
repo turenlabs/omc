@@ -312,6 +312,7 @@ enum PipListFormat {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DirectCompatMode {
+    Node,
     Npm,
     Npx,
     Pip,
@@ -344,6 +345,7 @@ fn run_entry() -> Result<ExitCode, OmcRegistryError> {
     if let Some(mode) = direct_compat_mode(program.as_deref()) {
         let invocation = parse_direct_compat_invocation(mode, raw_args)?;
         return match mode {
+            DirectCompatMode::Node => run_node(&invocation.project_dir, &invocation.args),
             DirectCompatMode::Npm => run_npm_compat(&invocation.project_dir, &invocation.args),
             DirectCompatMode::Npx => {
                 run_npm_compat(&invocation.project_dir, &npx_compat_args(invocation.args))
@@ -361,6 +363,7 @@ fn direct_compat_mode(program: Option<&std::ffi::OsStr>) -> Option<DirectCompatM
         .file_stem()
         .and_then(|name| name.to_str())?;
     match name {
+        "node" => Some(DirectCompatMode::Node),
         "npm" => Some(DirectCompatMode::Npm),
         "npx" => Some(DirectCompatMode::Npx),
         "pip" | "pip3" => Some(DirectCompatMode::Pip),
@@ -667,10 +670,14 @@ fn print_install_report(install: &InstallReport) {
 }
 
 fn run_node(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRegistryError> {
-    let mut command = ProcessCommand::new("node");
+    let mut command = ProcessCommand::new(host_node_program()?);
     apply_project_runtime_env(&mut command, project_dir)?;
     let status = command.args(args).status()?;
     Ok(exit_code(status.code()))
+}
+
+fn host_node_program() -> Result<PathBuf, OmcRegistryError> {
+    host_program("OMC_HOST_NODE", &["node"], "host node")
 }
 
 fn run_python(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRegistryError> {
@@ -685,17 +692,25 @@ fn run_python(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRegist
 }
 
 fn host_python_program() -> Result<PathBuf, OmcRegistryError> {
-    if let Some(path) = env::var_os("OMC_HOST_PYTHON") {
+    host_program("OMC_HOST_PYTHON", &["python3", "python"], "host python3")
+}
+
+fn host_program(
+    override_var: &str,
+    programs: &[&str],
+    description: &str,
+) -> Result<PathBuf, OmcRegistryError> {
+    if let Some(path) = env::var_os(override_var) {
         return Ok(PathBuf::from(path));
     }
 
-    find_program_outside_current_exe_dir("python3")
-        .or_else(|| find_program_outside_current_exe_dir("python"))
+    programs
+        .iter()
+        .find_map(|program| find_program_outside_current_exe_dir(program))
         .ok_or_else(|| {
-            OmcRegistryError::UnsupportedSpec(
-                "could not find a host python3 outside the OMC shim directory; set OMC_HOST_PYTHON"
-                    .to_owned(),
-            )
+            OmcRegistryError::UnsupportedSpec(format!(
+                "could not find a {description} outside the OMC shim directory; set {override_var}"
+            ))
         })
 }
 
@@ -2708,6 +2723,10 @@ mod tests {
     #[test]
     fn detects_direct_compat_binaries() {
         assert_eq!(
+            direct_compat_mode(Some(Path::new("/tmp/node").as_os_str())),
+            Some(DirectCompatMode::Node)
+        );
+        assert_eq!(
             direct_compat_mode(Some(Path::new("/tmp/npm").as_os_str())),
             Some(DirectCompatMode::Npm)
         );
@@ -2782,6 +2801,17 @@ mod tests {
         assert_eq!(
             npx_compat_args(args(&["eslint", "--", "."])),
             args(&["exec", "eslint", "--", "."])
+        );
+        assert_eq!(
+            parse_direct_compat_invocation(
+                DirectCompatMode::Node,
+                os_args(&["--omc-project-dir", "/tmp/project", "-e", "console.log(1)",])
+            )
+            .unwrap(),
+            DirectCompatInvocation {
+                project_dir: PathBuf::from("/tmp/project"),
+                args: args(&["-e", "console.log(1)"]),
+            }
         );
         assert_eq!(
             parse_direct_compat_invocation(

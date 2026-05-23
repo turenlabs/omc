@@ -26,6 +26,10 @@ name = "npx"
 path = "src/bin/npx.rs"
 
 [[bin]]
+name = "node"
+path = "src/bin/node.rs"
+
+[[bin]]
 name = "python"
 path = "src/bin/python.rs"
 
