@@ -158,7 +158,7 @@ update omc.toml and omc.lock only when accepted
 install npm packages into node_modules
 install PyPI wheels into .omc/python/site-packages
 verify cached archive sha256 from omc.lock before extracting locked installs
-install npm package bins into node_modules/.bin
+install npm package bins, including root project bins, into node_modules/.bin
 link npm workspace/local directory packages into node_modules and node_modules/.bin
 install Python console_scripts/gui_scripts from wheels, the root Python project, and pyproject/setup.cfg/setup.py local path packages into .omc/python/bin
 prune stale lockfile entries and installed packages during install
@@ -313,9 +313,9 @@ Supported now:
 - platform-compatible PyPI wheel selection for native wheels
 - fail-closed rejection for PyPI source distributions until build isolation and
   native-extension policy exist
-- npm bin links, including linked workspace/local package bins, and Python
-  console/gui script shims from wheels and pyproject/setup.cfg/setup.py local
-  path packages
+- npm bin links, including root project bins and linked workspace/local package
+  bins, and Python console/gui script shims from wheels and
+  pyproject/setup.cfg/setup.py local path packages
 - editable-style root Python project imports and scripts when
   pyproject/setup.cfg/setup.py metadata exists
 - `omc node`, `omc python`, `omc script`, and `omc run` wrappers, including

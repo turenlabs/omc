@@ -4791,15 +4791,30 @@ fn install_npm_project_links(
     bin_dir: &Path,
     include_dev_dependencies: bool,
 ) -> Result<usize> {
-    Ok(
-        install_npm_workspace_links(project_dir, node_modules, bin_dir)?
-            + install_npm_local_dependency_links(
-                project_dir,
-                node_modules,
-                bin_dir,
-                include_dev_dependencies,
-            )?,
-    )
+    Ok(install_npm_root_bins(project_dir, bin_dir)?
+        + install_npm_workspace_links(project_dir, node_modules, bin_dir)?
+        + install_npm_local_dependency_links(
+            project_dir,
+            node_modules,
+            bin_dir,
+            include_dev_dependencies,
+        )?)
+}
+
+fn install_npm_root_bins(project_dir: &Path, bin_dir: &Path) -> Result<usize> {
+    let package_json = project_dir.join("package.json");
+    if !package_json.exists() {
+        return Ok(0);
+    }
+
+    let package =
+        serde_json::from_str::<NpmInstalledPackageJson>(&fs::read_to_string(package_json)?)?;
+    let package_name = package.name.as_deref().unwrap_or("");
+    if package.bin.is_none() {
+        return Ok(0);
+    }
+
+    install_npm_bins(project_dir, package_name, bin_dir)
 }
 
 fn install_npm_workspace_links(
@@ -9316,6 +9331,37 @@ mod tests {
             "module.exports = 41;\n"
         );
         assert!(dir.path().join("node_modules/.bin/demo-lib").exists());
+    }
+
+    #[test]
+    fn installs_npm_root_package_bins() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(
+            dir.path().join("package.json"),
+            r#"{
+                "name": "@demo/root",
+                "bin": { "root-tool": "cli.js" }
+            }"#,
+        )
+        .unwrap();
+        fs::write(
+            dir.path().join("cli.js"),
+            "#!/usr/bin/env node\nconsole.log('root-tool-ok')\n",
+        )
+        .unwrap();
+
+        let report = install_project(&LinkOptions::new(dir.path())).unwrap();
+        assert_eq!(report.npm_packages, 0);
+        assert_eq!(report.npm_bins, 1);
+
+        let output = Command::new(dir.path().join("node_modules/.bin/root-tool"))
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout).trim(),
+            "root-tool-ok"
+        );
     }
 
     #[test]
