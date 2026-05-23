@@ -1708,6 +1708,20 @@ fn install_lock(project_dir: &Path, lock: &OmcLock) -> Result<InstallReport> {
     Ok(report)
 }
 
+fn read_locked_archive(project_dir: &Path, package: &LockedPackage) -> Result<Vec<u8>> {
+    let archive_path = project_dir.join(&package.archive);
+    let bytes = fs::read(&archive_path)?;
+    let actual = sha256_hex(&bytes);
+    if !package.sha256.eq_ignore_ascii_case(&actual) {
+        return Err(OmcRegistryError::DigestMismatch {
+            name: package.name.clone(),
+            expected: format!("sha256:{}", package.sha256),
+            actual: format!("sha256:{actual}"),
+        });
+    }
+    Ok(bytes)
+}
+
 fn install_npm_package(
     project_dir: &Path,
     package: &LockedPackage,
@@ -1723,14 +1737,13 @@ fn install_npm_package_to(
     package: &LockedPackage,
     node_modules: &Path,
 ) -> Result<PathBuf> {
-    let archive_path = project_dir.join(&package.archive);
+    let bytes = read_locked_archive(project_dir, package)?;
     let target = npm_install_target(node_modules, &package.name);
     if target.exists() {
         fs::remove_dir_all(&target)?;
     }
     fs::create_dir_all(&target)?;
 
-    let bytes = fs::read(&archive_path)?;
     let decoder = GzDecoder::new(Cursor::new(bytes));
     let mut archive = Archive::new(decoder);
     for entry in archive.entries()? {
@@ -1849,7 +1862,7 @@ fn install_pypi_package(
         ));
     }
 
-    let reader = Cursor::new(fs::read(&archive_path)?);
+    let reader = Cursor::new(read_locked_archive(project_dir, package)?);
     let mut archive = zip::ZipArchive::new(reader)?;
     let mut entry_points = Vec::new();
     for index in 0..archive.len() {
@@ -4382,6 +4395,27 @@ mod tests {
         assert_eq!(removed, 1);
         assert_eq!(lock.packages.len(), 1);
         assert_eq!(lock.packages[0].name, "left-pad");
+    }
+
+    #[test]
+    fn locked_archive_reader_rejects_tampered_cache() {
+        let dir = tempfile::tempdir().unwrap();
+        let archive = dir.path().join(".omc/cache/npm/pkg.tgz");
+        fs::create_dir_all(archive.parent().unwrap()).unwrap();
+        fs::write(&archive, b"tampered").unwrap();
+
+        let mut package = locked_package_for_test(Ecosystem::Npm, "pkg", "1.0.0");
+        package.archive = ".omc/cache/npm/pkg.tgz".to_owned();
+        package.sha256 = sha256_hex(b"expected");
+
+        let error = read_locked_archive(dir.path(), &package).unwrap_err();
+        assert!(matches!(error, OmcRegistryError::DigestMismatch { .. }));
+
+        package.sha256 = sha256_hex(b"tampered");
+        assert_eq!(
+            read_locked_archive(dir.path(), &package).unwrap(),
+            b"tampered"
+        );
     }
 
     #[test]

@@ -140,6 +140,7 @@ write an OMC artifact under .omc/artifacts
 update omc.toml and omc.lock only when accepted
 install npm packages into node_modules
 install PyPI wheels into .omc/python/site-packages
+verify cached archive sha256 from omc.lock before extracting locked installs
 install npm package bins into node_modules/.bin
 install Python console_scripts into .omc/python/bin
 prune stale lockfile entries and installed packages during install
@@ -228,6 +229,7 @@ Supported now:
   converge to current project manifests
 - locked/offline `omc install --locked` installs that validate `omc.lock`
   against current project manifests without registry resolution
+- install-time sha256 verification for cached archives before package extraction
 - text and JSON `omc list` output for locked packages
 - text and JSON audit output for locked package verdicts
 - `node_modules` installation for npm tarballs
