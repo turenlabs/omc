@@ -2693,20 +2693,82 @@ fn uv_local_sources(lock: &UvLock, base_dir: &Path) -> BTreeMap<String, PathBuf>
         .collect()
 }
 
-fn uv_local_source_map(
+fn uv_local_source_map_with_workspace(
     sources: &BTreeMap<String, UvProjectSource>,
+    workspace: Option<&UvWorkspace>,
     base_dir: &Path,
 ) -> BTreeMap<String, PathBuf> {
+    let workspace_paths = workspace
+        .map(|workspace| uv_workspace_package_paths(base_dir, workspace))
+        .unwrap_or_default();
     sources
         .iter()
         .filter_map(|(name, source)| {
-            let path = source.path.as_deref()?;
-            Some((
-                normalize_pypi_name(name),
-                resolved_local_path(path, base_dir),
-            ))
+            let name = normalize_pypi_name(name);
+            if let Some(path) = source.path.as_deref() {
+                return Some((name, resolved_local_path(path, base_dir)));
+            }
+            if source.workspace {
+                if let Some(path) = workspace_paths.get(&name) {
+                    return Some((name, path.clone()));
+                }
+            }
+            None
         })
         .collect()
+}
+
+fn uv_workspace_package_paths(root: &Path, workspace: &UvWorkspace) -> BTreeMap<String, PathBuf> {
+    let includes = workspace
+        .members
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    let excludes = workspace
+        .exclude
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    let mut paths = BTreeMap::new();
+
+    for entry in WalkDir::new(root)
+        .follow_links(false)
+        .into_iter()
+        .filter_entry(should_enter_workspace_dir)
+        .filter_map(std::result::Result::ok)
+    {
+        if !entry.file_type().is_file() || entry.file_name() != "pyproject.toml" {
+            continue;
+        }
+
+        let pyproject = entry.path();
+        let Some(package_dir) = pyproject.parent() else {
+            continue;
+        };
+        let Ok(relative_dir) = package_dir.strip_prefix(root) else {
+            continue;
+        };
+        if !workspace_patterns_match(&includes, &excludes, relative_dir) {
+            continue;
+        }
+
+        let Ok(content) = fs::read_to_string(pyproject) else {
+            continue;
+        };
+        let Ok(pyproject) = toml::from_str::<PyProjectToml>(&content) else {
+            continue;
+        };
+        let Some(name) = pyproject
+            .project
+            .and_then(|project| project.name)
+            .map(|name| normalize_pypi_name(&name))
+        else {
+            continue;
+        };
+        paths.insert(name, package_dir.to_path_buf());
+    }
+
+    paths
 }
 
 fn collect_uv_dist_hash(
@@ -3309,7 +3371,7 @@ fn read_pyproject_requirements(
         .tool
         .as_ref()
         .and_then(|tool| tool.uv.as_ref())
-        .map(|uv| uv_local_source_map(&uv.sources, base_dir))
+        .map(|uv| uv_local_source_map_with_workspace(&uv.sources, uv.workspace.as_ref(), base_dir))
         .unwrap_or_default();
 
     if let Some(project) = pyproject.project {
@@ -7956,6 +8018,7 @@ struct PyProjectToml {
 
 #[derive(Debug, Deserialize)]
 struct PyProjectProject {
+    name: Option<String>,
     #[serde(default)]
     dependencies: Vec<String>,
     #[serde(default, rename = "optional-dependencies")]
@@ -7984,11 +8047,22 @@ struct PyProjectTool {
 struct UvProject {
     #[serde(default)]
     sources: BTreeMap<String, UvProjectSource>,
+    workspace: Option<UvWorkspace>,
 }
 
 #[derive(Debug, Default, Deserialize)]
 struct UvProjectSource {
     path: Option<String>,
+    #[serde(default)]
+    workspace: bool,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct UvWorkspace {
+    #[serde(default)]
+    members: Vec<String>,
+    #[serde(default)]
+    exclude: Vec<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -10521,8 +10595,18 @@ wheels = [
         fs::create_dir_all(wheel.parent().unwrap()).unwrap();
         fs::create_dir_all(dir.path().join("vendor/local-package")).unwrap();
         fs::create_dir_all(dir.path().join("vendor/uv-local")).unwrap();
+        fs::create_dir_all(dir.path().join("packages/ws-local")).unwrap();
         fs::create_dir_all(dir.path().join("vendor/extra-local")).unwrap();
         fs::create_dir_all(dir.path().join("vendor/group-local")).unwrap();
+        fs::write(
+            dir.path().join("packages/ws-local/pyproject.toml"),
+            r#"
+            [project]
+            name = "ws-local"
+            version = "0.1.0"
+            "#,
+        )
+        .unwrap();
         fs::write(&wheel, b"not a real wheel").unwrap();
         fs::write(
             &pyproject,
@@ -10533,6 +10617,7 @@ wheels = [
                 "local-idna @ ./wheels/local_idna-3.7-py3-none-any.whl#sha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
                 "local-package @ ./vendor/local-package",
                 "uv-local",
+                "ws-local",
                 "skipped-local @ ./missing; sys_platform == 'win32'",
                 "colorama; extra == 'windows'"
             ]
@@ -10552,6 +10637,10 @@ wheels = [
 
             [tool.uv.sources]
             uv-local = { path = "vendor/uv-local" }
+            ws-local = { workspace = true }
+
+            [tool.uv.workspace]
+            members = ["packages/*"]
             "#,
         )
         .unwrap();
@@ -10574,7 +10663,8 @@ wheels = [
             base.python_local_paths,
             vec![
                 dir.path().join("vendor/local-package"),
-                dir.path().join("vendor/uv-local")
+                dir.path().join("vendor/uv-local"),
+                dir.path().join("packages/ws-local")
             ]
         );
 

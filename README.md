@@ -129,7 +129,7 @@ requirements.txt  PyPI requirements, direct wheel URLs/paths, hashes, extras, lo
 Pipfile.lock      Pipenv default/develop package pins, extras, markers, and sha256 hashes
 uv.lock           uv project requirements, dev requirements, local path sources, exact package pins, and hashes
 pylock.toml       standardized Python lock package pins, markers, and hashes
-pyproject.toml    PEP 621 project dependencies, selected optional groups, dependency-groups, uv local sources, direct wheel URL/path dependencies, local path deps
+pyproject.toml    PEP 621 project dependencies, selected optional groups, dependency-groups, uv local/workspace sources, direct wheel URL/path dependencies, local path deps
 pyproject.toml    Poetry dependencies, dev groups, optional groups, extras, wheel URL/path dependencies, local path deps
 poetry.lock       exact PyPI versions and file hashes for locked Poetry packages
 setup.cfg         legacy setuptools install_requires and selected extras_require
@@ -274,8 +274,8 @@ Supported now:
   package pins, markers, and archive/wheel sha256 hashes
 - `pyproject.toml` PEP 621 dependency ingestion with `omc install --extra`
   for selected optional dependency groups, standardized `[dependency-groups]`
-  with nested `include-group` support, `[tool.uv.sources]` local path sources,
-  direct wheel URLs/paths, and local path dependencies
+  with nested `include-group` support, `[tool.uv.sources]` local/workspace path
+  sources, direct wheel URLs/paths, and local path dependencies
 - Poetry `pyproject.toml` dependency ingestion, including
   `[tool.poetry.dependencies]`, old `[tool.poetry.dev-dependencies]`,
   dependency groups, selected optional groups, selected extras, direct HTTPS
