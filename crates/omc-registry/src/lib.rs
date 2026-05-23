@@ -3748,6 +3748,19 @@ fn read_requirements_file_inner(
             continue;
         }
 
+        if let Some(path) =
+            parse_pypi_local_path_requirement(&parsed.requirement, &BTreeSet::new(), base_dir)?
+        {
+            if mode == RequirementsMode::Constraint {
+                return Err(OmcRegistryError::UnsupportedRequirement(line.to_owned()));
+            }
+            if !parsed.hashes.is_empty() {
+                return Err(OmcRegistryError::UnsupportedRequirement(line.to_owned()));
+            }
+            discovered.python_local_paths.push(path);
+            continue;
+        }
+
         if let Some((spec, hashes)) =
             parse_pypi_local_wheel_requirement(&parsed.requirement, base_dir)?
         {
@@ -6642,6 +6655,48 @@ fn parse_pypi_local_direct_path_requirement(
     Ok(path.is_dir().then_some(path))
 }
 
+fn parse_pypi_local_path_requirement(
+    requirement: &str,
+    active_extras: &BTreeSet<String>,
+    base_dir: &Path,
+) -> Result<Option<PathBuf>> {
+    let mut parts = requirement.splitn(2, ';');
+    let requirement_body = parts.next().unwrap_or_default().trim();
+    if let Some(marker) = parts.next() {
+        if !pypi_marker_applies(marker, active_extras) {
+            return Ok(None);
+        }
+    }
+
+    if !looks_like_local_path_requirement(requirement_body)
+        || requirement_body.contains("://")
+        || requirement_body.to_ascii_lowercase().ends_with(".whl")
+    {
+        return Ok(None);
+    }
+
+    let path = normalize_requirements_editable_path(requirement_body, base_dir)?;
+    if !path.is_dir() {
+        return Err(OmcRegistryError::UnsupportedRequirement(
+            requirement.to_owned(),
+        ));
+    }
+    Ok(Some(path))
+}
+
+fn looks_like_local_path_requirement(value: &str) -> bool {
+    let path = value.split('[').next().unwrap_or(value).trim();
+    if path.is_empty() {
+        return false;
+    }
+    Path::new(path).is_absolute()
+        || matches!(path, "." | "..")
+        || path.starts_with("./")
+        || path.starts_with("../")
+        || path.contains('/')
+        || path.contains('\\')
+}
+
 fn pypi_direct_reference_applies(requirement: &str, active_extras: &BTreeSet<String>) -> bool {
     let mut parts = requirement.splitn(2, ';');
     let requirement = parts.next().unwrap_or_default().trim();
@@ -9485,21 +9540,26 @@ packages:
         let requirements = dir.path().join("requirements.txt");
         let local_pkg = dir.path().join("vendor/local-pkg");
         let file_url_pkg = dir.path().join("vendor/file-url-pkg");
+        let bare_pkg = dir.path().join("vendor/bare-pkg");
         fs::create_dir_all(&local_pkg).unwrap();
         fs::create_dir_all(&file_url_pkg).unwrap();
+        fs::create_dir_all(&bare_pkg).unwrap();
         let file_url = reqwest::Url::from_directory_path(&file_url_pkg)
             .unwrap()
             .to_string();
         fs::write(
             &requirements,
             format!(
-                "local-pkg @ ./vendor/local-pkg\nfile-url-pkg @ {file_url}\nskipped-local @ ./missing; sys_platform == 'win32'\n"
+                "local-pkg @ ./vendor/local-pkg\nfile-url-pkg @ {file_url}\n./vendor/bare-pkg[dev]\n./missing-bare; sys_platform == 'win32'\nskipped-local @ ./missing; sys_platform == 'win32'\n"
             ),
         )
         .unwrap();
 
         let discovered = read_requirements_file(&requirements).unwrap();
-        assert_eq!(discovered.python_local_paths, vec![local_pkg, file_url_pkg]);
+        assert_eq!(
+            discovered.python_local_paths,
+            vec![local_pkg, file_url_pkg, bare_pkg]
+        );
 
         let project = discover_project_requirements(dir.path()).unwrap();
         assert_eq!(project.python_local_paths, discovered.python_local_paths);
@@ -9910,6 +9970,12 @@ wheels = [
         assert!(error
             .to_string()
             .contains("unsupported requirements entry `local-pkg @ ./missing`"));
+
+        fs::write(&requirements, "./missing\n").unwrap();
+        let error = read_requirements_file(&requirements).unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("unsupported requirements entry `./missing`"));
     }
 
     #[test]
