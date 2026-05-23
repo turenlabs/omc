@@ -2351,48 +2351,77 @@ fn apply_pypi_environment_config(options: &mut LinkOptions, override_index: bool
     let index_url = env::var("PIP_INDEX_URL").ok();
     let extra_index_urls = env::var("PIP_EXTRA_INDEX_URL").ok();
     let find_links = env::var("PIP_FIND_LINKS").ok();
+    let no_binary = env::var("PIP_NO_BINARY").ok();
+    let only_binary = env::var("PIP_ONLY_BINARY").ok();
     let no_index = env_truthy("PIP_NO_INDEX");
     let project_dir = options.project_dir.clone();
     apply_pypi_environment_values(
         options,
         &project_dir,
-        index_url.as_deref(),
-        extra_index_urls.as_deref(),
-        find_links.as_deref(),
-        no_index,
-        override_index,
+        PypiEnvironmentValues {
+            index_url: index_url.as_deref(),
+            extra_index_urls: extra_index_urls.as_deref(),
+            find_links: find_links.as_deref(),
+            no_binary: no_binary.as_deref(),
+            only_binary: only_binary.as_deref(),
+            no_index,
+            override_index,
+        },
     );
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct PypiEnvironmentValues<'a> {
+    index_url: Option<&'a str>,
+    extra_index_urls: Option<&'a str>,
+    find_links: Option<&'a str>,
+    no_binary: Option<&'a str>,
+    only_binary: Option<&'a str>,
+    no_index: bool,
+    override_index: bool,
 }
 
 fn apply_pypi_environment_values(
     options: &mut LinkOptions,
     base_dir: &Path,
-    index_url: Option<&str>,
-    extra_index_urls: Option<&str>,
-    find_links: Option<&str>,
-    no_index: bool,
-    override_index: bool,
+    values: PypiEnvironmentValues<'_>,
 ) {
-    if override_index || options.pypi_index_url.is_none() {
-        if let Some(index_url) = index_url.and_then(normalize_pypi_simple_index_url) {
+    if values.override_index || options.pypi_index_url.is_none() {
+        if let Some(index_url) = values.index_url.and_then(normalize_pypi_simple_index_url) {
             options.pypi_index_url = Some(index_url);
         }
     }
-    if let Some(extra_index_urls) = extra_index_urls {
+    if let Some(extra_index_urls) = values.extra_index_urls {
         options.pypi_extra_index_urls.extend(
             pypi_index_url_values(extra_index_urls)
                 .into_iter()
                 .filter_map(|index_url| normalize_pypi_simple_index_url(&index_url)),
         );
     }
-    if let Some(find_links) = find_links {
+    if let Some(find_links) = values.find_links {
         options.pypi_find_links.extend(
             pypi_index_url_values(find_links)
                 .into_iter()
                 .filter_map(|find_links| normalize_pypi_find_links_source(&find_links, base_dir)),
         );
     }
-    options.pypi_no_index |= no_index;
+    if let Some(no_binary) = values.no_binary {
+        apply_pypi_binary_option(
+            &mut options.pypi_binary_all,
+            &mut options.pypi_binary_packages,
+            PypiBinaryMode::Source,
+            no_binary,
+        );
+    }
+    if let Some(only_binary) = values.only_binary {
+        apply_pypi_binary_option(
+            &mut options.pypi_binary_all,
+            &mut options.pypi_binary_packages,
+            PypiBinaryMode::Binary,
+            only_binary,
+        );
+    }
+    options.pypi_no_index |= values.no_index;
     dedupe_pypi_find_links(options);
     dedupe_pypi_extra_index_urls(options);
 }
@@ -2402,6 +2431,8 @@ struct PipConfig {
     index_url: Option<String>,
     extra_index_urls: Vec<String>,
     find_links: Vec<String>,
+    binary_all: Option<PypiBinaryMode>,
+    binary_packages: BTreeMap<String, PypiBinaryMode>,
     no_index: bool,
 }
 
@@ -2414,6 +2445,10 @@ fn apply_pip_config_files(project_dir: &Path, options: &mut LinkOptions) -> Resu
         .pypi_extra_index_urls
         .extend(config.extra_index_urls);
     options.pypi_find_links.extend(config.find_links);
+    if config.binary_all.is_some() {
+        options.pypi_binary_all = config.binary_all;
+    }
+    options.pypi_binary_packages.extend(config.binary_packages);
     options.pypi_no_index |= config.no_index;
     dedupe_pypi_find_links(options);
     dedupe_pypi_extra_index_urls(options);
@@ -2520,6 +2555,22 @@ fn apply_pip_config_value(
         }
         "no-index" => {
             config.no_index |= pip_config_bool(value);
+        }
+        "no-binary" => {
+            apply_pypi_binary_option(
+                &mut config.binary_all,
+                &mut config.binary_packages,
+                PypiBinaryMode::Source,
+                value,
+            );
+        }
+        "only-binary" => {
+            apply_pypi_binary_option(
+                &mut config.binary_all,
+                &mut config.binary_packages,
+                PypiBinaryMode::Binary,
+                value,
+            );
         }
         _ => {}
     }
@@ -15962,11 +16013,17 @@ wheels = [
         apply_pypi_environment_values(
             &mut options,
             dir.path(),
-            Some("https://env.example/simple"),
-            Some("https://extra.example/simple 'https://quoted.example/simple' https://extra.example/simple"),
-            Some("./wheelhouse https://files.example/packages"),
-            true,
-            true,
+            PypiEnvironmentValues {
+                index_url: Some("https://env.example/simple"),
+                extra_index_urls: Some(
+                    "https://extra.example/simple 'https://quoted.example/simple' https://extra.example/simple",
+                ),
+                find_links: Some("./wheelhouse https://files.example/packages"),
+                no_binary: Some(":all:"),
+                only_binary: Some("idna"),
+                no_index: true,
+                override_index: true,
+            },
         );
 
         assert_eq!(
@@ -15991,16 +16048,22 @@ wheels = [
                 "https://files.example/packages".to_owned(),
             ]
         );
+        assert_eq!(options.pypi_binary_all, Some(PypiBinaryMode::Source));
+        assert_eq!(
+            options.pypi_binary_packages.get("idna"),
+            Some(&PypiBinaryMode::Binary)
+        );
         assert!(options.pypi_no_index);
 
         apply_pypi_environment_values(
             &mut options,
             dir.path(),
-            Some("https://ignored.example/simple"),
-            Some("https://another.example/simple"),
-            Some("./wheelhouse"),
-            false,
-            false,
+            PypiEnvironmentValues {
+                index_url: Some("https://ignored.example/simple"),
+                extra_index_urls: Some("https://another.example/simple"),
+                find_links: Some("./wheelhouse"),
+                ..PypiEnvironmentValues::default()
+            },
         );
         assert_eq!(
             options.pypi_index_url.as_deref(),
@@ -16017,7 +16080,14 @@ wheels = [
 
         let mut options = LinkOptions::new(dir.path());
         options.pypi_index_url = Some("https://pip-config.example/simple/".to_owned());
-        apply_pypi_environment_values(&mut options, dir.path(), None, None, None, false, true);
+        apply_pypi_environment_values(
+            &mut options,
+            dir.path(),
+            PypiEnvironmentValues {
+                override_index: true,
+                ..PypiEnvironmentValues::default()
+            },
+        );
         assert_eq!(
             options.pypi_index_url.as_deref(),
             Some("https://pip-config.example/simple/")
@@ -16025,11 +16095,11 @@ wheels = [
         apply_pypi_environment_values(
             &mut options,
             dir.path(),
-            Some("https://env-override.example/simple"),
-            None,
-            None,
-            false,
-            true,
+            PypiEnvironmentValues {
+                index_url: Some("https://env-override.example/simple"),
+                override_index: true,
+                ..PypiEnvironmentValues::default()
+            },
         );
         assert_eq!(
             options.pypi_index_url.as_deref(),
@@ -16055,6 +16125,8 @@ wheels = [
             find-links =
                 https://files.example/packages
                 ./wheelhouse
+            no-binary = :all:
+            only-binary = idna
             no-index = true
 
             [download]
@@ -16086,6 +16158,11 @@ wheels = [
                     .into_owned(),
                 "https://files.example/packages".to_owned(),
             ]
+        );
+        assert_eq!(config.binary_all, Some(PypiBinaryMode::Source));
+        assert_eq!(
+            config.binary_packages.get("idna"),
+            Some(&PypiBinaryMode::Binary)
         );
         assert!(config.no_index);
     }

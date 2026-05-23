@@ -150,7 +150,7 @@ package-lock.json  exact versions, resolved tarball URLs, and integrity hashes f
 npm-shrinkwrap.json exact versions, resolved tarball URLs, and integrity hashes for uniquely locked npm packages
 yarn.lock          Yarn Classic exact versions, resolved tarball URLs, and integrity hashes for uniquely locked npm packages
 pnpm-lock.yaml     pnpm importer dependencies, exact versions, resolved tarball URLs, and integrity hashes
-pip.conf           PyPI index-url, extra-index-url, find-links, and no-index configuration
+pip.conf           PyPI index-url, extra-index-url, find-links, no-index, no-binary, and only-binary configuration
 requirements.txt  PyPI requirements, direct wheel/sdist URLs and paths, VCS git dependencies, hashes, extras, local editable/direct/bare directory paths, -r includes, -c constraints, markers, simple indexes, find-links wheel/sdist archives
 requirements-dev.txt / dev-requirements.txt  dev requirements read unless --omit-dev is set
 requirements/base.txt / requirements/dev.txt  common requirements directory layout; dev is read unless --omit-dev is set
@@ -175,7 +175,7 @@ use project/user `.npmrc` registry, scoped registry, and auth token settings for
 use `omc.toml` PyPI simple-index settings for OMC-managed PyPI adds
 use project/user `pip.conf` PyPI simple-index settings when no project index is set
 use `PIP_INDEX_URL` / `PIP_EXTRA_INDEX_URL` when no project PyPI index is set
-use pip-style `find-links` and `no-index` config/env values for wheelhouses
+use pip-style `find-links`, `no-index`, and binary-format config/env values for wheelhouses
 verify npm shasum/integrity and PyPI sha256 when the registry provides them
 use package-lock.json/npm-shrinkwrap.json/yarn.lock/pnpm-lock.yaml npm resolved tarball URLs and integrity hashes when present
 cache the source artifact under .omc/cache
@@ -268,9 +268,10 @@ Supported now:
 - project `omc.toml` PyPI simple-index support for `pypi-index-url` and
   `pypi-extra-index-urls`
 - project/user `pip.conf` and `PIP_CONFIG_FILE` PyPI support for `index-url`,
-  `extra-index-url`, `find-links`, and `no-index`
-- pip-style `PIP_INDEX_URL`, `PIP_EXTRA_INDEX_URL`, `PIP_FIND_LINKS`, and
-  `PIP_NO_INDEX` support when no project PyPI index is configured
+  `extra-index-url`, `find-links`, `no-index`, `no-binary`, and `only-binary`
+- pip-style `PIP_INDEX_URL`, `PIP_EXTRA_INDEX_URL`, `PIP_FIND_LINKS`,
+  `PIP_NO_INDEX`, `PIP_NO_BINARY`, and `PIP_ONLY_BINARY` support when no
+  project PyPI index is configured
 - credential-bearing PyPI simple-index URLs are used for downloads without
   recording those credentials in `omc.lock`
 - PyPI dependency range resolution with local `python3` `Requires-Python`
