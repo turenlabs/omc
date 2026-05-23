@@ -142,6 +142,8 @@ cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm pack --pack-de
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm pack left-pad@1.3.0 --pack-destination dist
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm publish --dry-run --json
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm publish --tag beta --access public --registry https://registry.npmjs.org/
+cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm unpublish left-pad@1.3.0 --dry-run
+cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm unpublish left-pad --force --otp 123456
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm deprecate left-pad@1.x "old release line" --dry-run
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm undeprecate left-pad@1.3.0
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm search left-pad --searchlimit=5 --json
@@ -461,7 +463,7 @@ Supported now:
   `upgrade`, `install-test` / `it`, `ci`, `install-ci-test` / `cit`, `prune`, `dedupe`, `rebuild`, `test`, `start`, `stop`, `restart`,
   `run`, `exec`, `init`, `remove`, `bin`, `root`, `prefix`, `audit` / `audit --json`,
   `help`, `fund` / `fund --json`, `cache verify/ls/rm/clean --force`, `pkg get/set/delete`, `version`,
-  `pack`, `publish`, `deprecate`, `undeprecate`, `search` / `find`, `ping`, `whoami`, `login` / `adduser`, `logout`, `token list/create/revoke`, `owner ls/add/rm`, `dist-tag ls/add/rm`, `sbom --sbom-format=cyclonedx|spdx`, `config get/set/delete/list`, `get`,
+  `pack`, `publish`, `unpublish`, `deprecate`, `undeprecate`, `search` / `find`, `ping`, `whoami`, `login` / `adduser`, `logout`, `token list/create/revoke`, `owner ls/add/rm`, `dist-tag ls/add/rm`, `sbom --sbom-format=cyclonedx|spdx`, `config get/set/delete/list`, `get`,
   `view` / `info` / `show`, `docs`, `repo`, `bugs`, `home`,
   `list` / `ls` / `ll` / `la`, including `--json`, common depth/omit/workspace
   flags, and package-name filters; `explain` / `why`,

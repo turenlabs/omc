@@ -7498,6 +7498,24 @@ pub struct NpmDeprecateResult {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct NpmUnpublishResult {
+    pub registry: String,
+    pub package: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+    pub removed_versions: Vec<String>,
+    pub dry_run: bool,
+    pub force: bool,
+    pub whole_package: bool,
+    pub changed: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tarball_status: Option<u16>,
+    pub response: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct NpmPublishPackage {
     pub name: String,
     pub version: String,
@@ -8802,6 +8820,327 @@ fn npm_optional_json_response(response: reqwest::blocking::Response) -> Result<s
             })
         }))
     }
+}
+
+pub fn unpublish_npm_package(
+    project_dir: &Path,
+    spec: &PackageSpec,
+    dry_run: bool,
+    force: bool,
+    registry_override: Option<&str>,
+    userconfig_override: Option<&Path>,
+    otp: Option<&str>,
+) -> Result<NpmUnpublishResult> {
+    if spec.ecosystem != Ecosystem::Npm || spec.direct_url.is_some() {
+        return Err(OmcRegistryError::UnsupportedSpec(spec.requested()));
+    }
+    let (package, requested_version) = npm_registry_name_and_requirement(spec)?;
+    let version = match requested_version.as_deref() {
+        Some("*") | None => None,
+        Some(version) if Version::parse(version).is_ok() => Some(version.to_owned()),
+        Some(requirement) => {
+            return Err(OmcRegistryError::UnsupportedSpec(format!(
+                "Can only unpublish a single version, or the entire project. Tags and ranges are not supported: `{requirement}`"
+            )))
+        }
+    };
+
+    let client = Client::new();
+    let npm_config =
+        read_npm_config_with_overrides(project_dir, registry_override, userconfig_override)?;
+    let registry = ensure_trailing_slash(npm_config.registry_for(&package));
+    let encoded = urlencoding::encode(&package);
+    let package_url = npm_registry_package_url(&registry, &encoded);
+    let read_url = format!("{package_url}?write=true");
+    let response = npm_get(&client, &read_url, &npm_config).send()?;
+    if response.status().as_u16() == 404 {
+        let whole_package = version.is_none();
+        return Ok(NpmUnpublishResult {
+            registry,
+            package,
+            version,
+            removed_versions: Vec::new(),
+            dry_run,
+            force,
+            whole_package,
+            changed: false,
+            status: None,
+            tarball_status: None,
+            response: serde_json::json!({ "missing": true }),
+        });
+    }
+    response.error_for_status_ref()?;
+    let mut packument = response.json::<serde_json::Value>()?;
+    let plan = npm_unpublish_plan(&packument, &package, version.as_deref(), force)?;
+
+    if dry_run || !plan.changed {
+        return Ok(NpmUnpublishResult {
+            registry,
+            package,
+            version,
+            removed_versions: plan.removed_versions,
+            dry_run,
+            force,
+            whole_package: plan.whole_package,
+            changed: plan.changed,
+            status: None,
+            tarball_status: None,
+            response: serde_json::json!({
+                "dryRun": dry_run,
+                "changed": plan.changed,
+            }),
+        });
+    }
+
+    if npm_config.auth_token_for_url(&package_url).is_none() {
+        return Err(OmcRegistryError::UnsupportedSpec(
+            "npm unpublish needs authentication; run npm login or configure a registry _authToken"
+                .to_owned(),
+        ));
+    }
+
+    if plan.whole_package {
+        let rev = npm_packument_rev(&packument, &package)?;
+        let url = format!("{package_url}/-rev/{}", urlencoding::encode(&rev));
+        let mut request = npm_delete(&client, &url, &npm_config);
+        if let Some(otp) = otp.map(str::trim).filter(|otp| !otp.is_empty()) {
+            request = request.header("npm-otp", otp);
+        }
+        let response = request.send()?;
+        response.error_for_status_ref()?;
+        let status = response.status().as_u16();
+        let response = npm_optional_json_response(response)?;
+        return Ok(NpmUnpublishResult {
+            registry,
+            package,
+            version,
+            removed_versions: plan.removed_versions,
+            dry_run,
+            force,
+            whole_package: true,
+            changed: true,
+            status: Some(status),
+            tarball_status: None,
+            response,
+        });
+    }
+
+    let version = version.as_deref().ok_or_else(|| {
+        OmcRegistryError::UnsupportedSpec("npm unpublish missing version".to_owned())
+    })?;
+    let tarball = npm_unpublish_remove_version(&mut packument, &package, version)?;
+    let rev = npm_packument_rev(&packument, &package)?;
+    let url = format!("{package_url}/-rev/{}", urlencoding::encode(&rev));
+    let mut request = npm_put(&client, &url, &npm_config).json(&packument);
+    if let Some(otp) = otp.map(str::trim).filter(|otp| !otp.is_empty()) {
+        request = request.header("npm-otp", otp);
+    }
+    let response = request.send()?;
+    response.error_for_status_ref()?;
+    let status = response.status().as_u16();
+    let response = npm_optional_json_response(response)?;
+
+    let fresh = npm_get(&client, &read_url, &npm_config)
+        .send()?
+        .error_for_status()?
+        .json::<serde_json::Value>()?;
+    let fresh_rev = npm_packument_rev(&fresh, &package)?;
+    let tarball_path = npm_unpublish_tarball_path(&tarball, &registry)?;
+    let tarball_url = format!(
+        "{}{}/-rev/{}",
+        registry,
+        tarball_path,
+        urlencoding::encode(&fresh_rev)
+    );
+    let mut request = npm_delete(&client, &tarball_url, &npm_config);
+    if let Some(otp) = otp.map(str::trim).filter(|otp| !otp.is_empty()) {
+        request = request.header("npm-otp", otp);
+    }
+    let tarball_response = request.send()?;
+    tarball_response.error_for_status_ref()?;
+    let tarball_status = tarball_response.status().as_u16();
+
+    Ok(NpmUnpublishResult {
+        registry,
+        package,
+        version: Some(version.to_owned()),
+        removed_versions: plan.removed_versions,
+        dry_run,
+        force,
+        whole_package: false,
+        changed: true,
+        status: Some(status),
+        tarball_status: Some(tarball_status),
+        response,
+    })
+}
+
+#[derive(Debug)]
+struct NpmUnpublishPlan {
+    removed_versions: Vec<String>,
+    whole_package: bool,
+    changed: bool,
+}
+
+fn npm_unpublish_plan(
+    packument: &serde_json::Value,
+    package: &str,
+    version: Option<&str>,
+    force: bool,
+) -> Result<NpmUnpublishPlan> {
+    let versions = npm_packument_version_keys(packument, package)?;
+    let no_versions = versions.is_empty();
+    let Some(version) = version else {
+        if !force {
+            return Err(OmcRegistryError::UnsupportedSpec(
+                "Refusing to delete entire project.\nRun with --force to do this.".to_owned(),
+            ));
+        }
+        return Ok(NpmUnpublishPlan {
+            removed_versions: versions,
+            whole_package: true,
+            changed: true,
+        });
+    };
+
+    let has_version = versions.iter().any(|candidate| candidate == version);
+    if !has_version && !no_versions {
+        return Ok(NpmUnpublishPlan {
+            removed_versions: Vec::new(),
+            whole_package: false,
+            changed: false,
+        });
+    }
+    if versions.len() == 1 && has_version && !force {
+        return Err(OmcRegistryError::UnsupportedSpec(
+            "Refusing to delete the last version of the package.\nIt will block from republishing a new version for 24 hours.\nRun with --force to do this."
+                .to_owned(),
+        ));
+    }
+    let whole_package = no_versions || versions.len() == 1;
+    let removed_versions = if no_versions {
+        Vec::new()
+    } else if versions.len() == 1 {
+        versions
+    } else {
+        vec![version.to_owned()]
+    };
+    Ok(NpmUnpublishPlan {
+        removed_versions,
+        whole_package,
+        changed: true,
+    })
+}
+
+fn npm_packument_version_keys(packument: &serde_json::Value, package: &str) -> Result<Vec<String>> {
+    let Some(versions) = packument.get("versions") else {
+        return Ok(Vec::new());
+    };
+    let versions = versions.as_object().ok_or_else(|| {
+        OmcRegistryError::UnsupportedSpec(format!(
+            "npm registry response for `{package}` had invalid versions"
+        ))
+    })?;
+    let mut versions = versions.keys().cloned().collect::<Vec<_>>();
+    versions.sort_by(|left, right| compare_npm_versions(left, right));
+    Ok(versions)
+}
+
+fn npm_packument_rev(packument: &serde_json::Value, package: &str) -> Result<String> {
+    packument
+        .get("_rev")
+        .and_then(serde_json::Value::as_str)
+        .filter(|rev| !rev.is_empty())
+        .map(str::to_owned)
+        .ok_or_else(|| {
+            OmcRegistryError::UnsupportedSpec(format!(
+                "npm registry response for `{package}` did not include _rev"
+            ))
+        })
+}
+
+fn npm_unpublish_remove_version(
+    packument: &mut serde_json::Value,
+    package: &str,
+    version: &str,
+) -> Result<String> {
+    let versions = packument
+        .get_mut("versions")
+        .and_then(serde_json::Value::as_object_mut)
+        .ok_or_else(|| {
+            OmcRegistryError::UnsupportedSpec(format!(
+                "npm registry response for `{package}` did not include versions"
+            ))
+        })?;
+    let version_doc = versions.remove(version).ok_or_else(|| {
+        OmcRegistryError::UnsupportedSpec(format!(
+            "npm registry response for `{package}` did not include version `{version}`"
+        ))
+    })?;
+    let tarball = version_doc
+        .get("dist")
+        .and_then(|dist| dist.get("tarball"))
+        .and_then(serde_json::Value::as_str)
+        .filter(|tarball| !tarball.is_empty())
+        .map(str::to_owned)
+        .ok_or_else(|| {
+            OmcRegistryError::UnsupportedSpec(format!(
+                "npm registry response for `{package}` version `{version}` did not include dist.tarball"
+            ))
+        })?;
+    let remaining_versions = versions.keys().cloned().collect::<Vec<_>>();
+
+    if let Some(dist_tags) = packument
+        .get_mut("dist-tags")
+        .and_then(serde_json::Value::as_object_mut)
+    {
+        let latest_was_removed =
+            dist_tags.get("latest").and_then(serde_json::Value::as_str) == Some(version);
+        let tags_to_remove = dist_tags
+            .iter()
+            .filter(|(_, value)| value.as_str() == Some(version))
+            .map(|(tag, _)| tag.clone())
+            .collect::<Vec<_>>();
+        for tag in tags_to_remove {
+            dist_tags.remove(&tag);
+        }
+        if latest_was_removed {
+            if let Some(latest) = remaining_versions
+                .iter()
+                .max_by(|left, right| compare_npm_versions(left, right))
+                .cloned()
+            {
+                dist_tags.insert("latest".to_owned(), serde_json::Value::String(latest));
+            }
+        }
+    }
+
+    if let Some(object) = packument.as_object_mut() {
+        object.remove("_revisions");
+        object.remove("_attachments");
+    }
+
+    Ok(tarball)
+}
+
+fn npm_unpublish_tarball_path(tarball: &str, registry: &str) -> Result<String> {
+    let registry_url = reqwest::Url::parse(registry)
+        .map_err(|_| OmcRegistryError::UnsupportedSpec(registry.to_owned()))?;
+    let tarball_url = reqwest::Url::parse(tarball)
+        .map_err(|_| OmcRegistryError::UnsupportedSpec(tarball.to_owned()))?;
+    let registry_path = registry_url.path().trim_start_matches('/');
+    let mut tarball_path = tarball_url.path().trim_start_matches('/').to_owned();
+    if !registry_path.is_empty() && tarball_path.starts_with(registry_path) {
+        tarball_path = tarball_path[registry_path.len()..]
+            .trim_start_matches('/')
+            .to_owned();
+    }
+    if tarball_path.is_empty() {
+        return Err(OmcRegistryError::UnsupportedSpec(format!(
+            "npm tarball URL `{tarball}` did not include a path"
+        )));
+    }
+    Ok(tarball_path)
 }
 
 pub fn publish_npm_package(
@@ -18409,6 +18748,210 @@ wheels = [
         assert_eq!(result.message, "old line");
         assert_eq!(result.versions, vec!["1.0.0", "1.1.0"]);
         assert_eq!(result.status, Some(200));
+        assert_eq!(result.response["ok"], true);
+        handle.join().unwrap();
+    }
+
+    #[test]
+    fn unpublishes_npm_version_with_userconfig_auth_and_otp() {
+        use std::io::Write as _;
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let handle = std::thread::spawn(move || {
+            let packument = format!(
+                r#"{{
+                  "_id": "demo-pkg",
+                  "_rev": "1-abc",
+                  "_revisions": {{"start": 1}},
+                  "_attachments": {{"demo-pkg-1.0.0.tgz": {{}}}},
+                  "name": "demo-pkg",
+                  "versions": {{
+                    "1.0.0": {{"name": "demo-pkg", "version": "1.0.0", "dist": {{"tarball": "http://{addr}/demo-pkg/-/demo-pkg-1.0.0.tgz"}}}},
+                    "2.0.0": {{"name": "demo-pkg", "version": "2.0.0", "dist": {{"tarball": "http://{addr}/demo-pkg/-/demo-pkg-2.0.0.tgz"}}}}
+                  }},
+                  "dist-tags": {{"latest": "2.0.0", "beta": "1.0.0", "old": "1.0.0"}}
+                }}"#
+            );
+
+            let (mut stream, _) = listener.accept().unwrap();
+            let buffer = read_http_request_bytes(&mut stream);
+            let body_start = http_body_start(&buffer).unwrap();
+            let headers = String::from_utf8_lossy(&buffer[..body_start]);
+            assert!(headers.starts_with("GET /demo-pkg?write=true "));
+            assert!(headers
+                .to_ascii_lowercase()
+                .contains("authorization: bearer registry-token"));
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                packument.len(),
+                packument
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+
+            let (mut stream, _) = listener.accept().unwrap();
+            let buffer = read_http_request_bytes(&mut stream);
+            let body_start = http_body_start(&buffer).unwrap();
+            let headers = String::from_utf8_lossy(&buffer[..body_start]);
+            assert!(headers.starts_with("PUT /demo-pkg/-rev/1-abc "));
+            let lower = headers.to_ascii_lowercase();
+            assert!(lower.contains("authorization: bearer registry-token"));
+            assert!(lower.contains("npm-otp: 123456"));
+            let body: serde_json::Value = serde_json::from_slice(&buffer[body_start..]).unwrap();
+            assert!(body["versions"].get("1.0.0").is_none());
+            assert!(body.get("_revisions").is_none());
+            assert!(body.get("_attachments").is_none());
+            assert_eq!(body["dist-tags"], serde_json::json!({"latest": "2.0.0"}));
+            let response_body = r#"{"ok":true}"#;
+            let response = format!(
+                "HTTP/1.1 201 Created\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                response_body.len(),
+                response_body
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+
+            let fresh_packument = r#"{
+              "_id": "demo-pkg",
+              "_rev": "2-def",
+              "name": "demo-pkg",
+              "versions": {
+                "2.0.0": {"name": "demo-pkg", "version": "2.0.0"}
+              },
+              "dist-tags": {"latest": "2.0.0"}
+            }"#;
+            let (mut stream, _) = listener.accept().unwrap();
+            let buffer = read_http_request_bytes(&mut stream);
+            let body_start = http_body_start(&buffer).unwrap();
+            let headers = String::from_utf8_lossy(&buffer[..body_start]);
+            assert!(headers.starts_with("GET /demo-pkg?write=true "));
+            assert!(headers
+                .to_ascii_lowercase()
+                .contains("authorization: bearer registry-token"));
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                fresh_packument.len(),
+                fresh_packument
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+
+            let (mut stream, _) = listener.accept().unwrap();
+            let buffer = read_http_request_bytes(&mut stream);
+            let body_start = http_body_start(&buffer).unwrap();
+            let headers = String::from_utf8_lossy(&buffer[..body_start]);
+            assert!(headers.starts_with("DELETE /demo-pkg/-/demo-pkg-1.0.0.tgz/-rev/2-def "));
+            let lower = headers.to_ascii_lowercase();
+            assert!(lower.contains("authorization: bearer registry-token"));
+            assert!(lower.contains("npm-otp: 123456"));
+            let response =
+                "HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+            stream.write_all(response.as_bytes()).unwrap();
+        });
+
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(
+            dir.path().join("ci.npmrc"),
+            format!("registry=http://{addr}/\n//{addr}/:_authToken=registry-token\n"),
+        )
+        .unwrap();
+
+        let spec = PackageSpec::parse("npm:demo-pkg@1.0.0").unwrap();
+        let result = unpublish_npm_package(
+            dir.path(),
+            &spec,
+            false,
+            false,
+            None,
+            Some(Path::new("ci.npmrc")),
+            Some("123456"),
+        )
+        .unwrap();
+        assert_eq!(result.registry, format!("http://{addr}/"));
+        assert_eq!(result.package, "demo-pkg");
+        assert_eq!(result.version.as_deref(), Some("1.0.0"));
+        assert_eq!(result.removed_versions, vec!["1.0.0"]);
+        assert!(!result.whole_package);
+        assert!(result.changed);
+        assert_eq!(result.status, Some(201));
+        assert_eq!(result.tarball_status, Some(204));
+        assert_eq!(result.response["ok"], true);
+        handle.join().unwrap();
+    }
+
+    #[test]
+    fn force_unpublishes_entire_npm_package() {
+        use std::io::Write as _;
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let handle = std::thread::spawn(move || {
+            let packument = r#"{
+              "_id": "demo-pkg",
+              "_rev": "1-abc",
+              "name": "demo-pkg",
+              "versions": {
+                "1.0.0": {"name": "demo-pkg", "version": "1.0.0"}
+              },
+              "dist-tags": {"latest": "1.0.0"}
+            }"#;
+
+            let (mut stream, _) = listener.accept().unwrap();
+            let buffer = read_http_request_bytes(&mut stream);
+            let body_start = http_body_start(&buffer).unwrap();
+            let headers = String::from_utf8_lossy(&buffer[..body_start]);
+            assert!(headers.starts_with("GET /demo-pkg?write=true "));
+            assert!(headers
+                .to_ascii_lowercase()
+                .contains("authorization: bearer registry-token"));
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                packument.len(),
+                packument
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+
+            let (mut stream, _) = listener.accept().unwrap();
+            let buffer = read_http_request_bytes(&mut stream);
+            let body_start = http_body_start(&buffer).unwrap();
+            let headers = String::from_utf8_lossy(&buffer[..body_start]);
+            assert!(headers.starts_with("DELETE /demo-pkg/-rev/1-abc "));
+            let lower = headers.to_ascii_lowercase();
+            assert!(lower.contains("authorization: bearer registry-token"));
+            assert!(lower.contains("npm-otp: 123456"));
+            let response_body = r#"{"ok":true}"#;
+            let response = format!(
+                "HTTP/1.1 202 Accepted\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                response_body.len(),
+                response_body
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+        });
+
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(
+            dir.path().join("ci.npmrc"),
+            format!("registry=http://{addr}/\n//{addr}/:_authToken=registry-token\n"),
+        )
+        .unwrap();
+
+        let spec = PackageSpec::parse("npm:demo-pkg").unwrap();
+        let result = unpublish_npm_package(
+            dir.path(),
+            &spec,
+            false,
+            true,
+            None,
+            Some(Path::new("ci.npmrc")),
+            Some("123456"),
+        )
+        .unwrap();
+        assert_eq!(result.registry, format!("http://{addr}/"));
+        assert_eq!(result.package, "demo-pkg");
+        assert_eq!(result.version, None);
+        assert_eq!(result.removed_versions, vec!["1.0.0"]);
+        assert!(result.whole_package);
+        assert!(result.changed);
+        assert_eq!(result.status, Some(202));
+        assert_eq!(result.tarball_status, None);
         assert_eq!(result.response["ok"], true);
         handle.join().unwrap();
     }

@@ -22,14 +22,14 @@ use omc_registry::{
     read_npm_ping_with_userconfig, read_npm_search, read_npm_token_list, read_npm_whoami,
     read_npm_workspace_packages, read_package_scripts, read_pip_config_snapshot,
     read_pypi_available_versions, read_requirements_files, remove_manifest_dependency,
-    remove_npm_dist_tag, revoke_npm_token, upload_pypi_distribution, Behavior, Ecosystem,
-    InstallReport, LinkOptions, LockedPackage, LockedPythonVcsDependency, NpmAccessToken,
-    NpmDeprecateResult, NpmDistTagMutationResult, NpmOwnerListResult, NpmOwnerMutationResult,
-    NpmPingResult, NpmPublishPackage, NpmPublishResult, NpmSearchPackage, NpmTokenCreateOptions,
-    NpmTokenCreateResult, NpmTokenListResult, NpmTokenRevokeResult, NpmWhoamiResult,
-    NpmWorkspacePackage, OmcRegistryError, PackageSpec, ProjectRequirements, PypiBinaryMode,
-    PypiCheckIssue, PypiUploadOptions, PypiUploadResult, PythonLocalRequirement,
-    PythonVcsRequirement, Verdict,
+    remove_npm_dist_tag, revoke_npm_token, unpublish_npm_package, upload_pypi_distribution,
+    Behavior, Ecosystem, InstallReport, LinkOptions, LockedPackage, LockedPythonVcsDependency,
+    NpmAccessToken, NpmDeprecateResult, NpmDistTagMutationResult, NpmOwnerListResult,
+    NpmOwnerMutationResult, NpmPingResult, NpmPublishPackage, NpmPublishResult, NpmSearchPackage,
+    NpmTokenCreateOptions, NpmTokenCreateResult, NpmTokenListResult, NpmTokenRevokeResult,
+    NpmUnpublishResult, NpmWhoamiResult, NpmWorkspacePackage, OmcRegistryError, PackageSpec,
+    ProjectRequirements, PypiBinaryMode, PypiCheckIssue, PypiUploadOptions, PypiUploadResult,
+    PythonLocalRequirement, PythonVcsRequirement, Verdict,
 };
 use sha2::{Digest, Sha256, Sha384, Sha512};
 
@@ -344,6 +344,9 @@ enum NpmCompatAction {
     Publish {
         action: NpmPublishAction,
     },
+    Unpublish {
+        action: NpmUnpublishAction,
+    },
     Deprecate {
         action: NpmDeprecateAction,
     },
@@ -588,6 +591,20 @@ struct NpmPublishAction {
     tag: String,
     access: Option<String>,
     dry_run: bool,
+    json: bool,
+    npm_registry: Option<String>,
+    userconfig: Option<PathBuf>,
+    otp: Option<String>,
+    workspaces: Vec<String>,
+    all_workspaces: bool,
+    include_workspace_root: bool,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct NpmUnpublishAction {
+    spec: Option<String>,
+    dry_run: bool,
+    force: bool,
     json: bool,
     npm_registry: Option<String>,
     userconfig: Option<PathBuf>,
@@ -2077,6 +2094,7 @@ fn run_npm_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
         NpmCompatAction::Pkg { action } => print_npm_pkg(project_dir, action)?,
         NpmCompatAction::Pack { action } => print_npm_pack(project_dir, action)?,
         NpmCompatAction::Publish { action } => print_npm_publish(project_dir, action)?,
+        NpmCompatAction::Unpublish { action } => print_npm_unpublish(project_dir, action)?,
         NpmCompatAction::Deprecate { action } => print_npm_deprecate(project_dir, action)?,
         NpmCompatAction::Search { action } => print_npm_search(project_dir, action)?,
         NpmCompatAction::Ping {
@@ -2821,6 +2839,14 @@ fn npm_help_text(topic: Option<&str>) -> String {
                 "Remote package specs, git URLs, and provenance bundles are not implemented yet.",
             ],
         ),
+        Some("unpublish") => npm_command_help(
+            "npm unpublish [<package-spec>]",
+            &[
+                "Remove one published npm package version or, with --force, an entire package.",
+                "Supports --dry-run, --force, --json, --registry, --userconfig, --otp, and workspace selectors.",
+                "Tags and semver ranges are rejected to match npm's single-version unpublish constraint.",
+            ],
+        ),
         Some("deprecate") => npm_command_help(
             "npm deprecate <package-spec> <message>",
             &[
@@ -2943,7 +2969,7 @@ fn npm_general_help_text() -> String {
         "npm <command>",
         &[
             "OMC npm compatibility runs supported npm workflows through OMC's verifier, lockfile, cache, and project-local runtime paths.",
-            "Supported commands: install, install-test, ci, install-ci-test, remove, run, test, start, stop, restart, exec, list, explain, audit, outdated, fund, prune, dedupe, rebuild, cache, pkg, version, pack, publish, deprecate, undeprecate, search, ping, whoami, login, adduser, logout, token, owner, dist-tag, sbom, view, docs, repo, bugs, home, config, init, bin, root, prefix.",
+            "Supported commands: install, install-test, ci, install-ci-test, remove, run, test, start, stop, restart, exec, list, explain, audit, outdated, fund, prune, dedupe, rebuild, cache, pkg, version, pack, publish, unpublish, deprecate, undeprecate, search, ping, whoami, login, adduser, logout, token, owner, dist-tag, sbom, view, docs, repo, bugs, home, config, init, bin, root, prefix.",
             "Use `npm help <command>` for focused OMC compatibility notes.",
         ],
     )
@@ -2980,6 +3006,7 @@ fn npm_help_topic(topic: &str) -> Option<&'static str> {
         "rebuild" | "rb" => Some("rebuild"),
         "pack" => Some("pack"),
         "publish" => Some("publish"),
+        "unpublish" => Some("unpublish"),
         "deprecate" | "undeprecate" => Some("deprecate"),
         "search" | "s" | "se" | "find" => Some("search"),
         "ping" => Some("ping"),
@@ -6291,6 +6318,110 @@ fn print_npm_publish(project_dir: &Path, action: NpmPublishAction) -> Result<(),
     Ok(())
 }
 
+fn print_npm_unpublish(
+    project_dir: &Path,
+    action: NpmUnpublishAction,
+) -> Result<(), OmcRegistryError> {
+    let mut outputs = Vec::new();
+    for target in npm_unpublish_targets(project_dir, &action)? {
+        let spec = parse_package_spec(&target.spec, Some(Ecosystem::Npm))?;
+        let result = unpublish_npm_package(
+            project_dir,
+            &spec,
+            action.dry_run,
+            action.force,
+            target.registry.as_deref(),
+            action.userconfig.as_deref(),
+            action.otp.as_deref(),
+        )?;
+        outputs.push(result);
+    }
+
+    if action.json {
+        println!("{}", serde_json::to_string_pretty(&outputs)?);
+    } else {
+        for output in &outputs {
+            print_npm_unpublish_result(output);
+        }
+    }
+    Ok(())
+}
+
+fn print_npm_unpublish_result(result: &NpmUnpublishResult) {
+    let version = result
+        .version
+        .as_deref()
+        .map(|version| format!("@{version}"))
+        .unwrap_or_default();
+    let dry_run = if result.dry_run { " (dry-run)" } else { "" };
+    println!("- {}{}{dry_run}", result.package, version);
+}
+
+#[derive(Debug)]
+struct NpmUnpublishTarget {
+    spec: String,
+    registry: Option<String>,
+}
+
+fn npm_unpublish_targets(
+    project_dir: &Path,
+    action: &NpmUnpublishAction,
+) -> Result<Vec<NpmUnpublishTarget>, OmcRegistryError> {
+    if let Some(spec) = &action.spec {
+        if !action.workspaces.is_empty() || action.all_workspaces {
+            return Err(OmcRegistryError::UnsupportedSpec(
+                "npm unpublish accepts either a package spec or workspace selectors, not both"
+                    .to_owned(),
+            ));
+        }
+        return Ok(vec![NpmUnpublishTarget {
+            spec: spec.clone(),
+            registry: action.npm_registry.clone(),
+        }]);
+    }
+
+    let targets = npm_script_target_dirs(
+        project_dir,
+        &action.workspaces,
+        action.all_workspaces,
+        action.include_workspace_root,
+    )?;
+    targets
+        .into_iter()
+        .map(|target| npm_unpublish_target_from_package_json(&target, action))
+        .collect()
+}
+
+fn npm_unpublish_target_from_package_json(
+    target: &Path,
+    action: &NpmUnpublishAction,
+) -> Result<NpmUnpublishTarget, OmcRegistryError> {
+    let manifest = read_npm_pkg_json(&target.join("package.json"))?;
+    let name = npm_package_json_name(&manifest)?;
+    let version = manifest
+        .get("version")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|version| !version.is_empty());
+    let spec = if let Some(version) = version {
+        format!("{name}@{version}")
+    } else {
+        if !action.force {
+            return Err(OmcRegistryError::UnsupportedSpec(
+                "Refusing to delete entire project.\nRun with --force to do this.".to_owned(),
+            ));
+        }
+        name
+    };
+    Ok(NpmUnpublishTarget {
+        spec,
+        registry: action
+            .npm_registry
+            .clone()
+            .or_else(|| npm_publish_config_registry(&manifest)),
+    })
+}
+
 fn print_npm_deprecate(
     project_dir: &Path,
     action: NpmDeprecateAction,
@@ -8727,6 +8858,7 @@ fn parse_npm_compat_action(args: &[String]) -> Result<NpmCompatAction, OmcRegist
         "pkg" => parse_npm_pkg_args(&args[1..]),
         "pack" => parse_npm_pack_args(&args[1..]),
         "publish" => parse_npm_publish_args(&args[1..]),
+        "unpublish" => parse_npm_unpublish_args(&args[1..]),
         "deprecate" => parse_npm_deprecate_args(false, &args[1..]),
         "undeprecate" => parse_npm_deprecate_args(true, &args[1..]),
         "search" | "s" | "se" | "find" => parse_npm_search_args(&args[1..]),
@@ -8882,6 +9014,7 @@ fn npm_global_arg_supported_by_command(command: &str, arg: &str) -> bool {
                 | "outdated"
                 | "pack"
                 | "publish"
+                | "unpublish"
                 | "deprecate"
                 | "undeprecate"
                 | "search"
@@ -8915,6 +9048,7 @@ fn npm_global_arg_supported_by_command(command: &str, arg: &str) -> bool {
                 | "adduser"
                 | "add-user"
                 | "publish"
+                | "unpublish"
                 | "deprecate"
                 | "undeprecate"
                 | "token"
@@ -8985,7 +9119,13 @@ fn npm_global_arg_supported_by_command(command: &str, arg: &str) -> bool {
         || arg.starts_with("--dry-run=")
         || arg.starts_with("--provenance=")
     {
-        return matches!(command, "publish" | "deprecate" | "undeprecate");
+        return matches!(
+            command,
+            "publish" | "unpublish" | "deprecate" | "undeprecate"
+        );
+    }
+    if matches!(arg, "--force" | "-f") || arg.starts_with("--force=") {
+        return matches!(command, "cache" | "unpublish");
     }
     if matches!(arg, "--sbom-format" | "--sbom-type")
         || arg.starts_with("--sbom-format=")
@@ -9008,6 +9148,7 @@ fn npm_global_arg_supported_by_command(command: &str, arg: &str) -> bool {
                 | "adduser"
                 | "add-user"
                 | "publish"
+                | "unpublish"
                 | "deprecate"
                 | "undeprecate"
                 | "logout"
@@ -9031,6 +9172,7 @@ fn npm_global_arg_supported_by_command(command: &str, arg: &str) -> bool {
                 | "restart"
                 | "fund"
                 | "owner"
+                | "unpublish"
                 | "publish"
                 | "dist-tag"
                 | "dist-tags"
@@ -9050,6 +9192,7 @@ fn npm_global_arg_supported_by_command(command: &str, arg: &str) -> bool {
                 | "restart"
                 | "fund"
                 | "owner"
+                | "unpublish"
                 | "publish"
                 | "dist-tag"
                 | "dist-tags"
@@ -9074,6 +9217,7 @@ fn npm_global_arg_supported_by_command(command: &str, arg: &str) -> bool {
                 | "pkg"
                 | "pack"
                 | "publish"
+                | "unpublish"
                 | "deprecate"
                 | "undeprecate"
                 | "search"
@@ -9150,6 +9294,8 @@ fn npm_global_preserved_bool_flag(arg: &str) -> bool {
             | "--global"
             | "-g"
             | "--dry-run"
+            | "--force"
+            | "-f"
             | "--provenance"
             | "--no-provenance"
             | "--read-only"
@@ -9218,6 +9364,7 @@ fn npm_global_preserved_equals_flag(arg: &str) -> bool {
         "--tag=",
         "--access=",
         "--dry-run=",
+        "--force=",
         "--provenance=",
         "--provenance-file=",
         "--scope=",
@@ -10226,6 +10373,105 @@ fn parse_npm_publish_args(args: &[String]) -> Result<NpmCompatAction, OmcRegistr
             include_workspace_root,
         },
     })
+}
+
+fn parse_npm_unpublish_args(args: &[String]) -> Result<NpmCompatAction, OmcRegistryError> {
+    let mut spec = None;
+    let mut dry_run = false;
+    let mut force = false;
+    let mut json = false;
+    let mut npm_registry = None;
+    let mut userconfig = None;
+    let mut otp = None;
+    let mut workspaces = Vec::new();
+    let mut all_workspaces = false;
+    let mut include_workspace_root = false;
+    let mut index = 0;
+    while index < args.len() {
+        let arg = &args[index];
+        if arg == "--json" || arg == "--json=true" {
+            json = true;
+        } else if arg == "--json=false" {
+            json = false;
+        } else if matches!(arg.as_str(), "--dry-run" | "--dry-run=true") {
+            dry_run = true;
+        } else if arg == "--dry-run=false" {
+            dry_run = false;
+        } else if matches!(arg.as_str(), "--force" | "-f" | "--force=true") {
+            force = true;
+        } else if arg == "--force=false" {
+            force = false;
+        } else if arg == "--registry" {
+            index += 1;
+            npm_registry = Some(npm_publish_flag_value(args, index, arg)?);
+        } else if let Some(value) = arg.strip_prefix("--registry=") {
+            npm_registry = Some(value.to_owned());
+        } else if arg == "--userconfig" {
+            index += 1;
+            userconfig = Some(PathBuf::from(npm_publish_flag_value(args, index, arg)?));
+        } else if let Some(value) = arg.strip_prefix("--userconfig=") {
+            userconfig = Some(PathBuf::from(value));
+        } else if arg == "--otp" {
+            index += 1;
+            otp = Some(npm_publish_flag_value(args, index, arg)?);
+        } else if let Some(value) = arg.strip_prefix("--otp=") {
+            otp = Some(value.to_owned());
+        } else if matches!(arg.as_str(), "--workspace" | "-w") {
+            index += 1;
+            workspaces.push(npm_publish_flag_value(args, index, arg)?);
+        } else if let Some(value) = arg
+            .strip_prefix("--workspace=")
+            .or_else(|| arg.strip_prefix("-w="))
+        {
+            workspaces.push(value.to_owned());
+        } else if matches!(arg.as_str(), "--workspaces" | "--workspaces=true") {
+            all_workspaces = true;
+        } else if arg == "--workspaces=false" {
+            all_workspaces = false;
+        } else if matches!(
+            arg.as_str(),
+            "--include-workspace-root" | "--include-workspace-root=true"
+        ) {
+            include_workspace_root = true;
+        } else if arg == "--include-workspace-root=false" {
+            include_workspace_root = false;
+        } else if matches!(arg.as_str(), "--silent" | "-s") {
+        } else if matches!(arg.as_str(), "--loglevel" | "--cache") {
+            index += 1;
+            let _ = npm_publish_flag_value(args, index, arg)?;
+        } else if npm_unpublish_ignored_equals_flag(arg) {
+        } else if arg.starts_with('-') {
+            return Err(unsupported_compat_arg("npm unpublish", arg));
+        } else if spec.is_none() {
+            spec = Some(arg.clone());
+        } else {
+            return Err(OmcRegistryError::UnsupportedSpec(
+                "npm unpublish accepts at most one package spec".to_owned(),
+            ));
+        }
+        index += 1;
+    }
+
+    Ok(NpmCompatAction::Unpublish {
+        action: NpmUnpublishAction {
+            spec,
+            dry_run,
+            force,
+            json,
+            npm_registry,
+            userconfig,
+            otp,
+            workspaces,
+            all_workspaces,
+            include_workspace_root,
+        },
+    })
+}
+
+fn npm_unpublish_ignored_equals_flag(arg: &str) -> bool {
+    ["--loglevel=", "--cache=", "--include-workspace-root="]
+        .iter()
+        .any(|prefix| arg.starts_with(prefix))
 }
 
 fn npm_publish_flag_value(
@@ -14937,6 +15183,53 @@ mod tests {
                 },
             }
         );
+        assert_eq!(
+            parse_npm_compat_action(&args(&[
+                "--json",
+                "--registry",
+                "https://registry.example.invalid/npm",
+                "--userconfig=ci.npmrc",
+                "--otp",
+                "123456",
+                "--force",
+                "unpublish",
+                "@scope/pkg@1.2.3",
+                "--dry-run",
+            ]))
+            .unwrap(),
+            NpmCompatAction::Unpublish {
+                action: NpmUnpublishAction {
+                    spec: Some("@scope/pkg@1.2.3".to_owned()),
+                    dry_run: true,
+                    force: true,
+                    json: true,
+                    npm_registry: Some("https://registry.example.invalid/npm".to_owned()),
+                    userconfig: Some(PathBuf::from("ci.npmrc")),
+                    otp: Some("123456".to_owned()),
+                    workspaces: Vec::new(),
+                    all_workspaces: false,
+                    include_workspace_root: false,
+                },
+            }
+        );
+        assert_eq!(
+            parse_npm_compat_action(&args(&["unpublish", "--workspace", "@demo/pkg"])).unwrap(),
+            NpmCompatAction::Unpublish {
+                action: NpmUnpublishAction {
+                    spec: None,
+                    dry_run: false,
+                    force: false,
+                    json: false,
+                    npm_registry: None,
+                    userconfig: None,
+                    otp: None,
+                    workspaces: vec!["@demo/pkg".to_owned()],
+                    all_workspaces: false,
+                    include_workspace_root: false,
+                },
+            }
+        );
+        assert!(parse_npm_compat_action(&args(&["unpublish", "a", "b"])).is_err());
         assert_eq!(
             parse_npm_compat_action(&args(&[
                 "--json",
