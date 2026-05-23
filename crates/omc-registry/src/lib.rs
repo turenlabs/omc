@@ -9232,7 +9232,7 @@ fn pypi_comparator_satisfied(version: &str, comparator: &str) -> bool {
     compare_pypi_versions(version, comparator).is_eq()
 }
 
-fn compare_pypi_versions(left: &str, right: &str) -> std::cmp::Ordering {
+pub fn compare_pypi_versions(left: &str, right: &str) -> std::cmp::Ordering {
     comparable_version(left).cmp(&comparable_version(right))
 }
 

@@ -7,13 +7,14 @@ use clap::{Parser, Subcommand};
 use omc_cap::Capability;
 use omc_registry::{
     add_manifest_npm_local_paths, add_manifest_policy_grants, add_package_graph,
-    apply_pypi_binary_option, check_pypi_lock, init_project, install_locked_packages,
-    install_locked_project, install_project, lock_project, parse_capability_grant,
-    parse_npm_direct_archive_reference, parse_pypi_direct_archive_reference, read_lockfile,
-    read_npm_config_snapshot, read_npm_package_metadata, read_package_scripts,
-    read_pip_config_snapshot, read_pypi_available_versions, read_requirements_files,
-    remove_manifest_dependency, Behavior, Ecosystem, InstallReport, LinkOptions, LockedPackage,
-    OmcRegistryError, PackageSpec, PypiBinaryMode, PypiCheckIssue, PythonLocalRequirement, Verdict,
+    apply_pypi_binary_option, check_pypi_lock, compare_pypi_versions, init_project,
+    install_locked_packages, install_locked_project, install_project, lock_project,
+    parse_capability_grant, parse_npm_direct_archive_reference,
+    parse_pypi_direct_archive_reference, read_lockfile, read_npm_config_snapshot,
+    read_npm_package_metadata, read_package_scripts, read_pip_config_snapshot,
+    read_pypi_available_versions, read_requirements_files, remove_manifest_dependency, Behavior,
+    Ecosystem, InstallReport, LinkOptions, LockedPackage, OmcRegistryError, PackageSpec,
+    PypiBinaryMode, PypiCheckIssue, PythonLocalRequirement, Verdict,
 };
 
 #[derive(Debug, Parser)]
@@ -303,6 +304,11 @@ enum PipCompatAction {
     Freeze,
     List {
         format: PipListFormat,
+        outdated: bool,
+        index_url: Option<String>,
+        extra_index_urls: Vec<String>,
+        find_links: Vec<String>,
+        no_index: bool,
     },
     IndexVersions {
         package: String,
@@ -1098,13 +1104,33 @@ fn run_pip_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
         }
         PipCompatAction::Check => return print_locked_pip_check(project_dir),
         PipCompatAction::Freeze => print_locked_freeze(project_dir)?,
-        PipCompatAction::List { format } => match format {
-            PipListFormat::Columns => {
-                print_locked_packages(project_dir, Some(Ecosystem::Pypi), false)?
+        PipCompatAction::List {
+            format,
+            outdated,
+            index_url,
+            extra_index_urls,
+            find_links,
+            no_index,
+        } => {
+            if outdated {
+                print_locked_pip_outdated(
+                    project_dir,
+                    format,
+                    index_url,
+                    extra_index_urls,
+                    find_links,
+                    no_index,
+                )?;
+            } else {
+                match format {
+                    PipListFormat::Columns => {
+                        print_locked_packages(project_dir, Some(Ecosystem::Pypi), false)?
+                    }
+                    PipListFormat::Freeze => print_locked_freeze(project_dir)?,
+                    PipListFormat::Json => print_locked_pip_json(project_dir)?,
+                }
             }
-            PipListFormat::Freeze => print_locked_freeze(project_dir)?,
-            PipListFormat::Json => print_locked_pip_json(project_dir)?,
-        },
+        }
         PipCompatAction::IndexVersions {
             package,
             index_url,
@@ -1657,6 +1683,111 @@ fn print_locked_pip_json(project_dir: &Path) -> Result<(), OmcRegistryError> {
         .collect::<Vec<_>>();
     println!("{}", serde_json::to_string_pretty(&packages)?);
     Ok(())
+}
+
+#[derive(Debug)]
+struct PipOutdatedPackage {
+    name: String,
+    version: String,
+    latest_version: String,
+    latest_filetype: String,
+}
+
+fn print_locked_pip_outdated(
+    project_dir: &Path,
+    format: PipListFormat,
+    index_url: Option<String>,
+    extra_index_urls: Vec<String>,
+    find_links: Vec<String>,
+    no_index: bool,
+) -> Result<(), OmcRegistryError> {
+    if format == PipListFormat::Freeze {
+        return Err(OmcRegistryError::UnsupportedSpec(
+            "pip list --outdated does not support --format=freeze".to_owned(),
+        ));
+    }
+
+    let lock = read_lockfile(project_dir.join("omc.lock"))?;
+    let mut rows = Vec::new();
+    for package in lock
+        .packages
+        .into_iter()
+        .filter(|package| package.ecosystem == Ecosystem::Pypi)
+    {
+        let listing = match read_pypi_available_versions(
+            project_dir,
+            &package.name,
+            index_url.clone(),
+            extra_index_urls.clone(),
+            find_links.clone(),
+            no_index,
+        ) {
+            Ok(listing) => listing,
+            Err(OmcRegistryError::PackageNotFound(_)) => continue,
+            Err(error) => return Err(error),
+        };
+        let Some(latest_version) = listing.versions.first() else {
+            continue;
+        };
+        if compare_pypi_versions(latest_version, &package.version).is_gt() {
+            rows.push(PipOutdatedPackage {
+                name: package.name.clone(),
+                version: package.version.clone(),
+                latest_version: latest_version.clone(),
+                latest_filetype: pip_locked_package_filetype(&package).to_owned(),
+            });
+        }
+    }
+    rows.sort_by(|left, right| left.name.cmp(&right.name));
+
+    match format {
+        PipListFormat::Columns => {
+            if !rows.is_empty() {
+                println!("Package Version Latest Type");
+                for row in rows {
+                    println!(
+                        "{} {} {} {}",
+                        row.name, row.version, row.latest_version, row.latest_filetype
+                    );
+                }
+            }
+        }
+        PipListFormat::Json => {
+            let packages = rows
+                .into_iter()
+                .map(|row| {
+                    serde_json::json!({
+                        "name": row.name,
+                        "version": row.version,
+                        "latest_version": row.latest_version,
+                        "latest_filetype": row.latest_filetype,
+                    })
+                })
+                .collect::<Vec<_>>();
+            println!("{}", serde_json::to_string_pretty(&packages)?);
+        }
+        PipListFormat::Freeze => unreachable!("freeze format rejected before listing"),
+    }
+    Ok(())
+}
+
+fn pip_locked_package_filetype(package: &LockedPackage) -> &'static str {
+    let source = if package.source_url.is_empty() {
+        package.archive.as_str()
+    } else {
+        package.source_url.as_str()
+    }
+    .to_ascii_lowercase();
+    if source.ends_with(".tar.gz")
+        || source.ends_with(".tar.bz2")
+        || source.ends_with(".tar.xz")
+        || source.ends_with(".zip")
+        || source.ends_with(".tgz")
+    {
+        "sdist"
+    } else {
+        "wheel"
+    }
 }
 
 fn print_locked_pip_show(
@@ -2750,9 +2881,7 @@ fn parse_pip_compat_action(args: &[String]) -> Result<PipCompatAction, OmcRegist
             parse_pip_freeze_args(&args[1..])?;
             Ok(PipCompatAction::Freeze)
         }
-        "list" => Ok(PipCompatAction::List {
-            format: parse_pip_list_format(&args[1..])?,
-        }),
+        "list" => parse_pip_list_args(&args[1..]),
         "index" => parse_pip_index_args(&args[1..]),
         "config" => parse_pip_config_args(&args[1..]),
         other => Err(OmcRegistryError::UnsupportedSpec(format!(
@@ -3631,8 +3760,13 @@ fn parse_json_list_flag(command: &str, args: &[String]) -> Result<bool, OmcRegis
     Ok(json)
 }
 
-fn parse_pip_list_format(args: &[String]) -> Result<PipListFormat, OmcRegistryError> {
+fn parse_pip_list_args(args: &[String]) -> Result<PipCompatAction, OmcRegistryError> {
     let mut format = PipListFormat::Columns;
+    let mut outdated = false;
+    let mut index_url = None;
+    let mut extra_index_urls = Vec::new();
+    let mut find_links = Vec::new();
+    let mut no_index = false;
     let mut index = 0;
     while index < args.len() {
         let arg = &args[index];
@@ -3646,6 +3780,40 @@ fn parse_pip_list_format(args: &[String]) -> Result<PipListFormat, OmcRegistryEr
             format = parse_pip_list_format_value(value)?;
         } else if let Some(value) = arg.strip_prefix("--format=") {
             format = parse_pip_list_format_value(value)?;
+        } else if arg == "-o" || arg == "--outdated" {
+            outdated = true;
+        } else if arg == "-i" || arg == "--index-url" {
+            index += 1;
+            let Some(url) = args.get(index) else {
+                return Err(OmcRegistryError::UnsupportedSpec(format!(
+                    "{arg} needs a URL"
+                )));
+            };
+            index_url = Some(url.clone());
+        } else if let Some(url) = arg.strip_prefix("--index-url=") {
+            index_url = Some(url.to_owned());
+        } else if arg == "--extra-index-url" {
+            index += 1;
+            let Some(url) = args.get(index) else {
+                return Err(OmcRegistryError::UnsupportedSpec(format!(
+                    "{arg} needs a URL"
+                )));
+            };
+            extra_index_urls.push(url.clone());
+        } else if let Some(url) = arg.strip_prefix("--extra-index-url=") {
+            extra_index_urls.push(url.to_owned());
+        } else if arg == "-f" || arg == "--find-links" {
+            index += 1;
+            let Some(value) = args.get(index) else {
+                return Err(OmcRegistryError::UnsupportedSpec(format!(
+                    "{arg} needs a path or URL"
+                )));
+            };
+            find_links.push(value.clone());
+        } else if let Some(value) = arg.strip_prefix("--find-links=") {
+            find_links.push(value.to_owned());
+        } else if arg == "--no-index" {
+            no_index = true;
         } else if matches!(
             arg.as_str(),
             "--local"
@@ -3654,6 +3822,9 @@ fn parse_pip_list_format(args: &[String]) -> Result<PipListFormat, OmcRegistryEr
                 | "--include-editable"
                 | "--exclude-editable"
                 | "--disable-pip-version-check"
+                | "--pre"
+                | "--not-required"
+                | "--ignore-requires-python"
                 | "-v"
                 | "--verbose"
                 | "-q"
@@ -3667,12 +3838,32 @@ fn parse_pip_list_format(args: &[String]) -> Result<PipListFormat, OmcRegistryEr
                 )));
             }
         } else if pip_path_or_exclude_equals_value_flag(arg) {
+        } else if pip_index_ignored_value_flag(arg) {
+            index += 1;
+            if args.get(index).is_none() {
+                return Err(OmcRegistryError::UnsupportedSpec(format!(
+                    "{arg} needs a value"
+                )));
+            }
+        } else if pip_index_ignored_equals_flag(arg) {
         } else {
             return Err(unsupported_compat_arg("pip list", arg));
         }
         index += 1;
     }
-    Ok(format)
+    if outdated && format == PipListFormat::Freeze {
+        return Err(OmcRegistryError::UnsupportedSpec(
+            "pip list --outdated does not support --format=freeze".to_owned(),
+        ));
+    }
+    Ok(PipCompatAction::List {
+        format,
+        outdated,
+        index_url,
+        extra_index_urls,
+        find_links,
+        no_index,
+    })
 }
 
 fn parse_pip_list_format_value(value: &str) -> Result<PipListFormat, OmcRegistryError> {
@@ -4634,12 +4825,22 @@ mod tests {
             parse_pip_compat_action(&args(&["list", "--format=freeze"])).unwrap(),
             PipCompatAction::List {
                 format: PipListFormat::Freeze,
+                outdated: false,
+                index_url: None,
+                extra_index_urls: Vec::new(),
+                find_links: Vec::new(),
+                no_index: false,
             }
         );
         assert_eq!(
             parse_pip_compat_action(&args(&["list", "--format", "json"])).unwrap(),
             PipCompatAction::List {
                 format: PipListFormat::Json,
+                outdated: false,
+                index_url: None,
+                extra_index_urls: Vec::new(),
+                find_links: Vec::new(),
+                no_index: false,
             }
         );
         assert_eq!(
@@ -4655,6 +4856,31 @@ mod tests {
             .unwrap(),
             PipCompatAction::List {
                 format: PipListFormat::Json,
+                outdated: false,
+                index_url: None,
+                extra_index_urls: Vec::new(),
+                find_links: Vec::new(),
+                no_index: false,
+            }
+        );
+        assert_eq!(
+            parse_pip_compat_action(&args(&[
+                "list",
+                "--outdated",
+                "--format=json",
+                "--no-index",
+                "--find-links=wheelhouse",
+                "--timeout",
+                "5",
+            ]))
+            .unwrap(),
+            PipCompatAction::List {
+                format: PipListFormat::Json,
+                outdated: true,
+                index_url: None,
+                extra_index_urls: Vec::new(),
+                find_links: vec!["wheelhouse".to_owned()],
+                no_index: true,
             }
         );
         assert_eq!(
@@ -4679,7 +4905,9 @@ mod tests {
             }
         );
         assert!(parse_pip_compat_action(&args(&["index", "foo", "requests"])).is_err());
-        assert!(parse_pip_compat_action(&args(&["list", "--outdated"])).is_err());
+        assert!(
+            parse_pip_compat_action(&args(&["list", "--outdated", "--format=freeze"])).is_err()
+        );
         assert_eq!(
             parse_pip_compat_action(&args(&[
                 "config",
