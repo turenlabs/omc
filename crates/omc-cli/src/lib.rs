@@ -16,26 +16,28 @@ use omc_registry::{
     compare_npm_versions, compare_pypi_versions, create_npm_team, create_npm_token,
     deprecate_npm_package, destroy_npm_team, grant_npm_access, init_project,
     install_locked_packages, install_locked_project, install_project, lock_project,
-    mutate_npm_package_owner, parse_capability_grant, parse_npm_direct_archive_reference,
-    parse_pypi_direct_archive_reference, parse_pypi_vcs_requirement, publish_npm_package,
-    read_constraint_files, read_lockfile, read_manifest, read_npm_access_collaborators,
-    read_npm_access_packages, read_npm_access_status, read_npm_config_snapshot, read_npm_org_users,
-    read_npm_package_metadata, read_npm_package_metadata_with_userconfig, read_npm_package_owners,
-    read_npm_ping_with_userconfig, read_npm_profile, read_npm_search, read_npm_team_users,
-    read_npm_teams, read_npm_token_list, read_npm_whoami, read_npm_workspace_packages,
-    read_package_scripts, read_pip_config_snapshot, read_pypi_available_versions,
-    read_requirements_files, remove_manifest_dependency, remove_npm_dist_tag, remove_npm_org_user,
-    remove_npm_team_user, revoke_npm_access, revoke_npm_token, set_npm_access_mfa,
-    set_npm_access_status, set_npm_org_user, set_npm_profile_property, unpublish_npm_package,
-    upload_pypi_distribution, Behavior, Ecosystem, InstallReport, LinkOptions, LockedPackage,
-    LockedPythonVcsDependency, NpmAccessMapResult, NpmAccessMutationResult, NpmAccessStatusResult,
-    NpmAccessToken, NpmDeprecateResult, NpmDistTagMutationResult, NpmOrgListResult,
-    NpmOrgMutationResult, NpmOwnerListResult, NpmOwnerMutationResult, NpmPingResult,
-    NpmProfileMutationResult, NpmProfileResult, NpmPublishPackage, NpmPublishResult,
-    NpmSearchPackage, NpmTeamListResult, NpmTeamMutationResult, NpmTokenCreateOptions,
-    NpmTokenCreateResult, NpmTokenListResult, NpmTokenRevokeResult, NpmUnpublishResult,
-    NpmWhoamiResult, NpmWorkspacePackage, OmcRegistryError, PackageSpec, ProjectRequirements,
-    PypiBinaryMode, PypiCheckIssue, PypiUploadOptions, PypiUploadResult, PythonLocalRequirement,
+    mutate_npm_package_owner, mutate_npm_package_star, parse_capability_grant,
+    parse_npm_direct_archive_reference, parse_pypi_direct_archive_reference,
+    parse_pypi_vcs_requirement, publish_npm_package, read_constraint_files, read_lockfile,
+    read_manifest, read_npm_access_collaborators, read_npm_access_packages, read_npm_access_status,
+    read_npm_config_snapshot, read_npm_org_users, read_npm_package_metadata,
+    read_npm_package_metadata_with_userconfig, read_npm_package_owners,
+    read_npm_ping_with_userconfig, read_npm_profile, read_npm_search, read_npm_stars,
+    read_npm_team_users, read_npm_teams, read_npm_token_list, read_npm_whoami,
+    read_npm_workspace_packages, read_package_scripts, read_pip_config_snapshot,
+    read_pypi_available_versions, read_requirements_files, remove_manifest_dependency,
+    remove_npm_dist_tag, remove_npm_org_user, remove_npm_team_user, revoke_npm_access,
+    revoke_npm_token, set_npm_access_mfa, set_npm_access_status, set_npm_org_user,
+    set_npm_profile_property, unpublish_npm_package, upload_pypi_distribution, Behavior, Ecosystem,
+    InstallReport, LinkOptions, LockedPackage, LockedPythonVcsDependency, NpmAccessMapResult,
+    NpmAccessMutationResult, NpmAccessStatusResult, NpmAccessToken, NpmDeprecateResult,
+    NpmDistTagMutationResult, NpmOrgListResult, NpmOrgMutationResult, NpmOwnerListResult,
+    NpmOwnerMutationResult, NpmPingResult, NpmProfileMutationResult, NpmProfileResult,
+    NpmPublishPackage, NpmPublishResult, NpmSearchPackage, NpmStarMutationResult, NpmStarsResult,
+    NpmTeamListResult, NpmTeamMutationResult, NpmTokenCreateOptions, NpmTokenCreateResult,
+    NpmTokenListResult, NpmTokenRevokeResult, NpmUnpublishResult, NpmWhoamiResult,
+    NpmWorkspacePackage, OmcRegistryError, PackageSpec, ProjectRequirements, PypiBinaryMode,
+    PypiCheckIssue, PypiUploadOptions, PypiUploadResult, PythonLocalRequirement,
     PythonVcsRequirement, Verdict,
 };
 use sha2::{Digest, Sha256, Sha384, Sha512};
@@ -378,6 +380,9 @@ enum NpmCompatAction {
     },
     Search {
         action: NpmSearchAction,
+    },
+    Star {
+        action: NpmStarAction,
     },
     Ping {
         json: bool,
@@ -824,6 +829,24 @@ struct NpmSearchAction {
     parseable: bool,
     limit: usize,
     npm_registry: Option<String>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum NpmStarAction {
+    Mutate {
+        specs: Vec<String>,
+        starred: bool,
+        json: bool,
+        npm_registry: Option<String>,
+        userconfig: Option<PathBuf>,
+        otp: Option<String>,
+    },
+    List {
+        user: Option<String>,
+        json: bool,
+        npm_registry: Option<String>,
+        userconfig: Option<PathBuf>,
+    },
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -2485,6 +2508,7 @@ fn run_npm_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
         NpmCompatAction::Unpublish { action } => print_npm_unpublish(project_dir, action)?,
         NpmCompatAction::Deprecate { action } => print_npm_deprecate(project_dir, action)?,
         NpmCompatAction::Search { action } => print_npm_search(project_dir, action)?,
+        NpmCompatAction::Star { action } => print_npm_star(project_dir, action)?,
         NpmCompatAction::Ping {
             json,
             npm_registry,
@@ -3306,6 +3330,14 @@ fn npm_help_text(topic: Option<&str>) -> String {
             "npm search <terms...>",
             &["Search the configured npm registry. Aliases: s, se, find. Supports --json, --parseable, --searchlimit."],
         ),
+        Some("star") => npm_command_help(
+            "npm <star|unstar|stars> [<package-spec>|<user>]",
+            &[
+                "Star or unstar npm registry packages, or list packages starred by a user.",
+                "star and unstar accept one or more package specs. stars accepts zero or one username.",
+                "Supports --json, --registry, --userconfig, and --otp for star mutations.",
+            ],
+        ),
         Some("ping") => npm_command_help(
             "npm ping",
             &["Check configured npm registry reachability. Supports --json, --registry, and --userconfig."],
@@ -3450,7 +3482,7 @@ fn npm_general_help_text() -> String {
         "npm <command>",
         &[
             "OMC npm compatibility runs supported npm workflows through OMC's verifier, lockfile, cache, and project-local runtime paths.",
-            "Supported commands: install, link, install-test, ci, install-ci-test, remove, run, test, start, stop, restart, exec, list, explain, audit, outdated, fund, prune, dedupe, rebuild, cache, pkg, version, pack, publish, unpublish, deprecate, undeprecate, search, ping, whoami, login, adduser, logout, token, profile, owner, access, org, team, dist-tag, sbom, view, docs, repo, bugs, home, config, init, bin, root, prefix.",
+            "Supported commands: install, link, install-test, ci, install-ci-test, remove, run, test, start, stop, restart, exec, list, explain, audit, outdated, fund, prune, dedupe, rebuild, cache, pkg, version, pack, publish, unpublish, deprecate, undeprecate, search, star, unstar, stars, ping, whoami, login, adduser, logout, token, profile, owner, access, org, team, dist-tag, sbom, view, docs, repo, bugs, home, config, init, bin, root, prefix.",
             "Use `npm help <command>` for focused OMC compatibility notes.",
         ],
     )
@@ -3491,6 +3523,7 @@ fn npm_help_topic(topic: &str) -> Option<&'static str> {
         "unpublish" => Some("unpublish"),
         "deprecate" | "undeprecate" => Some("deprecate"),
         "search" | "s" | "se" | "find" => Some("search"),
+        "star" | "unstar" | "stars" => Some("star"),
         "ping" => Some("ping"),
         "whoami" => Some("whoami"),
         "login" | "adduser" | "add-user" => Some("login"),
@@ -4176,6 +4209,78 @@ fn print_npm_search(project_dir: &Path, action: NpmSearchAction) -> Result<(), O
             }
             println!("{}", npm_search_package_url(package));
             println!();
+        }
+    }
+    Ok(())
+}
+
+fn print_npm_star(project_dir: &Path, action: NpmStarAction) -> Result<(), OmcRegistryError> {
+    match action {
+        NpmStarAction::Mutate {
+            specs,
+            starred,
+            json,
+            npm_registry,
+            userconfig,
+            otp,
+        } => {
+            let mut results = Vec::new();
+            for raw in specs {
+                let spec = parse_package_spec(&raw, Some(Ecosystem::Npm))?;
+                results.push(mutate_npm_package_star(
+                    project_dir,
+                    &spec,
+                    starred,
+                    npm_registry.as_deref(),
+                    userconfig.as_deref(),
+                    otp.as_deref(),
+                )?);
+            }
+            print_npm_star_mutation_results(&results, json)?;
+        }
+        NpmStarAction::List {
+            user,
+            json,
+            npm_registry,
+            userconfig,
+        } => {
+            let result = read_npm_stars(
+                project_dir,
+                user.as_deref(),
+                npm_registry.as_deref(),
+                userconfig.as_deref(),
+            )?;
+            print_npm_stars_result(&result, json)?;
+        }
+    }
+    Ok(())
+}
+
+fn print_npm_star_mutation_results(
+    results: &[NpmStarMutationResult],
+    json: bool,
+) -> Result<(), OmcRegistryError> {
+    if json {
+        println!("{}", serde_json::to_string_pretty(results)?);
+    } else {
+        for result in results {
+            let action = if result.starred {
+                "starred"
+            } else {
+                "unstarred"
+            };
+            println!("{action} {}", result.package);
+        }
+    }
+    Ok(())
+}
+
+fn print_npm_stars_result(result: &NpmStarsResult, json: bool) -> Result<(), OmcRegistryError> {
+    if json {
+        println!("{}", serde_json::to_string_pretty(result)?);
+    } else {
+        for package in &result.packages {
+            println!("{package}");
         }
     }
     Ok(())
@@ -10131,6 +10236,9 @@ fn parse_npm_compat_action(args: &[String]) -> Result<NpmCompatAction, OmcRegist
         "deprecate" => parse_npm_deprecate_args(false, &args[1..]),
         "undeprecate" => parse_npm_deprecate_args(true, &args[1..]),
         "search" | "s" | "se" | "find" => parse_npm_search_args(&args[1..]),
+        "star" => parse_npm_star_args(true, &args[1..]),
+        "unstar" => parse_npm_star_args(false, &args[1..]),
+        "stars" => parse_npm_stars_args(&args[1..]),
         "ping" => parse_npm_ping_args(&args[1..]),
         "whoami" => parse_npm_whoami_args(&args[1..]),
         "login" | "adduser" | "add-user" => parse_npm_login_args(&args[1..]),
@@ -10296,6 +10404,9 @@ fn npm_global_arg_supported_by_command(command: &str, arg: &str) -> bool {
                 | "s"
                 | "se"
                 | "find"
+                | "star"
+                | "unstar"
+                | "stars"
                 | "ping"
                 | "whoami"
                 | "login"
@@ -10330,6 +10441,8 @@ fn npm_global_arg_supported_by_command(command: &str, arg: &str) -> bool {
                 | "unpublish"
                 | "deprecate"
                 | "undeprecate"
+                | "star"
+                | "unstar"
                 | "token"
                 | "profile"
                 | "owner"
@@ -10443,6 +10556,9 @@ fn npm_global_arg_supported_by_command(command: &str, arg: &str) -> bool {
                 | "unpublish"
                 | "deprecate"
                 | "undeprecate"
+                | "star"
+                | "unstar"
+                | "stars"
                 | "logout"
                 | "token"
                 | "profile"
@@ -10520,6 +10636,9 @@ fn npm_global_arg_supported_by_command(command: &str, arg: &str) -> bool {
                 | "s"
                 | "se"
                 | "find"
+                | "star"
+                | "unstar"
+                | "stars"
                 | "ping"
                 | "whoami"
                 | "login"
@@ -12096,6 +12215,146 @@ fn npm_search_ignored_equals_flag(arg: &str) -> bool {
     ]
     .iter()
     .any(|prefix| arg.starts_with(prefix))
+}
+
+fn parse_npm_star_args(
+    starred: bool,
+    args: &[String],
+) -> Result<NpmCompatAction, OmcRegistryError> {
+    let mut json = false;
+    let mut npm_registry = None;
+    let mut userconfig = None;
+    let mut otp = None;
+    let mut specs = Vec::new();
+    let command = if starred { "npm star" } else { "npm unstar" };
+    let mut index = 0;
+    while index < args.len() {
+        let arg = &args[index];
+        if arg == "--json" || arg == "--json=true" {
+            json = true;
+        } else if arg == "--json=false" {
+            json = false;
+        } else if arg == "--registry" {
+            index += 1;
+            npm_registry = Some(npm_star_flag_value(args, index, arg)?);
+        } else if let Some(registry) = arg.strip_prefix("--registry=") {
+            npm_registry = Some(registry.to_owned());
+        } else if arg == "--userconfig" {
+            index += 1;
+            userconfig = Some(PathBuf::from(npm_star_flag_value(args, index, arg)?));
+        } else if let Some(value) = arg.strip_prefix("--userconfig=") {
+            userconfig = Some(PathBuf::from(value));
+        } else if arg == "--otp" {
+            index += 1;
+            otp = Some(npm_star_flag_value(args, index, arg)?);
+        } else if let Some(value) = arg.strip_prefix("--otp=") {
+            otp = Some(value.to_owned());
+        } else if matches!(arg.as_str(), "--silent" | "-s" | "--parseable" | "-p") {
+        } else if matches!(arg.as_str(), "--loglevel" | "--cache") {
+            index += 1;
+            if args.get(index).is_none() {
+                return Err(OmcRegistryError::UnsupportedSpec(format!(
+                    "{arg} needs a value"
+                )));
+            }
+        } else if npm_star_ignored_equals_flag(arg) {
+        } else if arg.starts_with('-') {
+            return Err(unsupported_compat_arg(command, arg));
+        } else {
+            specs.push(arg.clone());
+        }
+        index += 1;
+    }
+
+    if specs.is_empty() {
+        return Err(OmcRegistryError::UnsupportedSpec(format!(
+            "{command} needs at least one package spec"
+        )));
+    }
+    Ok(NpmCompatAction::Star {
+        action: NpmStarAction::Mutate {
+            specs,
+            starred,
+            json,
+            npm_registry,
+            userconfig,
+            otp,
+        },
+    })
+}
+
+fn parse_npm_stars_args(args: &[String]) -> Result<NpmCompatAction, OmcRegistryError> {
+    let mut json = false;
+    let mut npm_registry = None;
+    let mut userconfig = None;
+    let mut positionals = Vec::new();
+    let mut index = 0;
+    while index < args.len() {
+        let arg = &args[index];
+        if arg == "--json" || arg == "--json=true" {
+            json = true;
+        } else if arg == "--json=false" {
+            json = false;
+        } else if arg == "--registry" {
+            index += 1;
+            npm_registry = Some(npm_star_flag_value(args, index, arg)?);
+        } else if let Some(registry) = arg.strip_prefix("--registry=") {
+            npm_registry = Some(registry.to_owned());
+        } else if arg == "--userconfig" {
+            index += 1;
+            userconfig = Some(PathBuf::from(npm_star_flag_value(args, index, arg)?));
+        } else if let Some(value) = arg.strip_prefix("--userconfig=") {
+            userconfig = Some(PathBuf::from(value));
+        } else if matches!(arg.as_str(), "--silent" | "-s" | "--parseable" | "-p") {
+        } else if matches!(arg.as_str(), "--loglevel" | "--cache") {
+            index += 1;
+            if args.get(index).is_none() {
+                return Err(OmcRegistryError::UnsupportedSpec(format!(
+                    "{arg} needs a value"
+                )));
+            }
+        } else if npm_star_ignored_equals_flag(arg) {
+        } else if arg.starts_with('-') {
+            return Err(unsupported_compat_arg("npm stars", arg));
+        } else {
+            positionals.push(arg.clone());
+        }
+        index += 1;
+    }
+
+    if positionals.len() > 1 {
+        return Err(unsupported_compat_arg("npm stars", &positionals[1]));
+    }
+    Ok(NpmCompatAction::Star {
+        action: NpmStarAction::List {
+            user: positionals.pop(),
+            json,
+            npm_registry,
+            userconfig,
+        },
+    })
+}
+
+fn npm_star_ignored_equals_flag(arg: &str) -> bool {
+    [
+        "--json=",
+        "--parseable=",
+        "--loglevel=",
+        "--cache=",
+        "--color=",
+    ]
+    .iter()
+    .any(|prefix| arg.starts_with(prefix))
+}
+
+fn npm_star_flag_value(
+    args: &[String],
+    index: usize,
+    flag: &str,
+) -> Result<String, OmcRegistryError> {
+    args.get(index)
+        .cloned()
+        .ok_or_else(|| OmcRegistryError::UnsupportedSpec(format!("{flag} needs a value")))
 }
 
 fn parse_npm_ping_args(args: &[String]) -> Result<NpmCompatAction, OmcRegistryError> {
@@ -17880,6 +18139,62 @@ mod tests {
                     parseable: true,
                     limit: 250,
                     npm_registry: None,
+                },
+            }
+        );
+        assert_eq!(
+            parse_npm_compat_action(&args(&[
+                "--json",
+                "--registry",
+                "https://registry.example.invalid/npm",
+                "--userconfig=ci.npmrc",
+                "--otp",
+                "123456",
+                "star",
+                "left-pad",
+                "@demo/pkg",
+            ]))
+            .unwrap(),
+            NpmCompatAction::Star {
+                action: NpmStarAction::Mutate {
+                    specs: vec!["left-pad".to_owned(), "@demo/pkg".to_owned()],
+                    starred: true,
+                    json: true,
+                    npm_registry: Some("https://registry.example.invalid/npm".to_owned()),
+                    userconfig: Some(PathBuf::from("ci.npmrc")),
+                    otp: Some("123456".to_owned()),
+                },
+            }
+        );
+        assert_eq!(
+            parse_npm_compat_action(&args(&["unstar", "left-pad", "--otp=123456"])).unwrap(),
+            NpmCompatAction::Star {
+                action: NpmStarAction::Mutate {
+                    specs: vec!["left-pad".to_owned()],
+                    starred: false,
+                    json: false,
+                    npm_registry: None,
+                    userconfig: None,
+                    otp: Some("123456".to_owned()),
+                },
+            }
+        );
+        assert_eq!(
+            parse_npm_compat_action(&args(&[
+                "--registry=https://registry.example.invalid/npm",
+                "--userconfig",
+                "ci.npmrc",
+                "stars",
+                "alice",
+                "--json",
+            ]))
+            .unwrap(),
+            NpmCompatAction::Star {
+                action: NpmStarAction::List {
+                    user: Some("alice".to_owned()),
+                    json: true,
+                    npm_registry: Some("https://registry.example.invalid/npm".to_owned()),
+                    userconfig: Some(PathBuf::from("ci.npmrc")),
                 },
             }
         );

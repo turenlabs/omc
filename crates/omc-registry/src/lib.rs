@@ -7574,6 +7574,24 @@ pub struct NpmTeamMutationResult {
     pub response: serde_json::Value,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct NpmStarMutationResult {
+    pub registry: String,
+    pub package: String,
+    pub user: String,
+    pub starred: bool,
+    pub status: u16,
+    pub response: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct NpmStarsResult {
+    pub registry: String,
+    pub user: String,
+    pub packages: Vec<String>,
+    pub response: serde_json::Value,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct NpmDeprecateResult {
     pub registry: String,
@@ -8742,6 +8760,117 @@ pub fn mutate_npm_package_owner(
     })
 }
 
+pub fn mutate_npm_package_star(
+    project_dir: &Path,
+    spec: &PackageSpec,
+    starred: bool,
+    registry_override: Option<&str>,
+    userconfig_override: Option<&Path>,
+    otp: Option<&str>,
+) -> Result<NpmStarMutationResult> {
+    if spec.ecosystem != Ecosystem::Npm || spec.direct_url.is_some() {
+        return Err(OmcRegistryError::UnsupportedSpec(spec.requested()));
+    }
+    let (package, _) = npm_registry_name_and_requirement(spec)?;
+    let client = Client::new();
+    let npm_config =
+        read_npm_config_with_overrides(project_dir, registry_override, userconfig_override)?;
+    let registry = ensure_trailing_slash(npm_config.registry_for(&package));
+    let whoami = read_npm_whoami(project_dir, Some(registry.as_str()), userconfig_override)?;
+    let username = whoami.username;
+    let packument = npm_owner_packument(&client, &registry, &package, &npm_config)?;
+    let package_id = packument
+        .get("_id")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or(&package)
+        .to_owned();
+    let revision = packument
+        .get("_rev")
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| {
+            OmcRegistryError::UnsupportedSpec(format!(
+                "npm registry response for `{package}` did not include _rev"
+            ))
+        })?
+        .to_owned();
+    let mut users = npm_packument_users(&packument)?;
+    if starred {
+        users.insert(username.clone(), true);
+    } else {
+        users.remove(&username);
+    }
+
+    let encoded = urlencoding::encode(&package);
+    let url = format!("{registry}{encoded}");
+    if npm_config.auth_token_for_url(&url).is_none() {
+        return Err(OmcRegistryError::UnsupportedSpec(
+            "npm star needs authentication; run npm login or configure a registry _authToken"
+                .to_owned(),
+        ));
+    }
+    let body = serde_json::json!({
+        "_id": package_id,
+        "_rev": revision,
+        "users": users,
+    });
+    let mut request = npm_put(&client, &url, &npm_config).json(&body);
+    if let Some(otp) = otp.map(str::trim).filter(|otp| !otp.is_empty()) {
+        request = request.header("npm-otp", otp);
+    }
+    let response = request.send()?;
+    response.error_for_status_ref()?;
+    let status = response.status().as_u16();
+    let response = npm_optional_json_response(response)?;
+    Ok(NpmStarMutationResult {
+        registry,
+        package,
+        user: username,
+        starred,
+        status,
+        response,
+    })
+}
+
+pub fn read_npm_stars(
+    project_dir: &Path,
+    user: Option<&str>,
+    registry_override: Option<&str>,
+    userconfig_override: Option<&Path>,
+) -> Result<NpmStarsResult> {
+    let client = Client::new();
+    let npm_config =
+        read_npm_config_with_overrides(project_dir, registry_override, userconfig_override)?;
+    let registry = ensure_trailing_slash(&npm_config.registry);
+    let user = match user.map(str::trim).filter(|user| !user.is_empty()) {
+        Some(user) => user.to_owned(),
+        None => read_npm_whoami(project_dir, registry_override, userconfig_override)?.username,
+    };
+    let key_value = format!("\"{user}\"");
+    let key = urlencoding::encode(&key_value);
+    let url = format!("{registry}-/_view/starredByUser?key={key}");
+    let response = npm_get(&client, &url, &npm_config)
+        .send()?
+        .error_for_status()?
+        .json::<serde_json::Value>()?;
+    let packages = response
+        .get("rows")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| {
+            OmcRegistryError::UnsupportedSpec("npm stars response did not include rows".to_owned())
+        })?
+        .iter()
+        .filter_map(|row| row.get("value").and_then(serde_json::Value::as_str))
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    Ok(NpmStarsResult {
+        registry,
+        user,
+        packages,
+        response,
+    })
+}
+
 fn npm_owner_packument(
     client: &Client,
     registry: &str,
@@ -8803,6 +8932,21 @@ fn npm_packument_maintainers(packument: &serde_json::Value) -> Result<Vec<NpmSea
     }
     owners.sort_by(|left, right| left.username.cmp(&right.username));
     Ok(owners)
+}
+
+fn npm_packument_users(packument: &serde_json::Value) -> Result<BTreeMap<String, bool>> {
+    let Some(users) = packument.get("users") else {
+        return Ok(BTreeMap::new());
+    };
+    let users = users.as_object().ok_or_else(|| {
+        OmcRegistryError::UnsupportedSpec(
+            "npm registry response users field was not an object".to_owned(),
+        )
+    })?;
+    Ok(users
+        .iter()
+        .filter_map(|(user, value)| value.as_bool().map(|starred| (user.clone(), starred)))
+        .collect())
 }
 
 fn npm_owner_json(owner: &NpmSearchUser) -> serde_json::Value {
@@ -20984,6 +21128,219 @@ wheels = [
         assert_eq!(mutation.status, Some(201));
         assert_eq!(mutation.owners.len(), 3);
         assert_eq!(mutation.response["ok"], true);
+        handle.join().unwrap();
+    }
+
+    #[test]
+    fn stars_and_unstars_npm_packages_with_userconfig_auth_and_otp() {
+        use std::io::Write as _;
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let handle = std::thread::spawn(move || {
+            let whoami = r#"{"username":"alice"}"#;
+            let packument = r#"{
+              "_id": "demo-pkg",
+              "_rev": "1-abc",
+              "name": "demo-pkg",
+              "users": {"bob": true}
+            }"#;
+
+            let (mut stream, _) = listener.accept().unwrap();
+            let buffer = read_http_request_bytes(&mut stream);
+            let body_start = http_body_start(&buffer).unwrap();
+            let headers = String::from_utf8_lossy(&buffer[..body_start]);
+            assert!(headers.starts_with("GET /-/whoami "));
+            assert!(headers
+                .to_ascii_lowercase()
+                .contains("authorization: bearer registry-token"));
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                whoami.len(),
+                whoami
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+
+            let (mut stream, _) = listener.accept().unwrap();
+            let buffer = read_http_request_bytes(&mut stream);
+            let body_start = http_body_start(&buffer).unwrap();
+            let headers = String::from_utf8_lossy(&buffer[..body_start]);
+            assert!(headers.starts_with("GET /demo-pkg?write=true "));
+            assert!(headers
+                .to_ascii_lowercase()
+                .contains("authorization: bearer registry-token"));
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                packument.len(),
+                packument
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+
+            let (mut stream, _) = listener.accept().unwrap();
+            let buffer = read_http_request_bytes(&mut stream);
+            let body_start = http_body_start(&buffer).unwrap();
+            let headers = String::from_utf8_lossy(&buffer[..body_start]);
+            assert!(headers.starts_with("PUT /demo-pkg "));
+            let lower = headers.to_ascii_lowercase();
+            assert!(lower.contains("authorization: bearer registry-token"));
+            assert!(lower.contains("npm-otp: 123456"));
+            let body: serde_json::Value = serde_json::from_slice(&buffer[body_start..]).unwrap();
+            assert_eq!(body["_id"], "demo-pkg");
+            assert_eq!(body["_rev"], "1-abc");
+            assert_eq!(body["users"]["alice"], true);
+            assert_eq!(body["users"]["bob"], true);
+            let response_body = r#"{"ok":true}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                response_body.len(),
+                response_body
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+
+            let packument = r#"{
+              "_id": "demo-pkg",
+              "_rev": "2-def",
+              "name": "demo-pkg",
+              "users": {"alice": true, "bob": true}
+            }"#;
+
+            let (mut stream, _) = listener.accept().unwrap();
+            let buffer = read_http_request_bytes(&mut stream);
+            let body_start = http_body_start(&buffer).unwrap();
+            let headers = String::from_utf8_lossy(&buffer[..body_start]);
+            assert!(headers.starts_with("GET /-/whoami "));
+            assert!(headers
+                .to_ascii_lowercase()
+                .contains("authorization: bearer registry-token"));
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                whoami.len(),
+                whoami
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+
+            let (mut stream, _) = listener.accept().unwrap();
+            let buffer = read_http_request_bytes(&mut stream);
+            let body_start = http_body_start(&buffer).unwrap();
+            let headers = String::from_utf8_lossy(&buffer[..body_start]);
+            assert!(headers.starts_with("GET /demo-pkg?write=true "));
+            assert!(headers
+                .to_ascii_lowercase()
+                .contains("authorization: bearer registry-token"));
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                packument.len(),
+                packument
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+
+            let (mut stream, _) = listener.accept().unwrap();
+            let buffer = read_http_request_bytes(&mut stream);
+            let body_start = http_body_start(&buffer).unwrap();
+            let headers = String::from_utf8_lossy(&buffer[..body_start]);
+            assert!(headers.starts_with("PUT /demo-pkg "));
+            let lower = headers.to_ascii_lowercase();
+            assert!(lower.contains("authorization: bearer registry-token"));
+            assert!(lower.contains("npm-otp: 123456"));
+            let body: serde_json::Value = serde_json::from_slice(&buffer[body_start..]).unwrap();
+            assert_eq!(body["_id"], "demo-pkg");
+            assert_eq!(body["_rev"], "2-def");
+            assert!(body["users"].get("alice").is_none());
+            assert_eq!(body["users"]["bob"], true);
+            let response_body = r#"{"ok":true}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                response_body.len(),
+                response_body
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+        });
+
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(
+            dir.path().join("ci.npmrc"),
+            format!("registry=http://{addr}/\n//{addr}/:_authToken=registry-token\n"),
+        )
+        .unwrap();
+
+        let spec = PackageSpec::parse("npm:demo-pkg").unwrap();
+        let starred = mutate_npm_package_star(
+            dir.path(),
+            &spec,
+            true,
+            None,
+            Some(Path::new("ci.npmrc")),
+            Some("123456"),
+        )
+        .unwrap();
+        assert_eq!(starred.registry, format!("http://{addr}/"));
+        assert_eq!(starred.package, "demo-pkg");
+        assert_eq!(starred.user, "alice");
+        assert!(starred.starred);
+        assert_eq!(starred.status, 200);
+        assert_eq!(starred.response["ok"], true);
+
+        let unstarred = mutate_npm_package_star(
+            dir.path(),
+            &spec,
+            false,
+            None,
+            Some(Path::new("ci.npmrc")),
+            Some("123456"),
+        )
+        .unwrap();
+        assert_eq!(unstarred.registry, format!("http://{addr}/"));
+        assert_eq!(unstarred.package, "demo-pkg");
+        assert_eq!(unstarred.user, "alice");
+        assert!(!unstarred.starred);
+        assert_eq!(unstarred.status, 200);
+        assert_eq!(unstarred.response["ok"], true);
+        handle.join().unwrap();
+    }
+
+    #[test]
+    fn reads_npm_stars_with_userconfig_auth() {
+        use std::io::Write as _;
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let handle = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let buffer = read_http_request_bytes(&mut stream);
+            let body_start = http_body_start(&buffer).unwrap();
+            let headers = String::from_utf8_lossy(&buffer[..body_start]);
+            assert!(headers.starts_with("GET /-/_view/starredByUser?key=%22alice%22 "));
+            assert!(headers
+                .to_ascii_lowercase()
+                .contains("authorization: bearer registry-token"));
+            let body = r#"{
+              "rows": [
+                {"value": "left-pad"},
+                {"value": "@demo/pkg"},
+                {"value": 42}
+              ]
+            }"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+        });
+
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(
+            dir.path().join("ci.npmrc"),
+            format!("registry=http://{addr}/\n//{addr}/:_authToken=registry-token\n"),
+        )
+        .unwrap();
+
+        let result =
+            read_npm_stars(dir.path(), Some("alice"), None, Some(Path::new("ci.npmrc"))).unwrap();
+        assert_eq!(result.registry, format!("http://{addr}/"));
+        assert_eq!(result.user, "alice");
+        assert_eq!(result.packages, vec!["left-pad", "@demo/pkg"]);
+        assert!(result.response.get("rows").is_some());
         handle.join().unwrap();
     }
 
