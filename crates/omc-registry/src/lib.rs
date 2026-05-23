@@ -967,6 +967,12 @@ fn discover_project_requirements_with_options(
         project.specs.extend(requirements.specs);
     }
 
+    let setup_py = project_dir.join("setup.py");
+    if setup_py.exists() {
+        let requirements = read_setup_py_requirements(&setup_py, project_extras)?;
+        project.specs.extend(requirements.specs);
+    }
+
     let poetry_lock = project_dir.join("poetry.lock");
     if poetry_lock.exists() {
         let requirements = read_poetry_lock_requirements(&poetry_lock)?;
@@ -2619,6 +2625,315 @@ fn push_setup_cfg_value(
         .entry(key.to_owned())
         .or_default()
         .push(value.to_owned());
+}
+
+fn read_setup_py_requirements(
+    path: &Path,
+    project_extras: &BTreeSet<String>,
+) -> Result<ProjectRequirements> {
+    let content = fs::read_to_string(path)?;
+    let mut requirements = ProjectRequirements::default();
+
+    for value in python_keyword_assignment_values(&content, "install_requires") {
+        for requirement in python_string_literals(value) {
+            if let Some(spec) = parse_pypi_requirement_with_extras(&requirement, project_extras) {
+                requirements.specs.push(spec);
+            }
+        }
+    }
+
+    for value in python_keyword_assignment_values(&content, "extras_require") {
+        for requirement in python_string_dict_values(value, project_extras) {
+            if let Some(spec) = parse_pypi_requirement_with_extras(&requirement, project_extras) {
+                requirements.specs.push(spec);
+            }
+        }
+    }
+
+    Ok(requirements)
+}
+
+fn python_keyword_assignment_values<'a>(content: &'a str, keyword: &str) -> Vec<&'a str> {
+    let mut values = Vec::new();
+    let bytes = content.as_bytes();
+    let keyword = keyword.as_bytes();
+    let mut index = 0;
+
+    while index + keyword.len() <= bytes.len() {
+        if bytes[index] == b'#' {
+            index = skip_python_comment(content, index);
+            continue;
+        }
+        if let Some(token) = python_string_literal_at(content, index) {
+            index = token.end;
+            continue;
+        }
+        if !bytes[index..].starts_with(keyword)
+            || index
+                .checked_sub(1)
+                .map(|previous| python_identifier_char(bytes[previous]))
+                .unwrap_or(false)
+            || bytes
+                .get(index + keyword.len())
+                .copied()
+                .map(python_identifier_char)
+                .unwrap_or(false)
+        {
+            index += 1;
+            continue;
+        }
+
+        let mut value_start = skip_python_ws_and_comments(content, index + keyword.len());
+        if bytes.get(value_start) != Some(&b'=') {
+            index += keyword.len();
+            continue;
+        }
+        value_start = skip_python_ws_and_comments(content, value_start + 1);
+
+        let Some(value_end) = python_literal_value_end(content, value_start) else {
+            index += keyword.len();
+            continue;
+        };
+        values.push(&content[value_start..value_end]);
+        index = value_end;
+    }
+
+    values
+}
+
+fn python_literal_value_end(content: &str, start: usize) -> Option<usize> {
+    let byte = *content.as_bytes().get(start)?;
+    if matches!(byte, b'[' | b'(' | b'{') {
+        return python_balanced_literal_end(content, start);
+    }
+    python_string_literal_at(content, start).map(|token| token.end)
+}
+
+fn python_balanced_literal_end(content: &str, start: usize) -> Option<usize> {
+    let bytes = content.as_bytes();
+    let mut stack = Vec::new();
+    stack.push(python_matching_close(*bytes.get(start)?)?);
+    let mut index = start + 1;
+
+    while index < bytes.len() {
+        let byte = bytes[index];
+        if byte == b'#' {
+            index = skip_python_comment(content, index);
+            continue;
+        }
+        if let Some(token) = python_string_literal_at(content, index) {
+            index = token.end;
+            continue;
+        }
+        if let Some(close) = python_matching_close(byte) {
+            stack.push(close);
+            index += 1;
+            continue;
+        }
+        if stack.last().copied() == Some(byte) {
+            stack.pop();
+            index += 1;
+            if stack.is_empty() {
+                return Some(index);
+            }
+            continue;
+        }
+        index += 1;
+    }
+
+    None
+}
+
+fn python_matching_close(open: u8) -> Option<u8> {
+    match open {
+        b'[' => Some(b']'),
+        b'(' => Some(b')'),
+        b'{' => Some(b'}'),
+        _ => None,
+    }
+}
+
+fn python_string_literals(content: &str) -> Vec<String> {
+    let mut values = Vec::new();
+    let bytes = content.as_bytes();
+    let mut index = 0;
+
+    while index < bytes.len() {
+        if bytes[index] == b'#' {
+            index = skip_python_comment(content, index);
+            continue;
+        }
+        if let Some(token) = python_string_literal_at(content, index) {
+            if let Some(value) = token.value {
+                values.push(value);
+            }
+            index = token.end;
+        } else {
+            index += 1;
+        }
+    }
+
+    values
+}
+
+fn python_string_dict_values(content: &str, selected_keys: &BTreeSet<String>) -> Vec<String> {
+    let mut values = Vec::new();
+    let bytes = content.as_bytes();
+    if bytes.first() != Some(&b'{') {
+        return values;
+    }
+
+    let mut index = 1;
+    while index < bytes.len() {
+        index = skip_python_ws_and_comments(content, index);
+        if bytes.get(index) == Some(&b'}') {
+            break;
+        }
+        if bytes.get(index) == Some(&b',') {
+            index += 1;
+            continue;
+        }
+
+        let Some(key_token) = python_string_literal_at(content, index) else {
+            index += 1;
+            continue;
+        };
+        let Some(key) = key_token.value else {
+            index = key_token.end;
+            continue;
+        };
+        index = skip_python_ws_and_comments(content, key_token.end);
+        if bytes.get(index) != Some(&b':') {
+            continue;
+        }
+        index = skip_python_ws_and_comments(content, index + 1);
+        let Some(value_end) = python_literal_value_end(content, index) else {
+            continue;
+        };
+        if selected_keys.contains(&normalize_pypi_extra(&key)) {
+            values.extend(python_string_literals(&content[index..value_end]));
+        }
+        index = value_end;
+    }
+
+    values
+}
+
+struct PythonStringToken {
+    value: Option<String>,
+    end: usize,
+}
+
+fn python_string_literal_at(content: &str, start: usize) -> Option<PythonStringToken> {
+    let bytes = content.as_bytes();
+    let mut quote_index = start;
+    let mut dynamic_or_bytes = false;
+
+    while let Some(byte) = bytes.get(quote_index).copied() {
+        if matches!(byte, b'\'' | b'"') {
+            break;
+        }
+        if matches!(byte, b'r' | b'R' | b'u' | b'U' | b'b' | b'B' | b'f' | b'F') {
+            dynamic_or_bytes |= matches!(byte, b'b' | b'B' | b'f' | b'F');
+            quote_index += 1;
+            continue;
+        }
+        return None;
+    }
+
+    let quote = *bytes.get(quote_index)?;
+    if !matches!(quote, b'\'' | b'"') {
+        return None;
+    }
+
+    let triple =
+        bytes.get(quote_index + 1) == Some(&quote) && bytes.get(quote_index + 2) == Some(&quote);
+    let mut index = quote_index + if triple { 3 } else { 1 };
+    let value_start = index;
+
+    while index < bytes.len() {
+        if !triple && bytes[index] == b'\\' {
+            index = index.saturating_add(2);
+            continue;
+        }
+        if triple {
+            if bytes[index] == quote
+                && bytes.get(index + 1) == Some(&quote)
+                && bytes.get(index + 2) == Some(&quote)
+            {
+                let raw = &content[value_start..index];
+                return Some(PythonStringToken {
+                    value: (!dynamic_or_bytes).then(|| unescape_python_string(raw)),
+                    end: index + 3,
+                });
+            }
+            index += 1;
+            continue;
+        }
+        if bytes[index] == quote {
+            let raw = &content[value_start..index];
+            return Some(PythonStringToken {
+                value: (!dynamic_or_bytes).then(|| unescape_python_string(raw)),
+                end: index + 1,
+            });
+        }
+        index += 1;
+    }
+
+    None
+}
+
+fn unescape_python_string(raw: &str) -> String {
+    let mut output = String::new();
+    let mut chars = raw.chars();
+    while let Some(ch) = chars.next() {
+        if ch != '\\' {
+            output.push(ch);
+            continue;
+        }
+        match chars.next() {
+            Some('n') => output.push('\n'),
+            Some('r') => output.push('\r'),
+            Some('t') => output.push('\t'),
+            Some('\\') => output.push('\\'),
+            Some('\'') => output.push('\''),
+            Some('"') => output.push('"'),
+            Some(other) => {
+                output.push('\\');
+                output.push(other);
+            }
+            None => output.push('\\'),
+        }
+    }
+    output
+}
+
+fn skip_python_ws_and_comments(content: &str, mut index: usize) -> usize {
+    let bytes = content.as_bytes();
+    while index < bytes.len() {
+        if bytes[index].is_ascii_whitespace() {
+            index += 1;
+            continue;
+        }
+        if bytes[index] == b'#' {
+            index = skip_python_comment(content, index);
+            continue;
+        }
+        break;
+    }
+    index
+}
+
+fn skip_python_comment(content: &str, mut index: usize) -> usize {
+    let bytes = content.as_bytes();
+    while index < bytes.len() && bytes[index] != b'\n' {
+        index += 1;
+    }
+    index
+}
+
+fn python_identifier_char(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || byte == b'_'
 }
 
 fn read_pyproject_requirements(
@@ -8559,6 +8874,74 @@ wheels = [
             [options]
             install_requires =
                 idna==3.7
+            "#,
+        )
+        .unwrap();
+
+        let discovered = discover_project_requirements(dir.path()).unwrap();
+        assert!(has_spec(&discovered.specs, "idna", "==3.7"));
+    }
+
+    #[test]
+    fn reads_setup_py_static_requirements_and_selected_extras() {
+        let dir = tempfile::tempdir().unwrap();
+        let setup_py = dir.path().join("setup.py");
+        fs::write(
+            &setup_py,
+            r#"
+            from setuptools import setup
+
+            NOTE = "install_requires=['ignored-string==1.0']"
+            # install_requires=["ignored-comment==1.0"]
+
+            setup(
+                name="setup-py-demo",
+                install_requires=[
+                    # "ignored-list-comment==1.0"
+                    "idna==3.7",
+                    "colorama; sys_platform == 'win32'",
+                ],
+                extras_require={
+                    "dev": [
+                        "charset-normalizer==3.4.0",
+                    ],
+                    "docs": ["markdown==3.6"],
+                },
+            )
+            "#,
+        )
+        .unwrap();
+
+        let base = read_setup_py_requirements(&setup_py, &BTreeSet::new()).unwrap();
+        assert!(has_spec(&base.specs, "idna", "==3.7"));
+        assert!(!base.specs.iter().any(|spec| spec.name == "colorama"));
+        assert!(!base
+            .specs
+            .iter()
+            .any(|spec| spec.name.starts_with("ignored-")));
+        assert!(!base
+            .specs
+            .iter()
+            .any(|spec| spec.name == "charset-normalizer"));
+
+        let dev =
+            read_setup_py_requirements(&setup_py, &BTreeSet::from(["dev".to_owned()])).unwrap();
+        assert!(has_spec(&dev.specs, "charset-normalizer", "==3.4.0"));
+        assert!(!dev.specs.iter().any(|spec| spec.name == "markdown"));
+    }
+
+    #[test]
+    fn discovers_setup_py_requirements() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(
+            dir.path().join("setup.py"),
+            r#"
+            from setuptools import setup
+
+            setup(
+                name="setup-py-demo",
+                install_requires=["idna==3.7"],
+            )
             "#,
         )
         .unwrap();

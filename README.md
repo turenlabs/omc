@@ -133,6 +133,7 @@ pyproject.toml    PEP 621 project dependencies, selected optional groups, depend
 pyproject.toml    Poetry dependencies, dev groups, optional groups, extras, and wheel URL/path dependencies
 poetry.lock       exact PyPI versions and file hashes for locked Poetry packages
 setup.cfg         legacy setuptools install_requires and selected extras_require
+setup.py          static setuptools install_requires and selected extras_require
 ```
 
 What `add` does:
@@ -276,6 +277,8 @@ Supported now:
   locked PyPI packages
 - `setup.cfg` `install_requires` ingestion plus selected
   `[options.extras_require]` extras
+- static `setup.py` `install_requires` ingestion plus selected
+  `extras_require` extras
 - PyPI extras resolution for dependencies gated by `extra == "..."`
 - source artifact download and cache
 - `omc.toml` and `omc.lock`
