@@ -10,9 +10,9 @@ use omc_registry::{
     apply_pypi_binary_option, check_pypi_lock, init_project, install_locked_packages,
     install_locked_project, install_project, lock_project, parse_capability_grant,
     parse_npm_direct_archive_reference, parse_pypi_direct_archive_reference, read_lockfile,
-    read_package_scripts, remove_manifest_dependency, Behavior, Ecosystem, InstallReport,
-    LinkOptions, LockedPackage, OmcRegistryError, PackageSpec, PypiBinaryMode, PypiCheckIssue,
-    PythonLocalRequirement, Verdict,
+    read_package_scripts, read_requirements_files, remove_manifest_dependency, Behavior, Ecosystem,
+    InstallReport, LinkOptions, LockedPackage, OmcRegistryError, PackageSpec, PypiBinaryMode,
+    PypiCheckIssue, PythonLocalRequirement, Verdict,
 };
 
 #[derive(Debug, Parser)]
@@ -65,7 +65,7 @@ enum Command {
         #[arg(long, help = "Grant all host capabilities for compatibility testing")]
         allow_all_host: bool,
     },
-    #[command(about = "Remove an OMC-managed dependency and reinstall current project inputs")]
+    #[command(about = "Remove an OMC-managed dependency and reinstall remaining manifest inputs")]
     Remove {
         #[arg(
             long,
@@ -269,6 +269,7 @@ enum PipCompatAction {
     Install(Box<PipInstallAction>),
     Uninstall {
         specs: Vec<String>,
+        requirements: Vec<PathBuf>,
         allow: Vec<String>,
         allow_all_host: bool,
     },
@@ -1039,10 +1040,15 @@ fn run_pip_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
             }
         }
         PipCompatAction::Uninstall {
-            specs,
+            mut specs,
+            requirements,
             allow,
             allow_all_host,
         } => {
+            specs.extend(pip_uninstall_specs_from_requirements(
+                project_dir,
+                requirements,
+            )?);
             remove_specs(
                 project_dir,
                 &specs,
@@ -1104,6 +1110,7 @@ fn remove_specs(
 
     let mut options = LinkOptions::new(project_dir);
     options.allowed_capabilities = parse_grants(allow, allow_all_host)?;
+    options.discover_project_requirements = false;
     let install = install_project(&options)?;
     println!("removed {}", removed.join(", "));
     print_install_report(&install);
@@ -1968,24 +1975,7 @@ fn parse_pip_compat_action(args: &[String]) -> Result<PipCompatAction, OmcRegist
     match command {
         "--version" | "-V" => Ok(PipCompatAction::Version),
         "install" => parse_pip_install_args(&args[1..]),
-        "uninstall" | "remove" => {
-            let CommonCompatFlags {
-                allow,
-                allow_all_host,
-                positionals,
-                ..
-            } = parse_common_compat_flags(&args[1..], false)?;
-            if positionals.is_empty() {
-                return Err(OmcRegistryError::UnsupportedSpec(
-                    "pip uninstall needs at least one package".to_owned(),
-                ));
-            }
-            Ok(PipCompatAction::Uninstall {
-                specs: positionals,
-                allow,
-                allow_all_host,
-            })
-        }
+        "uninstall" | "remove" => parse_pip_uninstall_args(&args[1..]),
         "show" => parse_pip_show_args(&args[1..]),
         "check" => {
             parse_pip_check_args(&args[1..])?;
@@ -1999,6 +1989,51 @@ fn parse_pip_compat_action(args: &[String]) -> Result<PipCompatAction, OmcRegist
             "unsupported pip compatibility command `{other}`"
         ))),
     }
+}
+
+fn parse_pip_uninstall_args(args: &[String]) -> Result<PipCompatAction, OmcRegistryError> {
+    let mut requirements = Vec::new();
+    let mut filtered = Vec::new();
+    let mut index = 0;
+    while index < args.len() {
+        let arg = &args[index];
+        if arg == "-r" || arg == "--requirement" {
+            index += 1;
+            let Some(path) = args.get(index) else {
+                return Err(OmcRegistryError::UnsupportedSpec(format!(
+                    "{arg} needs a path"
+                )));
+            };
+            requirements.push(PathBuf::from(path));
+        } else if let Some(path) = arg.strip_prefix("--requirement=") {
+            requirements.push(PathBuf::from(path));
+        } else if matches!(
+            arg.as_str(),
+            "-y" | "--yes" | "--disable-pip-version-check" | "-v" | "--verbose" | "-q" | "--quiet"
+        ) {
+        } else {
+            filtered.push(arg.clone());
+        }
+        index += 1;
+    }
+
+    let CommonCompatFlags {
+        allow,
+        allow_all_host,
+        positionals,
+        ..
+    } = parse_common_compat_flags(&filtered, false)?;
+    if positionals.is_empty() && requirements.is_empty() {
+        return Err(OmcRegistryError::UnsupportedSpec(
+            "pip uninstall needs at least one package or requirement file".to_owned(),
+        ));
+    }
+    Ok(PipCompatAction::Uninstall {
+        specs: positionals,
+        requirements,
+        allow,
+        allow_all_host,
+    })
 }
 
 fn parse_pip_show_args(args: &[String]) -> Result<PipCompatAction, OmcRegistryError> {
@@ -2590,6 +2625,37 @@ fn parse_pip_list_format_value(value: &str) -> Result<PipListFormat, OmcRegistry
             "unsupported pip list format `{other}`"
         ))),
     }
+}
+
+fn pip_uninstall_specs_from_requirements(
+    project_dir: &Path,
+    requirements: Vec<PathBuf>,
+) -> Result<Vec<String>, OmcRegistryError> {
+    if requirements.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let requirements = read_requirements_files(&absolutize_paths(project_dir, requirements))?;
+    if !requirements.python_local_paths.is_empty()
+        || !requirements.python_local_requirements.is_empty()
+    {
+        return Err(OmcRegistryError::UnsupportedSpec(
+            "pip uninstall -r cannot remove unnamed local path requirements".to_owned(),
+        ));
+    }
+
+    let mut specs = requirements
+        .specs
+        .into_iter()
+        .map(|spec| spec.package_key())
+        .collect::<Vec<_>>();
+    specs.extend(
+        requirements
+            .python_vcs_requirements
+            .into_iter()
+            .map(|requirement| format!("pypi:{}", requirement.name)),
+    );
+    Ok(specs)
 }
 
 fn split_first_position(
@@ -3258,6 +3324,28 @@ mod tests {
             parse_pip_compat_action(&args(&["uninstall", "-y", "requests"])).unwrap(),
             PipCompatAction::Uninstall {
                 specs: vec!["requests".to_owned()],
+                requirements: Vec::new(),
+                allow: Vec::new(),
+                allow_all_host: false,
+            }
+        );
+        assert_eq!(
+            parse_pip_compat_action(&args(&[
+                "uninstall",
+                "--yes",
+                "-r",
+                "requirements.txt",
+                "--requirement=dev-requirements.txt",
+                "--disable-pip-version-check",
+                "pytest",
+            ]))
+            .unwrap(),
+            PipCompatAction::Uninstall {
+                specs: vec!["pytest".to_owned()],
+                requirements: vec![
+                    PathBuf::from("requirements.txt"),
+                    PathBuf::from("dev-requirements.txt"),
+                ],
                 allow: Vec::new(),
                 allow_all_host: false,
             }

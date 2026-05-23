@@ -132,6 +132,7 @@ cargo run -p omc-cli --bin python3 -- --omc-project-dir /tmp/omc-demo -m pip fre
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip freeze
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip show requests
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip list --format=json
+cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip uninstall -r requirements.txt -y
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo list
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo list --json
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo audit
@@ -410,8 +411,10 @@ Supported now:
   `-r`, index URL, constraints, extra-index, find-links, no-index,
   require-hashes, no-deps, target-directory, trusted-host, retry/timeout,
   reinstall, warning, build-isolation, and binary-policy install flags without
-  delegating to pip; direct `pip install -e PATH` and `pip install ./path`
-  local directory installs, including selected extras such as
+  delegating to pip; `pip uninstall -r requirements.txt` removes named
+  requirements from the OMC manifest and reinstalls the remaining graph; direct
+  `pip install -e PATH` and `pip install ./path` local directory installs,
+  including selected extras such as
   `pip install -e '.[dev]'`; direct
   `pip install ./archive.whl`, `./archive.tar.gz`, and HTTPS archive URL
   installs; `omc python -m pip ...` dispatches to the same compatibility path;

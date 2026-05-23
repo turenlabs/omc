@@ -570,6 +570,7 @@ pub struct LinkOptions {
     pub constraint_files: Vec<PathBuf>,
     pub project_extras: BTreeSet<String>,
     pub include_dev_dependencies: bool,
+    pub discover_project_requirements: bool,
     pub save_manifest_dependency: bool,
     pub save_dev_dependency: bool,
 }
@@ -603,6 +604,7 @@ impl LinkOptions {
             constraint_files: Vec::new(),
             project_extras: BTreeSet::new(),
             include_dev_dependencies: true,
+            discover_project_requirements: true,
             save_manifest_dependency: true,
             save_dev_dependency: false,
         }
@@ -1124,12 +1126,14 @@ fn project_requested_specs(options: &mut LinkOptions, locked: bool) -> Result<Ve
             specs.push(parse_manifest_dependency(&key, &requirement)?);
         }
     }
-    let discovered = discover_project_requirements_with_options(
-        &options.project_dir,
-        &options.project_extras,
-        options.include_dev_dependencies,
-    )?;
-    apply_project_requirements_to_options(options, &mut specs, discovered);
+    if options.discover_project_requirements {
+        let discovered = discover_project_requirements_with_options(
+            &options.project_dir,
+            &options.project_extras,
+            options.include_dev_dependencies,
+        )?;
+        apply_project_requirements_to_options(options, &mut specs, discovered);
+    }
 
     if !options.requirement_files.is_empty() {
         let requirements = read_requirements_files(&options.requirement_files)?;
@@ -3668,7 +3672,7 @@ fn read_requirements_file(path: &Path) -> Result<ProjectRequirements> {
     read_requirements_files(&[path.to_path_buf()])
 }
 
-fn read_requirements_files(paths: &[PathBuf]) -> Result<ProjectRequirements> {
+pub fn read_requirements_files(paths: &[PathBuf]) -> Result<ProjectRequirements> {
     let mut discovered = ProjectRequirements::default();
     let mut seen = BTreeSet::new();
     for path in paths {
@@ -12047,6 +12051,31 @@ mod tests {
             .iter()
             .any(|package| package.name == "local-pkg"));
         assert!(!dir.path().join("node_modules").exists());
+    }
+
+    #[test]
+    fn link_options_can_skip_project_requirement_discovery() {
+        let dir = tempfile::tempdir().unwrap();
+        let archive = dir.path().join("local-pkg-1.0.0.tgz");
+        fs::write(
+            &archive,
+            npm_tgz_for_test(r#"{ "name": "local-pkg", "version": "1.0.0" }"#),
+        )
+        .unwrap();
+        fs::write(
+            dir.path().join("package.json"),
+            r#"{ "dependencies": { "local-pkg": "file:local-pkg-1.0.0.tgz" } }"#,
+        )
+        .unwrap();
+        fs::write(dir.path().join("requirements.txt"), "requests==2.32.3\n").unwrap();
+
+        let mut options = LinkOptions::new(dir.path());
+        options.discover_project_requirements = false;
+        let reports = lock_project(&options).unwrap();
+        let lock = read_lockfile(dir.path().join("omc.lock")).unwrap();
+
+        assert!(reports.is_empty());
+        assert!(lock.packages.is_empty());
     }
 
     #[test]
