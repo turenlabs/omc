@@ -238,7 +238,7 @@ Supported now:
 - npm bin links and Python console script shims
 - `omc node`, `omc python`, `omc script`, and `omc run` wrappers
 - isolated `omc python` execution that uses OMC site-packages without ambient
-  user/global Python site-packages
+  user/global Python site-packages or startup/hook environment variables
 - isolated Node execution wrappers that remove ambient `NODE_PATH` module
   resolution and `NODE_OPTIONS` preloads outside the project install tree
 - runtime source profiling into capability findings

@@ -369,6 +369,14 @@ fn apply_project_runtime_env(
         .env("PYTHONNOUSERSITE", "1")
         .env_remove("NODE_OPTIONS")
         .env_remove("NODE_PATH");
+    for key in [
+        "PYTHONBREAKPOINT",
+        "PYTHONHOME",
+        "PYTHONINSPECT",
+        "PYTHONSTARTUP",
+    ] {
+        command.env_remove(key);
+    }
     Ok(())
 }
 
