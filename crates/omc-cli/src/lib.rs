@@ -10,9 +10,9 @@ use omc_registry::{
     apply_pypi_binary_option, check_pypi_lock, init_project, install_locked_packages,
     install_locked_project, install_project, lock_project, parse_capability_grant,
     parse_npm_direct_archive_reference, parse_pypi_direct_archive_reference, read_lockfile,
-    read_package_scripts, read_requirements_files, remove_manifest_dependency, Behavior, Ecosystem,
-    InstallReport, LinkOptions, LockedPackage, OmcRegistryError, PackageSpec, PypiBinaryMode,
-    PypiCheckIssue, PythonLocalRequirement, Verdict,
+    read_npm_config_snapshot, read_package_scripts, read_requirements_files,
+    remove_manifest_dependency, Behavior, Ecosystem, InstallReport, LinkOptions, LockedPackage,
+    OmcRegistryError, PackageSpec, PypiBinaryMode, PypiCheckIssue, PythonLocalRequirement, Verdict,
 };
 
 #[derive(Debug, Parser)]
@@ -258,6 +258,11 @@ enum NpmCompatAction {
     Audit {
         json: bool,
     },
+    Config {
+        action: NpmConfigAction,
+        npm_registry: Option<String>,
+        userconfig: Option<PathBuf>,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -265,6 +270,12 @@ enum NpmPathKind {
     Bin,
     Root,
     Prefix,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum NpmConfigAction {
+    Get { keys: Vec<String>, json: bool },
+    List { json: bool },
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -924,6 +935,16 @@ fn run_npm_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
             print_locked_packages(project_dir, Some(Ecosystem::Npm), json)?
         }
         NpmCompatAction::Audit { json } => return print_audit_report(project_dir, json),
+        NpmCompatAction::Config {
+            action,
+            npm_registry,
+            userconfig,
+        } => print_npm_config(
+            project_dir,
+            action,
+            npm_registry.as_deref(),
+            userconfig.as_deref(),
+        )?,
     }
 
     Ok(ExitCode::SUCCESS)
@@ -1105,6 +1126,117 @@ fn print_audit_report(project_dir: &Path, json: bool) -> Result<ExitCode, OmcReg
     }
 
     Ok(ExitCode::SUCCESS)
+}
+
+fn print_npm_config(
+    project_dir: &Path,
+    action: NpmConfigAction,
+    npm_registry: Option<&str>,
+    userconfig: Option<&Path>,
+) -> Result<(), OmcRegistryError> {
+    let values = npm_config_values(project_dir, npm_registry, userconfig)?;
+    match action {
+        NpmConfigAction::Get { keys, json } => {
+            if json {
+                if keys.len() == 1 {
+                    let value = npm_config_value_for_key(&values, &keys[0]);
+                    println!("{}", serde_json::to_string_pretty(&value)?);
+                } else {
+                    let selected = keys
+                        .into_iter()
+                        .map(|key| {
+                            let value = npm_config_value_for_key(&values, &key);
+                            (key, value)
+                        })
+                        .collect::<BTreeMap<_, _>>();
+                    println!("{}", serde_json::to_string_pretty(&selected)?);
+                }
+            } else {
+                for key in keys {
+                    println!("{}", npm_config_value_for_key(&values, &key));
+                }
+            }
+        }
+        NpmConfigAction::List { json } => {
+            if json {
+                println!("{}", serde_json::to_string_pretty(&values)?);
+            } else {
+                for (key, value) in values {
+                    println!("{key} = {value}");
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn npm_config_values(
+    project_dir: &Path,
+    npm_registry: Option<&str>,
+    userconfig: Option<&Path>,
+) -> Result<BTreeMap<String, String>, OmcRegistryError> {
+    let snapshot = read_npm_config_snapshot(project_dir, npm_registry, userconfig)?;
+    let project_dir = absolute_project_dir(project_dir);
+    let mut values = BTreeMap::from([
+        ("audit".to_owned(), "true".to_owned()),
+        (
+            "cache".to_owned(),
+            project_dir
+                .join(".omc")
+                .join("cache")
+                .join("npm")
+                .to_string_lossy()
+                .into_owned(),
+        ),
+        ("fund".to_owned(), "false".to_owned()),
+        ("global".to_owned(), "false".to_owned()),
+        (
+            "local-prefix".to_owned(),
+            project_dir.to_string_lossy().into_owned(),
+        ),
+        ("loglevel".to_owned(), "notice".to_owned()),
+        ("package-lock".to_owned(), "true".to_owned()),
+        (
+            "prefix".to_owned(),
+            project_dir.to_string_lossy().into_owned(),
+        ),
+        ("registry".to_owned(), snapshot.registry),
+        ("save".to_owned(), "true".to_owned()),
+        (
+            "userconfig".to_owned(),
+            npm_userconfig_path(project_dir.as_path(), userconfig)
+                .to_string_lossy()
+                .into_owned(),
+        ),
+    ]);
+    for (scope, registry) in snapshot.scoped_registries {
+        values.insert(format!("{scope}:registry"), registry);
+    }
+    Ok(values)
+}
+
+fn npm_userconfig_path(project_dir: &Path, userconfig: Option<&Path>) -> PathBuf {
+    if let Some(userconfig) = userconfig {
+        return absolutize_path(project_dir, userconfig.to_path_buf());
+    }
+    if let Some(userconfig) = env::var_os("npm_config_userconfig")
+        .or_else(|| env::var_os("NPM_CONFIG_USERCONFIG"))
+        .map(PathBuf::from)
+        .filter(|path| !path.as_os_str().is_empty())
+    {
+        return absolutize_path(project_dir, userconfig);
+    }
+    env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| project_dir.to_path_buf())
+        .join(".npmrc")
+}
+
+fn npm_config_value_for_key(values: &BTreeMap<String, String>, key: &str) -> String {
+    values
+        .get(key)
+        .cloned()
+        .unwrap_or_else(|| "undefined".to_owned())
 }
 
 fn print_lock_only_report(project_dir: &Path) {
@@ -1933,6 +2065,8 @@ fn parse_npm_compat_action(args: &[String]) -> Result<NpmCompatAction, OmcRegist
             json: parse_json_list_flag("npm list", &args[1..])?,
         }),
         "audit" => parse_npm_audit_args(&args[1..]),
+        "config" | "c" => parse_npm_config_args(&args[1..]),
+        "get" => parse_npm_config_get_args(&args[1..]),
         other => Err(OmcRegistryError::UnsupportedSpec(format!(
             "unsupported npm compatibility command `{other}`"
         ))),
@@ -2030,6 +2164,120 @@ fn parse_npm_audit_args(args: &[String]) -> Result<NpmCompatAction, OmcRegistryE
     }
 
     Ok(NpmCompatAction::Audit { json })
+}
+
+fn parse_npm_config_args(args: &[String]) -> Result<NpmCompatAction, OmcRegistryError> {
+    let Some(command) = args.first().map(String::as_str) else {
+        return Ok(NpmCompatAction::Config {
+            action: NpmConfigAction::List { json: false },
+            npm_registry: None,
+            userconfig: None,
+        });
+    };
+    match command {
+        "get" => parse_npm_config_get_args(&args[1..]),
+        "list" | "ls" => parse_npm_config_list_args(&args[1..]),
+        other => Err(OmcRegistryError::UnsupportedSpec(format!(
+            "unsupported npm config command `{other}`"
+        ))),
+    }
+}
+
+fn parse_npm_config_get_args(args: &[String]) -> Result<NpmCompatAction, OmcRegistryError> {
+    let NpmConfigArgs {
+        json,
+        npm_registry,
+        userconfig,
+        positionals,
+    } = parse_npm_config_common_args(args)?;
+    if positionals.is_empty() {
+        return Err(OmcRegistryError::UnsupportedSpec(
+            "npm config get needs at least one key".to_owned(),
+        ));
+    }
+    Ok(NpmCompatAction::Config {
+        action: NpmConfigAction::Get {
+            keys: positionals,
+            json,
+        },
+        npm_registry,
+        userconfig,
+    })
+}
+
+fn parse_npm_config_list_args(args: &[String]) -> Result<NpmCompatAction, OmcRegistryError> {
+    let NpmConfigArgs {
+        json,
+        npm_registry,
+        userconfig,
+        positionals,
+    } = parse_npm_config_common_args(args)?;
+    if !positionals.is_empty() {
+        return Err(unsupported_compat_arg("npm config list", &positionals[0]));
+    }
+    Ok(NpmCompatAction::Config {
+        action: NpmConfigAction::List { json },
+        npm_registry,
+        userconfig,
+    })
+}
+
+#[derive(Debug)]
+struct NpmConfigArgs {
+    json: bool,
+    npm_registry: Option<String>,
+    userconfig: Option<PathBuf>,
+    positionals: Vec<String>,
+}
+
+fn parse_npm_config_common_args(args: &[String]) -> Result<NpmConfigArgs, OmcRegistryError> {
+    let mut json = false;
+    let mut userconfig = None;
+    let mut filtered = Vec::new();
+    let mut index = 0;
+    while index < args.len() {
+        let arg = &args[index];
+        if arg == "--json" {
+            json = true;
+        } else if arg == "--userconfig" {
+            index += 1;
+            let Some(path) = args.get(index) else {
+                return Err(OmcRegistryError::UnsupportedSpec(
+                    "--userconfig needs a path".to_owned(),
+                ));
+            };
+            userconfig = Some(PathBuf::from(path));
+        } else if let Some(path) = arg.strip_prefix("--userconfig=") {
+            userconfig = Some(PathBuf::from(path));
+        } else if matches!(
+            arg.as_str(),
+            "--global" | "-g" | "--long" | "-l" | "--parseable"
+        ) {
+        } else if arg == "--location" {
+            index += 1;
+            if args.get(index).is_none() {
+                return Err(OmcRegistryError::UnsupportedSpec(
+                    "--location needs a value".to_owned(),
+                ));
+            }
+        } else if arg.starts_with("--location=") {
+        } else {
+            filtered.push(arg.clone());
+        }
+        index += 1;
+    }
+
+    let CommonCompatFlags {
+        npm_registry,
+        positionals,
+        ..
+    } = parse_common_compat_flags(&filtered, true)?;
+    Ok(NpmConfigArgs {
+        json,
+        npm_registry,
+        userconfig,
+        positionals,
+    })
 }
 
 fn npm_audit_equals_value_flag(arg: &str) -> bool {
@@ -3393,6 +3641,52 @@ mod tests {
             NpmCompatAction::Audit { json: true }
         );
         assert!(parse_npm_compat_action(&args(&["audit", "fix"])).is_err());
+        assert_eq!(
+            parse_npm_compat_action(&args(&[
+                "config",
+                "get",
+                "registry",
+                "--json",
+                "--userconfig",
+                "ci.npmrc",
+                "--location=project",
+            ]))
+            .unwrap(),
+            NpmCompatAction::Config {
+                action: NpmConfigAction::Get {
+                    keys: vec!["registry".to_owned()],
+                    json: true,
+                },
+                npm_registry: None,
+                userconfig: Some(PathBuf::from("ci.npmrc")),
+            }
+        );
+        assert_eq!(
+            parse_npm_compat_action(&args(&[
+                "get",
+                "prefix",
+                "--registry",
+                "https://registry.example.invalid/npm",
+            ]))
+            .unwrap(),
+            NpmCompatAction::Config {
+                action: NpmConfigAction::Get {
+                    keys: vec!["prefix".to_owned()],
+                    json: false,
+                },
+                npm_registry: Some("https://registry.example.invalid/npm".to_owned()),
+                userconfig: None,
+            }
+        );
+        assert_eq!(
+            parse_npm_compat_action(&args(&["config", "list", "--json", "--long"])).unwrap(),
+            NpmCompatAction::Config {
+                action: NpmConfigAction::List { json: true },
+                npm_registry: None,
+                userconfig: None,
+            }
+        );
+        assert!(parse_npm_compat_action(&args(&["config", "set", "registry", "x"])).is_err());
     }
 
     #[test]

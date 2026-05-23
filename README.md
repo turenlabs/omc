@@ -119,6 +119,7 @@ cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm update --packa
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm ci --omit=dev
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm run test -- --watch
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm audit --json
+cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm config get registry
 cargo run -p omc-cli --bin npx -- --omc-project-dir /tmp/omc-demo eslint -- .
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm root
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm bin
@@ -396,13 +397,13 @@ Supported now:
   package.json and Pipfile project scripts
 - `omc npm` compatibility commands for common `install`, `update` / `up` /
   `upgrade`, `ci`, `test`, `start`, `stop`, `restart`, `run`, `exec`,
-  `remove`, `bin`, `root`, `prefix`, `audit` / `audit --json`, and `list` /
-  `list --json` flows without delegating to npm, plus a direct `npm`
-  compatibility binary and direct `npx` compatibility binary for project-local
-  executable flows; direct local npm tarballs and local package directories are
-  accepted as install/update inputs; common `npm exec` / `npx` flags such as
-  `--yes`, `--package`, `--cache`, and `--registry` are parsed before
-  dispatching to project-local executables; `--no-save`,
+  `remove`, `bin`, `root`, `prefix`, `audit` / `audit --json`, `config get`,
+  `config list`, `get`, and `list` / `list --json` flows without delegating to
+  npm, plus a direct `npm` compatibility binary and direct `npx` compatibility
+  binary for project-local executable flows; direct local npm tarballs and local
+  package directories are accepted as install/update inputs; common `npm exec` /
+  `npx` flags such as `--yes`, `--package`, `--cache`, and `--registry` are
+  parsed before dispatching to project-local executables; `--no-save`,
   `--package-lock-only`, `--package-lock=false`, `--registry`, `--omit=...`,
   `--include=...`, and common audit/fund/peer/install-strategy flags are
   understood for install/ci compatibility; package scripts receive npm-style

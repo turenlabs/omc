@@ -7258,6 +7258,12 @@ struct NpmAuthToken {
     token: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NpmConfigSnapshot {
+    pub registry: String,
+    pub scoped_registries: BTreeMap<String, String>,
+}
+
 impl Default for NpmConfig {
     fn default() -> Self {
         Self {
@@ -7302,6 +7308,29 @@ fn read_npm_config(project_dir: &Path) -> Result<NpmConfig> {
     read_npmrc_into(&project_dir.join(".npmrc"), &mut config)?;
     apply_npm_environment_config(&mut config);
     Ok(config)
+}
+
+pub fn read_npm_config_snapshot(
+    project_dir: &Path,
+    registry_override: Option<&str>,
+    userconfig_override: Option<&Path>,
+) -> Result<NpmConfigSnapshot> {
+    let mut config = NpmConfig::default();
+    let user_config = userconfig_override
+        .map(Path::to_path_buf)
+        .or_else(npm_userconfig_env_path);
+    read_npm_user_config(project_dir, user_config.as_deref(), &mut config)?;
+    read_npmrc_into(&project_dir.join(".npmrc"), &mut config)?;
+    apply_npm_environment_config(&mut config);
+    if let Some(registry) = registry_override {
+        config.registry = normalize_npm_registry(registry).ok_or_else(|| {
+            OmcRegistryError::UnsupportedSpec(format!("invalid npm registry `{registry}`"))
+        })?;
+    }
+    Ok(NpmConfigSnapshot {
+        registry: config.registry,
+        scoped_registries: config.scoped_registries,
+    })
 }
 
 fn read_npm_config_for_options(project_dir: &Path, options: &LinkOptions) -> Result<NpmConfig> {
