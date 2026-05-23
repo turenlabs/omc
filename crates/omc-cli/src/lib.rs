@@ -292,6 +292,9 @@ enum NpmCompatAction {
     Audit {
         json: bool,
     },
+    Fund {
+        action: NpmFundAction,
+    },
     Cache {
         action: NpmCacheAction,
     },
@@ -332,6 +335,15 @@ struct NpmListAction {
 #[derive(Debug, PartialEq, Eq)]
 struct NpmRunListAction {
     json: bool,
+    workspaces: Vec<String>,
+    all_workspaces: bool,
+    include_workspace_root: bool,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct NpmFundAction {
+    json: bool,
+    package: Option<String>,
     workspaces: Vec<String>,
     all_workspaces: bool,
     include_workspace_root: bool,
@@ -1431,6 +1443,7 @@ fn run_npm_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
             npm_registry,
         } => return print_npm_outdated(project_dir, json, parseable, npm_registry.as_deref()),
         NpmCompatAction::Audit { json } => return print_audit_report(project_dir, json),
+        NpmCompatAction::Fund { action } => print_npm_fund(project_dir, action)?,
         NpmCompatAction::Cache { action } => print_npm_cache(project_dir, action)?,
         NpmCompatAction::Pkg { action } => print_npm_pkg(project_dir, action)?,
         NpmCompatAction::Pack { action } => print_npm_pack(project_dir, action)?,
@@ -2837,6 +2850,358 @@ fn print_npm_cache(project_dir: &Path, action: NpmCacheAction) -> Result<(), Omc
         }
     }
     Ok(())
+}
+
+fn print_npm_fund(project_dir: &Path, action: NpmFundAction) -> Result<(), OmcRegistryError> {
+    let report = collect_npm_fund_report(project_dir, &action)?;
+    if action.json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&npm_fund_report_json(&report))?
+        );
+    } else {
+        print_npm_fund_text(&report, action.package.as_deref());
+    }
+    Ok(())
+}
+
+#[derive(Debug, Clone)]
+struct NpmFundReport {
+    root: Option<NpmFundPackage>,
+    dependencies: Vec<NpmFundPackage>,
+}
+
+#[derive(Debug, Clone)]
+struct NpmFundPackage {
+    name: String,
+    version: Option<String>,
+    funding: Option<serde_json::Value>,
+    urls: Vec<String>,
+}
+
+impl NpmFundPackage {
+    fn id(&self) -> String {
+        match self.version.as_deref() {
+            Some(version) if !version.is_empty() => format!("{}@{}", self.name, version),
+            _ => self.name.clone(),
+        }
+    }
+}
+
+fn collect_npm_fund_report(
+    project_dir: &Path,
+    action: &NpmFundAction,
+) -> Result<NpmFundReport, OmcRegistryError> {
+    let target_dirs = npm_script_target_dirs(
+        project_dir,
+        &action.workspaces,
+        action.all_workspaces,
+        action.include_workspace_root,
+    )?;
+    let report_root_dir = if target_dirs.len() == 1 {
+        target_dirs[0].clone()
+    } else {
+        project_dir.to_path_buf()
+    };
+    let report_root_dir = absolute_project_dir(&report_root_dir);
+    let package_filter = action.package.as_deref().map(npm_fund_filter_name);
+
+    let mut root = None;
+    let mut dependencies = BTreeMap::new();
+    for target_dir in target_dirs {
+        let target_dir = absolute_project_dir(&target_dir);
+        let target_root = npm_fund_package_from_dir(&target_dir)?;
+        let is_report_root = target_dir == report_root_dir;
+        if is_report_root {
+            root = Some(target_root.clone());
+        } else {
+            insert_npm_fund_dependency(&mut dependencies, target_root, package_filter.as_deref());
+        }
+
+        for package_json in npm_fund_installed_package_jsons(&target_dir)? {
+            let package = npm_fund_package_from_package_json(&package_json)?;
+            insert_npm_fund_dependency(&mut dependencies, package, package_filter.as_deref());
+        }
+    }
+
+    if let Some(filter) = package_filter.as_deref() {
+        if root
+            .as_ref()
+            .is_some_and(|package| !npm_fund_package_matches(package, filter))
+        {
+            root = None;
+        }
+    }
+
+    Ok(NpmFundReport {
+        root,
+        dependencies: dependencies.into_values().collect(),
+    })
+}
+
+fn insert_npm_fund_dependency(
+    dependencies: &mut BTreeMap<String, NpmFundPackage>,
+    package: NpmFundPackage,
+    package_filter: Option<&str>,
+) {
+    if package_filter.is_some_and(|filter| !npm_fund_package_matches(&package, filter)) {
+        return;
+    }
+    if package.funding.is_none() {
+        return;
+    }
+    dependencies.entry(package.name.clone()).or_insert(package);
+}
+
+fn npm_fund_package_from_dir(dir: &Path) -> Result<NpmFundPackage, OmcRegistryError> {
+    npm_fund_package_from_package_json(&dir.join("package.json"))
+}
+
+fn npm_fund_package_from_package_json(
+    package_json: &Path,
+) -> Result<NpmFundPackage, OmcRegistryError> {
+    let package = read_npm_pkg_json(package_json)?;
+    let name = npm_package_json_name(&package)?;
+    let version = package
+        .get("version")
+        .and_then(serde_json::Value::as_str)
+        .filter(|version| !version.is_empty())
+        .map(str::to_owned);
+    let funding = package.get("funding").and_then(normalize_npm_funding);
+    let urls = funding.as_ref().map(npm_funding_urls).unwrap_or_default();
+    Ok(NpmFundPackage {
+        name,
+        version,
+        funding,
+        urls,
+    })
+}
+
+fn npm_fund_installed_package_jsons(project_dir: &Path) -> Result<Vec<PathBuf>, OmcRegistryError> {
+    let node_modules = project_dir.join("node_modules");
+    if !node_modules.exists() {
+        return Ok(Vec::new());
+    }
+
+    let mut package_jsons = Vec::new();
+    for entry in fs::read_dir(&node_modules)? {
+        let entry = entry?;
+        let path = entry.path();
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if name == ".bin" || name.starts_with('.') || !path.is_dir() {
+            continue;
+        }
+        if name.starts_with('@') {
+            for scoped_entry in fs::read_dir(&path)? {
+                let scoped_entry = scoped_entry?;
+                let scoped_path = scoped_entry.path();
+                if scoped_path.is_dir() {
+                    let package_json = scoped_path.join("package.json");
+                    if package_json.exists() {
+                        package_jsons.push(package_json);
+                    }
+                }
+            }
+        } else {
+            let package_json = path.join("package.json");
+            if package_json.exists() {
+                package_jsons.push(package_json);
+            }
+        }
+    }
+    package_jsons.sort();
+    Ok(package_jsons)
+}
+
+fn normalize_npm_funding(value: &serde_json::Value) -> Option<serde_json::Value> {
+    match value {
+        serde_json::Value::String(url) => npm_funding_url_value(url),
+        serde_json::Value::Object(_) => {
+            if npm_funding_urls(value).is_empty() {
+                None
+            } else {
+                Some(value.clone())
+            }
+        }
+        serde_json::Value::Array(values) => {
+            let normalized = values
+                .iter()
+                .filter_map(normalize_npm_funding)
+                .collect::<Vec<_>>();
+            if normalized.is_empty() {
+                None
+            } else {
+                Some(serde_json::Value::Array(normalized))
+            }
+        }
+        _ => None,
+    }
+}
+
+fn npm_funding_url_value(url: &str) -> Option<serde_json::Value> {
+    let url = url.trim();
+    if url.is_empty() {
+        return None;
+    }
+    Some(serde_json::json!({ "url": url }))
+}
+
+fn npm_funding_urls(value: &serde_json::Value) -> Vec<String> {
+    let mut urls = Vec::new();
+    collect_npm_funding_urls(value, &mut urls);
+    urls.sort();
+    urls.dedup();
+    urls
+}
+
+fn collect_npm_funding_urls(value: &serde_json::Value, urls: &mut Vec<String>) {
+    match value {
+        serde_json::Value::String(url) => {
+            let url = url.trim();
+            if !url.is_empty() {
+                urls.push(url.to_owned());
+            }
+        }
+        serde_json::Value::Object(object) => {
+            if let Some(url) = object
+                .get("url")
+                .and_then(serde_json::Value::as_str)
+                .map(str::trim)
+                .filter(|url| !url.is_empty())
+            {
+                urls.push(url.to_owned());
+            }
+        }
+        serde_json::Value::Array(values) => {
+            for value in values {
+                collect_npm_funding_urls(value, urls);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn npm_fund_report_json(report: &NpmFundReport) -> serde_json::Value {
+    let mut dependencies = serde_json::Map::new();
+    for package in &report.dependencies {
+        if package.funding.is_none() {
+            continue;
+        }
+        dependencies.insert(package.name.clone(), npm_fund_package_json(package, false));
+    }
+
+    let mut object = serde_json::Map::new();
+    object.insert(
+        "length".to_owned(),
+        serde_json::Value::Number(dependencies.len().into()),
+    );
+    if let Some(root) = &report.root {
+        object.insert(
+            "name".to_owned(),
+            serde_json::Value::String(root.name.clone()),
+        );
+        if let Some(version) = &root.version {
+            object.insert(
+                "version".to_owned(),
+                serde_json::Value::String(version.clone()),
+            );
+        }
+        if let Some(funding) = &root.funding {
+            object.insert("funding".to_owned(), funding.clone());
+        }
+    }
+    object.insert(
+        "dependencies".to_owned(),
+        serde_json::Value::Object(dependencies),
+    );
+    serde_json::Value::Object(object)
+}
+
+fn npm_fund_package_json(package: &NpmFundPackage, include_name: bool) -> serde_json::Value {
+    let mut object = serde_json::Map::new();
+    if include_name {
+        object.insert(
+            "name".to_owned(),
+            serde_json::Value::String(package.name.clone()),
+        );
+    }
+    if let Some(version) = &package.version {
+        object.insert(
+            "version".to_owned(),
+            serde_json::Value::String(version.clone()),
+        );
+    }
+    if let Some(funding) = &package.funding {
+        object.insert("funding".to_owned(), funding.clone());
+    }
+    serde_json::Value::Object(object)
+}
+
+fn print_npm_fund_text(report: &NpmFundReport, package_filter: Option<&str>) {
+    let package_filter = package_filter.map(npm_fund_filter_name);
+    let mut packages_by_url = BTreeMap::<String, Vec<String>>::new();
+    if let Some(root) = &report.root {
+        if package_filter
+            .as_deref()
+            .is_none_or(|filter| npm_fund_package_matches(root, filter))
+        {
+            for url in &root.urls {
+                packages_by_url
+                    .entry(url.clone())
+                    .or_default()
+                    .push(root.id());
+            }
+        }
+    }
+    for package in &report.dependencies {
+        for url in &package.urls {
+            packages_by_url
+                .entry(url.clone())
+                .or_default()
+                .push(package.id());
+        }
+    }
+
+    if packages_by_url.is_empty() {
+        if let Some(filter) = package_filter {
+            println!("No funding information found for {filter}");
+        } else if let Some(root) = &report.root {
+            println!("{}", root.id());
+        } else {
+            println!("No funding information found");
+        }
+        return;
+    }
+
+    let mut first = true;
+    for (url, mut package_ids) in packages_by_url {
+        package_ids.sort();
+        package_ids.dedup();
+        if !first {
+            println!();
+        }
+        first = false;
+        println!("{url}");
+        for package_id in package_ids {
+            println!("  - {package_id}");
+        }
+    }
+}
+
+fn npm_fund_filter_name(spec: &str) -> String {
+    let spec = spec.strip_prefix("npm:").unwrap_or(spec);
+    let spec = spec.split_once('#').map(|(base, _)| base).unwrap_or(spec);
+    if let Some(index) = spec.rfind('@') {
+        if index > 0 {
+            return spec[..index].to_owned();
+        }
+    }
+    spec.to_owned()
+}
+
+fn npm_fund_package_matches(package: &NpmFundPackage, filter: &str) -> bool {
+    package.name == filter || package.id() == filter
 }
 
 fn print_npm_init(project_dir: &Path, action: NpmInitAction) -> Result<(), OmcRegistryError> {
@@ -4963,6 +5328,7 @@ fn parse_npm_compat_action(args: &[String]) -> Result<NpmCompatAction, OmcRegist
         "explain" | "why" => parse_npm_explain_args(&args[1..]),
         "outdated" => parse_npm_outdated_args(&args[1..]),
         "audit" => parse_npm_audit_args(&args[1..]),
+        "fund" => parse_npm_fund_args(&args[1..]),
         "cache" => parse_npm_cache_args(&args[1..]),
         "pkg" => parse_npm_pkg_args(&args[1..]),
         "pack" => parse_npm_pack_args(&args[1..]),
@@ -5091,7 +5457,7 @@ fn npm_global_arg_supported_by_command(command: &str, arg: &str) -> bool {
     {
         return matches!(
             command,
-            "run" | "run-script" | "test" | "start" | "stop" | "restart"
+            "run" | "run-script" | "test" | "start" | "stop" | "restart" | "fund"
         );
     }
     if matches!(arg, "--workspaces" | "--include-workspace-root")
@@ -5099,7 +5465,7 @@ fn npm_global_arg_supported_by_command(command: &str, arg: &str) -> bool {
     {
         return matches!(
             command,
-            "run" | "run-script" | "test" | "start" | "stop" | "restart"
+            "run" | "run-script" | "test" | "start" | "stop" | "restart" | "fund"
         );
     }
     if arg == "--json" {
@@ -5116,6 +5482,7 @@ fn npm_global_arg_supported_by_command(command: &str, arg: &str) -> bool {
                 | "why"
                 | "outdated"
                 | "audit"
+                | "fund"
                 | "pkg"
                 | "pack"
                 | "search"
@@ -5537,6 +5904,96 @@ fn parse_npm_audit_args(args: &[String]) -> Result<NpmCompatAction, OmcRegistryE
     }
 
     Ok(NpmCompatAction::Audit { json })
+}
+
+fn parse_npm_fund_args(args: &[String]) -> Result<NpmCompatAction, OmcRegistryError> {
+    let mut json = false;
+    let mut package = None;
+    let mut workspaces = Vec::new();
+    let mut all_workspaces = false;
+    let mut include_workspace_root = false;
+    let mut index = 0;
+    while index < args.len() {
+        let arg = &args[index];
+        if arg == "--json" || arg == "--json=true" {
+            json = true;
+        } else if arg == "--json=false" {
+            json = false;
+        } else if matches!(arg.as_str(), "--workspaces" | "--workspace=true") {
+            all_workspaces = true;
+        } else if matches!(
+            arg.as_str(),
+            "--include-workspace-root" | "--include-workspace-root=true"
+        ) {
+            include_workspace_root = true;
+        } else if matches!(
+            arg.as_str(),
+            "--silent"
+                | "-s"
+                | "--browser"
+                | "--browser=true"
+                | "--browser=false"
+                | "--no-browser"
+                | "--unicode"
+                | "--unicode=true"
+                | "--unicode=false"
+                | "--no-unicode"
+                | "--global"
+                | "-g"
+        ) {
+        } else if matches!(arg.as_str(), "--workspace" | "-w") {
+            index += 1;
+            let Some(workspace) = args.get(index) else {
+                return Err(OmcRegistryError::UnsupportedSpec(format!(
+                    "{arg} needs a workspace"
+                )));
+            };
+            workspaces.push(workspace.clone());
+        } else if let Some(workspace) = arg
+            .strip_prefix("--workspace=")
+            .or_else(|| arg.strip_prefix("-w="))
+        {
+            workspaces.push(workspace.to_owned());
+        } else if matches!(arg.as_str(), "--which" | "--loglevel" | "--cache") {
+            index += 1;
+            if args.get(index).is_none() {
+                return Err(OmcRegistryError::UnsupportedSpec(format!(
+                    "{arg} needs a value"
+                )));
+            }
+        } else if npm_fund_equals_value_flag(arg) {
+        } else if arg.starts_with('-') {
+            return Err(unsupported_compat_arg("npm fund", arg));
+        } else if package.is_none() {
+            package = Some(arg.clone());
+        } else {
+            return Err(OmcRegistryError::UnsupportedSpec(
+                "npm fund accepts at most one package argument".to_owned(),
+            ));
+        }
+        index += 1;
+    }
+
+    Ok(NpmCompatAction::Fund {
+        action: NpmFundAction {
+            json,
+            package,
+            workspaces,
+            all_workspaces,
+            include_workspace_root,
+        },
+    })
+}
+
+fn npm_fund_equals_value_flag(arg: &str) -> bool {
+    [
+        "--which=",
+        "--loglevel=",
+        "--cache=",
+        "--include-workspace-root=",
+    ]
+    .iter()
+    .any(|prefix| arg.starts_with(prefix))
 }
 
 fn parse_npm_cache_args(args: &[String]) -> Result<NpmCompatAction, OmcRegistryError> {
@@ -8896,6 +9353,46 @@ mod tests {
         );
         assert!(parse_npm_compat_action(&args(&["audit", "fix"])).is_err());
         assert_eq!(
+            parse_npm_compat_action(&args(&[
+                "--json",
+                "--workspace",
+                "@demo/lib",
+                "fund",
+                "left-pad@1.3.0",
+                "--browser=false",
+            ]))
+            .unwrap(),
+            NpmCompatAction::Fund {
+                action: NpmFundAction {
+                    json: true,
+                    package: Some("left-pad@1.3.0".to_owned()),
+                    workspaces: vec!["@demo/lib".to_owned()],
+                    all_workspaces: false,
+                    include_workspace_root: false,
+                },
+            }
+        );
+        assert_eq!(
+            parse_npm_compat_action(&args(&[
+                "fund",
+                "--workspaces",
+                "--include-workspace-root",
+                "--which",
+                "1",
+            ]))
+            .unwrap(),
+            NpmCompatAction::Fund {
+                action: NpmFundAction {
+                    json: false,
+                    package: None,
+                    workspaces: Vec::new(),
+                    all_workspaces: true,
+                    include_workspace_root: true,
+                },
+            }
+        );
+        assert!(parse_npm_compat_action(&args(&["fund", "left-pad", "chalk"])).is_err());
+        assert_eq!(
             parse_npm_compat_action(&args(&["cache", "verify", "--cache=/tmp/npm-cache"])).unwrap(),
             NpmCompatAction::Cache {
                 action: NpmCacheAction::Verify,
@@ -9195,6 +9692,181 @@ mod tests {
         assert_eq!(
             fs::read_to_string(dir.join("ci.npmrc")).unwrap(),
             "registry=https://ci.example.invalid\n"
+        );
+    }
+
+    #[test]
+    fn normalizes_npm_funding_metadata() {
+        assert_eq!(
+            normalize_npm_funding(&serde_json::Value::String(
+                "https://example.com/pkg".to_owned()
+            ))
+            .unwrap(),
+            serde_json::json!({ "url": "https://example.com/pkg" })
+        );
+        assert_eq!(
+            normalize_npm_funding(&serde_json::json!([
+                "https://example.com/one",
+                { "type": "github", "url": "https://example.com/two" },
+                "",
+            ]))
+            .unwrap(),
+            serde_json::json!([
+                { "url": "https://example.com/one" },
+                { "type": "github", "url": "https://example.com/two" },
+            ])
+        );
+        assert!(normalize_npm_funding(&serde_json::json!({ "type": "github" })).is_none());
+        assert_eq!(
+            npm_funding_urls(&serde_json::json!([
+                { "url": "https://example.com/two" },
+                { "url": "https://example.com/one" },
+                { "url": "https://example.com/two" },
+            ])),
+            vec![
+                "https://example.com/one".to_owned(),
+                "https://example.com/two".to_owned(),
+            ]
+        );
+    }
+
+    #[test]
+    fn collects_npm_funding_from_root_and_node_modules() {
+        let dir = test_dir("npm-fund");
+        fs::write(
+            dir.join("package.json"),
+            r#"{
+              "name": "root",
+              "version": "1.0.0",
+              "funding": { "type": "github", "url": "https://github.com/sponsors/root" }
+            }"#,
+        )
+        .unwrap();
+        fs::create_dir_all(dir.join("node_modules/left-pad")).unwrap();
+        fs::write(
+            dir.join("node_modules/left-pad/package.json"),
+            r#"{ "name": "left-pad", "version": "1.3.0", "funding": "https://example.com/left-pad" }"#,
+        )
+        .unwrap();
+        fs::create_dir_all(dir.join("node_modules/@scope/scoped")).unwrap();
+        fs::write(
+            dir.join("node_modules/@scope/scoped/package.json"),
+            r#"{
+              "name": "@scope/scoped",
+              "version": "2.0.0",
+              "funding": [{ "type": "opencollective", "url": "https://opencollective.com/scoped" }]
+            }"#,
+        )
+        .unwrap();
+        fs::create_dir_all(dir.join("node_modules/.bin")).unwrap();
+
+        let report = collect_npm_fund_report(
+            &dir,
+            &NpmFundAction {
+                json: true,
+                package: None,
+                workspaces: Vec::new(),
+                all_workspaces: false,
+                include_workspace_root: false,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            report.root.as_ref().map(|package| package.id()).as_deref(),
+            Some("root@1.0.0")
+        );
+        assert_eq!(
+            report
+                .dependencies
+                .iter()
+                .map(|package| package.id())
+                .collect::<Vec<_>>(),
+            vec![
+                "@scope/scoped@2.0.0".to_owned(),
+                "left-pad@1.3.0".to_owned()
+            ]
+        );
+
+        let json = npm_fund_report_json(&report);
+        assert_eq!(
+            json.get("length").and_then(serde_json::Value::as_u64),
+            Some(2)
+        );
+        assert_eq!(
+            npm_pkg_get_path(&json, "dependencies.left-pad.funding.url")
+                .and_then(serde_json::Value::as_str),
+            Some("https://example.com/left-pad")
+        );
+
+        let filtered = collect_npm_fund_report(
+            &dir,
+            &NpmFundAction {
+                json: true,
+                package: Some("@scope/scoped@2.0.0".to_owned()),
+                workspaces: Vec::new(),
+                all_workspaces: false,
+                include_workspace_root: false,
+            },
+        )
+        .unwrap();
+        assert!(filtered.root.is_none());
+        assert_eq!(filtered.dependencies.len(), 1);
+        assert_eq!(filtered.dependencies[0].name, "@scope/scoped");
+    }
+
+    #[test]
+    fn collects_npm_funding_from_selected_workspaces() {
+        let dir = test_dir("npm-fund-workspaces");
+        fs::write(
+            dir.join("package.json"),
+            r#"{ "name": "root", "version": "1.0.0", "workspaces": ["packages/*"] }"#,
+        )
+        .unwrap();
+        fs::create_dir_all(dir.join("packages/lib/node_modules/dep")).unwrap();
+        fs::write(
+            dir.join("packages/lib/package.json"),
+            r#"{
+              "name": "@demo/lib",
+              "version": "1.0.0",
+              "funding": "https://example.com/lib"
+            }"#,
+        )
+        .unwrap();
+        fs::write(
+            dir.join("packages/lib/node_modules/dep/package.json"),
+            r#"{ "name": "dep", "version": "2.0.0", "funding": "https://example.com/dep" }"#,
+        )
+        .unwrap();
+        fs::create_dir_all(dir.join("packages/api")).unwrap();
+        fs::write(
+            dir.join("packages/api/package.json"),
+            r#"{ "name": "@demo/api", "version": "1.0.0", "funding": "https://example.com/api" }"#,
+        )
+        .unwrap();
+
+        let report = collect_npm_fund_report(
+            &dir,
+            &NpmFundAction {
+                json: false,
+                package: None,
+                workspaces: vec!["@demo/lib".to_owned()],
+                all_workspaces: false,
+                include_workspace_root: false,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            report.root.as_ref().map(|package| package.id()).as_deref(),
+            Some("@demo/lib@1.0.0")
+        );
+        assert_eq!(
+            report
+                .dependencies
+                .iter()
+                .map(|package| package.id())
+                .collect::<Vec<_>>(),
+            vec!["dep@2.0.0".to_owned()]
         );
     }
 
