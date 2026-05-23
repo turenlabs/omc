@@ -4,6 +4,8 @@ use std::process::{Command as ProcessCommand, ExitCode};
 use std::{env, ffi::OsString, fs};
 
 use clap::{Parser, Subcommand};
+use flate2::write::GzEncoder;
+use flate2::Compression;
 use omc_cap::Capability;
 use omc_registry::{
     add_manifest_npm_local_paths, add_manifest_policy_grants, add_package_graph,
@@ -282,6 +284,9 @@ enum NpmCompatAction {
     Pkg {
         action: NpmPkgAction,
     },
+    Pack {
+        action: NpmPackAction,
+    },
     Config {
         action: NpmConfigAction,
         npm_registry: Option<String>,
@@ -340,6 +345,14 @@ enum NpmPkgAction {
     Delete {
         fields: Vec<String>,
     },
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct NpmPackAction {
+    packages: Vec<PathBuf>,
+    destination: PathBuf,
+    json: bool,
+    dry_run: bool,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -1124,6 +1137,7 @@ fn run_npm_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
         NpmCompatAction::Audit { json } => return print_audit_report(project_dir, json),
         NpmCompatAction::Cache { action } => print_npm_cache(project_dir, action)?,
         NpmCompatAction::Pkg { action } => print_npm_pkg(project_dir, action)?,
+        NpmCompatAction::Pack { action } => print_npm_pack(project_dir, action)?,
         NpmCompatAction::Config {
             action,
             npm_registry,
@@ -2345,6 +2359,245 @@ fn print_npm_pkg(project_dir: &Path, action: NpmPkgAction) -> Result<(), OmcRegi
         }
     }
     Ok(())
+}
+
+fn print_npm_pack(project_dir: &Path, action: NpmPackAction) -> Result<(), OmcRegistryError> {
+    let destination = absolutize_path(project_dir, action.destination);
+    if !action.dry_run {
+        fs::create_dir_all(&destination)?;
+    }
+    let package_roots = if action.packages.is_empty() {
+        vec![PathBuf::from(".")]
+    } else {
+        action.packages
+    };
+    let mut results = Vec::new();
+    for package_root in package_roots {
+        let root = absolutize_path(project_dir, package_root);
+        let result = npm_pack_package(&root, &destination, action.dry_run)?;
+        if !action.json {
+            println!("{}", result.filename);
+        }
+        results.push(result);
+    }
+    if action.json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(
+                &results
+                    .into_iter()
+                    .map(npm_pack_result_json)
+                    .collect::<Vec<_>>()
+            )?
+        );
+    }
+    Ok(())
+}
+
+#[derive(Debug)]
+struct NpmPackResult {
+    id: String,
+    name: String,
+    version: String,
+    filename: String,
+    size: u64,
+    unpacked_size: u64,
+    files: Vec<NpmPackedFile>,
+}
+
+#[derive(Debug)]
+struct NpmPackedFile {
+    path: String,
+    size: u64,
+}
+
+fn npm_pack_package(
+    root: &Path,
+    destination: &Path,
+    dry_run: bool,
+) -> Result<NpmPackResult, OmcRegistryError> {
+    if !root.is_dir() {
+        return Err(OmcRegistryError::UnsupportedSpec(format!(
+            "npm pack local path `{}` is not a directory",
+            root.display()
+        )));
+    }
+    let package_json = root.join("package.json");
+    let package = read_npm_pkg_json(&package_json)?;
+    let name = npm_package_json_name(&package)?;
+    let version = npm_package_json_version(&package)?;
+    let filename = npm_pack_filename(&name, &version);
+    let tarball = destination.join(&filename);
+    let files = collect_npm_pack_files(root)?;
+    if files.is_empty() {
+        return Err(OmcRegistryError::UnsupportedSpec(format!(
+            "npm pack local path `{}` has no files",
+            root.display()
+        )));
+    }
+    let unpacked_size = files.iter().map(|file| file.size).sum();
+    let size = if dry_run {
+        0
+    } else {
+        write_npm_pack_tarball(&tarball, &files)?;
+        fs::metadata(&tarball)?.len()
+    };
+    Ok(NpmPackResult {
+        id: format!("{name}@{version}"),
+        name,
+        version,
+        filename,
+        size,
+        unpacked_size,
+        files: files
+            .into_iter()
+            .map(|file| NpmPackedFile {
+                path: file.relative_path,
+                size: file.size,
+            })
+            .collect(),
+    })
+}
+
+#[derive(Debug)]
+struct NpmPackSourceFile {
+    source: PathBuf,
+    relative_path: String,
+    archive_path: String,
+    size: u64,
+}
+
+fn collect_npm_pack_files(root: &Path) -> Result<Vec<NpmPackSourceFile>, OmcRegistryError> {
+    let mut files = Vec::new();
+    collect_npm_pack_files_recursive(root, root, &mut files)?;
+    files.sort_by(|left, right| left.archive_path.cmp(&right.archive_path));
+    Ok(files)
+}
+
+fn collect_npm_pack_files_recursive(
+    root: &Path,
+    dir: &Path,
+    files: &mut Vec<NpmPackSourceFile>,
+) -> Result<(), OmcRegistryError> {
+    for entry in fs::read_dir(dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        let file_type = entry.file_type()?;
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if file_type.is_dir() {
+            if npm_pack_excluded_dir(&name) {
+                continue;
+            }
+            collect_npm_pack_files_recursive(root, &path, files)?;
+        } else if file_type.is_file() {
+            if npm_pack_excluded_file(&name) {
+                continue;
+            }
+            let metadata = entry.metadata()?;
+            let relative = path.strip_prefix(root).map_err(|error| {
+                OmcRegistryError::UnsupportedSpec(format!(
+                    "could not pack `{}` relative to `{}`: {error}",
+                    path.display(),
+                    root.display()
+                ))
+            })?;
+            let relative_path = path_to_archive_string(relative)?;
+            files.push(NpmPackSourceFile {
+                source: path,
+                archive_path: format!("package/{relative_path}"),
+                relative_path,
+                size: metadata.len(),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn npm_pack_excluded_dir(name: &str) -> bool {
+    matches!(
+        name,
+        ".git" | ".hg" | ".svn" | "node_modules" | ".omc" | "target"
+    )
+}
+
+fn npm_pack_excluded_file(name: &str) -> bool {
+    name == ".DS_Store" || name.ends_with(".tgz") || name.ends_with(".tar.gz")
+}
+
+fn write_npm_pack_tarball(
+    tarball: &Path,
+    files: &[NpmPackSourceFile],
+) -> Result<(), OmcRegistryError> {
+    let file = fs::File::create(tarball)?;
+    let encoder = GzEncoder::new(file, Compression::default());
+    let mut archive = tar::Builder::new(encoder);
+    for file in files {
+        let mut input = fs::File::open(&file.source)?;
+        let mut header = tar::Header::new_gnu();
+        header.set_path(&file.archive_path)?;
+        header.set_size(file.size);
+        header.set_mode(0o644);
+        header.set_cksum();
+        archive.append_data(&mut header, &file.archive_path, &mut input)?;
+    }
+    let encoder = archive.into_inner()?;
+    encoder.finish()?;
+    Ok(())
+}
+
+fn npm_package_json_name(package: &serde_json::Value) -> Result<String, OmcRegistryError> {
+    package
+        .get("name")
+        .and_then(serde_json::Value::as_str)
+        .filter(|name| !name.is_empty())
+        .map(str::to_owned)
+        .ok_or_else(|| {
+            OmcRegistryError::UnsupportedSpec("package.json does not define name".to_owned())
+        })
+}
+
+fn npm_pack_filename(name: &str, version: &str) -> String {
+    let name = name.trim_start_matches('@').replace('/', "-");
+    format!("{name}-{version}.tgz")
+}
+
+fn path_to_archive_string(path: &Path) -> Result<String, OmcRegistryError> {
+    let mut parts = Vec::new();
+    for component in path.components() {
+        let std::path::Component::Normal(part) = component else {
+            return Err(OmcRegistryError::UnsupportedSpec(format!(
+                "unsupported package path `{}`",
+                path.display()
+            )));
+        };
+        let Some(part) = part.to_str() else {
+            return Err(OmcRegistryError::UnsupportedSpec(format!(
+                "package path `{}` is not UTF-8",
+                path.display()
+            )));
+        };
+        parts.push(part.to_owned());
+    }
+    Ok(parts.join("/"))
+}
+
+fn npm_pack_result_json(result: NpmPackResult) -> serde_json::Value {
+    serde_json::json!({
+        "id": result.id,
+        "name": result.name,
+        "version": result.version,
+        "filename": result.filename,
+        "size": result.size,
+        "unpackedSize": result.unpacked_size,
+        "entryCount": result.files.len(),
+        "files": result.files.into_iter().map(|file| {
+            serde_json::json!({
+                "path": file.path,
+                "size": file.size,
+            })
+        }).collect::<Vec<_>>(),
+    })
 }
 
 fn read_npm_pkg_json(path: &Path) -> Result<serde_json::Value, OmcRegistryError> {
@@ -3890,6 +4143,7 @@ fn parse_npm_compat_action(args: &[String]) -> Result<NpmCompatAction, OmcRegist
         "audit" => parse_npm_audit_args(&args[1..]),
         "cache" => parse_npm_cache_args(&args[1..]),
         "pkg" => parse_npm_pkg_args(&args[1..]),
+        "pack" => parse_npm_pack_args(&args[1..]),
         "view" | "info" | "show" | "v" => parse_npm_view_args(&args[1..]),
         "config" | "c" => parse_npm_config_args(&args[1..]),
         "get" => parse_npm_config_get_args(&args[1..]),
@@ -4297,6 +4551,87 @@ fn npm_pkg_ignored_equals_flag(arg: &str) -> bool {
     ["--workspace=", "--loglevel="]
         .iter()
         .any(|prefix| arg.starts_with(prefix))
+}
+
+fn parse_npm_pack_args(args: &[String]) -> Result<NpmCompatAction, OmcRegistryError> {
+    let mut destination = PathBuf::from(".");
+    let mut json = false;
+    let mut dry_run = false;
+    let mut packages = Vec::new();
+    let mut index = 0;
+    while index < args.len() {
+        let arg = &args[index];
+        if arg == "--json" {
+            json = true;
+        } else if arg == "--dry-run" {
+            dry_run = true;
+        } else if matches!(arg.as_str(), "--silent" | "-s" | "--ignore-scripts") {
+        } else if arg == "--pack-destination" {
+            index += 1;
+            let Some(path) = args.get(index) else {
+                return Err(OmcRegistryError::UnsupportedSpec(
+                    "--pack-destination needs a path".to_owned(),
+                ));
+            };
+            destination = PathBuf::from(path);
+        } else if let Some(path) = arg.strip_prefix("--pack-destination=") {
+            destination = PathBuf::from(path);
+        } else if npm_pack_ignored_value_flag(arg) {
+            index += 1;
+            if args.get(index).is_none() {
+                return Err(OmcRegistryError::UnsupportedSpec(format!(
+                    "{arg} needs a value"
+                )));
+            }
+        } else if npm_pack_ignored_equals_flag(arg) {
+        } else if arg.starts_with('-') {
+            return Err(unsupported_compat_arg("npm pack", arg));
+        } else if npm_pack_local_package_arg(arg) {
+            packages.push(PathBuf::from(arg));
+        } else {
+            return Err(OmcRegistryError::UnsupportedSpec(format!(
+                "npm pack registry spec `{arg}` is not supported by OMC compatibility yet"
+            )));
+        }
+        index += 1;
+    }
+    Ok(NpmCompatAction::Pack {
+        action: NpmPackAction {
+            packages,
+            destination,
+            json,
+            dry_run,
+        },
+    })
+}
+
+fn npm_pack_local_package_arg(arg: &str) -> bool {
+    arg == "."
+        || arg.starts_with("./")
+        || arg.starts_with("../")
+        || arg.starts_with('/')
+        || arg.starts_with("~/")
+        || Path::new(arg).is_dir()
+}
+
+fn npm_pack_ignored_value_flag(arg: &str) -> bool {
+    matches!(
+        arg,
+        "--workspace" | "-w" | "--include-workspace-root" | "--loglevel"
+    )
+}
+
+fn npm_pack_ignored_equals_flag(arg: &str) -> bool {
+    [
+        "--workspace=",
+        "--include-workspace-root=",
+        "--loglevel=",
+        "--cache=",
+        "--registry=",
+        "--userconfig=",
+    ]
+    .iter()
+    .any(|prefix| arg.starts_with(prefix))
 }
 
 fn parse_npm_outdated_args(args: &[String]) -> Result<NpmCompatAction, OmcRegistryError> {
@@ -6794,6 +7129,26 @@ mod tests {
         );
         assert_eq!(
             parse_npm_compat_action(&args(&[
+                "pack",
+                "--pack-destination",
+                "dist",
+                "--json",
+                "--dry-run",
+                ".",
+            ]))
+            .unwrap(),
+            NpmCompatAction::Pack {
+                action: NpmPackAction {
+                    packages: vec![PathBuf::from(".")],
+                    destination: PathBuf::from("dist"),
+                    json: true,
+                    dry_run: true,
+                },
+            }
+        );
+        assert!(parse_npm_compat_action(&args(&["pack", "left-pad@1.3.0"])).is_err());
+        assert_eq!(
+            parse_npm_compat_action(&args(&[
                 "prune",
                 "--omit=dev",
                 "--loglevel=silent",
@@ -7098,6 +7453,70 @@ mod tests {
             fs::read_to_string(dir.join("ci.npmrc")).unwrap(),
             "registry=https://ci.example.invalid\n"
         );
+    }
+
+    #[test]
+    fn packs_local_npm_package_tarball() {
+        let dir = test_dir("npm-pack");
+        fs::write(
+            dir.join("package.json"),
+            r#"{ "name": "@scope/demo-pkg", "version": "1.2.3" }"#,
+        )
+        .unwrap();
+        fs::write(dir.join("index.js"), "module.exports = 1\n").unwrap();
+        fs::create_dir_all(dir.join("lib")).unwrap();
+        fs::write(dir.join("lib/main.js"), "module.exports = 2\n").unwrap();
+        fs::create_dir_all(dir.join("node_modules/ignored")).unwrap();
+        fs::write(dir.join("node_modules/ignored/index.js"), "ignored\n").unwrap();
+
+        print_npm_pack(
+            &dir,
+            NpmPackAction {
+                packages: Vec::new(),
+                destination: PathBuf::from("dist"),
+                json: false,
+                dry_run: false,
+            },
+        )
+        .unwrap();
+
+        let tarball = dir.join("dist/scope-demo-pkg-1.2.3.tgz");
+        assert!(tarball.exists());
+        let decoder = flate2::read::GzDecoder::new(fs::File::open(tarball).unwrap());
+        let mut archive = tar::Archive::new(decoder);
+        let mut paths = archive
+            .entries()
+            .unwrap()
+            .map(|entry| {
+                entry
+                    .unwrap()
+                    .path()
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect::<Vec<_>>();
+        paths.sort();
+        assert_eq!(
+            paths,
+            vec![
+                "package/index.js".to_owned(),
+                "package/lib/main.js".to_owned(),
+                "package/package.json".to_owned(),
+            ]
+        );
+
+        print_npm_pack(
+            &dir,
+            NpmPackAction {
+                packages: Vec::new(),
+                destination: PathBuf::from("dry"),
+                json: true,
+                dry_run: true,
+            },
+        )
+        .unwrap();
+        assert!(!dir.join("dry").exists());
     }
 
     #[test]

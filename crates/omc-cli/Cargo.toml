@@ -39,9 +39,11 @@ path = "src/bin/python3.rs"
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }
+flate2 = "1"
 omc-cap = { path = "../omc-cap" }
 omc-registry = { path = "../omc-registry" }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
 serde_json = "1"
 sha2 = "0.10"
+tar = "0.4"
 thiserror = "2"
