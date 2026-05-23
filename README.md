@@ -158,7 +158,7 @@ install npm packages into node_modules
 install PyPI wheels into .omc/python/site-packages
 verify cached archive sha256 from omc.lock before extracting locked installs
 install npm package bins into node_modules/.bin
-link npm workspace packages into node_modules
+link npm workspace/local directory packages into node_modules and node_modules/.bin
 install Python console_scripts into .omc/python/bin
 prune stale lockfile entries and installed packages during install
 ```
@@ -243,7 +243,8 @@ Supported now:
   including HTTPS/local `file:` `.tgz` / `.tar.gz` tarball dependencies and
   local `file:` / `link:` directory dependencies
 - npm `overrides` and Yarn-style `resolutions` as version constraints
-- npm workspace package linking into `node_modules`
+- npm workspace and local directory package linking into `node_modules` and
+  `node_modules/.bin`
 - production-style `omc install --omit-dev` installs
 - npm `optionalDependencies` and required `peerDependencies` ingestion
 - npm registry `optionalDependencies` and required `peerDependencies` resolution
@@ -306,7 +307,8 @@ Supported now:
 - platform-compatible PyPI wheel selection for native wheels
 - fail-closed rejection for PyPI source distributions until build isolation and
   native-extension policy exist
-- npm bin links and Python console script shims
+- npm bin links, including linked workspace/local package bins, and Python
+  console script shims
 - `omc node`, `omc python`, `omc script`, and `omc run` wrappers
 - isolated `omc python` execution that uses OMC site-packages without ambient
   user/global Python site-packages or startup/hook environment variables

@@ -676,10 +676,11 @@ pub fn install_project(options: &LinkOptions) -> Result<InstallReport> {
 
     prune_lockfile(&options.project_dir, &retained)?;
     let lock = read_lockfile(options.project_dir.join(LOCKFILE))?;
-    let report = install_lock(&options.project_dir, &lock)?;
-    install_npm_project_links(
+    let mut report = install_lock(&options.project_dir, &lock)?;
+    report.npm_bins += install_npm_project_links(
         &options.project_dir,
         &report.node_modules,
+        &report.npm_bin_dir,
         options.include_dev_dependencies,
     )?;
     install_python_local_paths(&options.python_local_paths, &report.python_site_packages)?;
@@ -698,10 +699,11 @@ pub fn install_locked_project(options: &LinkOptions) -> Result<InstallReport> {
         .packages
         .retain(|package| retained.contains(&locked_package_key(package)));
 
-    let report = install_lock(&options.project_dir, &selected)?;
-    install_npm_project_links(
+    let mut report = install_lock(&options.project_dir, &selected)?;
+    report.npm_bins += install_npm_project_links(
         &options.project_dir,
         &report.node_modules,
+        &report.npm_bin_dir,
         options.include_dev_dependencies,
     )?;
     install_python_local_paths(&options.python_local_paths, &report.python_site_packages)?;
@@ -3977,8 +3979,9 @@ fn is_exact_pypi_requirement(requirement: &str) -> bool {
 pub fn install_locked_packages(project_dir: impl AsRef<Path>) -> Result<InstallReport> {
     let project_dir = project_dir.as_ref();
     let lock = read_lockfile(project_dir.join(LOCKFILE))?;
-    let report = install_lock(project_dir, &lock)?;
-    install_npm_project_links(project_dir, &report.node_modules, true)?;
+    let mut report = install_lock(project_dir, &lock)?;
+    report.npm_bins +=
+        install_npm_project_links(project_dir, &report.node_modules, &report.npm_bin_dir, true)?;
     Ok(report)
 }
 
@@ -4187,13 +4190,25 @@ fn install_nested_npm_dependencies(
 fn install_npm_project_links(
     project_dir: &Path,
     node_modules: &Path,
+    bin_dir: &Path,
     include_dev_dependencies: bool,
 ) -> Result<usize> {
-    Ok(install_npm_workspace_links(project_dir, node_modules)?
-        + install_npm_local_dependency_links(project_dir, node_modules, include_dev_dependencies)?)
+    Ok(
+        install_npm_workspace_links(project_dir, node_modules, bin_dir)?
+            + install_npm_local_dependency_links(
+                project_dir,
+                node_modules,
+                bin_dir,
+                include_dev_dependencies,
+            )?,
+    )
 }
 
-fn install_npm_workspace_links(project_dir: &Path, node_modules: &Path) -> Result<usize> {
+fn install_npm_workspace_links(
+    project_dir: &Path,
+    node_modules: &Path,
+    bin_dir: &Path,
+) -> Result<usize> {
     let package_json = project_dir.join("package.json");
     if !package_json.exists() {
         return Ok(0);
@@ -4218,7 +4233,7 @@ fn install_npm_workspace_links(project_dir: &Path, node_modules: &Path) -> Resul
             fs::create_dir_all(parent)?;
         }
         create_directory_link(workspace_dir, &target)?;
-        count += 1;
+        count += install_npm_bins(workspace_dir, name, bin_dir)?;
     }
 
     Ok(count)
@@ -4227,6 +4242,7 @@ fn install_npm_workspace_links(project_dir: &Path, node_modules: &Path) -> Resul
 fn install_npm_local_dependency_links(
     project_dir: &Path,
     node_modules: &Path,
+    bin_dir: &Path,
     include_dev_dependencies: bool,
 ) -> Result<usize> {
     let mut count = 0;
@@ -4248,7 +4264,7 @@ fn install_npm_local_dependency_links(
                 fs::create_dir_all(parent)?;
             }
             create_directory_link(&link.path, &target)?;
-            count += 1;
+            count += install_npm_bins(&link.path, &link.name, bin_dir)?;
         }
     }
     Ok(count)
@@ -4555,6 +4571,7 @@ fn install_npm_bins(package_dir: &Path, package_name: &str, bin_dir: &Path) -> R
         if !source.exists() {
             continue;
         }
+        make_executable(&source)?;
         let target = bin_dir.join(&name);
         remove_path_if_exists(&target)?;
         create_command_link(&source, &target)?;
@@ -8320,7 +8337,7 @@ mod tests {
         .unwrap();
         fs::write(
             dir.path().join("packages/lib/package.json"),
-            r#"{ "name": "@demo/lib", "main": "index.js" }"#,
+            r#"{ "name": "@demo/lib", "main": "index.js", "bin": { "demo-lib": "cli.js" } }"#,
         )
         .unwrap();
         fs::write(
@@ -8328,13 +8345,20 @@ mod tests {
             "module.exports = 41;\n",
         )
         .unwrap();
+        fs::write(
+            dir.path().join("packages/lib/cli.js"),
+            "#!/usr/bin/env node\n",
+        )
+        .unwrap();
 
         let report = install_project(&LinkOptions::new(dir.path())).unwrap();
         assert_eq!(report.npm_packages, 0);
+        assert_eq!(report.npm_bins, 1);
         assert_eq!(
             fs::read_to_string(dir.path().join("node_modules/@demo/lib/index.js")).unwrap(),
             "module.exports = 41;\n"
         );
+        assert!(dir.path().join("node_modules/.bin/demo-lib").exists());
     }
 
     #[test]
@@ -8357,26 +8381,51 @@ mod tests {
         )
         .unwrap();
         fs::write(
+            dir.path().join("vendor/local-pkg/package.json"),
+            r#"{ "name": "local-pkg", "bin": { "local-tool": "cli.js" } }"#,
+        )
+        .unwrap();
+        fs::write(
+            dir.path().join("vendor/local-pkg/cli.js"),
+            "#!/usr/bin/env node\n",
+        )
+        .unwrap();
+        fs::write(
             dir.path().join("vendor/dev-pkg/index.js"),
             "module.exports = 42;\n",
+        )
+        .unwrap();
+        fs::write(
+            dir.path().join("vendor/dev-pkg/package.json"),
+            r#"{ "name": "dev-pkg", "bin": { "dev-tool": "cli.js" } }"#,
+        )
+        .unwrap();
+        fs::write(
+            dir.path().join("vendor/dev-pkg/cli.js"),
+            "#!/usr/bin/env node\n",
         )
         .unwrap();
 
         let mut options = LinkOptions::new(dir.path());
         options.include_dev_dependencies = false;
-        install_project(&options).unwrap();
+        let report = install_project(&options).unwrap();
+        assert_eq!(report.npm_bins, 1);
         assert_eq!(
             fs::read_to_string(dir.path().join("node_modules/local-pkg/index.js")).unwrap(),
             "module.exports = 41;\n"
         );
+        assert!(dir.path().join("node_modules/.bin/local-tool").exists());
+        assert!(!dir.path().join("node_modules/.bin/dev-tool").exists());
         assert!(!dir.path().join("node_modules/dev-pkg").exists());
 
         options.include_dev_dependencies = true;
-        install_project(&options).unwrap();
+        let report = install_project(&options).unwrap();
+        assert_eq!(report.npm_bins, 2);
         assert_eq!(
             fs::read_to_string(dir.path().join("node_modules/dev-pkg/index.js")).unwrap(),
             "module.exports = 42;\n"
         );
+        assert!(dir.path().join("node_modules/.bin/dev-tool").exists());
     }
 
     #[test]
