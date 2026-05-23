@@ -370,8 +370,7 @@ enum NpmCompatAction {
         action: NpmRunListAction,
     },
     Exec {
-        command: String,
-        args: Vec<String>,
+        action: NpmExecAction,
     },
     Explore {
         action: NpmExploreAction,
@@ -551,6 +550,17 @@ struct NpmInitAction {
 struct NpmCreateAction {
     initializer: String,
     args: Vec<String>,
+    npm_registry: Option<String>,
+    allow: Vec<String>,
+    allow_all_host: bool,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct NpmExecAction {
+    packages: Vec<String>,
+    command: String,
+    args: Vec<String>,
+    no_install: bool,
     npm_registry: Option<String>,
     allow: Vec<String>,
     allow_all_host: bool,
@@ -2088,6 +2098,31 @@ fn run_project_command(
     Ok(exit_code(status.code()))
 }
 
+fn run_npm_exec(project_dir: &Path, action: NpmExecAction) -> Result<ExitCode, OmcRegistryError> {
+    if action.packages.is_empty() || action.no_install {
+        return run_project_command(project_dir, &action.command, &action.args);
+    }
+
+    let temp_project = TempOmcProject::empty("npm-exec")?;
+    let specs = parse_package_specs(&action.packages, Some(Ecosystem::Npm))?;
+
+    let mut options = LinkOptions::new(temp_project.path());
+    options.allowed_capabilities = parse_grants(&action.allow, action.allow_all_host)?;
+    options.npm_registry_url = action.npm_registry;
+    options.discover_project_requirements = false;
+    options.save_manifest_dependency = true;
+
+    for spec in specs {
+        add_package_graph(&spec, &options)?;
+    }
+    install_project(&options)?;
+
+    let mut process = ProcessCommand::new(action.command);
+    apply_project_runtime_env_for_cwd(&mut process, temp_project.path(), project_dir)?;
+    let status = process.args(action.args).status()?;
+    Ok(exit_code(status.code()))
+}
+
 fn run_npm_explore(
     project_dir: &Path,
     action: NpmExploreAction,
@@ -2726,9 +2761,7 @@ fn run_npm_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
         NpmCompatAction::RunList { action } => {
             print_npm_run_list(project_dir, action)?;
         }
-        NpmCompatAction::Exec { command, args } => {
-            return run_project_command(project_dir, &command, &args)
-        }
+        NpmCompatAction::Exec { action } => return run_npm_exec(project_dir, action),
         NpmCompatAction::Explore { action } => return run_npm_explore(project_dir, action),
         NpmCompatAction::Path { kind } => print_npm_path(project_dir, kind)?,
         NpmCompatAction::List { action } => print_locked_packages(
@@ -3496,7 +3529,8 @@ fn npm_help_text(topic: Option<&str>) -> String {
             "npm exec <command> [-- <args>...]",
             &[
                 "Run a project-local executable with OMC runtime paths.",
-                "Aliases: x, npx. Common flags: --yes, --package, --cache, --registry.",
+                "--package installs verified packages into a temporary OMC project before running the command.",
+                "Aliases: x, npx. Common flags: --yes, --no-install, --package, --cache, --registry, --allow, --allow-all-host.",
             ],
         ),
         Some("completion") => npm_command_help(
@@ -12015,13 +12049,9 @@ fn parse_npm_compat_action(args: &[String]) -> Result<NpmCompatAction, OmcRegist
                 include_workspace_root,
             })
         }
-        "exec" | "x" | "npx" => {
-            let (command, rest) = parse_npm_exec_args(&args[1..])?;
-            Ok(NpmCompatAction::Exec {
-                command,
-                args: rest,
-            })
-        }
+        "exec" | "x" | "npx" => Ok(NpmCompatAction::Exec {
+            action: parse_npm_exec_args(&args[1..])?,
+        }),
         "explore" => parse_npm_explore_args(&args[1..]),
         "bin" => {
             parse_npm_path_args("npm bin", &args[1..])?;
@@ -12102,6 +12132,14 @@ fn parse_npm_help_request(args: &[String]) -> Option<NpmCompatAction> {
             .find(|arg| !arg.starts_with('-'))
             .cloned();
         return Some(NpmCompatAction::Help { topic });
+    }
+    if matches!(command.as_str(), "exec" | "x" | "npx") {
+        if args.get(1).is_some_and(|arg| npm_help_flag(arg)) {
+            return Some(NpmCompatAction::Help {
+                topic: Some("exec".to_owned()),
+            });
+        }
+        return None;
     }
     if args
         .iter()
@@ -16927,7 +16965,12 @@ fn npm_run_equals_value_flag(arg: &str) -> bool {
         .any(|prefix| arg.starts_with(prefix))
 }
 
-fn parse_npm_exec_args(args: &[String]) -> Result<(String, Vec<String>), OmcRegistryError> {
+fn parse_npm_exec_args(args: &[String]) -> Result<NpmExecAction, OmcRegistryError> {
+    let mut packages = Vec::new();
+    let mut no_install = false;
+    let mut npm_registry = None;
+    let mut allow = Vec::new();
+    let mut allow_all_host = false;
     let mut filtered = Vec::new();
     let mut index = 0;
     while index < args.len() {
@@ -16941,14 +16984,44 @@ fn parse_npm_exec_args(args: &[String]) -> Result<(String, Vec<String>), OmcRegi
                 | "--no"
                 | "--ignore-existing"
                 | "--foreground-scripts"
-                | "--no-install"
                 | "--quiet"
                 | "--silent"
         ) {
-        } else if matches!(
-            arg.as_str(),
-            "-p" | "--package" | "--cache" | "--registry" | "--userconfig"
-        ) {
+        } else if arg == "--no-install" {
+            no_install = true;
+        } else if matches!(arg.as_str(), "-p" | "--package") {
+            index += 1;
+            let Some(package) = args.get(index) else {
+                return Err(OmcRegistryError::UnsupportedSpec(format!(
+                    "{arg} needs a value"
+                )));
+            };
+            packages.push(package.clone());
+        } else if let Some(package) = arg.strip_prefix("--package=") {
+            packages.push(package.to_owned());
+        } else if arg == "--registry" {
+            index += 1;
+            let Some(registry) = args.get(index) else {
+                return Err(OmcRegistryError::UnsupportedSpec(
+                    "--registry needs a URL".to_owned(),
+                ));
+            };
+            npm_registry = Some(registry.clone());
+        } else if let Some(registry) = arg.strip_prefix("--registry=") {
+            npm_registry = Some(registry.to_owned());
+        } else if arg == "--allow" {
+            index += 1;
+            let Some(grant) = args.get(index) else {
+                return Err(OmcRegistryError::UnsupportedSpec(
+                    "--allow needs a capability grant".to_owned(),
+                ));
+            };
+            allow.push(grant.clone());
+        } else if let Some(grant) = arg.strip_prefix("--allow=") {
+            allow.push(grant.to_owned());
+        } else if arg == "--allow-all-host" {
+            allow_all_host = true;
+        } else if matches!(arg.as_str(), "--cache" | "--userconfig") {
             index += 1;
             if args.get(index).is_none() {
                 return Err(OmcRegistryError::UnsupportedSpec(format!(
@@ -16965,11 +17038,20 @@ fn parse_npm_exec_args(args: &[String]) -> Result<(String, Vec<String>), OmcRegi
         }
         index += 1;
     }
-    split_first_position("npm exec", &filtered)
+    let (command, args) = split_first_position("npm exec", &filtered)?;
+    Ok(NpmExecAction {
+        packages,
+        command,
+        args,
+        no_install,
+        npm_registry,
+        allow,
+        allow_all_host,
+    })
 }
 
 fn npm_exec_equals_value_flag(arg: &str) -> bool {
-    ["--package=", "--cache=", "--registry=", "--userconfig="]
+    ["--cache=", "--userconfig="]
         .iter()
         .any(|prefix| arg.starts_with(prefix))
 }
@@ -20198,8 +20280,35 @@ mod tests {
         assert_eq!(
             parse_npm_compat_action(&args(&["exec", "eslint", "--", "."])).unwrap(),
             NpmCompatAction::Exec {
-                command: "eslint".to_owned(),
-                args: vec![".".to_owned()],
+                action: NpmExecAction {
+                    packages: Vec::new(),
+                    command: "eslint".to_owned(),
+                    args: vec![".".to_owned()],
+                    no_install: false,
+                    npm_registry: None,
+                    allow: Vec::new(),
+                    allow_all_host: false,
+                },
+            }
+        );
+        assert_eq!(
+            parse_npm_compat_action(&args(&["exec", "--help"])).unwrap(),
+            NpmCompatAction::Help {
+                topic: Some("exec".to_owned()),
+            }
+        );
+        assert_eq!(
+            parse_npm_compat_action(&args(&["exec", "eslint", "--help"])).unwrap(),
+            NpmCompatAction::Exec {
+                action: NpmExecAction {
+                    packages: Vec::new(),
+                    command: "eslint".to_owned(),
+                    args: vec!["--help".to_owned()],
+                    no_install: false,
+                    npm_registry: None,
+                    allow: Vec::new(),
+                    allow_all_host: false,
+                },
             }
         );
         assert_eq!(
@@ -20215,8 +20324,15 @@ mod tests {
             ]))
             .unwrap(),
             NpmCompatAction::Exec {
-                command: "eslint".to_owned(),
-                args: vec![".".to_owned()],
+                action: NpmExecAction {
+                    packages: vec!["eslint".to_owned()],
+                    command: "eslint".to_owned(),
+                    args: vec![".".to_owned()],
+                    no_install: false,
+                    npm_registry: None,
+                    allow: Vec::new(),
+                    allow_all_host: false,
+                },
             }
         );
         assert_eq!(
@@ -20230,8 +20346,61 @@ mod tests {
             ]))
             .unwrap(),
             NpmCompatAction::Exec {
-                command: "tsc".to_owned(),
-                args: vec!["--version".to_owned()],
+                action: NpmExecAction {
+                    packages: vec!["typescript".to_owned()],
+                    command: "tsc".to_owned(),
+                    args: vec!["--version".to_owned()],
+                    no_install: false,
+                    npm_registry: None,
+                    allow: Vec::new(),
+                    allow_all_host: false,
+                },
+            }
+        );
+        assert_eq!(
+            parse_npm_compat_action(&args(&[
+                "exec",
+                "--package=@scope/tool@1.2.3",
+                "--registry",
+                "https://registry.example",
+                "--allow=env:TOOL_TOKEN",
+                "--allow-all-host",
+                "--",
+                "tool",
+                "--help",
+            ]))
+            .unwrap(),
+            NpmCompatAction::Exec {
+                action: NpmExecAction {
+                    packages: vec!["@scope/tool@1.2.3".to_owned()],
+                    command: "tool".to_owned(),
+                    args: vec!["--help".to_owned()],
+                    no_install: false,
+                    npm_registry: Some("https://registry.example".to_owned()),
+                    allow: vec!["env:TOOL_TOKEN".to_owned()],
+                    allow_all_host: true,
+                },
+            }
+        );
+        assert_eq!(
+            parse_npm_compat_action(&args(&[
+                "exec",
+                "--no-install",
+                "--package",
+                "eslint",
+                "eslint",
+            ]))
+            .unwrap(),
+            NpmCompatAction::Exec {
+                action: NpmExecAction {
+                    packages: vec!["eslint".to_owned()],
+                    command: "eslint".to_owned(),
+                    args: Vec::new(),
+                    no_install: true,
+                    npm_registry: None,
+                    allow: Vec::new(),
+                    allow_all_host: false,
+                },
             }
         );
         assert_eq!(
