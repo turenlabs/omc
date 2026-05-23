@@ -1870,7 +1870,7 @@ fn parse_npm_compat_action(args: &[String]) -> Result<NpmCompatAction, OmcRegist
             args: strip_optional_double_dash(&args[1..]),
         }),
         "exec" | "x" | "npx" => {
-            let (command, rest) = split_first_position("npm exec", &args[1..])?;
+            let (command, rest) = parse_npm_exec_args(&args[1..])?;
             Ok(NpmCompatAction::Exec {
                 command,
                 args: rest,
@@ -1962,6 +1962,53 @@ fn parse_npm_install_args(args: &[String]) -> Result<NpmCompatAction, OmcRegistr
         allow,
         allow_all_host,
     })
+}
+
+fn parse_npm_exec_args(args: &[String]) -> Result<(String, Vec<String>), OmcRegistryError> {
+    let mut filtered = Vec::new();
+    let mut index = 0;
+    while index < args.len() {
+        let arg = &args[index];
+        if arg == "--" {
+            filtered.extend(args[index + 1..].iter().cloned());
+            break;
+        } else if matches!(
+            arg.as_str(),
+            "-y" | "--yes"
+                | "--no"
+                | "--ignore-existing"
+                | "--foreground-scripts"
+                | "--no-install"
+                | "--quiet"
+                | "--silent"
+        ) {
+        } else if matches!(
+            arg.as_str(),
+            "-p" | "--package" | "--cache" | "--registry" | "--userconfig"
+        ) {
+            index += 1;
+            if args.get(index).is_none() {
+                return Err(OmcRegistryError::UnsupportedSpec(format!(
+                    "{arg} needs a value"
+                )));
+            }
+        } else if npm_exec_equals_value_flag(arg) {
+        } else if arg.starts_with('-') {
+            return Err(unsupported_compat_arg("npm exec", arg));
+        } else {
+            filtered.push(arg.clone());
+            filtered.extend(args[index + 1..].iter().cloned());
+            break;
+        }
+        index += 1;
+    }
+    split_first_position("npm exec", &filtered)
+}
+
+fn npm_exec_equals_value_flag(arg: &str) -> bool {
+    ["--package=", "--cache=", "--registry=", "--userconfig="]
+        .iter()
+        .any(|prefix| arg.starts_with(prefix))
 }
 
 fn parse_pip_compat_action(args: &[String]) -> Result<PipCompatAction, OmcRegistryError> {
@@ -3107,6 +3154,38 @@ mod tests {
             NpmCompatAction::Exec {
                 command: "eslint".to_owned(),
                 args: vec![".".to_owned()],
+            }
+        );
+        assert_eq!(
+            parse_npm_compat_action(&args(&[
+                "exec",
+                "--yes",
+                "--package",
+                "eslint",
+                "--cache=/tmp/npm-cache",
+                "eslint",
+                "--",
+                ".",
+            ]))
+            .unwrap(),
+            NpmCompatAction::Exec {
+                command: "eslint".to_owned(),
+                args: vec![".".to_owned()],
+            }
+        );
+        assert_eq!(
+            parse_npm_compat_action(&args(&[
+                "npx",
+                "-y",
+                "-p",
+                "typescript",
+                "tsc",
+                "--version",
+            ]))
+            .unwrap(),
+            NpmCompatAction::Exec {
+                command: "tsc".to_owned(),
+                args: vec!["--version".to_owned()],
             }
         );
         assert_eq!(

@@ -397,7 +397,9 @@ Supported now:
   `prefix`, and `list` / `list --json` flows without delegating to npm, plus a
   direct `npm` compatibility binary and direct `npx` compatibility binary for
   project-local executable flows; direct local npm tarballs and local package
-  directories are accepted as install inputs; `--no-save`,
+  directories are accepted as install inputs; common `npm exec` / `npx` flags
+  such as `--yes`, `--package`, `--cache`, and `--registry` are parsed before
+  dispatching to project-local executables; `--no-save`,
   `--package-lock-only`, `--package-lock=false`, `--registry`, `--omit=...`,
   `--include=...`, and common audit/fund/peer/install-strategy flags are
   understood for install/ci compatibility; package scripts receive npm-style
