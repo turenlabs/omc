@@ -254,6 +254,7 @@ enum NpmCompatAction {
     },
     Maintenance {
         command: NpmMaintenanceCommand,
+        packages: Vec<String>,
         omit_dev: bool,
         allow: Vec<String>,
         allow_all_host: bool,
@@ -324,6 +325,7 @@ enum NpmCompatAction {
 enum NpmMaintenanceCommand {
     Prune,
     Dedupe,
+    Rebuild,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -1389,6 +1391,7 @@ fn run_npm_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
         }
         NpmCompatAction::Maintenance {
             command,
+            packages,
             omit_dev,
             allow,
             allow_all_host,
@@ -1397,7 +1400,7 @@ fn run_npm_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
             options.allowed_capabilities = parse_grants(&allow, allow_all_host)?;
             options.include_dev_dependencies = !omit_dev;
             let install = install_locked_project(&options)?;
-            print_npm_maintenance_report(command, &install);
+            print_npm_maintenance_report(command, &packages, &install);
         }
         NpmCompatAction::RunScript {
             command,
@@ -4268,10 +4271,24 @@ fn print_lock_only_report(project_dir: &Path) {
     println!("lockfile {}", project_dir.join("omc.lock").display());
 }
 
-fn print_npm_maintenance_report(command: NpmMaintenanceCommand, install: &InstallReport) {
+fn print_npm_maintenance_report(
+    command: NpmMaintenanceCommand,
+    packages: &[String],
+    install: &InstallReport,
+) {
     match command {
         NpmMaintenanceCommand::Prune => println!("pruned OMC npm install state"),
         NpmMaintenanceCommand::Dedupe => println!("deduped OMC npm install state"),
+        NpmMaintenanceCommand::Rebuild => {
+            if packages.is_empty() {
+                println!("rebuilt OMC npm install state without package lifecycle scripts");
+            } else {
+                println!(
+                    "rebuilt OMC npm package request without package lifecycle scripts: {}",
+                    packages.join(", ")
+                );
+            }
+        }
     }
     print_install_report(install);
 }
@@ -5248,6 +5265,7 @@ fn parse_npm_compat_action(args: &[String]) -> Result<NpmCompatAction, OmcRegist
         "dedupe" | "ddp" | "find-dupes" => {
             parse_npm_maintenance_args("npm dedupe", NpmMaintenanceCommand::Dedupe, &args[1..])
         }
+        "rebuild" | "rb" => parse_npm_rebuild_args(&args[1..]),
         "run" | "run-script" => {
             let NpmRunArgs {
                 name,
@@ -5524,6 +5542,8 @@ fn npm_global_arg_supported_by_command(command: &str, arg: &str) -> bool {
                 | "dedupe"
                 | "ddp"
                 | "find-dupes"
+                | "rebuild"
+                | "rb"
                 | "list"
                 | "ls"
                 | "ll"
@@ -5644,6 +5664,7 @@ fn parse_npm_maintenance_args(
     }
     Ok(NpmCompatAction::Maintenance {
         command: maintenance,
+        packages: Vec::new(),
         omit_dev,
         allow,
         allow_all_host,
@@ -5654,6 +5675,77 @@ fn npm_maintenance_equals_value_flag(arg: &str) -> bool {
     ["--loglevel=", "--cache="]
         .iter()
         .any(|prefix| arg.starts_with(prefix))
+}
+
+fn parse_npm_rebuild_args(args: &[String]) -> Result<NpmCompatAction, OmcRegistryError> {
+    let mut filtered = Vec::new();
+    let mut index = 0;
+    while index < args.len() {
+        let arg = &args[index];
+        if matches!(
+            arg.as_str(),
+            "--dry-run"
+                | "--json"
+                | "--silent"
+                | "-s"
+                | "--force"
+                | "-f"
+                | "--ignore-scripts"
+                | "--foreground-scripts"
+                | "--build-from-source"
+                | "--bin-links"
+                | "--no-bin-links"
+                | "--install-links"
+                | "--no-install-links"
+                | "--audit"
+                | "--audit=false"
+                | "--fund"
+                | "--fund=false"
+        ) {
+        } else if matches!(
+            arg.as_str(),
+            "--loglevel" | "--cache" | "--install-strategy"
+        ) {
+            index += 1;
+            if args.get(index).is_none() {
+                return Err(OmcRegistryError::UnsupportedSpec(format!(
+                    "{arg} needs a value"
+                )));
+            }
+        } else if npm_rebuild_equals_value_flag(arg) {
+        } else {
+            filtered.push(arg.clone());
+        }
+        index += 1;
+    }
+
+    let CommonCompatFlags {
+        omit_dev,
+        allow,
+        allow_all_host,
+        positionals,
+        ..
+    } = parse_common_compat_flags(&filtered, true)?;
+
+    Ok(NpmCompatAction::Maintenance {
+        command: NpmMaintenanceCommand::Rebuild,
+        packages: positionals,
+        omit_dev,
+        allow,
+        allow_all_host,
+    })
+}
+
+fn npm_rebuild_equals_value_flag(arg: &str) -> bool {
+    [
+        "--loglevel=",
+        "--cache=",
+        "--install-strategy=",
+        "--audit=",
+        "--fund=",
+    ]
+    .iter()
+    .any(|prefix| arg.starts_with(prefix))
 }
 
 fn parse_npm_init_args(args: &[String]) -> Result<NpmCompatAction, OmcRegistryError> {
@@ -9323,6 +9415,7 @@ mod tests {
             .unwrap(),
             NpmCompatAction::Maintenance {
                 command: NpmMaintenanceCommand::Prune,
+                packages: Vec::new(),
                 omit_dev: true,
                 allow: Vec::new(),
                 allow_all_host: true,
@@ -9333,7 +9426,25 @@ mod tests {
                 .unwrap(),
             NpmCompatAction::Maintenance {
                 command: NpmMaintenanceCommand::Dedupe,
+                packages: Vec::new(),
                 omit_dev: false,
+                allow: Vec::new(),
+                allow_all_host: false,
+            }
+        );
+        assert_eq!(
+            parse_npm_compat_action(&args(&[
+                "--omit=dev",
+                "rebuild",
+                "node-sass",
+                "--ignore-scripts",
+                "--build-from-source",
+            ]))
+            .unwrap(),
+            NpmCompatAction::Maintenance {
+                command: NpmMaintenanceCommand::Rebuild,
+                packages: vec!["node-sass".to_owned()],
+                omit_dev: true,
                 allow: Vec::new(),
                 allow_all_host: false,
             }
