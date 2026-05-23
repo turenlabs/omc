@@ -14,12 +14,13 @@ use omc_registry::{
     parse_capability_grant, parse_npm_direct_archive_reference,
     parse_pypi_direct_archive_reference, parse_pypi_vcs_requirement, read_constraint_files,
     read_lockfile, read_manifest, read_npm_config_snapshot, read_npm_package_metadata,
-    read_npm_ping_with_userconfig, read_npm_search, read_npm_whoami, read_npm_workspace_packages,
-    read_package_scripts, read_pip_config_snapshot, read_pypi_available_versions,
-    read_requirements_files, remove_manifest_dependency, Behavior, Ecosystem, InstallReport,
-    LinkOptions, LockedPackage, LockedPythonVcsDependency, NpmPingResult, NpmSearchPackage,
-    NpmWhoamiResult, NpmWorkspacePackage, OmcRegistryError, PackageSpec, ProjectRequirements,
-    PypiBinaryMode, PypiCheckIssue, PythonLocalRequirement, PythonVcsRequirement, Verdict,
+    read_npm_ping_with_userconfig, read_npm_search, read_npm_token_list, read_npm_whoami,
+    read_npm_workspace_packages, read_package_scripts, read_pip_config_snapshot,
+    read_pypi_available_versions, read_requirements_files, remove_manifest_dependency, Behavior,
+    Ecosystem, InstallReport, LinkOptions, LockedPackage, LockedPythonVcsDependency,
+    NpmAccessToken, NpmPingResult, NpmSearchPackage, NpmTokenListResult, NpmWhoamiResult,
+    NpmWorkspacePackage, OmcRegistryError, PackageSpec, ProjectRequirements, PypiBinaryMode,
+    PypiCheckIssue, PythonLocalRequirement, PythonVcsRequirement, Verdict,
 };
 use sha2::{Digest, Sha256, Sha384, Sha512};
 
@@ -339,6 +340,9 @@ enum NpmCompatAction {
         npm_registry: Option<String>,
         userconfig: Option<PathBuf>,
     },
+    Token {
+        action: NpmTokenAction,
+    },
     Config {
         action: NpmConfigAction,
         npm_registry: Option<String>,
@@ -479,6 +483,16 @@ enum NpmConfigAction {
     List { json: bool },
     Set { assignments: Vec<(String, String)> },
     Delete { keys: Vec<String> },
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum NpmTokenAction {
+    List {
+        json: bool,
+        parseable: bool,
+        npm_registry: Option<String>,
+        userconfig: Option<PathBuf>,
+    },
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -1867,6 +1881,7 @@ fn run_npm_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
             npm_registry.as_deref(),
             userconfig.as_deref(),
         )?,
+        NpmCompatAction::Token { action } => print_npm_token(project_dir, action)?,
         NpmCompatAction::Config {
             action,
             npm_registry,
@@ -2340,6 +2355,14 @@ fn npm_help_text(topic: Option<&str>) -> String {
                 "Supports --json, --registry, and --userconfig.",
             ],
         ),
+        Some("token") => npm_command_help(
+            "npm token list",
+            &[
+                "List redacted npm access tokens for the authenticated registry account.",
+                "Supports --json, --parseable, --registry, and --userconfig.",
+                "Token creation and revocation are not implemented yet.",
+            ],
+        ),
         Some("view") => npm_command_help(
             "npm view <package-spec> [field...]",
             &["Read package metadata from the configured npm registry. Aliases: info, show, v. Supports --json."],
@@ -2390,7 +2413,7 @@ fn npm_general_help_text() -> String {
         "npm <command>",
         &[
             "OMC npm compatibility runs supported npm workflows through OMC's verifier, lockfile, cache, and project-local runtime paths.",
-            "Supported commands: install, install-test, ci, install-ci-test, remove, run, test, start, stop, restart, exec, list, explain, audit, outdated, fund, prune, dedupe, rebuild, cache, pkg, version, pack, search, ping, whoami, view, docs, repo, bugs, home, config, init, bin, root, prefix.",
+            "Supported commands: install, install-test, ci, install-ci-test, remove, run, test, start, stop, restart, exec, list, explain, audit, outdated, fund, prune, dedupe, rebuild, cache, pkg, version, pack, search, ping, whoami, token, view, docs, repo, bugs, home, config, init, bin, root, prefix.",
             "Use `npm help <command>` for focused OMC compatibility notes.",
         ],
     )
@@ -2429,6 +2452,7 @@ fn npm_help_topic(topic: &str) -> Option<&'static str> {
         "search" | "s" | "se" | "find" => Some("search"),
         "ping" => Some("ping"),
         "whoami" => Some("whoami"),
+        "token" => Some("token"),
         "view" | "info" | "show" | "v" => Some("view"),
         "docs" | "doc" | "repo" | "repository" | "bugs" | "home" | "homepage" => {
             Some("metadata-url")
@@ -3098,6 +3122,89 @@ fn npm_whoami_json(whoami: &NpmWhoamiResult) -> serde_json::Value {
         "registry": whoami.registry,
         "response": whoami.response,
     })
+}
+
+fn print_npm_token(project_dir: &Path, action: NpmTokenAction) -> Result<(), OmcRegistryError> {
+    match action {
+        NpmTokenAction::List {
+            json,
+            parseable,
+            npm_registry,
+            userconfig,
+        } => {
+            let list =
+                read_npm_token_list(project_dir, npm_registry.as_deref(), userconfig.as_deref())?;
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&npm_token_list_json(&list))?
+                );
+            } else if parseable {
+                print_npm_token_list_parseable(&list);
+            } else {
+                print_npm_token_list_text(&list);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn npm_token_list_json(list: &NpmTokenListResult) -> serde_json::Value {
+    serde_json::json!({
+        "registry": list.registry,
+        "tokens": list.tokens,
+        "total": list.total.unwrap_or(list.tokens.len() as u64),
+        "urls": list.urls,
+        "response": list.response,
+    })
+}
+
+fn print_npm_token_list_parseable(list: &NpmTokenListResult) {
+    println!("key\ttoken\tcreated\treadonly\tcidr");
+    for token in &list.tokens {
+        println!(
+            "{}\t{}\t{}\t{}\t{}",
+            npm_token_key(token),
+            npm_token_token(token),
+            token.created.as_deref().unwrap_or_default(),
+            npm_token_readonly(token),
+            npm_token_cidr(token)
+        );
+    }
+}
+
+fn print_npm_token_list_text(list: &NpmTokenListResult) {
+    println!("key\ttoken\tcreated\treadonly\tcidr");
+    for token in &list.tokens {
+        println!(
+            "{}\t{}\t{}\t{}\t{}",
+            npm_token_key(token),
+            npm_token_token(token),
+            token.created.as_deref().unwrap_or_default(),
+            npm_token_readonly(token),
+            npm_token_cidr(token)
+        );
+    }
+}
+
+fn npm_token_key(token: &NpmAccessToken) -> &str {
+    token.key.as_deref().unwrap_or_default()
+}
+
+fn npm_token_token(token: &NpmAccessToken) -> &str {
+    token.token.as_deref().unwrap_or_default()
+}
+
+fn npm_token_readonly(token: &NpmAccessToken) -> &'static str {
+    if token.readonly.unwrap_or(false) {
+        "yes"
+    } else {
+        "no"
+    }
+}
+
+fn npm_token_cidr(token: &NpmAccessToken) -> String {
+    token.cidr.join(",")
 }
 
 fn npm_search_short_date(package: &NpmSearchPackage) -> &str {
@@ -6566,6 +6673,7 @@ fn parse_npm_compat_action(args: &[String]) -> Result<NpmCompatAction, OmcRegist
         "search" | "s" | "se" | "find" => parse_npm_search_args(&args[1..]),
         "ping" => parse_npm_ping_args(&args[1..]),
         "whoami" => parse_npm_whoami_args(&args[1..]),
+        "token" => parse_npm_token_args(&args[1..]),
         "view" | "info" | "show" | "v" => parse_npm_view_args(&args[1..]),
         "docs" | "doc" => {
             parse_npm_metadata_url_args(command, NpmMetadataUrlKind::Docs, &args[1..])
@@ -6715,6 +6823,7 @@ fn npm_global_arg_supported_by_command(command: &str, arg: &str) -> bool {
                 | "find"
                 | "ping"
                 | "whoami"
+                | "token"
                 | "view"
                 | "info"
                 | "show"
@@ -6725,7 +6834,10 @@ fn npm_global_arg_supported_by_command(command: &str, arg: &str) -> bool {
         );
     }
     if matches!(arg, "--userconfig") || arg.starts_with("--userconfig=") {
-        return matches!(command, "config" | "c" | "get" | "ping" | "whoami");
+        return matches!(
+            command,
+            "config" | "c" | "get" | "ping" | "whoami" | "token"
+        );
     }
     if matches!(arg, "--workspace" | "-w")
         || arg.starts_with("--workspace=")
@@ -6767,6 +6879,7 @@ fn npm_global_arg_supported_by_command(command: &str, arg: &str) -> bool {
                 | "find"
                 | "ping"
                 | "whoami"
+                | "token"
                 | "view"
                 | "info"
                 | "show"
@@ -7839,6 +7952,58 @@ fn parse_npm_whoami_args(args: &[String]) -> Result<NpmCompatAction, OmcRegistry
         npm_registry,
         userconfig,
     })
+}
+
+fn parse_npm_token_args(args: &[String]) -> Result<NpmCompatAction, OmcRegistryError> {
+    let mut command = None;
+    let mut command_args = Vec::new();
+    let mut index = 0;
+    while index < args.len() {
+        let arg = &args[index];
+        if command.is_none() && !arg.starts_with('-') {
+            command = Some(arg.as_str());
+        } else {
+            command_args.push(arg.clone());
+            if matches!(arg.as_str(), "--registry" | "--userconfig" | "--loglevel") {
+                index += 1;
+                let value = args.get(index).ok_or_else(|| {
+                    OmcRegistryError::UnsupportedSpec(format!("{arg} needs a value"))
+                })?;
+                command_args.push(value.clone());
+            }
+        }
+        index += 1;
+    }
+    let command = command.unwrap_or("list");
+    match command {
+        "list" | "ls" => {
+            let mut parseable = false;
+            let mut filtered = Vec::new();
+            for arg in command_args {
+                if matches!(arg.as_str(), "--parseable" | "-p") {
+                    parseable = true;
+                } else {
+                    filtered.push(arg.clone());
+                }
+            }
+            let (json, npm_registry, userconfig) =
+                parse_npm_registry_identity_args("npm token list", &filtered)?;
+            Ok(NpmCompatAction::Token {
+                action: NpmTokenAction::List {
+                    json,
+                    parseable,
+                    npm_registry,
+                    userconfig,
+                },
+            })
+        }
+        "create" | "revoke" | "rm" | "delete" | "del" => Err(OmcRegistryError::UnsupportedSpec(
+            format!("npm token {command} is not supported by OMC compatibility yet"),
+        )),
+        other => Err(OmcRegistryError::UnsupportedSpec(format!(
+            "unsupported npm token command `{other}`"
+        ))),
+    }
 }
 
 fn parse_npm_registry_identity_args(
@@ -11324,6 +11489,27 @@ mod tests {
                 userconfig: Some(PathBuf::from("ci.npmrc")),
             }
         );
+        assert_eq!(
+            parse_npm_compat_action(&args(&[
+                "--json",
+                "--registry",
+                "https://registry.example.invalid/npm",
+                "--userconfig=ci.npmrc",
+                "token",
+                "list",
+                "--parseable",
+            ]))
+            .unwrap(),
+            NpmCompatAction::Token {
+                action: NpmTokenAction::List {
+                    json: true,
+                    parseable: true,
+                    npm_registry: Some("https://registry.example.invalid/npm".to_owned()),
+                    userconfig: Some(PathBuf::from("ci.npmrc")),
+                },
+            }
+        );
+        assert!(parse_npm_compat_action(&args(&["token", "create"])).is_err());
         assert_eq!(
             parse_npm_compat_action(&args(&[
                 "view",

@@ -7408,6 +7408,43 @@ pub struct NpmWhoamiResult {
     pub response: serde_json::Value,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct NpmTokenListResult {
+    pub registry: String,
+    pub tokens: Vec<NpmAccessToken>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub total: Option<u64>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub urls: BTreeMap<String, String>,
+    pub response: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct NpmAccessToken {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub readonly: Option<bool>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub cidr: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub updated: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub accessed: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expiry: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bypass_2fa: Option<bool>,
+}
+
 #[derive(Debug, Clone)]
 pub struct NpmPackageMetadata {
     pub name: String,
@@ -7875,6 +7912,53 @@ pub fn read_npm_whoami(
     Ok(NpmWhoamiResult {
         registry,
         username,
+        response,
+    })
+}
+
+pub fn read_npm_token_list(
+    project_dir: &Path,
+    registry_override: Option<&str>,
+    userconfig_override: Option<&Path>,
+) -> Result<NpmTokenListResult> {
+    let client = Client::new();
+    let npm_config =
+        read_npm_config_with_overrides(project_dir, registry_override, userconfig_override)?;
+    let registry = ensure_trailing_slash(&npm_config.registry);
+    let url = format!("{registry}-/npm/v1/tokens?perPage=1000");
+    let response = npm_get(&client, &url, &npm_config)
+        .send()?
+        .error_for_status()?
+        .json::<serde_json::Value>()?;
+    let tokens = response
+        .get("objects")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| {
+            OmcRegistryError::UnsupportedSpec(
+                "npm token list response did not include objects".to_owned(),
+            )
+        })?
+        .iter()
+        .cloned()
+        .map(serde_json::from_value)
+        .collect::<std::result::Result<Vec<NpmAccessToken>, serde_json::Error>>()?;
+    let total = response.get("total").and_then(serde_json::Value::as_u64);
+    let urls = response
+        .get("urls")
+        .and_then(serde_json::Value::as_object)
+        .map(|urls| {
+            urls.iter()
+                .filter_map(|(key, value)| {
+                    value.as_str().map(|value| (key.clone(), value.to_owned()))
+                })
+                .collect::<BTreeMap<_, _>>()
+        })
+        .unwrap_or_default();
+    Ok(NpmTokenListResult {
+        registry,
+        tokens,
+        total,
+        urls,
         response,
     })
 }
@@ -16676,6 +16760,64 @@ wheels = [
                 .get("username")
                 .and_then(serde_json::Value::as_str),
             Some("alice")
+        );
+        handle.join().unwrap();
+    }
+
+    #[test]
+    fn reads_npm_token_list_with_userconfig_auth() {
+        use std::io::{Read as _, Write as _};
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let handle = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buffer = [0_u8; 4096];
+            let len = stream.read(&mut buffer).unwrap();
+            let request = String::from_utf8_lossy(&buffer[..len]);
+            assert!(request.starts_with("GET /-/npm/v1/tokens?perPage=1000 "));
+            assert!(request
+                .to_ascii_lowercase()
+                .contains("authorization: bearer registry-token"));
+
+            let body = r#"{
+              "objects": [
+                {
+                  "key": "a1b2c3",
+                  "token": "npm_aBcD...7890",
+                  "readonly": true,
+                  "cidr": ["192.0.2.0/24"],
+                  "created": "2026-05-23T00:00:00Z"
+                }
+              ],
+              "total": 1,
+              "urls": {"next": "https://registry.example.invalid/-/npm/v1/tokens?page=1"}
+            }"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+        });
+
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(
+            dir.path().join("ci.npmrc"),
+            format!("registry=http://{addr}/\n//{addr}/:_authToken=registry-token\n"),
+        )
+        .unwrap();
+
+        let list = read_npm_token_list(dir.path(), None, Some(Path::new("ci.npmrc"))).unwrap();
+        assert_eq!(list.registry, format!("http://{addr}/"));
+        assert_eq!(list.total, Some(1));
+        assert_eq!(list.tokens.len(), 1);
+        assert_eq!(list.tokens[0].key.as_deref(), Some("a1b2c3"));
+        assert_eq!(list.tokens[0].readonly, Some(true));
+        assert_eq!(list.tokens[0].cidr, vec!["192.0.2.0/24"]);
+        assert_eq!(
+            list.urls.get("next").map(String::as_str),
+            Some("https://registry.example.invalid/-/npm/v1/tokens?page=1")
         );
         handle.join().unwrap();
     }
