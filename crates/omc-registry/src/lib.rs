@@ -3783,7 +3783,7 @@ pub fn read_requirements_files(paths: &[PathBuf]) -> Result<ProjectRequirements>
     Ok(discovered)
 }
 
-fn read_constraint_files(paths: &[PathBuf]) -> Result<ProjectRequirements> {
+pub fn read_constraint_files(paths: &[PathBuf]) -> Result<ProjectRequirements> {
     let mut discovered = ProjectRequirements::default();
     let mut seen = BTreeSet::new();
     for path in paths {

@@ -10,11 +10,12 @@ use omc_registry::{
     apply_pypi_binary_option, check_pypi_lock, compare_npm_versions, compare_pypi_versions,
     init_project, install_locked_packages, install_locked_project, install_project, lock_project,
     parse_capability_grant, parse_npm_direct_archive_reference,
-    parse_pypi_direct_archive_reference, read_lockfile, read_npm_config_snapshot,
-    read_npm_package_metadata, read_package_scripts, read_pip_config_snapshot,
-    read_pypi_available_versions, read_requirements_files, remove_manifest_dependency, Behavior,
-    Ecosystem, InstallReport, LinkOptions, LockedPackage, OmcRegistryError, PackageSpec,
-    PypiBinaryMode, PypiCheckIssue, PythonLocalRequirement, Verdict,
+    parse_pypi_direct_archive_reference, read_constraint_files, read_lockfile,
+    read_npm_config_snapshot, read_npm_package_metadata, read_package_scripts,
+    read_pip_config_snapshot, read_pypi_available_versions, read_requirements_files,
+    remove_manifest_dependency, Behavior, Ecosystem, InstallReport, LinkOptions, LockedPackage,
+    OmcRegistryError, PackageSpec, ProjectRequirements, PypiBinaryMode, PypiCheckIssue,
+    PythonLocalRequirement, Verdict,
 };
 use sha2::{Digest, Sha256, Sha384, Sha512};
 
@@ -319,6 +320,7 @@ enum NpmConfigAction {
 enum PipCompatAction {
     Version,
     Install(Box<PipInstallAction>),
+    Download(Box<PipDownloadAction>),
     Uninstall {
         specs: Vec<String>,
         requirements: Vec<PathBuf>,
@@ -401,6 +403,25 @@ struct PipInstallAction {
     require_hashes: bool,
     no_deps: bool,
     target: Option<PathBuf>,
+    allow: Vec<String>,
+    allow_all_host: bool,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct PipDownloadAction {
+    specs: Vec<String>,
+    requirements: Vec<PathBuf>,
+    constraints: Vec<PathBuf>,
+    archive_references: Vec<String>,
+    index_url: Option<String>,
+    extra_index_urls: Vec<String>,
+    find_links: Vec<String>,
+    no_index: bool,
+    binary_all: Option<PypiBinaryMode>,
+    binary_packages: BTreeMap<String, PypiBinaryMode>,
+    require_hashes: bool,
+    no_deps: bool,
+    destination: PathBuf,
     allow: Vec<String>,
     allow_all_host: bool,
 }
@@ -1161,6 +1182,9 @@ fn run_pip_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
                 print_install_report(&install);
             }
         }
+        PipCompatAction::Download(action) => {
+            download_pip_packages(project_dir, *action)?;
+        }
         PipCompatAction::Uninstall {
             mut specs,
             requirements,
@@ -1658,6 +1682,173 @@ fn pip_hash_digest(algorithm: PipHashAlgorithm, bytes: &[u8]) -> String {
         .into_iter()
         .map(|byte| format!("{byte:02x}"))
         .collect::<String>()
+}
+
+fn download_pip_packages(
+    project_dir: &Path,
+    action: PipDownloadAction,
+) -> Result<(), OmcRegistryError> {
+    let PipDownloadAction {
+        specs,
+        requirements,
+        constraints,
+        archive_references,
+        index_url,
+        extra_index_urls,
+        find_links,
+        no_index,
+        binary_all,
+        binary_packages,
+        require_hashes,
+        no_deps,
+        destination,
+        allow,
+        allow_all_host,
+    } = action;
+
+    let destination = absolutize_path(project_dir, destination);
+    fs::create_dir_all(&destination)?;
+
+    let mut options = LinkOptions::new(project_dir);
+    options.save_manifest_dependency = false;
+    options.discover_project_requirements = false;
+    options.allowed_capabilities = parse_grants(&allow, allow_all_host)?;
+    apply_pip_compat_index_options(
+        &mut options,
+        index_url,
+        extra_index_urls,
+        find_links,
+        no_index,
+    );
+    options.pypi_require_hashes = require_hashes;
+    options.pypi_include_dependencies = !no_deps;
+    options.pypi_binary_all = binary_all;
+    options.pypi_binary_packages = binary_packages;
+
+    let mut resolved_specs = parse_package_specs(&specs, Some(Ecosystem::Pypi))?;
+    resolved_specs.extend(parse_pip_archive_references(
+        project_dir,
+        &archive_references,
+        &mut options,
+    )?);
+    if !requirements.is_empty() {
+        let requirements = read_requirements_files(&absolutize_paths(project_dir, requirements))?;
+        apply_pypi_download_requirements(&mut options, &mut resolved_specs, requirements)?;
+    }
+    if !constraints.is_empty() {
+        let constraints = read_constraint_files(&absolutize_paths(project_dir, constraints))?;
+        apply_pypi_download_requirements(&mut options, &mut resolved_specs, constraints)?;
+    }
+    if resolved_specs.is_empty() {
+        return Err(OmcRegistryError::UnsupportedSpec(
+            "pip download needs at least one package, archive, or requirement file".to_owned(),
+        ));
+    }
+
+    let mut reports = Vec::new();
+    for spec in &resolved_specs {
+        reports.extend(add_package_graph(spec, &options)?);
+    }
+    copy_downloaded_pypi_archives(project_dir, &destination, &reports)?;
+    Ok(())
+}
+
+fn apply_pypi_download_requirements(
+    options: &mut LinkOptions,
+    specs: &mut Vec<PackageSpec>,
+    requirements: ProjectRequirements,
+) -> Result<(), OmcRegistryError> {
+    if !requirements.python_local_paths.is_empty()
+        || !requirements.python_local_requirements.is_empty()
+        || !requirements.python_vcs_requirements.is_empty()
+    {
+        return Err(OmcRegistryError::UnsupportedSpec(
+            "pip download supports registry requirements and direct wheel/sdist archives; local directories and VCS requirements need pip install"
+                .to_owned(),
+        ));
+    }
+
+    specs.extend(requirements.specs);
+    options.constraints.extend(requirements.constraints);
+    options.hashes.extend(requirements.hashes);
+    if requirements.pypi_binary_all.is_some() {
+        options.pypi_binary_all = requirements.pypi_binary_all;
+    }
+    options
+        .pypi_binary_packages
+        .extend(requirements.pypi_binary_packages);
+    if requirements.pypi_index_url.is_some() {
+        options.pypi_index_url = requirements.pypi_index_url;
+    }
+    options
+        .pypi_extra_index_urls
+        .extend(requirements.pypi_extra_index_urls);
+    options.pypi_find_links.extend(requirements.pypi_find_links);
+    options.pypi_no_index |= requirements.pypi_no_index;
+    options.pypi_require_hashes |= requirements.pypi_require_hashes;
+    if requirements.pypi_no_deps {
+        options.pypi_include_dependencies = false;
+    }
+    Ok(())
+}
+
+fn copy_downloaded_pypi_archives(
+    project_dir: &Path,
+    destination: &Path,
+    reports: &[omc_registry::LinkReport],
+) -> Result<(), OmcRegistryError> {
+    let mut copied = BTreeSet::new();
+    for report in reports {
+        let package = &report.locked;
+        if package.ecosystem != Ecosystem::Pypi {
+            continue;
+        }
+        let key = format!("{}=={}:{}", package.name, package.version, package.sha256);
+        if !copied.insert(key) {
+            continue;
+        }
+        let source = project_dir.join(&package.archive);
+        let filename = pypi_download_filename(package);
+        let target = destination.join(filename);
+        fs::copy(&source, &target)?;
+        println!("Saved {}", target.display());
+    }
+    println!("Successfully downloaded {} package(s)", copied.len());
+    Ok(())
+}
+
+fn pypi_download_filename(package: &LockedPackage) -> String {
+    if let Ok(url) = reqwest::Url::parse(&package.source_url) {
+        if let Some(filename) = url
+            .path_segments()
+            .and_then(|mut segments| segments.next_back())
+        {
+            if !filename.is_empty() {
+                return filename.to_owned();
+            }
+        }
+    }
+    let without_fragment = package
+        .source_url
+        .split_once('#')
+        .map(|(path, _)| path)
+        .unwrap_or(&package.source_url);
+    let source = without_fragment
+        .split_once('?')
+        .map(|(path, _)| path)
+        .unwrap_or(without_fragment);
+    Path::new(source)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty())
+        .map(str::to_owned)
+        .or_else(|| {
+            Path::new(&package.archive)
+                .file_name()
+                .and_then(|name| name.to_str())
+                .map(str::to_owned)
+        })
+        .unwrap_or_else(|| format!("{}-{}.archive", package.name, package.version))
 }
 
 fn print_npm_cache(project_dir: &Path, action: NpmCacheAction) -> Result<(), OmcRegistryError> {
@@ -3547,6 +3738,7 @@ fn parse_pip_compat_action(args: &[String]) -> Result<PipCompatAction, OmcRegist
     match command {
         "--version" | "-V" => Ok(PipCompatAction::Version),
         "install" => parse_pip_install_args(&args[1..]),
+        "download" => parse_pip_download_args(&args[1..]),
         "uninstall" | "remove" => parse_pip_uninstall_args(&args[1..]),
         "show" => parse_pip_show_args(&args[1..]),
         "hash" => parse_pip_hash_args(&args[1..]),
@@ -4227,6 +4419,187 @@ fn parse_pip_install_args(args: &[String]) -> Result<PipCompatAction, OmcRegistr
     })))
 }
 
+fn parse_pip_download_args(args: &[String]) -> Result<PipCompatAction, OmcRegistryError> {
+    let mut requirements = Vec::new();
+    let mut constraints = Vec::new();
+    let mut index_url = None;
+    let mut extra_index_urls = Vec::new();
+    let mut find_links = Vec::new();
+    let mut no_index = false;
+    let mut binary_all = None;
+    let mut binary_packages = BTreeMap::new();
+    let mut require_hashes = false;
+    let mut no_deps = false;
+    let mut destination = PathBuf::from(".");
+    let mut archive_references = Vec::new();
+    let mut filtered = Vec::new();
+    let mut index = 0;
+    while index < args.len() {
+        let arg = &args[index];
+        if arg == "-r" || arg == "--requirement" {
+            index += 1;
+            let Some(path) = args.get(index) else {
+                return Err(OmcRegistryError::UnsupportedSpec(format!(
+                    "{arg} needs a path"
+                )));
+            };
+            requirements.push(PathBuf::from(path));
+        } else if let Some(path) = arg.strip_prefix("--requirement=") {
+            requirements.push(PathBuf::from(path));
+        } else if arg == "-c" || arg == "--constraint" {
+            index += 1;
+            let Some(path) = args.get(index) else {
+                return Err(OmcRegistryError::UnsupportedSpec(format!(
+                    "{arg} needs a path"
+                )));
+            };
+            constraints.push(PathBuf::from(path));
+        } else if let Some(path) = arg.strip_prefix("--constraint=") {
+            constraints.push(PathBuf::from(path));
+        } else if arg == "-d" || arg == "--dest" || arg == "--destination-dir" {
+            index += 1;
+            let Some(path) = args.get(index) else {
+                return Err(OmcRegistryError::UnsupportedSpec(format!(
+                    "{arg} needs a path"
+                )));
+            };
+            destination = PathBuf::from(path);
+        } else if let Some(path) = arg
+            .strip_prefix("--dest=")
+            .or_else(|| arg.strip_prefix("--destination-dir="))
+        {
+            destination = PathBuf::from(path);
+        } else if arg == "-i" || arg == "--index-url" {
+            index += 1;
+            let Some(url) = args.get(index) else {
+                return Err(OmcRegistryError::UnsupportedSpec(format!(
+                    "{arg} needs a URL"
+                )));
+            };
+            index_url = Some(url.clone());
+        } else if let Some(url) = arg.strip_prefix("--index-url=") {
+            index_url = Some(url.to_owned());
+        } else if arg == "--extra-index-url" {
+            index += 1;
+            let Some(url) = args.get(index) else {
+                return Err(OmcRegistryError::UnsupportedSpec(format!(
+                    "{arg} needs a URL"
+                )));
+            };
+            extra_index_urls.push(url.clone());
+        } else if let Some(url) = arg.strip_prefix("--extra-index-url=") {
+            extra_index_urls.push(url.to_owned());
+        } else if arg == "-f" || arg == "--find-links" {
+            index += 1;
+            let Some(value) = args.get(index) else {
+                return Err(OmcRegistryError::UnsupportedSpec(format!(
+                    "{arg} needs a path or URL"
+                )));
+            };
+            find_links.push(value.clone());
+        } else if let Some(value) = arg.strip_prefix("--find-links=") {
+            find_links.push(value.to_owned());
+        } else if arg == "--no-index" {
+            no_index = true;
+        } else if arg == "--require-hashes" {
+            require_hashes = true;
+        } else if arg == "--no-deps" {
+            no_deps = true;
+        } else if arg == "--prefer-binary" {
+        } else if arg == "--only-binary" || arg == "--no-binary" {
+            index += 1;
+            let Some(value) = args.get(index) else {
+                return Err(OmcRegistryError::UnsupportedSpec(format!(
+                    "{arg} needs a value"
+                )));
+            };
+            let mode = if arg == "--only-binary" {
+                PypiBinaryMode::Binary
+            } else {
+                PypiBinaryMode::Source
+            };
+            apply_pypi_binary_option(&mut binary_all, &mut binary_packages, mode, value);
+        } else if let Some(value) = arg.strip_prefix("--only-binary=") {
+            apply_pypi_binary_option(
+                &mut binary_all,
+                &mut binary_packages,
+                PypiBinaryMode::Binary,
+                value,
+            );
+        } else if let Some(value) = arg.strip_prefix("--no-binary=") {
+            apply_pypi_binary_option(
+                &mut binary_all,
+                &mut binary_packages,
+                PypiBinaryMode::Source,
+                value,
+            );
+        } else if arg == "--trusted-host" {
+            index += 1;
+            if args.get(index).is_none() {
+                return Err(OmcRegistryError::UnsupportedSpec(format!(
+                    "{arg} needs a value"
+                )));
+            }
+        } else if matches!(
+            arg.as_str(),
+            "--disable-pip-version-check"
+                | "--no-cache-dir"
+                | "--ignore-requires-python"
+                | "--no-build-isolation"
+                | "--use-pep517"
+                | "--no-use-pep517"
+                | "-v"
+                | "--verbose"
+                | "-q"
+                | "--quiet"
+        ) || arg.starts_with("--trusted-host=")
+        {
+        } else if pip_ignored_download_value_flag(arg) {
+            index += 1;
+            if args.get(index).is_none() {
+                return Err(OmcRegistryError::UnsupportedSpec(format!(
+                    "{arg} needs a value"
+                )));
+            }
+        } else if pip_ignored_download_equals_flag(arg) {
+        } else if is_pip_archive_arg(arg) {
+            archive_references.push(arg.clone());
+        } else if is_pip_local_directory_arg(arg) {
+            return Err(OmcRegistryError::UnsupportedSpec(format!(
+                "pip download cannot build local directory `{arg}`; pass a wheel or sdist archive"
+            )));
+        } else {
+            filtered.push(arg.clone());
+        }
+        index += 1;
+    }
+
+    let CommonCompatFlags {
+        allow,
+        allow_all_host,
+        positionals,
+        ..
+    } = parse_common_compat_flags(&filtered, false)?;
+
+    Ok(PipCompatAction::Download(Box::new(PipDownloadAction {
+        specs: positionals.into_iter().filter(|spec| spec != ".").collect(),
+        requirements,
+        constraints,
+        archive_references,
+        index_url,
+        extra_index_urls,
+        find_links,
+        no_index,
+        binary_all,
+        binary_packages,
+        require_hashes,
+        no_deps,
+        destination,
+        allow,
+        allow_all_host,
+    })))
+}
+
 fn pip_ignored_install_value_flag(arg: &str) -> bool {
     matches!(
         arg,
@@ -4249,6 +4622,47 @@ fn pip_ignored_install_equals_flag(arg: &str) -> bool {
         "--timeout=",
         "--exists-action=",
         "--keyring-provider=",
+    ]
+    .iter()
+    .any(|prefix| arg.starts_with(prefix))
+}
+
+fn pip_ignored_download_value_flag(arg: &str) -> bool {
+    matches!(
+        arg,
+        "--progress-bar"
+            | "--retries"
+            | "--timeout"
+            | "--exists-action"
+            | "--keyring-provider"
+            | "--cert"
+            | "--client-cert"
+            | "--proxy"
+            | "--cache-dir"
+            | "--log"
+            | "--platform"
+            | "--python-version"
+            | "--implementation"
+            | "--abi"
+    )
+}
+
+fn pip_ignored_download_equals_flag(arg: &str) -> bool {
+    [
+        "--progress-bar=",
+        "--retries=",
+        "--timeout=",
+        "--exists-action=",
+        "--keyring-provider=",
+        "--cert=",
+        "--client-cert=",
+        "--proxy=",
+        "--cache-dir=",
+        "--log=",
+        "--platform=",
+        "--python-version=",
+        "--implementation=",
+        "--abi=",
     ]
     .iter()
     .any(|prefix| arg.starts_with(prefix))
@@ -5507,6 +5921,49 @@ mod tests {
                 target: Some(PathBuf::from("vendor")),
                 allow: Vec::new(),
                 allow_all_host: true,
+            }))
+        );
+
+        let action = parse_pip_compat_action(&args(&[
+            "download",
+            "-r",
+            "requirements.txt",
+            "-c",
+            "constraints.txt",
+            "--dest",
+            "wheelhouse",
+            "--index-url=https://mirror.example/simple",
+            "--find-links=vendor",
+            "--no-index",
+            "--require-hashes",
+            "--no-deps",
+            "--only-binary=:all:",
+            "--trusted-host",
+            "mirror.example",
+            "--allow",
+            "http:files.example",
+            "requests==2.32.3",
+        ]))
+        .unwrap();
+
+        assert_eq!(
+            action,
+            PipCompatAction::Download(Box::new(PipDownloadAction {
+                specs: vec!["requests==2.32.3".to_owned()],
+                requirements: vec![PathBuf::from("requirements.txt")],
+                constraints: vec![PathBuf::from("constraints.txt")],
+                archive_references: Vec::new(),
+                index_url: Some("https://mirror.example/simple".to_owned()),
+                extra_index_urls: Vec::new(),
+                find_links: vec!["vendor".to_owned()],
+                no_index: true,
+                binary_all: Some(PypiBinaryMode::Binary),
+                binary_packages: BTreeMap::new(),
+                require_hashes: true,
+                no_deps: true,
+                destination: PathBuf::from("wheelhouse"),
+                allow: vec!["http:files.example".to_owned()],
+                allow_all_host: false,
             }))
         );
     }
