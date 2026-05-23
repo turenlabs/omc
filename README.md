@@ -145,7 +145,7 @@ For existing projects, `install` reads normal project files:
 
 ```text
 package.json       root/workspace dependencies, devDependencies, optionalDependencies, peers, overrides/resolutions, HTTPS/file tarball deps, local file/link dirs; use --omit-dev for production installs
-.npmrc             npm registry, scoped registry, and host-scoped auth token configuration
+.npmrc             npm registry, scoped registry, and host-scoped auth token configuration; NPM_CONFIG_REGISTRY / npm_config_registry override the default registry
 package-lock.json  exact versions, resolved tarball URLs, and integrity hashes for uniquely locked npm packages
 npm-shrinkwrap.json exact versions, resolved tarball URLs, and integrity hashes for uniquely locked npm packages
 yarn.lock          Yarn Classic exact versions, resolved tarball URLs, and integrity hashes for uniquely locked npm packages
@@ -171,7 +171,7 @@ What `add` does:
 resolve package version ranges from npm or PyPI
 walk runtime dependencies recursively
 download the registry artifact without executing it
-use project/user `.npmrc` registry, scoped registry, and auth token settings for npm
+use project/user `.npmrc` registry, scoped registry, auth token settings, and npm registry env vars for npm
 use `omc.toml` PyPI simple-index settings for OMC-managed PyPI adds
 use project/user `pip.conf` PyPI simple-index settings when no project index is set
 use `PIP_INDEX_URL` / `PIP_EXTRA_INDEX_URL` when no project PyPI index is set
@@ -264,7 +264,8 @@ Supported now:
 - npm and PyPI exact-version resolution
 - npm semver range resolution for common dependency ranges
 - project and user `.npmrc` support for `registry`, `@scope:registry`, and
-  host-scoped `_authToken` npm registry access
+  host-scoped `_authToken` npm registry access, plus `NPM_CONFIG_REGISTRY` /
+  `npm_config_registry` default-registry overrides
 - project `omc.toml` PyPI simple-index support for `pypi-index-url` and
   `pypi-extra-index-urls`
 - project/user `pip.conf` and `PIP_CONFIG_FILE` PyPI support for `index-url`,

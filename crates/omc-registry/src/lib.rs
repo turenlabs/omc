@@ -7195,6 +7195,7 @@ fn read_npm_config(project_dir: &Path) -> Result<NpmConfig> {
         read_npmrc_into(&PathBuf::from(home).join(".npmrc"), &mut config)?;
     }
     read_npmrc_into(&project_dir.join(".npmrc"), &mut config)?;
+    apply_npm_environment_config(&mut config);
     Ok(config)
 }
 
@@ -7206,6 +7207,19 @@ fn read_npm_config_for_options(project_dir: &Path, options: &LinkOptions) -> Res
         })?;
     }
     Ok(config)
+}
+
+fn apply_npm_environment_config(config: &mut NpmConfig) {
+    let registry = env::var("npm_config_registry")
+        .ok()
+        .or_else(|| env::var("NPM_CONFIG_REGISTRY").ok());
+    apply_npm_environment_values(config, registry.as_deref());
+}
+
+fn apply_npm_environment_values(config: &mut NpmConfig, registry: Option<&str>) {
+    if let Some(registry) = registry.and_then(normalize_npm_registry) {
+        config.registry = registry;
+    }
 }
 
 fn read_npmrc_into(path: &Path, config: &mut NpmConfig) -> Result<()> {
@@ -15967,6 +15981,16 @@ wheels = [
         let config = read_npm_config_for_options(dir.path(), &options).unwrap();
 
         assert_eq!(config.registry, "https://cli.example.invalid/npm/");
+    }
+
+    #[test]
+    fn npm_environment_overrides_npmrc_registry() {
+        let mut config = NpmConfig::default();
+        parse_npmrc_content("registry=https://npmrc.example.invalid/\n", &mut config);
+
+        apply_npm_environment_values(&mut config, Some("https://env.example.invalid/npm"));
+
+        assert_eq!(config.registry, "https://env.example.invalid/npm/");
     }
 
     #[test]
