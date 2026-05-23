@@ -119,7 +119,7 @@ For existing projects, `install` reads normal project files:
 
 ```text
 package.json       dependencies, devDependencies, optionalDependencies, peers; use --omit-dev for production installs
-package-lock.json  exact version constraints and integrity hashes for uniquely locked npm packages
+package-lock.json  exact versions, resolved tarball URLs, and integrity hashes for uniquely locked npm packages
 requirements.txt  PyPI requirements, direct wheel URLs, hashes, extras, -r includes, -c constraints, markers
 pyproject.toml    PEP 621 project dependencies, selected optional groups
 pyproject.toml    Poetry dependencies, dev groups, optional groups, and extras
@@ -132,7 +132,7 @@ resolve package version ranges from npm or PyPI
 walk runtime dependencies recursively
 download the registry artifact without executing it
 verify npm shasum/integrity and PyPI sha256 when the registry provides them
-verify package-lock.json npm integrity hashes when present
+use package-lock.json npm resolved tarball URLs and integrity hashes when present
 cache the source artifact under .omc/cache
 profile runtime source files into OMC capability findings
 run the OMC verifier with deny-by-default policy
@@ -206,8 +206,8 @@ Supported now:
   and `libc` metadata
 - npm bundled dependency metadata so bundled packages are not resolved from the
   registry a second time
-- `package-lock.json` exact-version constraints and integrity verification for
-  uniquely locked npm packages
+- `package-lock.json` exact-version constraints, resolved tarball URLs, and
+  integrity verification for uniquely locked npm packages
 - `requirements.txt` ingestion with hashes, line continuations, extras,
   direct wheel URLs, recursive `-r` includes, `-c` constraints, and common
   Python environment markers
