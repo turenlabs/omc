@@ -502,6 +502,20 @@ pub fn add_package_graph(spec: &PackageSpec, options: &LinkOptions) -> Result<Ve
     Ok(reports)
 }
 
+pub fn remove_manifest_dependency(
+    project_dir: impl AsRef<Path>,
+    spec: &PackageSpec,
+) -> Result<bool> {
+    let project_dir = project_dir.as_ref();
+    init_project(project_dir, None)?;
+
+    let manifest_path = project_dir.join(MANIFEST);
+    let mut manifest = read_manifest(&manifest_path)?;
+    let removed = manifest.dependencies.remove(&spec.package_key()).is_some();
+    fs::write(&manifest_path, toml::to_string_pretty(&manifest)?)?;
+    Ok(removed)
+}
+
 pub fn install_project(options: &LinkOptions) -> Result<InstallReport> {
     init_project(&options.project_dir, None)?;
 
@@ -3374,6 +3388,35 @@ mod tests {
             .iter()
             .any(|spec| spec.name == "is-odd" && spec.version.as_deref() == Some("3.0.1")));
         assert!(!production_specs.iter().any(|spec| spec.name == "which"));
+    }
+
+    #[test]
+    fn removes_manifest_dependencies() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifest = OmcManifest {
+            project: ProjectInfo {
+                name: "remove-demo".to_owned(),
+                version: "0.1.0".to_owned(),
+            },
+            dependencies: BTreeMap::from([("npm:left-pad".to_owned(), "1.3.0".to_owned())]),
+            policy: ManifestPolicy {
+                allow: vec!["http:api.example.com".to_owned()],
+            },
+        };
+        fs::write(
+            dir.path().join("omc.toml"),
+            toml::to_string_pretty(&manifest).unwrap(),
+        )
+        .unwrap();
+
+        let removed =
+            remove_manifest_dependency(dir.path(), &PackageSpec::parse("npm:left-pad").unwrap())
+                .unwrap();
+        let manifest = read_manifest(dir.path().join("omc.toml")).unwrap();
+
+        assert!(removed);
+        assert!(manifest.dependencies.is_empty());
+        assert_eq!(manifest.policy.allow, vec!["http:api.example.com"]);
     }
 
     #[test]

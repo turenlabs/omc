@@ -6,8 +6,8 @@ use clap::{Parser, Subcommand};
 use omc_cap::Capability;
 use omc_registry::{
     add_package_graph, init_project, install_locked_packages, install_locked_project,
-    install_project, parse_capability_grant, read_lockfile, read_package_scripts, LinkOptions,
-    OmcRegistryError, PackageSpec, Verdict,
+    install_project, parse_capability_grant, read_lockfile, read_package_scripts,
+    remove_manifest_dependency, LinkOptions, OmcRegistryError, PackageSpec, Verdict,
 };
 
 #[derive(Debug, Parser)]
@@ -37,6 +37,18 @@ enum Command {
         #[arg(
             long = "allow",
             help = "Grant a capability, e.g. http:api.example.com, env:API_TOKEN, fs-read:*, proc:*"
+        )]
+        allow: Vec<String>,
+        #[arg(long, help = "Grant all host capabilities for compatibility testing")]
+        allow_all_host: bool,
+    },
+    #[command(about = "Remove an OMC-managed dependency and reinstall current project inputs")]
+    Remove {
+        #[arg(help = "Package spec such as npm:left-pad or pypi:idna")]
+        spec: String,
+        #[arg(
+            long = "allow",
+            help = "Grant a capability while reinstalling remaining dependencies"
         )]
         allow: Vec<String>,
         #[arg(long, help = "Grant all host capabilities for compatibility testing")]
@@ -146,6 +158,33 @@ fn run() -> Result<ExitCode, OmcRegistryError> {
                 }
                 Err(error) => return Err(error),
             }
+        }
+        Command::Remove {
+            spec,
+            allow,
+            allow_all_host,
+        } => {
+            let spec = PackageSpec::parse(&spec)?;
+            if !remove_manifest_dependency(&cli.project_dir, &spec)? {
+                return Err(OmcRegistryError::UnsupportedSpec(format!(
+                    "dependency `{}` is not in omc.toml",
+                    spec.package_key()
+                )));
+            }
+
+            let mut options = LinkOptions::new(&cli.project_dir);
+            options.allowed_capabilities = parse_grants(&allow, allow_all_host)?;
+            let install = install_project(&options)?;
+            println!("removed {}", spec.package_key());
+            println!(
+                "installed npm={} pypi={} npm_bins={} python_scripts={} node_modules={} python_site_packages={}",
+                install.npm_packages,
+                install.pypi_packages,
+                install.npm_bins,
+                install.python_scripts,
+                install.node_modules.display(),
+                install.python_site_packages.display()
+            );
         }
         Command::Install {
             allow,

@@ -108,6 +108,7 @@ cargo run -p omc-cli -- --project-dir /tmp/omc-demo install --locked
 cargo run -p omc-cli -- --project-dir /tmp/omc-demo run normalizer --version
 cargo run -p omc-cli -- --project-dir /tmp/omc-demo audit
 cargo run -p omc-cli -- --project-dir /tmp/omc-demo audit --json
+cargo run -p omc-cli -- --project-dir /tmp/omc-demo remove npm:is-odd
 ```
 
 For existing projects, `install` reads normal project files:
@@ -206,6 +207,7 @@ Supported now:
 - source artifact download and cache
 - `omc.toml` and `omc.lock`
 - persistent `[policy].allow` grants in `omc.toml`
+- `omc add` and `omc remove` for OMC-managed dependencies
 - install-time pruning so `omc.lock`, `node_modules`, and Python site-packages
   converge to current project manifests
 - locked/offline `omc install --locked` installs that validate `omc.lock`
