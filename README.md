@@ -128,6 +128,7 @@ pip.conf           PyPI index-url, extra-index-url, find-links, and no-index con
 requirements.txt  PyPI requirements, direct wheel URLs, hashes, extras, -r includes, -c constraints, markers, simple indexes, find-links wheelhouses
 Pipfile.lock      Pipenv default/develop package pins, extras, markers, and sha256 hashes
 uv.lock           uv project requirements, dev requirements, exact package pins, and hashes
+pylock.toml       standardized Python lock package pins, markers, and hashes
 pyproject.toml    PEP 621 project dependencies, selected optional groups
 pyproject.toml    Poetry dependencies, dev groups, optional groups, extras, and wheel URL/path dependencies
 poetry.lock       exact PyPI versions and file hashes for locked Poetry packages
@@ -260,6 +261,8 @@ Supported now:
   markers, and sha256 hashes
 - `uv.lock` ingestion for uv project requirements, dev requirements,
   exact-version constraints, and sdist/wheel sha256 hashes
+- `pylock.omc.toml` / `pylock.toml` ingestion for standardized Python lock
+  package pins, markers, and archive/wheel sha256 hashes
 - `pyproject.toml` PEP 621 dependency ingestion with `omc install --extra`
   for selected optional dependency groups
 - Poetry `pyproject.toml` dependency ingestion, including

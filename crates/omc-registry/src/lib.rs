@@ -929,6 +929,17 @@ fn discover_project_requirements_with_options(
         project.hashes.extend(requirements.hashes);
     }
 
+    for pylock_name in ["pylock.omc.toml", "pylock.toml"] {
+        let pylock = project_dir.join(pylock_name);
+        if pylock.exists() {
+            let requirements = read_pylock_requirements(&pylock)?;
+            project.specs.extend(requirements.specs);
+            project.constraints.extend(requirements.constraints);
+            project.hashes.extend(requirements.hashes);
+            break;
+        }
+    }
+
     let pyproject_toml = project_dir.join("pyproject.toml");
     if pyproject_toml.exists() {
         let requirements =
@@ -2328,6 +2339,61 @@ fn uv_requirement_spec(requirement: UvRequirement) -> Option<PackageSpec> {
             .filter(|specifier| !specifier.trim().is_empty()),
         extras,
     ))
+}
+
+fn read_pylock_requirements(path: &Path) -> Result<ProjectRequirements> {
+    let lock = toml::from_str::<PylockToml>(&fs::read_to_string(path)?)?;
+    let mut requirements = ProjectRequirements::default();
+
+    for package in lock.packages {
+        if package
+            .marker
+            .as_deref()
+            .map(|marker| !pypi_marker_applies(marker, &BTreeSet::new()))
+            .unwrap_or(false)
+        {
+            continue;
+        }
+
+        let name = normalize_pypi_name(&package.name);
+        let key = format!("pypi:{name}");
+        requirements.specs.push(PackageSpec::new(
+            Ecosystem::Pypi,
+            name,
+            Some(package.version.clone()),
+        ));
+        requirements
+            .constraints
+            .insert(key.clone(), package.version);
+
+        collect_pylock_dist_hash(package.archive.as_ref(), &key, &mut requirements);
+        collect_pylock_dist_hash(package.sdist.as_ref(), &key, &mut requirements);
+        for wheel in &package.wheels {
+            collect_pylock_dist_hash(Some(wheel), &key, &mut requirements);
+        }
+    }
+
+    Ok(requirements)
+}
+
+fn collect_pylock_dist_hash(
+    dist: Option<&PylockDistribution>,
+    key: &str,
+    requirements: &mut ProjectRequirements,
+) {
+    let Some(hash) = dist
+        .and_then(|dist| dist.hashes.get("sha256"))
+        .map(|hash| format!("sha256:{hash}"))
+        .and_then(|hash| normalize_sha256_hash(&hash))
+    else {
+        return;
+    };
+
+    requirements
+        .hashes
+        .entry(key.to_owned())
+        .or_default()
+        .insert(hash);
 }
 
 fn read_pyproject_requirements(
@@ -5782,6 +5848,8 @@ fn is_source_like(path: &str) -> bool {
             | "yarn.lock"
             | "Pipfile.lock"
             | "uv.lock"
+            | "pylock.toml"
+            | "pylock.omc.toml"
             | "setup.py"
             | "conftest.py"
             | "tox.ini"
@@ -6186,6 +6254,29 @@ struct UvRequirement {
     extras: Vec<String>,
     #[serde(default)]
     extra: Vec<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct PylockToml {
+    #[serde(default)]
+    packages: Vec<PylockPackage>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct PylockPackage {
+    name: String,
+    version: String,
+    marker: Option<String>,
+    archive: Option<PylockDistribution>,
+    sdist: Option<PylockDistribution>,
+    #[serde(default)]
+    wheels: Vec<PylockDistribution>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct PylockDistribution {
+    #[serde(default)]
+    hashes: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -7703,6 +7794,99 @@ requires-dist = [{ name = "idna", specifier = "==3.7" }]
             discovered.constraints.get("pypi:idna").map(String::as_str),
             Some("3.7")
         );
+        assert_eq!(
+            discovered
+                .hashes
+                .get("pypi:idna")
+                .and_then(|hashes| hashes.iter().next())
+                .map(String::as_str),
+            Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+        );
+    }
+
+    #[test]
+    fn reads_pylock_specs_constraints_and_hashes() {
+        let dir = tempfile::tempdir().unwrap();
+        let pylock = dir.path().join("pylock.toml");
+        let sdist = "a".repeat(64);
+        let wheel = "b".repeat(64);
+        fs::write(
+            &pylock,
+            format!(
+                r#"lock-version = "1.0"
+created-by = "test"
+requires-python = ">=3.11"
+
+[[packages]]
+name = "idna"
+version = "3.7"
+index = "https://pypi.org/simple"
+sdist = {{ url = "https://files.example/idna-3.7.tar.gz", hashes = {{ sha256 = "{sdist}" }} }}
+wheels = [
+  {{ url = "https://files.example/idna-3.7-py3-none-any.whl", hashes = {{ sha256 = "{wheel}" }} }},
+]
+
+[[packages]]
+name = "colorama"
+version = "0.4.6"
+marker = "sys_platform == 'win32'"
+wheels = [
+  {{ url = "https://files.example/colorama-0.4.6-py3-none-any.whl", hashes = {{ sha256 = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc" }} }},
+]
+"#
+            ),
+        )
+        .unwrap();
+
+        let requirements = read_pylock_requirements(&pylock).unwrap();
+        assert!(has_spec(&requirements.specs, "idna", "3.7"));
+        assert!(!requirements
+            .specs
+            .iter()
+            .any(|spec| spec.name == "colorama"));
+        assert_eq!(
+            requirements
+                .constraints
+                .get("pypi:idna")
+                .map(String::as_str),
+            Some("3.7")
+        );
+        assert_eq!(
+            requirements.hashes.get("pypi:idna").cloned().unwrap(),
+            BTreeSet::from([sdist, wheel])
+        );
+    }
+
+    #[test]
+    fn discovers_pylock_requirements_preferring_omc_specific_file() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(
+            dir.path().join("pylock.toml"),
+            r#"lock-version = "1.0"
+
+[[packages]]
+name = "wrong"
+version = "1.0.0"
+"#,
+        )
+        .unwrap();
+        fs::write(
+            dir.path().join("pylock.omc.toml"),
+            r#"lock-version = "1.0"
+
+[[packages]]
+name = "idna"
+version = "3.7"
+wheels = [
+  { url = "https://files.example/idna-3.7-py3-none-any.whl", hashes = { sha256 = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" } },
+]
+"#,
+        )
+        .unwrap();
+
+        let discovered = discover_project_requirements(dir.path()).unwrap();
+        assert!(has_spec(&discovered.specs, "idna", "3.7"));
+        assert!(!discovered.specs.iter().any(|spec| spec.name == "wrong"));
         assert_eq!(
             discovered
                 .hashes
