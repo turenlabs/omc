@@ -240,7 +240,7 @@ Supported now:
 - isolated `omc python` execution that uses OMC site-packages without ambient
   user/global Python site-packages
 - isolated Node execution wrappers that remove ambient `NODE_PATH` module
-  resolution outside the project install tree
+  resolution and `NODE_OPTIONS` preloads outside the project install tree
 - runtime source profiling into capability findings
 - explicit CLI grants for accepted host authority
 

@@ -367,6 +367,7 @@ fn apply_project_runtime_env(
         .env("PATH", project_path(project_dir)?)
         .env("PYTHONPATH", project_python_path(project_dir)?)
         .env("PYTHONNOUSERSITE", "1")
+        .env_remove("NODE_OPTIONS")
         .env_remove("NODE_PATH");
     Ok(())
 }
