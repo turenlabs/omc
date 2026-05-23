@@ -556,6 +556,7 @@ pub struct LinkOptions {
     pub pypi_find_links: Vec<String>,
     pub pypi_no_index: bool,
     pub pypi_require_hashes: bool,
+    pub pypi_include_dependencies: bool,
     pub python_target_dir: Option<PathBuf>,
     pub npm_local_paths: Vec<PathBuf>,
     pub python_local_paths: Vec<PathBuf>,
@@ -584,6 +585,7 @@ impl LinkOptions {
             pypi_find_links: Vec::new(),
             pypi_no_index: false,
             pypi_require_hashes: false,
+            pypi_include_dependencies: true,
             python_target_dir: None,
             npm_local_paths: Vec::new(),
             python_local_paths: Vec::new(),
@@ -631,6 +633,7 @@ pub struct ProjectRequirements {
     pub pypi_find_links: Vec<String>,
     pub pypi_no_index: bool,
     pub pypi_require_hashes: bool,
+    pub pypi_no_deps: bool,
     pub python_local_paths: Vec<PathBuf>,
     pub python_vcs_requirements: Vec<PythonVcsRequirement>,
 }
@@ -668,6 +671,7 @@ fn extend_project_requirements(
     target.pypi_find_links.extend(requirements.pypi_find_links);
     target.pypi_no_index |= requirements.pypi_no_index;
     target.pypi_require_hashes |= requirements.pypi_require_hashes;
+    target.pypi_no_deps |= requirements.pypi_no_deps;
     target
         .python_local_paths
         .extend(requirements.python_local_paths);
@@ -695,6 +699,9 @@ fn apply_project_requirements_to_options(
     options.pypi_find_links.extend(requirements.pypi_find_links);
     options.pypi_no_index |= requirements.pypi_no_index;
     options.pypi_require_hashes |= requirements.pypi_require_hashes;
+    if requirements.pypi_no_deps {
+        options.pypi_include_dependencies = false;
+    }
     options
         .python_local_paths
         .extend(requirements.python_local_paths);
@@ -1547,7 +1554,7 @@ fn locked_reachable_package_keys(
         let package =
             find_locked_package_for_spec(lock, spec, &options.constraints, &options.hashes)
                 .ok_or_else(|| OmcRegistryError::LockfileOutOfDate(spec.requested()))?;
-        collect_locked_dependencies(lock, package, &mut retained)?;
+        collect_locked_dependencies(lock, package, options, &mut retained)?;
     }
     Ok(retained)
 }
@@ -1555,9 +1562,14 @@ fn locked_reachable_package_keys(
 fn collect_locked_dependencies(
     lock: &OmcLock,
     package: &LockedPackage,
+    options: &LinkOptions,
     retained: &mut BTreeSet<String>,
 ) -> Result<()> {
     if !retained.insert(locked_package_key(package)) {
+        return Ok(());
+    }
+
+    if !should_follow_locked_dependencies(package, options) {
         return Ok(());
     }
 
@@ -1566,18 +1578,22 @@ fn collect_locked_dependencies(
         let dependency =
             find_locked_package_for_spec(lock, &spec, &BTreeMap::new(), &BTreeMap::new())
                 .ok_or_else(|| OmcRegistryError::LockfileOutOfDate(spec.requested()))?;
-        collect_locked_dependencies(lock, dependency, retained)?;
+        collect_locked_dependencies(lock, dependency, options, retained)?;
     }
     for dependency in &package.optional_dependencies {
         let spec = PackageSpec::parse(dependency)?;
         if let Some(dependency) =
             find_locked_package_for_spec(lock, &spec, &BTreeMap::new(), &BTreeMap::new())
         {
-            collect_locked_dependencies(lock, dependency, retained)?;
+            collect_locked_dependencies(lock, dependency, options, retained)?;
         }
     }
 
     Ok(())
+}
+
+fn should_follow_locked_dependencies(package: &LockedPackage, options: &LinkOptions) -> bool {
+    package.ecosystem != Ecosystem::Pypi || options.pypi_include_dependencies
 }
 
 fn find_locked_package_for_spec<'a>(
@@ -1944,17 +1960,20 @@ fn add_package_graph_inner(
         return Ok(());
     }
 
+    let follow_dependencies = should_follow_locked_dependencies(&report.locked, options);
     reports.push(report);
 
-    for dependency in dependencies {
-        add_package_graph_inner(
-            client,
-            &dependency.spec,
-            dependency.optional,
-            options,
-            seen,
-            reports,
-        )?;
+    if follow_dependencies {
+        for dependency in dependencies {
+            add_package_graph_inner(
+                client,
+                &dependency.spec,
+                dependency.optional,
+                options,
+                seen,
+                reports,
+            )?;
+        }
     }
 
     Ok(())
@@ -3405,6 +3424,7 @@ fn npm_requirements_from_lock_maps(
         pypi_find_links: Vec::new(),
         pypi_no_index: false,
         pypi_require_hashes: false,
+        pypi_no_deps: false,
         python_local_paths: Vec::new(),
         python_vcs_requirements: Vec::new(),
     }
@@ -5277,6 +5297,13 @@ fn read_requirements_file_inner(
         if parse_requirements_require_hashes(line) {
             if mode == RequirementsMode::Install {
                 discovered.pypi_require_hashes = true;
+            }
+            continue;
+        }
+
+        if parse_requirements_no_deps(line) {
+            if mode == RequirementsMode::Install {
+                discovered.pypi_no_deps = true;
             }
             continue;
         }
@@ -9274,6 +9301,10 @@ fn parse_requirements_require_hashes(line: &str) -> bool {
     line == "--require-hashes"
 }
 
+fn parse_requirements_no_deps(line: &str) -> bool {
+    line == "--no-deps"
+}
+
 fn parse_requirements_compatible_global_option(line: &str) -> bool {
     line == "--prefer-binary"
         || parse_requirements_option_value(line, &["--trusted-host=", "--trusted-host"]).is_some()
@@ -12435,6 +12466,30 @@ packages:
     }
 
     #[test]
+    fn locked_reachable_packages_respect_pypi_no_deps() {
+        let mut root = locked_package_for_test(Ecosystem::Pypi, "requests", "2.32.3");
+        root.dependencies = vec!["pypi:idna>=3".to_owned()];
+        let dependency = locked_package_for_test(Ecosystem::Pypi, "idna", "3.7");
+        let lock = OmcLock {
+            version: 1,
+            packages: vec![root, dependency],
+            python_vcs: Vec::new(),
+        };
+        let mut options = LinkOptions::new(".");
+        options.pypi_include_dependencies = false;
+
+        let retained = locked_reachable_package_keys(
+            &lock,
+            &[PackageSpec::parse("pypi:requests==2.32.3").unwrap()],
+            &options,
+        )
+        .unwrap();
+
+        assert!(retained.contains("pypi:requests@2.32.3"));
+        assert!(!retained.contains("pypi:idna@3.7"));
+    }
+
+    #[test]
     fn locked_reachable_packages_allow_missing_optional_dependencies() {
         let mut root = locked_package_for_test(Ecosystem::Npm, "has-optional", "1.0.0");
         root.optional_dependencies = vec!["npm:optional-platform@1.0.0".to_owned()];
@@ -14252,7 +14307,7 @@ wheels = [
     fn rejects_unsupported_requirements_entries() {
         let dir = tempfile::tempdir().unwrap();
         let requirements = dir.path().join("requirements.txt");
-        fs::write(&requirements, "--no-deps\n").unwrap();
+        fs::write(&requirements, "--dry-run\n").unwrap();
         let error = read_requirements_file(&requirements).unwrap_err();
         assert!(error.to_string().contains("unsupported requirements entry"));
 
@@ -14275,12 +14330,13 @@ wheels = [
         let requirements = dir.path().join("requirements.txt");
         fs::write(
             &requirements,
-            "--trusted-host example.invalid\n--only-binary=:all:\n--only-binary idna\n--prefer-binary\n--require-hashes\nidna==3.7 --hash=sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n",
+            "--trusted-host example.invalid\n--only-binary=:all:\n--only-binary idna\n--prefer-binary\n--require-hashes\n--no-deps\nidna==3.7 --hash=sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n",
         )
         .unwrap();
 
         let discovered = read_requirements_file(&requirements).unwrap();
         assert!(discovered.pypi_require_hashes);
+        assert!(discovered.pypi_no_deps);
         assert!(has_spec(&discovered.specs, "idna", "==3.7"));
         assert_eq!(
             discovered

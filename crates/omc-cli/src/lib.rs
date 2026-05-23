@@ -274,6 +274,7 @@ enum PipCompatAction {
         find_links: Vec<String>,
         no_index: bool,
         require_hashes: bool,
+        no_deps: bool,
         target: Option<PathBuf>,
         allow: Vec<String>,
         allow_all_host: bool,
@@ -802,6 +803,7 @@ fn run_pip_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
             find_links,
             no_index,
             require_hashes,
+            no_deps,
             target,
             allow,
             allow_all_host,
@@ -821,6 +823,7 @@ fn run_pip_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
                     no_index,
                 );
                 options.pypi_require_hashes = require_hashes;
+                options.pypi_include_dependencies = !no_deps;
                 options.python_target_dir = target.map(|path| absolutize_path(project_dir, path));
                 let install = install_project(&options)?;
                 print_install_report(&install);
@@ -838,6 +841,7 @@ fn run_pip_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
                     no_index,
                 );
                 options.pypi_require_hashes = require_hashes;
+                options.pypi_include_dependencies = !no_deps;
                 options.python_target_dir = target.map(|path| absolutize_path(project_dir, path));
                 let mut specs = parse_package_specs(&specs, Some(Ecosystem::Pypi))?;
                 specs.extend(parse_pip_archive_references(
@@ -854,6 +858,7 @@ fn run_pip_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
                     && options.constraint_files.is_empty()
                     && options.python_local_paths.is_empty()
                     && options.python_target_dir.is_none()
+                    && options.pypi_include_dependencies
                 {
                     install_locked_packages(project_dir)?
                 } else if options.requirement_files.is_empty()
@@ -1658,6 +1663,7 @@ fn parse_pip_install_args(args: &[String]) -> Result<PipCompatAction, OmcRegistr
     let mut find_links = Vec::new();
     let mut no_index = false;
     let mut require_hashes = false;
+    let mut no_deps = false;
     let mut target = None;
     let mut archive_references = Vec::new();
     let mut local_paths = Vec::new();
@@ -1719,6 +1725,8 @@ fn parse_pip_install_args(args: &[String]) -> Result<PipCompatAction, OmcRegistr
             no_index = true;
         } else if arg == "--require-hashes" {
             require_hashes = true;
+        } else if arg == "--no-deps" {
+            no_deps = true;
         } else if arg == "-t" || arg == "--target" {
             index += 1;
             let Some(path) = args.get(index) else {
@@ -1786,6 +1794,7 @@ fn parse_pip_install_args(args: &[String]) -> Result<PipCompatAction, OmcRegistr
         find_links,
         no_index,
         require_hashes,
+        no_deps,
         target,
         allow,
         allow_all_host,
@@ -2396,6 +2405,7 @@ mod tests {
             "wheelhouse",
             "--no-index",
             "--require-hashes",
+            "--no-deps",
             "--target",
             "vendor",
             "--only-binary=:all:",
@@ -2420,6 +2430,7 @@ mod tests {
                 find_links: vec!["wheelhouse".to_owned()],
                 no_index: true,
                 require_hashes: true,
+                no_deps: true,
                 target: Some(PathBuf::from("vendor")),
                 allow: Vec::new(),
                 allow_all_host: true,
@@ -2454,6 +2465,7 @@ mod tests {
                 find_links: Vec::new(),
                 no_index: false,
                 require_hashes: false,
+                no_deps: false,
                 target: None,
                 allow: Vec::new(),
                 allow_all_host: false,
@@ -2484,6 +2496,7 @@ mod tests {
                 find_links: Vec::new(),
                 no_index: false,
                 require_hashes: false,
+                no_deps: false,
                 target: None,
                 allow: Vec::new(),
                 allow_all_host: false,
