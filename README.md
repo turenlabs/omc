@@ -110,7 +110,7 @@ For existing projects, `install` reads normal project files:
 
 ```text
 package.json       dependencies and devDependencies
-requirements.txt  simple PyPI requirements
+requirements.txt  PyPI requirements, recursive -r includes, common env markers
 ```
 
 What `add` does:
@@ -177,7 +177,8 @@ Supported now:
   filtering
 - recursive runtime dependency locking
 - `package.json` dependency/devDependency ingestion
-- `requirements.txt` ingestion for simple PyPI requirements
+- `requirements.txt` ingestion with recursive `-r` includes and common Python
+  environment markers
 - source artifact download and cache
 - `omc.toml` and `omc.lock`
 - `node_modules` installation for npm tarballs
@@ -198,7 +199,7 @@ Not implemented yet:
 - imports/linking across package cells
 - native/Wasm/Cranelift backend
 - full npm peer/optional/bundled dependency semantics
-- full Python marker/extras and recursive requirements semantics
+- full Python extras, constraints, and advanced requirements-file semantics
 - Python sdist build isolation and native wheel policy
 - execution of package code inside OMC cells for real applications
 

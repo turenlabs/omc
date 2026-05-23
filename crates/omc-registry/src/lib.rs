@@ -5,6 +5,7 @@ use std::io::{Cursor, Read};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::str::FromStr;
+use std::sync::OnceLock;
 
 use flate2::read::GzDecoder;
 use omc_cap::{Capability, Policy};
@@ -652,12 +653,38 @@ fn read_package_json_specs(path: &Path) -> Result<Vec<PackageSpec>> {
 }
 
 fn read_requirements_specs(path: &Path) -> Result<Vec<PackageSpec>> {
+    read_requirements_specs_inner(path, &mut BTreeSet::new())
+}
+
+fn read_requirements_specs_inner(
+    path: &Path,
+    seen: &mut BTreeSet<PathBuf>,
+) -> Result<Vec<PackageSpec>> {
+    let seen_key = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    if !seen.insert(seen_key) {
+        return Ok(Vec::new());
+    }
+
     let mut specs = Vec::new();
+    let base_dir = path.parent().unwrap_or_else(|| Path::new("."));
     for raw_line in fs::read_to_string(path)?.lines() {
         let line = raw_line.split('#').next().unwrap_or_default().trim();
-        if line.is_empty() || line.starts_with('-') || line.contains("://") {
+        if line.is_empty() {
             continue;
         }
+
+        if let Some(include) = parse_requirements_include(line) {
+            specs.extend(read_requirements_specs_inner(
+                &base_dir.join(include),
+                seen,
+            )?);
+            continue;
+        }
+
+        if line.starts_with('-') || line.contains("://") {
+            continue;
+        }
+
         if let Some(spec) = parse_pypi_requirement(line) {
             specs.push(spec);
         }
@@ -1437,6 +1464,13 @@ fn pypi_file_python_compatible(file: &PypiFile, target_python: Option<&str>) -> 
 }
 
 fn current_python_version() -> Option<String> {
+    static CURRENT_PYTHON_VERSION: OnceLock<Option<String>> = OnceLock::new();
+    CURRENT_PYTHON_VERSION
+        .get_or_init(detect_python_version)
+        .clone()
+}
+
+fn detect_python_version() -> Option<String> {
     let output = Command::new("python3")
         .arg("-c")
         .arg(
@@ -1486,12 +1520,10 @@ fn comparable_version(version: &str) -> Vec<u64> {
 fn parse_pypi_requirement(requirement: &str) -> Option<PackageSpec> {
     let mut parts = requirement.splitn(2, ';');
     let requirement = parts.next()?.trim();
-    if parts
-        .next()
-        .map(|marker| marker.contains("extra ==") || marker.contains("extra=="))
-        .unwrap_or(false)
-    {
-        return None;
+    if let Some(marker) = parts.next() {
+        if !pypi_marker_applies(marker) {
+            return None;
+        }
     }
 
     if requirement.is_empty() {
@@ -1522,6 +1554,298 @@ fn parse_pypi_requirement(requirement: &str) -> Option<PackageSpec> {
         name: name.replace('_', "-"),
         version: (!version.is_empty()).then_some(version),
     })
+}
+
+fn parse_requirements_include(line: &str) -> Option<String> {
+    for prefix in ["--requirement="] {
+        if let Some(rest) = line.strip_prefix(prefix) {
+            let rest = rest.trim();
+            if !rest.is_empty() {
+                return Some(rest.to_owned());
+            }
+        }
+    }
+
+    for prefix in ["-r", "--requirement"] {
+        if let Some(rest) = line.strip_prefix(prefix) {
+            let rest = rest.trim_start();
+            if rest.is_empty() {
+                continue;
+            }
+            return Some(rest.to_owned());
+        }
+    }
+
+    None
+}
+
+#[derive(Debug, Clone)]
+struct PypiMarkerEnvironment {
+    python_full_version: Option<String>,
+    os_name: String,
+    sys_platform: String,
+    platform_system: String,
+    platform_machine: String,
+    implementation_name: String,
+    platform_python_implementation: String,
+    extra: String,
+}
+
+impl PypiMarkerEnvironment {
+    fn current() -> Self {
+        Self {
+            python_full_version: current_python_version(),
+            os_name: os_name().to_owned(),
+            sys_platform: sys_platform().to_owned(),
+            platform_system: platform_system().to_owned(),
+            platform_machine: std::env::consts::ARCH.to_owned(),
+            implementation_name: "cpython".to_owned(),
+            platform_python_implementation: "CPython".to_owned(),
+            extra: String::new(),
+        }
+    }
+
+    fn value(&self, name: &str) -> Option<String> {
+        match name {
+            "python_version" => self.python_full_version.as_deref().map(python_major_minor),
+            "python_full_version" => self.python_full_version.clone(),
+            "os_name" => Some(self.os_name.clone()),
+            "sys_platform" => Some(self.sys_platform.clone()),
+            "platform_system" => Some(self.platform_system.clone()),
+            "platform_machine" => Some(self.platform_machine.clone()),
+            "implementation_name" => Some(self.implementation_name.clone()),
+            "platform_python_implementation" => Some(self.platform_python_implementation.clone()),
+            "extra" => Some(self.extra.clone()),
+            _ => None,
+        }
+    }
+}
+
+fn pypi_marker_applies(marker: &str) -> bool {
+    let env = PypiMarkerEnvironment::current();
+    evaluate_pypi_marker(marker.trim(), &env).unwrap_or(true)
+}
+
+fn evaluate_pypi_marker(marker: &str, env: &PypiMarkerEnvironment) -> Option<bool> {
+    let mut saw_unknown_true_path = false;
+
+    for or_group in split_marker_keyword(marker, "or") {
+        let mut group_unknown = false;
+        let mut group_matches = true;
+
+        for atom in split_marker_keyword(or_group, "and") {
+            match evaluate_pypi_marker_atom(atom, env) {
+                Some(true) => {}
+                Some(false) => {
+                    group_matches = false;
+                    break;
+                }
+                None => group_unknown = true,
+            }
+        }
+
+        if group_matches && !group_unknown {
+            return Some(true);
+        }
+        if group_matches {
+            saw_unknown_true_path = true;
+        }
+    }
+
+    if saw_unknown_true_path {
+        None
+    } else {
+        Some(false)
+    }
+}
+
+fn evaluate_pypi_marker_atom(atom: &str, env: &PypiMarkerEnvironment) -> Option<bool> {
+    let atom = atom
+        .trim()
+        .trim_start_matches('(')
+        .trim_end_matches(')')
+        .trim();
+
+    let (left, op, right) = split_marker_comparison(atom)?;
+    let left = marker_operand_value(left, env)?;
+    let right = marker_operand_value(right, env)?;
+
+    match op {
+        "==" => Some(left == right),
+        "!=" => Some(left != right),
+        "in" => Some(right.contains(&left)),
+        "not in" => Some(!right.contains(&left)),
+        ">=" | "<=" | ">" | "<" => {
+            if looks_like_version(&left) && looks_like_version(&right) {
+                let ordering = compare_pypi_versions(&left, &right);
+                Some(match op {
+                    ">=" => ordering.is_ge(),
+                    "<=" => ordering.is_le(),
+                    ">" => ordering.is_gt(),
+                    "<" => ordering.is_lt(),
+                    _ => false,
+                })
+            } else {
+                Some(match op {
+                    ">=" => left >= right,
+                    "<=" => left <= right,
+                    ">" => left > right,
+                    "<" => left < right,
+                    _ => false,
+                })
+            }
+        }
+        _ => None,
+    }
+}
+
+fn split_marker_comparison(atom: &str) -> Option<(&str, &'static str, &str)> {
+    for (needle, op) in [
+        (" not in ", "not in"),
+        (" in ", "in"),
+        ("==", "=="),
+        ("!=", "!="),
+        (">=", ">="),
+        ("<=", "<="),
+        (">", ">"),
+        ("<", "<"),
+    ] {
+        if let Some(index) = find_outside_quotes(atom, needle) {
+            let left = atom[..index].trim();
+            let right = atom[index + needle.len()..].trim();
+            if !left.is_empty() && !right.is_empty() {
+                return Some((left, op, right));
+            }
+        }
+    }
+
+    None
+}
+
+fn marker_operand_value(value: &str, env: &PypiMarkerEnvironment) -> Option<String> {
+    let value = value.trim();
+    if let Some(quoted) = unquote_marker_value(value) {
+        return Some(quoted);
+    }
+    env.value(value)
+}
+
+fn unquote_marker_value(value: &str) -> Option<String> {
+    let bytes = value.as_bytes();
+    if bytes.len() >= 2
+        && ((bytes[0] == b'\'' && bytes[bytes.len() - 1] == b'\'')
+            || (bytes[0] == b'"' && bytes[bytes.len() - 1] == b'"'))
+    {
+        Some(value[1..value.len() - 1].to_owned())
+    } else {
+        None
+    }
+}
+
+fn split_marker_keyword<'a>(marker: &'a str, keyword: &str) -> Vec<&'a str> {
+    let separator = format!(" {keyword} ");
+    let mut parts = Vec::new();
+    let mut start = 0;
+    let mut quote = None;
+    let mut index = 0;
+
+    while index < marker.len() {
+        let ch = marker[index..].chars().next().unwrap_or_default();
+        let ch_len = ch.len_utf8();
+
+        if matches!(ch, '\'' | '"') {
+            if quote == Some(ch) {
+                quote = None;
+            } else if quote.is_none() {
+                quote = Some(ch);
+            }
+        }
+
+        if quote.is_none() && marker[index..].to_ascii_lowercase().starts_with(&separator) {
+            parts.push(marker[start..index].trim());
+            index += separator.len();
+            start = index;
+            continue;
+        }
+
+        index += ch_len;
+    }
+
+    parts.push(marker[start..].trim());
+    parts
+}
+
+fn find_outside_quotes(haystack: &str, needle: &str) -> Option<usize> {
+    let mut quote = None;
+    let mut index = 0;
+
+    while index < haystack.len() {
+        let ch = haystack[index..].chars().next().unwrap_or_default();
+        let ch_len = ch.len_utf8();
+
+        if matches!(ch, '\'' | '"') {
+            if quote == Some(ch) {
+                quote = None;
+            } else if quote.is_none() {
+                quote = Some(ch);
+            }
+        }
+
+        if quote.is_none() && haystack[index..].starts_with(needle) {
+            return Some(index);
+        }
+
+        index += ch_len;
+    }
+
+    None
+}
+
+fn python_major_minor(version: &str) -> String {
+    let mut parts = version.split('.');
+    let major = parts.next().unwrap_or("0");
+    let minor = parts.next().unwrap_or("0");
+    format!("{major}.{minor}")
+}
+
+fn looks_like_version(value: &str) -> bool {
+    value
+        .chars()
+        .next()
+        .map(|ch| ch.is_ascii_digit())
+        .unwrap_or(false)
+}
+
+fn os_name() -> &'static str {
+    if cfg!(windows) {
+        "nt"
+    } else {
+        "posix"
+    }
+}
+
+fn sys_platform() -> &'static str {
+    if cfg!(target_os = "macos") {
+        "darwin"
+    } else if cfg!(target_os = "windows") {
+        "win32"
+    } else if cfg!(target_os = "linux") {
+        "linux"
+    } else {
+        std::env::consts::OS
+    }
+}
+
+fn platform_system() -> &'static str {
+    if cfg!(target_os = "macos") {
+        "Darwin"
+    } else if cfg!(target_os = "windows") {
+        "Windows"
+    } else if cfg!(target_os = "linux") {
+        "Linux"
+    } else {
+        std::env::consts::OS
+    }
 }
 
 fn download_artifact(client: &Client, package: &ResolvedPackage) -> Result<Vec<u8>> {
@@ -2044,9 +2368,11 @@ mod tests {
     fn reads_requirements_specs() {
         let dir = tempfile::tempdir().unwrap();
         let requirements = dir.path().join("requirements.txt");
+        let nested = dir.path().join("nested.txt");
+        fs::write(&nested, "charset-normalizer==3.4.0\n").unwrap();
         fs::write(
             &requirements,
-            "requests==2.32.3\n# ignored\nidna>=2,<4\n-r other.txt\n",
+            "requests==2.32.3\n# ignored\nidna>=2,<4\n-r nested.txt\ncolorama; extra == 'windows'\n",
         )
         .unwrap();
         let specs = read_requirements_specs(&requirements).unwrap();
@@ -2056,7 +2382,12 @@ mod tests {
         assert!(specs
             .iter()
             .any(|spec| spec.name == "idna" && spec.version.as_deref() == Some(">=2,<4")));
-        assert_eq!(specs.len(), 2);
+        assert!(specs
+            .iter()
+            .any(|spec| spec.name == "charset-normalizer"
+                && spec.version.as_deref() == Some("==3.4.0")));
+        assert!(!specs.iter().any(|spec| spec.name == "colorama"));
+        assert_eq!(specs.len(), 3);
     }
 
     #[test]
@@ -2066,6 +2397,37 @@ mod tests {
         assert_eq!(spec.version.as_deref(), Some("<3,>=1.21.1"));
 
         assert!(parse_pypi_requirement("PySocks>=1.5.6; extra == 'socks'").is_none());
+    }
+
+    #[test]
+    fn evaluates_common_pypi_markers() {
+        let env = PypiMarkerEnvironment {
+            python_full_version: Some("3.11.4".to_owned()),
+            os_name: "posix".to_owned(),
+            sys_platform: "darwin".to_owned(),
+            platform_system: "Darwin".to_owned(),
+            platform_machine: "arm64".to_owned(),
+            implementation_name: "cpython".to_owned(),
+            platform_python_implementation: "CPython".to_owned(),
+            extra: String::new(),
+        };
+
+        assert_eq!(
+            evaluate_pypi_marker("python_version >= '3.0'", &env),
+            Some(true)
+        );
+        assert_eq!(
+            evaluate_pypi_marker("python_version < '0'", &env),
+            Some(false)
+        );
+        assert_eq!(
+            evaluate_pypi_marker("os_name == 'posix' or python_version < '0'", &env),
+            Some(true)
+        );
+        assert_eq!(
+            evaluate_pypi_marker("os_name == 'nt' and python_version >= '3.0'", &env),
+            Some(false)
+        );
     }
 
     #[test]
