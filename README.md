@@ -100,6 +100,7 @@ The `omc` CLI is the first working slice of a PyPI/npm replacement:
 cargo run -p omc-cli -- --project-dir /tmp/omc-demo init --name demo
 cargo run -p omc-cli -- --project-dir /tmp/omc-demo add npm:is-odd@3.0.1
 cargo run -p omc-cli -- --project-dir /tmp/omc-demo node -e "console.log(require('is-odd')(3))"
+cargo run -p omc-cli -- --project-dir /tmp/omc-demo script test
 cargo run -p omc-cli -- --project-dir /tmp/omc-demo add pypi:requests==2.32.3 --allow-all-host
 cargo run -p omc-cli -- --project-dir /tmp/omc-demo python -c "import requests; print(requests.__version__)"
 cargo run -p omc-cli -- --project-dir /tmp/omc-demo run normalizer --version
@@ -196,7 +197,7 @@ Supported now:
 - `.omc/python/site-packages` installation for PyPI wheels
 - platform-compatible PyPI wheel selection for native wheels
 - npm bin links and Python console script shims
-- `omc node`, `omc python`, and `omc run` wrappers
+- `omc node`, `omc python`, `omc script`, and `omc run` wrappers
 - runtime source profiling into capability findings
 - explicit CLI grants for accepted host authority
 

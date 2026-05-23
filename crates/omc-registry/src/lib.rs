@@ -507,6 +507,16 @@ pub fn discover_project_specs(project_dir: impl AsRef<Path>) -> Result<Vec<Packa
     Ok(discover_project_requirements(project_dir)?.specs)
 }
 
+pub fn read_package_scripts(project_dir: impl AsRef<Path>) -> Result<BTreeMap<String, String>> {
+    let package_json = project_dir.as_ref().join("package.json");
+    if !package_json.exists() {
+        return Ok(BTreeMap::new());
+    }
+
+    let package = serde_json::from_str::<ProjectPackageJson>(&fs::read_to_string(package_json)?)?;
+    Ok(package.scripts)
+}
+
 pub fn discover_project_requirements(project_dir: impl AsRef<Path>) -> Result<ProjectRequirements> {
     discover_project_requirements_with_extras(project_dir, &BTreeSet::new())
 }
@@ -2914,6 +2924,8 @@ fn relative_path(base: &Path, path: &Path) -> String {
 #[derive(Debug, Deserialize)]
 struct ProjectPackageJson {
     #[serde(default)]
+    scripts: BTreeMap<String, String>,
+    #[serde(default)]
     dependencies: BTreeMap<String, String>,
     #[serde(default, rename = "devDependencies")]
     dev_dependencies: BTreeMap<String, String>,
@@ -3125,6 +3137,7 @@ mod tests {
         fs::write(
             &package_json,
             r#"{
+                "scripts": { "check": "node -e \"console.log('ok')\"" },
                 "dependencies": { "is-odd": "3.0.1" },
                 "devDependencies": { "which": "^2.0.2" },
                 "optionalDependencies": { "is-even": "1.0.0" },
@@ -3152,6 +3165,12 @@ mod tests {
             .iter()
             .any(|spec| spec.name == "left-pad" && spec.version.as_deref() == Some("1.3.0")));
         assert!(!specs.iter().any(|spec| spec.name == "optional-peer"));
+
+        let scripts = read_package_scripts(dir.path()).unwrap();
+        assert_eq!(
+            scripts.get("check").map(String::as_str),
+            Some("node -e \"console.log('ok')\"")
+        );
     }
 
     #[test]
