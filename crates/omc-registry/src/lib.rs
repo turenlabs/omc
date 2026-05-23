@@ -452,6 +452,8 @@ pub struct LinkOptions {
     pub npm_resolved: BTreeMap<String, String>,
     pub pypi_index_url: Option<String>,
     pub pypi_extra_index_urls: Vec<String>,
+    pub pypi_find_links: Vec<String>,
+    pub pypi_no_index: bool,
     pub project_extras: BTreeSet<String>,
     pub include_dev_dependencies: bool,
     pub save_dev_dependency: bool,
@@ -469,6 +471,8 @@ impl LinkOptions {
             npm_resolved: BTreeMap::new(),
             pypi_index_url: None,
             pypi_extra_index_urls: Vec::new(),
+            pypi_find_links: Vec::new(),
+            pypi_no_index: false,
             project_extras: BTreeSet::new(),
             include_dev_dependencies: true,
             save_dev_dependency: false,
@@ -505,6 +509,8 @@ pub struct ProjectRequirements {
     pub npm_resolved: BTreeMap<String, String>,
     pub pypi_index_url: Option<String>,
     pub pypi_extra_index_urls: Vec<String>,
+    pub pypi_find_links: Vec<String>,
+    pub pypi_no_index: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -514,6 +520,7 @@ struct ResolvedPackage {
     version: String,
     source_url: String,
     download_url: Option<String>,
+    local_path: Option<PathBuf>,
     filename: String,
     expected_sha256: Option<String>,
     expected_sha1: Option<String>,
@@ -695,6 +702,8 @@ fn project_requested_specs(options: &mut LinkOptions) -> Result<Vec<PackageSpec>
     options
         .pypi_extra_index_urls
         .extend(discovered.pypi_extra_index_urls);
+    options.pypi_find_links.extend(discovered.pypi_find_links);
+    options.pypi_no_index |= discovered.pypi_no_index;
 
     let mut seen = BTreeSet::new();
     specs.retain(|spec| seen.insert(spec.requested()));
@@ -876,6 +885,8 @@ fn discover_project_requirements_with_options(
         project
             .pypi_extra_index_urls
             .extend(requirements.pypi_extra_index_urls);
+        project.pypi_find_links.extend(requirements.pypi_find_links);
+        project.pypi_no_index |= requirements.pypi_no_index;
     }
 
     let pyproject_toml = project_dir.join("pyproject.toml");
@@ -1491,6 +1502,8 @@ fn read_package_lock_requirements(path: &Path) -> Result<ProjectRequirements> {
         npm_resolved,
         pypi_index_url: None,
         pypi_extra_index_urls: Vec::new(),
+        pypi_find_links: Vec::new(),
+        pypi_no_index: false,
     })
 }
 
@@ -1837,6 +1850,20 @@ fn read_requirements_file_inner(
         if let Some(index_url) = parse_requirements_extra_index_url(line) {
             if mode == RequirementsMode::Install {
                 discovered.pypi_extra_index_urls.push(index_url);
+            }
+            continue;
+        }
+
+        if let Some(find_links) = parse_requirements_find_links(line, base_dir) {
+            if mode == RequirementsMode::Install {
+                discovered.pypi_find_links.push(find_links);
+            }
+            continue;
+        }
+
+        if parse_requirements_no_index(line) {
+            if mode == RequirementsMode::Install {
+                discovered.pypi_no_index = true;
             }
             continue;
         }
@@ -2866,6 +2893,7 @@ fn resolve_npm(
         version: version_doc.version,
         source_url: version_doc.dist.tarball,
         download_url: None,
+        local_path: None,
         filename,
         expected_sha256: None,
         expected_sha1: version_doc.dist.shasum,
@@ -2929,6 +2957,7 @@ fn npm_direct_tarball_package(
         version: version.to_owned(),
         source_url: source_url.to_owned(),
         download_url: None,
+        local_path: None,
         filename,
         expected_sha256: None,
         expected_sha1: None,
@@ -3139,13 +3168,37 @@ fn resolve_pypi(
     if spec.direct_url.is_some() {
         return resolve_pypi_direct_wheel(spec);
     }
+    let target_python = current_python_version();
+    let mut candidates =
+        pypi_find_link_candidates(client, spec, options, target_python.as_deref())?;
     let simple_indexes = pypi_simple_index_urls(options);
+    if !candidates.is_empty() || options.pypi_no_index {
+        if !options.pypi_no_index {
+            let indexes = if simple_indexes.is_empty() {
+                vec!["https://pypi.org/simple/".to_owned()]
+            } else {
+                simple_indexes
+            };
+            candidates.extend(pypi_simple_index_candidates_from_indexes(
+                client,
+                spec,
+                &indexes,
+                target_python.as_deref(),
+            )?);
+        }
+        return pypi_candidate_to_resolved(spec, options, candidates);
+    }
     if !simple_indexes.is_empty() {
-        return resolve_pypi_from_simple_indexes(client, spec, options, &simple_indexes);
+        let candidates = pypi_simple_index_candidates_from_indexes(
+            client,
+            spec,
+            &simple_indexes,
+            target_python.as_deref(),
+        )?;
+        return pypi_candidate_to_resolved(spec, options, candidates);
     }
 
     let encoded = urlencoding::encode(&spec.name);
-    let target_python = current_python_version();
     let constrained_requirement = constrained_pypi_requirement(spec, &options.constraints);
     let version = match constrained_requirement.as_deref() {
         Some(requirement) if is_exact_pypi_version(requirement) => requirement.to_owned(),
@@ -3197,6 +3250,7 @@ fn resolve_pypi(
         version: doc.info.version,
         source_url,
         download_url: None,
+        local_path: None,
         filename,
         expected_sha256: Some(expected_sha256),
         expected_sha1: None,
@@ -3226,15 +3280,12 @@ fn pypi_simple_index_urls(options: &LinkOptions) -> Vec<String> {
     indexes
 }
 
-fn resolve_pypi_from_simple_indexes(
+fn pypi_simple_index_candidates_from_indexes(
     client: &Client,
     spec: &PackageSpec,
-    options: &LinkOptions,
     indexes: &[String],
-) -> Result<ResolvedPackage> {
-    let target_python = current_python_version();
-    let requirement =
-        constrained_pypi_requirement(spec, &options.constraints).unwrap_or_else(|| "*".to_owned());
+    target_python: Option<&str>,
+) -> Result<Vec<PypiSimpleCandidate>> {
     let mut candidates = Vec::new();
     for index in indexes {
         let url = pypi_simple_package_url(index, &spec.name)?;
@@ -3248,9 +3299,19 @@ fn resolve_pypi_from_simple_indexes(
             &base_url,
             &html,
             &spec.name,
-            target_python.as_deref(),
+            target_python,
         ));
     }
+    Ok(candidates)
+}
+
+fn pypi_candidate_to_resolved(
+    spec: &PackageSpec,
+    options: &LinkOptions,
+    candidates: Vec<PypiSimpleCandidate>,
+) -> Result<ResolvedPackage> {
+    let requirement =
+        constrained_pypi_requirement(spec, &options.constraints).unwrap_or_else(|| "*".to_owned());
 
     let candidate = candidates
         .into_iter()
@@ -3267,6 +3328,7 @@ fn resolve_pypi_from_simple_indexes(
         version: candidate.version,
         source_url: candidate.url,
         download_url: candidate.download_url,
+        local_path: candidate.local_path,
         filename: candidate.filename,
         expected_sha256: candidate.sha256,
         expected_sha1: None,
@@ -3290,9 +3352,136 @@ fn pypi_simple_package_url(index: &str, package: &str) -> Result<reqwest::Url> {
 struct PypiSimpleCandidate {
     url: String,
     download_url: Option<String>,
+    local_path: Option<PathBuf>,
     filename: String,
     version: String,
     sha256: Option<String>,
+}
+
+fn pypi_find_link_candidates(
+    client: &Client,
+    spec: &PackageSpec,
+    options: &LinkOptions,
+    target_python: Option<&str>,
+) -> Result<Vec<PypiSimpleCandidate>> {
+    let mut candidates = Vec::new();
+    for source in &options.pypi_find_links {
+        candidates.extend(pypi_find_link_source_candidates(
+            client,
+            source,
+            &spec.name,
+            target_python,
+        )?);
+    }
+    Ok(candidates)
+}
+
+fn pypi_find_link_source_candidates(
+    client: &Client,
+    source: &str,
+    package: &str,
+    target_python: Option<&str>,
+) -> Result<Vec<PypiSimpleCandidate>> {
+    if let Ok(url) = reqwest::Url::parse(source) {
+        return match url.scheme() {
+            "http" | "https" => pypi_http_find_link_candidates(client, url, package, target_python),
+            "file" => {
+                let Ok(path) = url.to_file_path() else {
+                    return Ok(Vec::new());
+                };
+                pypi_local_find_link_candidates(&path, package, target_python)
+            }
+            _ => Ok(Vec::new()),
+        };
+    }
+    pypi_local_find_link_candidates(Path::new(source), package, target_python)
+}
+
+fn pypi_http_find_link_candidates(
+    client: &Client,
+    url: reqwest::Url,
+    package: &str,
+    target_python: Option<&str>,
+) -> Result<Vec<PypiSimpleCandidate>> {
+    if url
+        .path_segments()
+        .and_then(|mut segments| segments.next_back())
+        .map(|filename| filename.ends_with(".whl"))
+        .unwrap_or(false)
+    {
+        return Ok(
+            pypi_candidate_from_url(url, package, None, target_python, None)
+                .into_iter()
+                .collect(),
+        );
+    }
+
+    let response = client.get(url).send()?;
+    if response.status().as_u16() == 404 {
+        return Ok(Vec::new());
+    }
+    let base_url = response.url().clone();
+    let html = response.error_for_status()?.text()?;
+    Ok(pypi_simple_index_candidates(
+        &base_url,
+        &html,
+        package,
+        target_python,
+    ))
+}
+
+fn pypi_local_find_link_candidates(
+    source: &Path,
+    package: &str,
+    target_python: Option<&str>,
+) -> Result<Vec<PypiSimpleCandidate>> {
+    if source.is_dir() {
+        let mut candidates = Vec::new();
+        for entry in fs::read_dir(source)? {
+            let path = entry?.path();
+            if path.is_file() {
+                candidates.extend(pypi_local_find_link_candidates(
+                    &path,
+                    package,
+                    target_python,
+                )?);
+            }
+        }
+        return Ok(candidates);
+    }
+    if !source.is_file() {
+        return Ok(Vec::new());
+    }
+    if source.extension().and_then(|ext| ext.to_str()) == Some("whl") {
+        return Ok(pypi_local_wheel_candidate(source, package, target_python)
+            .into_iter()
+            .collect());
+    }
+
+    let html = fs::read_to_string(source)?;
+    let Ok(base_url) = reqwest::Url::from_file_path(source) else {
+        return Ok(Vec::new());
+    };
+    let mut candidates = pypi_simple_index_candidates(&base_url, &html, package, target_python);
+    for candidate in &mut candidates {
+        if candidate.local_path.is_none() {
+            if let Ok(url) = reqwest::Url::parse(&candidate.url) {
+                if url.scheme() == "file" {
+                    candidate.local_path = url.to_file_path().ok();
+                }
+            }
+        }
+    }
+    Ok(candidates)
+}
+
+fn pypi_local_wheel_candidate(
+    path: &Path,
+    package: &str,
+    target_python: Option<&str>,
+) -> Option<PypiSimpleCandidate> {
+    let url = reqwest::Url::from_file_path(path).ok()?;
+    pypi_candidate_from_url(url, package, None, target_python, Some(path.to_path_buf()))
 }
 
 fn pypi_simple_index_candidates(
@@ -3304,61 +3493,69 @@ fn pypi_simple_index_candidates(
     simple_index_links(base_url, html)
         .into_iter()
         .filter_map(|link| {
-            let filename = link.filename()?;
-            let (name, version) = parse_wheel_name_and_version(&filename)?;
-            if name != normalize_pypi_name(package) {
-                return None;
-            }
-            if !link
-                .requires_python
-                .as_deref()
-                .map(|requirement| {
-                    target_python
-                        .map(|target_python| pypi_version_satisfies(target_python, requirement))
-                        .unwrap_or(true)
-                })
-                .unwrap_or(true)
-            {
-                return None;
-            }
-            if !current_python_wheel_compatibility()
-                .as_ref()
-                .map(|compatibility| wheel_tag_compatible(&filename, compatibility))
-                .unwrap_or(true)
-            {
-                return None;
-            }
-            let mut url = link.url;
-            let sha256 = url.fragment().and_then(simple_index_sha256_fragment);
-            url.set_fragment(None);
-            let mut source_url = url.clone();
-            strip_url_credentials(&mut source_url);
-            let download_url = (source_url != url).then(|| url.to_string());
-            Some(PypiSimpleCandidate {
-                url: source_url.to_string(),
-                download_url,
-                filename,
-                version,
-                sha256,
-            })
+            pypi_candidate_from_url(
+                link.url,
+                package,
+                link.requires_python.as_deref(),
+                target_python,
+                None,
+            )
         })
         .collect()
+}
+
+fn pypi_candidate_from_url(
+    mut url: reqwest::Url,
+    package: &str,
+    requires_python: Option<&str>,
+    target_python: Option<&str>,
+    local_path: Option<PathBuf>,
+) -> Option<PypiSimpleCandidate> {
+    let filename = url
+        .path_segments()
+        .and_then(|mut segments| segments.next_back())
+        .and_then(|filename| urlencoding::decode(filename).ok())
+        .map(|filename| filename.into_owned())?;
+    let (name, version) = parse_wheel_name_and_version(&filename)?;
+    if name != normalize_pypi_name(package) {
+        return None;
+    }
+    if !requires_python
+        .map(|requirement| {
+            target_python
+                .map(|target_python| pypi_version_satisfies(target_python, requirement))
+                .unwrap_or(true)
+        })
+        .unwrap_or(true)
+    {
+        return None;
+    }
+    if !current_python_wheel_compatibility()
+        .as_ref()
+        .map(|compatibility| wheel_tag_compatible(&filename, compatibility))
+        .unwrap_or(true)
+    {
+        return None;
+    }
+    let sha256 = url.fragment().and_then(simple_index_sha256_fragment);
+    url.set_fragment(None);
+    let mut source_url = url.clone();
+    strip_url_credentials(&mut source_url);
+    let download_url = (source_url != url).then(|| url.to_string());
+    Some(PypiSimpleCandidate {
+        url: source_url.to_string(),
+        download_url,
+        local_path,
+        filename,
+        version,
+        sha256,
+    })
 }
 
 #[derive(Debug, Clone)]
 struct SimpleIndexLink {
     url: reqwest::Url,
     requires_python: Option<String>,
-}
-
-impl SimpleIndexLink {
-    fn filename(&self) -> Option<String> {
-        self.url
-            .path_segments()
-            .and_then(|mut segments| segments.next_back())
-            .and_then(|filename| urlencoding::decode(filename).ok())
-            .map(|filename| filename.into_owned())
-    }
 }
 
 fn simple_index_links(base_url: &reqwest::Url, html: &str) -> Vec<SimpleIndexLink> {
@@ -3486,6 +3683,7 @@ fn resolve_pypi_direct_wheel(spec: &PackageSpec) -> Result<ResolvedPackage> {
         version,
         source_url,
         download_url: None,
+        local_path: None,
         filename,
         expected_sha256: None,
         expected_sha1: None,
@@ -4126,6 +4324,15 @@ fn parse_requirements_extra_index_url(line: &str) -> Option<String> {
         .and_then(|index_url| normalize_pypi_simple_index_url(&index_url))
 }
 
+fn parse_requirements_find_links(line: &str, base_dir: &Path) -> Option<String> {
+    parse_requirements_option_value(line, &["--find-links=", "--find-links", "-f"])
+        .and_then(|find_links| normalize_pypi_find_links_source(&find_links, base_dir))
+}
+
+fn parse_requirements_no_index(line: &str) -> bool {
+    line == "--no-index"
+}
+
 fn parse_requirements_option_value(line: &str, prefixes: &[&str]) -> Option<String> {
     for prefix in prefixes {
         if prefix.ends_with('=') {
@@ -4144,6 +4351,23 @@ fn parse_requirements_option_value(line: &str, prefixes: &[&str]) -> Option<Stri
         }
     }
     None
+}
+
+fn normalize_pypi_find_links_source(value: &str, base_dir: &Path) -> Option<String> {
+    let value = value.trim();
+    if value.is_empty() {
+        return None;
+    }
+    if reqwest::Url::parse(value).is_ok() {
+        return Some(value.to_owned());
+    }
+    let path = Path::new(value);
+    let path = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        base_dir.join(path)
+    };
+    Some(path.to_string_lossy().into_owned())
 }
 
 fn normalize_pypi_simple_index_url(value: &str) -> Option<String> {
@@ -4436,6 +4660,9 @@ fn download_artifact(
     package: &ResolvedPackage,
     project_dir: &Path,
 ) -> Result<Vec<u8>> {
+    if let Some(path) = &package.local_path {
+        return Ok(fs::read(path)?);
+    }
     let source_url = package
         .download_url
         .as_deref()
@@ -5931,11 +6158,7 @@ mod tests {
     fn rejects_unsupported_requirements_entries() {
         let dir = tempfile::tempdir().unwrap();
         let requirements = dir.path().join("requirements.txt");
-        fs::write(
-            &requirements,
-            "--find-links https://example.invalid/packages\n",
-        )
-        .unwrap();
+        fs::write(&requirements, "--trusted-host example.invalid\n").unwrap();
         let error = read_requirements_file(&requirements).unwrap_err();
         assert!(error.to_string().contains("unsupported requirements entry"));
     }
@@ -5944,9 +6167,10 @@ mod tests {
     fn reads_requirements_index_urls() {
         let dir = tempfile::tempdir().unwrap();
         let requirements = dir.path().join("requirements.txt");
+        let wheels = dir.path().join(".").join("wheels");
         fs::write(
             &requirements,
-            "--index-url https://mirror.example/simple\n--extra-index-url=https://extra.example/simple\n-i https://override.example/simple\nidna==3.7\n",
+            "--index-url https://mirror.example/simple\n--extra-index-url=https://extra.example/simple\n-i https://override.example/simple\n--find-links ./wheels\n-f https://files.example/packages\n--no-index\nidna==3.7\n",
         )
         .unwrap();
 
@@ -5959,6 +6183,14 @@ mod tests {
             discovered.pypi_extra_index_urls,
             vec!["https://extra.example/simple/".to_owned()]
         );
+        assert_eq!(
+            discovered.pypi_find_links,
+            vec![
+                wheels.to_string_lossy().into_owned(),
+                "https://files.example/packages".to_owned()
+            ]
+        );
+        assert!(discovered.pypi_no_index);
         assert!(discovered
             .specs
             .iter()
@@ -6009,6 +6241,7 @@ mod tests {
             vec![PypiSimpleCandidate {
                 url: "https://index.example/packages/idna-3.7-py3-none-any.whl".to_owned(),
                 download_url: None,
+                local_path: None,
                 filename: "idna-3.7-py3-none-any.whl".to_owned(),
                 version: "3.7".to_owned(),
                 sha256: Some(
@@ -6032,11 +6265,27 @@ mod tests {
                 download_url: Some(
                     "https://user:pass@index.example/packages/idna-3.7-py3-none-any.whl".to_owned()
                 ),
+                local_path: None,
                 filename: "idna-3.7-py3-none-any.whl".to_owned(),
                 version: "3.7".to_owned(),
                 sha256: None,
             }]
         );
+    }
+
+    #[test]
+    fn reads_local_find_links_wheel_candidates() {
+        let dir = tempfile::tempdir().unwrap();
+        let wheel = dir.path().join("idna-3.7-py3-none-any.whl");
+        fs::write(&wheel, b"not a real wheel").unwrap();
+
+        let candidates =
+            pypi_local_find_link_candidates(dir.path(), "idna", Some("3.11.0")).unwrap();
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].filename, "idna-3.7-py3-none-any.whl");
+        assert_eq!(candidates[0].version, "3.7");
+        assert_eq!(candidates[0].local_path.as_deref(), Some(wheel.as_path()));
+        assert!(candidates[0].url.starts_with("file://"));
     }
 
     #[test]
@@ -6681,6 +6930,7 @@ mod tests {
             version: "1.2.4".to_owned(),
             source_url: "https://example.invalid/date-helper.tgz".to_owned(),
             download_url: None,
+            local_path: None,
             filename: "date-helper.tgz".to_owned(),
             expected_sha256: None,
             expected_sha1: None,
