@@ -547,6 +547,7 @@ struct PipInstallAction {
     specs: Vec<String>,
     requirements: Vec<PathBuf>,
     constraints: Vec<PathBuf>,
+    report: Option<PathBuf>,
     archive_references: Vec<String>,
     local_paths: Vec<PythonLocalRequirement>,
     index_url: Option<String>,
@@ -940,6 +941,80 @@ fn print_install_report(install: &InstallReport) {
         install.node_modules.display(),
         install.python_site_packages.display()
     );
+}
+
+fn write_pip_install_report(
+    project_dir: &Path,
+    report_path: Option<&Path>,
+    install: &InstallReport,
+) -> Result<(), OmcRegistryError> {
+    let Some(report_path) = report_path else {
+        return Ok(());
+    };
+    let report = pip_install_report_json(project_dir, install)?;
+    let report = serde_json::to_string_pretty(&report)?;
+    if report_path == Path::new("-") {
+        println!("{report}");
+    } else {
+        let report_path = absolutize_path(project_dir, report_path.to_path_buf());
+        if let Some(parent) = report_path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::write(report_path, format!("{report}\n"))?;
+    }
+    Ok(())
+}
+
+fn pip_install_report_json(
+    project_dir: &Path,
+    install: &InstallReport,
+) -> Result<serde_json::Value, OmcRegistryError> {
+    let lock = read_lockfile(project_dir.join("omc.lock"))?;
+    let install_entries = lock
+        .packages
+        .into_iter()
+        .filter(|package| package.ecosystem == Ecosystem::Pypi)
+        .map(pip_install_report_entry)
+        .collect::<Vec<_>>();
+    Ok(serde_json::json!({
+        "version": "1",
+        "pip_version": format!("omc-{}", env!("CARGO_PKG_VERSION")),
+        "install": install_entries,
+        "environment": {
+            "implementation_name": "omc",
+            "implementation_version": env!("CARGO_PKG_VERSION"),
+            "os_name": env::consts::OS,
+            "platform_machine": env::consts::ARCH,
+            "platform_system": env::consts::OS,
+        },
+        "omc": {
+            "python_site_packages": install.python_site_packages,
+            "python_bin_dir": install.python_bin_dir,
+            "python_scripts": install.python_scripts,
+            "pypi_packages": install.pypi_packages,
+        },
+    }))
+}
+
+fn pip_install_report_entry(package: LockedPackage) -> serde_json::Value {
+    serde_json::json!({
+        "download_info": {
+            "url": package.source_url,
+            "archive_info": {
+                "hashes": {
+                    "sha256": package.sha256,
+                },
+            },
+        },
+        "is_direct": false,
+        "is_yanked": false,
+        "requested": true,
+        "metadata": {
+            "metadata_version": "2.1",
+            "name": package.name,
+            "version": package.version,
+        },
+    })
 }
 
 fn run_node(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRegistryError> {
@@ -1621,6 +1696,7 @@ fn run_pip_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
                 specs,
                 requirements,
                 constraints,
+                report,
                 archive_references,
                 local_paths,
                 index_url,
@@ -1659,6 +1735,7 @@ fn run_pip_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
                 options.python_vcs_requirements = vcs_requirements;
                 let install = install_project(&options)?;
                 print_install_report(&install);
+                write_pip_install_report(project_dir, report.as_deref(), &install)?;
             } else {
                 let mut options = LinkOptions::new(project_dir);
                 options.allowed_capabilities = allowed_capabilities;
@@ -1709,6 +1786,7 @@ fn run_pip_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
                 };
                 println!();
                 print_install_report(&install);
+                write_pip_install_report(project_dir, report.as_deref(), &install)?;
             }
         }
         PipCompatAction::Download(action) => {
@@ -2022,7 +2100,7 @@ fn pip_help_text(topic: Option<&str>) -> String {
             "pip install [<requirement>...]",
             &[
                 "Resolve, verify, lock, and install PyPI packages with OMC.",
-                "Supports requirements/constraints, indexes, find-links, no-index, hashes, no-deps, binary policy, target dirs, local archives, local directories, editable paths, and editable VCS requirements.",
+                "Supports requirements/constraints, indexes, find-links, no-index, hashes, no-deps, install reports, binary policy, target dirs, local archives, local directories, editable paths, and editable VCS requirements.",
             ],
         ),
         Some("download") => pip_command_help(
@@ -8485,6 +8563,7 @@ fn parse_pip_freeze_args(args: &[String]) -> Result<(), OmcRegistryError> {
 fn parse_pip_install_args(args: &[String]) -> Result<PipCompatAction, OmcRegistryError> {
     let mut requirements = Vec::new();
     let mut constraints = Vec::new();
+    let mut report = None;
     let mut index_url = None;
     let mut extra_index_urls = Vec::new();
     let mut find_links = Vec::new();
@@ -8521,6 +8600,16 @@ fn parse_pip_install_args(args: &[String]) -> Result<PipCompatAction, OmcRegistr
             constraints.push(PathBuf::from(path));
         } else if let Some(path) = arg.strip_prefix("--constraint=") {
             constraints.push(PathBuf::from(path));
+        } else if arg == "--report" {
+            index += 1;
+            let Some(path) = args.get(index) else {
+                return Err(OmcRegistryError::UnsupportedSpec(format!(
+                    "{arg} needs a path"
+                )));
+            };
+            report = Some(PathBuf::from(path));
+        } else if let Some(path) = arg.strip_prefix("--report=") {
+            report = Some(PathBuf::from(path));
         } else if arg == "-i" || arg == "--index-url" {
             index += 1;
             let Some(url) = args.get(index) else {
@@ -8670,6 +8759,7 @@ fn parse_pip_install_args(args: &[String]) -> Result<PipCompatAction, OmcRegistr
         specs: positionals.into_iter().filter(|spec| spec != ".").collect(),
         requirements,
         constraints,
+        report,
         archive_references,
         local_paths,
         index_url,
@@ -11189,6 +11279,8 @@ mod tests {
             "--no-build-isolation",
             "--no-warn-script-location",
             "--no-compile",
+            "--report",
+            "install-report.json",
             "--allow-all-host",
             "requests==2.32.3",
         ]))
@@ -11200,6 +11292,7 @@ mod tests {
                 specs: vec!["requests==2.32.3".to_owned()],
                 requirements: vec![PathBuf::from("requirements.txt")],
                 constraints: vec![PathBuf::from("constraints.txt")],
+                report: Some(PathBuf::from("install-report.json")),
                 archive_references: Vec::new(),
                 local_paths: Vec::new(),
                 index_url: Some("https://mirror.example/simple".to_owned()),
@@ -11320,6 +11413,7 @@ mod tests {
                 specs: vec!["requests==2.32.3".to_owned()],
                 requirements: Vec::new(),
                 constraints: Vec::new(),
+                report: None,
                 archive_references: Vec::new(),
                 local_paths: vec![
                     PythonLocalRequirement::new(
@@ -11356,6 +11450,7 @@ mod tests {
                 specs: Vec::new(),
                 requirements: Vec::new(),
                 constraints: Vec::new(),
+                report: None,
                 archive_references: Vec::new(),
                 local_paths: Vec::new(),
                 index_url: None,
@@ -11402,6 +11497,7 @@ mod tests {
                 specs: Vec::new(),
                 requirements: Vec::new(),
                 constraints: Vec::new(),
+                report: None,
                 archive_references: vec![
                     "./wheelhouse/demo_pkg-1.0.0-py3-none-any.whl".to_owned(),
                     "https://files.example/source_pkg-2.0.0.tar.gz#sha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_owned(),
