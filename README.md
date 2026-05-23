@@ -113,6 +113,7 @@ cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo install -r require
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo install --locked
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo ci
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo run normalizer --version
+cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm init -y
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm install left-pad@1.3.0
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm install --registry https://registry.npmjs.org left-pad@1.3.0
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm update --package-lock-only
@@ -414,7 +415,7 @@ Supported now:
   package.json and Pipfile project scripts
 - `omc npm` compatibility commands for common `install`, `update` / `up` /
   `upgrade`, `ci`, `prune`, `dedupe`, `test`, `start`, `stop`, `restart`,
-  `run`, `exec`, `remove`, `bin`, `root`, `prefix`, `audit` / `audit --json`,
+  `run`, `exec`, `init`, `remove`, `bin`, `root`, `prefix`, `audit` / `audit --json`,
   `cache verify/ls/rm/clean --force`, `pkg get/set/delete`, `version`,
   `pack`, `config get/set/delete/list`, `get`, `view` / `info` / `show`,
   `list` / `list --json`,

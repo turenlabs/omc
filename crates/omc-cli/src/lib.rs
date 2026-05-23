@@ -223,6 +223,9 @@ enum Command {
 #[derive(Debug, PartialEq, Eq)]
 enum NpmCompatAction {
     Version,
+    Init {
+        action: NpmInitAction,
+    },
     PackageVersion {
         action: NpmVersionAction,
     },
@@ -304,6 +307,18 @@ enum NpmCompatAction {
 enum NpmMaintenanceCommand {
     Prune,
     Dedupe,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct NpmInitAction {
+    name: Option<String>,
+    version: Option<String>,
+    description: Option<String>,
+    main: Option<String>,
+    license: Option<String>,
+    scope: Option<String>,
+    private: bool,
+    package_type: Option<String>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -1007,6 +1022,7 @@ fn run_project_command(
 fn run_npm_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRegistryError> {
     match parse_npm_compat_action(args)? {
         NpmCompatAction::Version => println!("{}", env!("CARGO_PKG_VERSION")),
+        NpmCompatAction::Init { action } => print_npm_init(project_dir, action)?,
         NpmCompatAction::PackageVersion { action } => print_npm_version(project_dir, action)?,
         NpmCompatAction::Install {
             specs,
@@ -2313,6 +2329,119 @@ fn print_npm_cache(project_dir: &Path, action: NpmCacheAction) -> Result<(), Omc
         }
     }
     Ok(())
+}
+
+fn print_npm_init(project_dir: &Path, action: NpmInitAction) -> Result<(), OmcRegistryError> {
+    let package_json = project_dir.join("package.json");
+    let mut package = if package_json.exists() {
+        read_npm_pkg_json(&package_json)?
+    } else {
+        serde_json::Value::Object(serde_json::Map::new())
+    };
+
+    let name = action
+        .name
+        .clone()
+        .unwrap_or_else(|| default_npm_package_name(project_dir, action.scope.as_deref()));
+    npm_pkg_set_default_string(&mut package, "name", name)?;
+    npm_pkg_set_default_string(
+        &mut package,
+        "version",
+        action.version.unwrap_or_else(|| "1.0.0".to_owned()),
+    )?;
+    npm_pkg_set_default_string(
+        &mut package,
+        "description",
+        action.description.unwrap_or_default(),
+    )?;
+    npm_pkg_set_default_string(
+        &mut package,
+        "main",
+        action.main.unwrap_or_else(|| "index.js".to_owned()),
+    )?;
+    if npm_pkg_get_path(&package, "scripts.test").is_none() {
+        npm_pkg_set_path(
+            &mut package,
+            "scripts.test",
+            serde_json::Value::String("echo \"Error: no test specified\" && exit 1".to_owned()),
+        )?;
+    }
+    if npm_pkg_get_path(&package, "keywords").is_none() {
+        npm_pkg_set_path(
+            &mut package,
+            "keywords",
+            serde_json::Value::Array(Vec::new()),
+        )?;
+    }
+    npm_pkg_set_default_string(&mut package, "author", String::new())?;
+    npm_pkg_set_default_string(
+        &mut package,
+        "license",
+        action.license.unwrap_or_else(|| "ISC".to_owned()),
+    )?;
+    if action.private && npm_pkg_get_path(&package, "private").is_none() {
+        npm_pkg_set_path(&mut package, "private", serde_json::Value::Bool(true))?;
+    }
+    if let Some(package_type) = action.package_type {
+        npm_pkg_set_default_string(&mut package, "type", package_type)?;
+    }
+
+    write_npm_pkg_json(&package_json, &package)?;
+    println!("Wrote to {}", package_json.display());
+    Ok(())
+}
+
+fn npm_pkg_set_default_string(
+    package: &mut serde_json::Value,
+    path: &str,
+    value: String,
+) -> Result<(), OmcRegistryError> {
+    if npm_pkg_get_path(package, path).is_none() {
+        npm_pkg_set_path(package, path, serde_json::Value::String(value))?;
+    }
+    Ok(())
+}
+
+fn default_npm_package_name(project_dir: &Path, scope: Option<&str>) -> String {
+    let base = project_dir
+        .file_name()
+        .and_then(|name| name.to_str())
+        .map(normalize_npm_init_name)
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| "omc-project".to_owned());
+    if let Some(scope) = scope
+        .map(normalize_npm_scope)
+        .filter(|scope| !scope.is_empty())
+    {
+        format!("{scope}/{base}")
+    } else {
+        base
+    }
+}
+
+fn normalize_npm_init_name(name: &str) -> String {
+    name.trim()
+        .to_ascii_lowercase()
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.') {
+                ch
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>()
+        .trim_matches('-')
+        .to_owned()
+}
+
+fn normalize_npm_scope(scope: &str) -> String {
+    let scope = scope.trim().trim_start_matches('@');
+    if scope.is_empty() {
+        String::new()
+    } else {
+        format!("@{}", normalize_npm_init_name(scope))
+    }
 }
 
 fn npm_cache_dir(project_dir: &Path) -> PathBuf {
@@ -4042,6 +4171,7 @@ fn parse_npm_compat_action(args: &[String]) -> Result<NpmCompatAction, OmcRegist
 
     match command {
         "--version" | "-v" => Ok(NpmCompatAction::Version),
+        "init" => parse_npm_init_args(&args[1..]),
         "version" => parse_npm_version_args(&args[1..]),
         "install" | "i" | "add" | "update" | "up" | "upgrade" => parse_npm_install_args(&args[1..]),
         "ci" => {
@@ -4207,6 +4337,101 @@ fn parse_npm_maintenance_args(
 
 fn npm_maintenance_equals_value_flag(arg: &str) -> bool {
     ["--loglevel=", "--cache="]
+        .iter()
+        .any(|prefix| arg.starts_with(prefix))
+}
+
+fn parse_npm_init_args(args: &[String]) -> Result<NpmCompatAction, OmcRegistryError> {
+    let mut action = NpmInitAction {
+        name: None,
+        version: None,
+        description: None,
+        main: None,
+        license: None,
+        scope: None,
+        private: false,
+        package_type: None,
+    };
+    let mut positionals = Vec::new();
+    let mut index = 0;
+    while index < args.len() {
+        let arg = &args[index];
+        if matches!(arg.as_str(), "-y" | "--yes" | "--force") {
+        } else if arg == "--private" {
+            action.private = true;
+        } else if arg == "--name" {
+            action.name = Some(npm_init_flag_value(args, &mut index, arg)?);
+        } else if let Some(value) = arg.strip_prefix("--name=") {
+            action.name = Some(value.to_owned());
+        } else if arg == "--version" {
+            action.version = Some(npm_init_flag_value(args, &mut index, arg)?);
+        } else if let Some(value) = arg.strip_prefix("--version=") {
+            action.version = Some(value.to_owned());
+        } else if arg == "--description" {
+            action.description = Some(npm_init_flag_value(args, &mut index, arg)?);
+        } else if let Some(value) = arg.strip_prefix("--description=") {
+            action.description = Some(value.to_owned());
+        } else if arg == "--main" {
+            action.main = Some(npm_init_flag_value(args, &mut index, arg)?);
+        } else if let Some(value) = arg.strip_prefix("--main=") {
+            action.main = Some(value.to_owned());
+        } else if arg == "--license" {
+            action.license = Some(npm_init_flag_value(args, &mut index, arg)?);
+        } else if let Some(value) = arg.strip_prefix("--license=") {
+            action.license = Some(value.to_owned());
+        } else if arg == "--scope" {
+            action.scope = Some(npm_init_flag_value(args, &mut index, arg)?);
+        } else if let Some(value) = arg.strip_prefix("--scope=") {
+            action.scope = Some(value.to_owned());
+        } else if arg == "--type" {
+            action.package_type = Some(npm_init_flag_value(args, &mut index, arg)?);
+        } else if let Some(value) = arg.strip_prefix("--type=") {
+            action.package_type = Some(value.to_owned());
+        } else if matches!(arg.as_str(), "--silent" | "-s") {
+        } else if npm_init_ignored_value_flag(arg) {
+            index += 1;
+            if args.get(index).is_none() {
+                return Err(OmcRegistryError::UnsupportedSpec(format!(
+                    "{arg} needs a value"
+                )));
+            }
+        } else if npm_init_ignored_equals_flag(arg) {
+        } else if arg.starts_with('-') {
+            return Err(unsupported_compat_arg("npm init", arg));
+        } else {
+            positionals.push(arg.clone());
+        }
+        index += 1;
+    }
+    if !positionals.is_empty() {
+        return Err(OmcRegistryError::UnsupportedSpec(format!(
+            "npm init package initializer `{}` is not supported by OMC compatibility yet",
+            positionals[0]
+        )));
+    }
+    Ok(NpmCompatAction::Init { action })
+}
+
+fn npm_init_flag_value(
+    args: &[String],
+    index: &mut usize,
+    flag: &str,
+) -> Result<String, OmcRegistryError> {
+    *index += 1;
+    args.get(*index)
+        .cloned()
+        .ok_or_else(|| OmcRegistryError::UnsupportedSpec(format!("{flag} needs a value")))
+}
+
+fn npm_init_ignored_value_flag(arg: &str) -> bool {
+    matches!(
+        arg,
+        "--cache" | "--registry" | "--userconfig" | "--loglevel"
+    )
+}
+
+fn npm_init_ignored_equals_flag(arg: &str) -> bool {
+    ["--cache=", "--registry=", "--userconfig=", "--loglevel="]
         .iter()
         .any(|prefix| arg.starts_with(prefix))
 }
@@ -6842,6 +7067,30 @@ mod tests {
             NpmCompatAction::Version
         );
         assert_eq!(
+            parse_npm_compat_action(&args(&[
+                "init",
+                "-y",
+                "--scope",
+                "@scope",
+                "--private",
+                "--type=module",
+            ]))
+            .unwrap(),
+            NpmCompatAction::Init {
+                action: NpmInitAction {
+                    name: None,
+                    version: None,
+                    description: None,
+                    main: None,
+                    license: None,
+                    scope: Some("@scope".to_owned()),
+                    private: true,
+                    package_type: Some("module".to_owned()),
+                },
+            }
+        );
+        assert!(parse_npm_compat_action(&args(&["init", "react-app"])).is_err());
+        assert_eq!(
             parse_npm_compat_action(&args(&["version", "--json"])).unwrap(),
             NpmCompatAction::PackageVersion {
                 action: NpmVersionAction::Current { json: true },
@@ -7452,6 +7701,63 @@ mod tests {
         assert_eq!(
             fs::read_to_string(dir.join("ci.npmrc")).unwrap(),
             "registry=https://ci.example.invalid\n"
+        );
+    }
+
+    #[test]
+    fn initializes_npm_package_json() {
+        let root = test_dir("npm-init");
+        let dir = root.join("demo_pkg");
+        fs::create_dir_all(&dir).unwrap();
+        print_npm_init(
+            &dir,
+            NpmInitAction {
+                name: None,
+                version: Some("2.0.0".to_owned()),
+                description: Some("demo package".to_owned()),
+                main: Some("src/index.js".to_owned()),
+                license: Some("MIT".to_owned()),
+                scope: Some("@scope".to_owned()),
+                private: true,
+                package_type: Some("module".to_owned()),
+            },
+        )
+        .unwrap();
+
+        let package = read_npm_pkg_json(&dir.join("package.json")).unwrap();
+        assert_eq!(
+            package.get("name").and_then(serde_json::Value::as_str),
+            Some("@scope/demo_pkg")
+        );
+        assert_eq!(
+            package.get("version").and_then(serde_json::Value::as_str),
+            Some("2.0.0")
+        );
+        assert_eq!(
+            package
+                .get("description")
+                .and_then(serde_json::Value::as_str),
+            Some("demo package")
+        );
+        assert_eq!(
+            package.get("main").and_then(serde_json::Value::as_str),
+            Some("src/index.js")
+        );
+        assert_eq!(
+            package.get("license").and_then(serde_json::Value::as_str),
+            Some("MIT")
+        );
+        assert_eq!(
+            package.get("type").and_then(serde_json::Value::as_str),
+            Some("module")
+        );
+        assert_eq!(
+            package.get("private").and_then(serde_json::Value::as_bool),
+            Some(true)
+        );
+        assert_eq!(
+            npm_pkg_get_path(&package, "scripts.test").and_then(serde_json::Value::as_str),
+            Some("echo \"Error: no test specified\" && exit 1")
         );
     }
 
