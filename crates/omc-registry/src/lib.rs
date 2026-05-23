@@ -223,6 +223,8 @@ pub struct OmcManifest {
     pub project: ProjectInfo,
     #[serde(default)]
     pub dependencies: BTreeMap<String, String>,
+    #[serde(default, rename = "dev-dependencies")]
+    pub dev_dependencies: BTreeMap<String, String>,
     #[serde(default, skip_serializing_if = "ManifestPolicy::is_empty")]
     pub policy: ManifestPolicy,
 }
@@ -253,6 +255,7 @@ impl OmcManifest {
                 version: "0.1.0".to_owned(),
             },
             dependencies: BTreeMap::new(),
+            dev_dependencies: BTreeMap::new(),
             policy: ManifestPolicy::default(),
         }
     }
@@ -403,6 +406,7 @@ pub struct LinkOptions {
     pub hashes: BTreeMap<String, BTreeSet<String>>,
     pub project_extras: BTreeSet<String>,
     pub include_dev_dependencies: bool,
+    pub save_dev_dependency: bool,
 }
 
 impl LinkOptions {
@@ -415,6 +419,7 @@ impl LinkOptions {
             hashes: BTreeMap::new(),
             project_extras: BTreeSet::new(),
             include_dev_dependencies: true,
+            save_dev_dependency: false,
         }
     }
 }
@@ -508,7 +513,12 @@ pub fn add_package_graph(spec: &PackageSpec, options: &LinkOptions) -> Result<Ve
     let reports = resolve_package_graph(&client, spec, &options)?;
 
     if let Some(root) = reports.first() {
-        write_manifest_dependency(&options.project_dir, spec, &root.locked.version)?;
+        write_manifest_dependency(
+            &options.project_dir,
+            spec,
+            &root.locked.version,
+            options.save_dev_dependency,
+        )?;
     }
 
     Ok(reports)
@@ -523,7 +533,11 @@ pub fn remove_manifest_dependency(
 
     let manifest_path = project_dir.join(MANIFEST);
     let mut manifest = read_manifest(&manifest_path)?;
-    let removed = manifest.dependencies.remove(&spec.package_key()).is_some();
+    let removed = manifest.dependencies.remove(&spec.package_key()).is_some()
+        || manifest
+            .dev_dependencies
+            .remove(&spec.package_key())
+            .is_some();
     fs::write(&manifest_path, toml::to_string_pretty(&manifest)?)?;
     Ok(removed)
 }
@@ -597,6 +611,11 @@ fn project_requested_specs(options: &mut LinkOptions) -> Result<Vec<PackageSpec>
     let mut specs = Vec::new();
     for (key, version) in manifest.dependencies {
         specs.push(PackageSpec::parse(&format!("{key}@{version}"))?);
+    }
+    if options.include_dev_dependencies {
+        for (key, version) in manifest.dev_dependencies {
+            specs.push(PackageSpec::parse(&format!("{key}@{version}"))?);
+        }
     }
     let discovered = discover_project_requirements_with_options(
         &options.project_dir,
@@ -953,7 +972,12 @@ fn link_package_inner(
     }
 
     if update_manifest {
-        write_manifest_dependency(&options.project_dir, spec, &resolved.version)?;
+        write_manifest_dependency(
+            &options.project_dir,
+            spec,
+            &resolved.version,
+            options.save_dev_dependency,
+        )?;
     }
 
     let lockfile = options.project_dir.join(LOCKFILE);
@@ -973,12 +997,25 @@ fn link_package_inner(
     )))
 }
 
-fn write_manifest_dependency(project_dir: &Path, spec: &PackageSpec, version: &str) -> Result<()> {
+fn write_manifest_dependency(
+    project_dir: &Path,
+    spec: &PackageSpec,
+    version: &str,
+    dev_dependency: bool,
+) -> Result<()> {
     let manifest_path = project_dir.join(MANIFEST);
     let mut manifest = read_manifest(&manifest_path)?;
-    manifest
-        .dependencies
-        .insert(spec.package_key(), version.to_owned());
+    if dev_dependency {
+        manifest.dependencies.remove(&spec.package_key());
+        manifest
+            .dev_dependencies
+            .insert(spec.package_key(), version.to_owned());
+    } else {
+        manifest.dev_dependencies.remove(&spec.package_key());
+        manifest
+            .dependencies
+            .insert(spec.package_key(), version.to_owned());
+    }
     fs::write(&manifest_path, toml::to_string_pretty(&manifest)?)?;
     Ok(())
 }
@@ -3651,6 +3688,7 @@ mod tests {
                 version: "0.1.0".to_owned(),
             },
             dependencies: BTreeMap::from([("npm:left-pad".to_owned(), "1.3.0".to_owned())]),
+            dev_dependencies: BTreeMap::from([("npm:is-odd".to_owned(), "3.0.1".to_owned())]),
             policy: ManifestPolicy {
                 allow: vec!["http:api.example.com".to_owned()],
             },
@@ -3668,7 +3706,33 @@ mod tests {
 
         assert!(removed);
         assert!(manifest.dependencies.is_empty());
+        assert_eq!(
+            manifest.dev_dependencies,
+            BTreeMap::from([("npm:is-odd".to_owned(), "3.0.1".to_owned())])
+        );
         assert_eq!(manifest.policy.allow, vec!["http:api.example.com"]);
+    }
+
+    #[test]
+    fn writes_manifest_dev_dependencies() {
+        let dir = tempfile::tempdir().unwrap();
+        let spec = PackageSpec::parse("npm:is-odd@3.0.1").unwrap();
+        write_manifest_dependency(dir.path(), &spec, "3.0.1", true).unwrap();
+        let manifest = read_manifest(dir.path().join("omc.toml")).unwrap();
+
+        assert!(manifest.dependencies.is_empty());
+        assert_eq!(
+            manifest.dev_dependencies,
+            BTreeMap::from([("npm:is-odd".to_owned(), "3.0.1".to_owned())])
+        );
+
+        write_manifest_dependency(dir.path(), &spec, "3.0.1", false).unwrap();
+        let manifest = read_manifest(dir.path().join("omc.toml")).unwrap();
+        assert_eq!(
+            manifest.dependencies,
+            BTreeMap::from([("npm:is-odd".to_owned(), "3.0.1".to_owned())])
+        );
+        assert!(manifest.dev_dependencies.is_empty());
     }
 
     #[test]

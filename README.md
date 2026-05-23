@@ -100,6 +100,7 @@ The `omc` CLI is the first working slice of a PyPI/npm replacement:
 cargo run -p omc-cli -- --project-dir /tmp/omc-demo init --name demo
 cargo run -p omc-cli -- --project-dir /tmp/omc-demo allow http:api.example.com env:API_TOKEN
 cargo run -p omc-cli -- --project-dir /tmp/omc-demo add npm:is-odd@3.0.1
+cargo run -p omc-cli -- --project-dir /tmp/omc-demo add npm:left-pad@1.3.0 --dev
 cargo run -p omc-cli -- --project-dir /tmp/omc-demo node -e "console.log(require('is-odd')(3))"
 cargo run -p omc-cli -- --project-dir /tmp/omc-demo script test
 cargo run -p omc-cli -- --project-dir /tmp/omc-demo add pypi:requests==2.32.3 --allow-all-host
@@ -215,7 +216,8 @@ Supported now:
 - `omc.toml` and `omc.lock`
 - persistent `[policy].allow` grants in `omc.toml`
 - `omc allow` for editing persistent project policy grants
-- `omc add` and `omc remove` for OMC-managed dependencies
+- `omc add`, `omc add --dev`, and `omc remove` for OMC-managed dependencies
+- `[dev-dependencies]` support in `omc.toml`, including `omc install --omit-dev`
 - install-time pruning so `omc.lock`, `node_modules`, and Python site-packages
   converge to current project manifests
 - locked/offline `omc install --locked` installs that validate `omc.lock`

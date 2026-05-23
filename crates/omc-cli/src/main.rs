@@ -33,6 +33,8 @@ enum Command {
     Add {
         #[arg(help = "Package spec such as npm:left-pad@1.3.0 or pypi:idna==3.7")]
         spec: String,
+        #[arg(long, help = "Save the package as a development dependency")]
+        dev: bool,
         #[arg(long, help = "Write blocked packages into omc.lock for review")]
         record_blocked: bool,
         #[arg(
@@ -140,6 +142,7 @@ fn run() -> Result<ExitCode, OmcRegistryError> {
         }
         Command::Add {
             spec,
+            dev,
             record_blocked,
             allow,
             allow_all_host,
@@ -148,6 +151,7 @@ fn run() -> Result<ExitCode, OmcRegistryError> {
             let mut options = LinkOptions::new(&cli.project_dir);
             options.record_blocked = record_blocked;
             options.allowed_capabilities = parse_grants(&allow, allow_all_host)?;
+            options.save_dev_dependency = dev;
 
             match add_package_graph(&spec, &options) {
                 Ok(reports) => {
