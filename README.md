@@ -98,15 +98,18 @@ The `omc` CLI is the first working slice of a PyPI/npm replacement:
 
 ```bash
 cargo run -p omc-cli -- --project-dir /tmp/omc-demo init --name demo
-cargo run -p omc-cli -- --project-dir /tmp/omc-demo add npm:left-pad@1.3.0
-cargo run -p omc-cli -- --project-dir /tmp/omc-demo add pypi:idna==3.7
+cargo run -p omc-cli -- --project-dir /tmp/omc-demo add npm:is-odd@3.0.1
+cargo run -p omc-cli -- --project-dir /tmp/omc-demo node -e "console.log(require('is-odd')(3))"
+cargo run -p omc-cli -- --project-dir /tmp/omc-demo add pypi:requests==2.32.3 --allow-all-host
+cargo run -p omc-cli -- --project-dir /tmp/omc-demo python -c "import requests; print(requests.__version__)"
 cargo run -p omc-cli -- --project-dir /tmp/omc-demo audit
 ```
 
 What `add` does:
 
 ```text
-resolve exact package version from npm or PyPI
+resolve package version ranges from npm or PyPI
+walk runtime dependencies recursively
 download the registry artifact without executing it
 verify PyPI sha256 when the registry provides it
 cache the source artifact under .omc/cache
@@ -114,6 +117,8 @@ profile runtime source files into OMC capability findings
 run the OMC verifier with deny-by-default policy
 write an OMC artifact under .omc/artifacts
 update omc.toml and omc.lock only when accepted
+install npm packages into node_modules
+install PyPI wheels into .omc/python/site-packages
 ```
 
 Default policy denies host authority. A package such as `esbuild`, which has a
@@ -140,9 +145,9 @@ cargo run -p omc-cli -- --project-dir /tmp/omc-demo add npm:some-client@1.0.0 \
 
 This is still a prototype. It replaces install-time execution with registry
 resolution, source caching, OMC artifact generation, capability verification,
-and lockfile recording. It does not yet build a complete dependency graph,
-execute packages as cells for real applications, or expose compatibility shims
-for Node/Python imports.
+lockfile recording, and local install trees for Node/Python imports. It does
+not yet execute package code inside OMC cells for real applications, implement
+the complete npm/PyPI resolver surface, or build native/sdist packages.
 
 ## Current MVP Boundaries
 
@@ -157,8 +162,15 @@ Supported now:
   simple stack-visible flows
 - interpreter checks the same broker policy at runtime
 - npm and PyPI exact-version resolution
+- npm semver range resolution for common dependency ranges
+- PyPI dependency range resolution with local `python3` `Requires-Python`
+  filtering
+- recursive runtime dependency locking
 - source artifact download and cache
 - `omc.toml` and `omc.lock`
+- `node_modules` installation for npm tarballs
+- `.omc/python/site-packages` installation for PyPI wheels
+- `omc node` and `omc python` wrappers
 - runtime source profiling into capability findings
 - explicit CLI grants for accepted host authority
 
@@ -166,12 +178,13 @@ Not implemented yet:
 
 - real JavaScript or Python frontend
 - package artifact signing
-- transitive dependency graph solving
 - structured microcode serialization
 - full control-flow graph verification
 - imports/linking across package cells
 - native/Wasm/Cranelift backend
-- Node/Python compatibility shims that execute real applications through OMC
+- full npm peer/optional/bundled dependency semantics
+- Python sdist build isolation and native wheel policy
+- execution of package code inside OMC cells for real applications
 
 ## Useful Commands
 

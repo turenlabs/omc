@@ -1,11 +1,12 @@
+use std::env;
 use std::path::PathBuf;
-use std::process::ExitCode;
+use std::process::{Command as ProcessCommand, ExitCode};
 
 use clap::{Parser, Subcommand};
 use omc_cap::Capability;
 use omc_registry::{
-    init_project, link_package, parse_capability_grant, read_lockfile, LinkOptions,
-    OmcRegistryError, PackageSpec, Verdict,
+    add_package_graph, init_project, install_locked_packages, install_project,
+    parse_capability_grant, read_lockfile, LinkOptions, OmcRegistryError, PackageSpec, Verdict,
 };
 
 #[derive(Debug, Parser)]
@@ -26,7 +27,7 @@ enum Command {
         #[arg(long)]
         name: Option<String>,
     },
-    #[command(about = "Resolve, cache, profile, verify, and lock a package")]
+    #[command(about = "Resolve, verify, lock, and install a package plus dependencies")]
     Add {
         #[arg(help = "Package spec such as npm:left-pad@1.3.0 or pypi:idna==3.7")]
         spec: String,
@@ -40,13 +41,33 @@ enum Command {
         #[arg(long, help = "Grant all host capabilities for compatibility testing")]
         allow_all_host: bool,
     },
+    #[command(about = "Resolve omc.toml dependencies and install locked packages")]
+    Install {
+        #[arg(
+            long = "allow",
+            help = "Grant a capability, e.g. http:api.example.com, env:API_TOKEN, fs-read:*, proc:*"
+        )]
+        allow: Vec<String>,
+        #[arg(long, help = "Grant all host capabilities for compatibility testing")]
+        allow_all_host: bool,
+    },
     #[command(about = "Summarize locked packages and fail if any are blocked")]
     Audit,
+    #[command(about = "Run node with this project's OMC-installed node_modules")]
+    Node {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    #[command(about = "Run python3 with this project's OMC-installed site-packages")]
+    Python {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
 }
 
 fn main() -> ExitCode {
     match run() {
-        Ok(()) => ExitCode::SUCCESS,
+        Ok(code) => code,
         Err(OmcRegistryError::BlockedPackage { spec }) => {
             eprintln!("blocked: {spec}");
             ExitCode::from(2)
@@ -58,7 +79,7 @@ fn main() -> ExitCode {
     }
 }
 
-fn run() -> Result<(), OmcRegistryError> {
+fn run() -> Result<ExitCode, OmcRegistryError> {
     let cli = Cli::parse();
     match cli.command {
         Command::Init { name } => {
@@ -76,43 +97,39 @@ fn run() -> Result<(), OmcRegistryError> {
             options.record_blocked = record_blocked;
             options.allowed_capabilities = parse_grants(&allow, allow_all_host)?;
 
-            match link_package(&spec, &options) {
-                Ok(report) => {
+            match add_package_graph(&spec, &options) {
+                Ok(reports) => {
+                    print_link_reports(&reports);
+                    let install = install_locked_packages(&cli.project_dir)?;
+                    println!();
                     println!(
-                        "{} {}:{}@{}",
-                        verdict_label(report.locked.verdict),
-                        report.locked.ecosystem,
-                        report.locked.name,
-                        report.locked.version
+                        "installed npm={} pypi={} node_modules={} python_site_packages={}",
+                        install.npm_packages,
+                        install.pypi_packages,
+                        install.node_modules.display(),
+                        install.python_site_packages.display()
                     );
-                    println!("archive  {}", report.locked.archive);
-                    println!("artifact {}", report.locked.artifact);
-                    println!("lockfile {}", report.lockfile.display());
-
-                    if !report.artifact.capabilities.is_empty() {
-                        println!();
-                        println!("capabilities:");
-                        for finding in &report.artifact.capabilities {
-                            println!(
-                                "  - {} {} from {} ({})",
-                                finding.kind, finding.target, finding.source, finding.evidence
-                            );
-                        }
-                    }
-
-                    if !report.artifact.verifier_findings.is_empty() {
-                        println!();
-                        println!("verifier findings:");
-                        for finding in &report.artifact.verifier_findings {
-                            println!("  - {finding}");
-                        }
-                    }
                 }
                 Err(OmcRegistryError::BlockedPackage { spec }) => {
                     return Err(OmcRegistryError::BlockedPackage { spec });
                 }
                 Err(error) => return Err(error),
             }
+        }
+        Command::Install {
+            allow,
+            allow_all_host,
+        } => {
+            let mut options = LinkOptions::new(&cli.project_dir);
+            options.allowed_capabilities = parse_grants(&allow, allow_all_host)?;
+            let install = install_project(&options)?;
+            println!(
+                "installed npm={} pypi={} node_modules={} python_site_packages={}",
+                install.npm_packages,
+                install.pypi_packages,
+                install.node_modules.display(),
+                install.python_site_packages.display()
+            );
         }
         Command::Audit => {
             let lock = read_lockfile(cli.project_dir.join("omc.lock"))?;
@@ -139,9 +156,81 @@ fn run() -> Result<(), OmcRegistryError> {
                 });
             }
         }
+        Command::Node { args } => return run_node(&cli.project_dir, &args),
+        Command::Python { args } => return run_python(&cli.project_dir, &args),
     }
 
-    Ok(())
+    Ok(ExitCode::SUCCESS)
+}
+
+fn run_node(project_dir: &PathBuf, args: &[String]) -> Result<ExitCode, OmcRegistryError> {
+    let status = ProcessCommand::new("node")
+        .args(args)
+        .current_dir(project_dir)
+        .status()?;
+    Ok(exit_code(status.code()))
+}
+
+fn run_python(project_dir: &PathBuf, args: &[String]) -> Result<ExitCode, OmcRegistryError> {
+    let site_packages = project_dir
+        .join(".omc")
+        .join("python")
+        .join("site-packages");
+    let mut python_paths = vec![site_packages];
+    if let Some(existing) = env::var_os("PYTHONPATH") {
+        python_paths.extend(env::split_paths(&existing));
+    }
+    let joined = env::join_paths(python_paths)
+        .map_err(|error| OmcRegistryError::UnsupportedSpec(error.to_string()))?;
+
+    let status = ProcessCommand::new("python3")
+        .args(args)
+        .current_dir(project_dir)
+        .env("PYTHONPATH", joined)
+        .status()?;
+    Ok(exit_code(status.code()))
+}
+
+fn exit_code(code: Option<i32>) -> ExitCode {
+    code.and_then(|code| u8::try_from(code).ok())
+        .map(ExitCode::from)
+        .unwrap_or(ExitCode::FAILURE)
+}
+
+fn print_link_reports(reports: &[omc_registry::LinkReport]) {
+    for report in reports {
+        println!(
+            "{} {}:{}@{}",
+            verdict_label(report.locked.verdict),
+            report.locked.ecosystem,
+            report.locked.name,
+            report.locked.version
+        );
+        println!("archive  {}", report.locked.archive);
+        println!("artifact {}", report.locked.artifact);
+        println!("lockfile {}", report.lockfile.display());
+
+        if !report.artifact.dependencies.is_empty() {
+            println!("dependencies: {}", report.artifact.dependencies.join(", "));
+        }
+
+        if !report.artifact.capabilities.is_empty() {
+            println!("capabilities:");
+            for finding in &report.artifact.capabilities {
+                println!(
+                    "  - {} {} from {} ({})",
+                    finding.kind, finding.target, finding.source, finding.evidence
+                );
+            }
+        }
+
+        if !report.artifact.verifier_findings.is_empty() {
+            println!("verifier findings:");
+            for finding in &report.artifact.verifier_findings {
+                println!("  - {finding}");
+            }
+        }
+    }
 }
 
 fn verdict_label(verdict: Verdict) -> &'static str {

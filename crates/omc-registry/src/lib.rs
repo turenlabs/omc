@@ -3,6 +3,7 @@ use std::fmt;
 use std::fs;
 use std::io::{Cursor, Read};
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::str::FromStr;
 
 use flate2::read::GzDecoder;
@@ -10,6 +11,7 @@ use omc_cap::{Capability, Policy};
 use omc_format::{BehaviorType, CapOp, Function, HttpRequest, Module, Op, Value, VirtualPath};
 use omc_verify::{verify_module, VerifyFinding};
 use reqwest::blocking::Client;
+use semver::Version;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tar::Archive;
@@ -32,6 +34,14 @@ pub enum OmcRegistryError {
     BlockedPackage { spec: String },
     #[error("registry response did not include a downloadable artifact for {0}")]
     MissingArtifact(String),
+    #[error("could not resolve a version for {name} matching `{requirement}`")]
+    UnsatisfiedRequirement { name: String, requirement: String },
+    #[error("install requires an accepted lockfile; blocked package remains: {0}")]
+    BlockedLockedPackage(String),
+    #[error("cannot install unsupported artifact type: {0}")]
+    UnsupportedInstallArtifact(String),
+    #[error("archive contains an unsafe path: {0}")]
+    UnsafeArchivePath(String),
     #[error("downloaded artifact digest mismatch for {name}: expected {expected}, got {actual}")]
     DigestMismatch {
         name: String,
@@ -238,6 +248,8 @@ pub struct LockedPackage {
     pub behavior: Behavior,
     pub verdict: Verdict,
     #[serde(default)]
+    pub dependencies: Vec<String>,
+    #[serde(default)]
     pub grants: Vec<String>,
     #[serde(default)]
     pub capabilities: Vec<CapabilityFinding>,
@@ -301,6 +313,7 @@ pub struct OmcArtifact {
     pub behavior: Behavior,
     pub verdict: Verdict,
     pub grants: Vec<String>,
+    pub dependencies: Vec<String>,
     pub files_scanned: usize,
     pub capabilities: Vec<CapabilityFinding>,
     pub verifier_findings: Vec<String>,
@@ -338,6 +351,14 @@ pub struct LinkReport {
     pub manifest: PathBuf,
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct InstallReport {
+    pub npm_packages: usize,
+    pub pypi_packages: usize,
+    pub node_modules: PathBuf,
+    pub python_site_packages: PathBuf,
+}
+
 #[derive(Debug, Clone)]
 struct ResolvedPackage {
     ecosystem: Ecosystem,
@@ -347,6 +368,7 @@ struct ResolvedPackage {
     filename: String,
     expected_sha256: Option<String>,
     npm_scripts: BTreeMap<String, String>,
+    dependencies: Vec<PackageSpec>,
 }
 
 pub fn init_project(project_dir: impl AsRef<Path>, name: Option<&str>) -> Result<PathBuf> {
@@ -378,8 +400,71 @@ pub fn link_package(spec: &PackageSpec, options: &LinkOptions) -> Result<LinkRep
     init_project(&options.project_dir, None)?;
 
     let client = Client::builder().user_agent("omc-prototype/0.1").build()?;
-    let resolved = resolve_package(&client, spec)?;
-    let archive_bytes = download_artifact(&client, &resolved)?;
+    let (report, _) = link_package_inner(&client, spec, options, true)?;
+    Ok(report)
+}
+
+pub fn add_package_graph(spec: &PackageSpec, options: &LinkOptions) -> Result<Vec<LinkReport>> {
+    init_project(&options.project_dir, None)?;
+
+    let client = Client::builder().user_agent("omc-prototype/0.1").build()?;
+    let mut reports = Vec::new();
+    let mut seen = BTreeSet::new();
+    add_package_graph_inner(&client, spec, options, &mut seen, &mut reports)?;
+
+    if let Some(root) = reports.first() {
+        write_manifest_dependency(&options.project_dir, spec, &root.locked.version)?;
+    }
+
+    Ok(reports)
+}
+
+pub fn install_project(options: &LinkOptions) -> Result<InstallReport> {
+    init_project(&options.project_dir, None)?;
+
+    let manifest = read_manifest(options.project_dir.join(MANIFEST))?;
+    for (key, version) in &manifest.dependencies {
+        let spec = PackageSpec::parse(&format!("{key}@{version}"))?;
+        add_package_graph(&spec, options)?;
+    }
+
+    install_locked_packages(&options.project_dir)
+}
+
+fn add_package_graph_inner(
+    client: &Client,
+    spec: &PackageSpec,
+    options: &LinkOptions,
+    seen: &mut BTreeSet<String>,
+    reports: &mut Vec<LinkReport>,
+) -> Result<()> {
+    let (report, dependencies) = link_package_inner(client, spec, options, false)?;
+    let resolved_key = format!(
+        "{}:{}@{}",
+        report.locked.ecosystem, report.locked.name, report.locked.version
+    );
+
+    if !seen.insert(resolved_key) {
+        return Ok(());
+    }
+
+    reports.push(report);
+
+    for dependency in dependencies {
+        add_package_graph_inner(client, &dependency, options, seen, reports)?;
+    }
+
+    Ok(())
+}
+
+fn link_package_inner(
+    client: &Client,
+    spec: &PackageSpec,
+    options: &LinkOptions,
+    update_manifest: bool,
+) -> Result<(LinkReport, Vec<PackageSpec>)> {
+    let resolved = resolve_package(client, spec)?;
+    let archive_bytes = download_artifact(client, &resolved)?;
     let sha256 = sha256_hex(&archive_bytes);
 
     if let Some(expected) = &resolved.expected_sha256 {
@@ -439,6 +524,11 @@ pub fn link_package(spec: &PackageSpec, options: &LinkOptions) -> Result<LinkRep
             .iter()
             .map(ToString::to_string)
             .collect(),
+        dependencies: resolved
+            .dependencies
+            .iter()
+            .map(PackageSpec::requested)
+            .collect(),
         files_scanned: profile.files_scanned,
         capabilities: profile.capabilities,
         verifier_findings: verifier_findings.clone(),
@@ -455,6 +545,7 @@ pub fn link_package(spec: &PackageSpec, options: &LinkOptions) -> Result<LinkRep
         sha256,
         behavior,
         verdict,
+        dependencies: artifact.dependencies.clone(),
         grants: artifact.grants.clone(),
         capabilities: artifact.capabilities.clone(),
         verifier_findings,
@@ -466,24 +557,35 @@ pub fn link_package(spec: &PackageSpec, options: &LinkOptions) -> Result<LinkRep
         });
     }
 
-    let manifest_path = options.project_dir.join(MANIFEST);
-    let mut manifest = read_manifest(&manifest_path)?;
-    manifest
-        .dependencies
-        .insert(spec.package_key(), resolved.version.clone());
-    fs::write(&manifest_path, toml::to_string_pretty(&manifest)?)?;
+    if update_manifest {
+        write_manifest_dependency(&options.project_dir, spec, &resolved.version)?;
+    }
 
     let lockfile = options.project_dir.join(LOCKFILE);
     let mut lock = read_lockfile(&lockfile)?;
     lock.upsert(locked.clone());
     fs::write(&lockfile, toml::to_string_pretty(&lock)?)?;
 
-    Ok(LinkReport {
-        locked,
-        artifact,
-        lockfile,
-        manifest: manifest_path,
-    })
+    let manifest_path = options.project_dir.join(MANIFEST);
+    Ok((
+        LinkReport {
+            locked,
+            artifact,
+            lockfile,
+            manifest: manifest_path,
+        },
+        resolved.dependencies,
+    ))
+}
+
+fn write_manifest_dependency(project_dir: &Path, spec: &PackageSpec, version: &str) -> Result<()> {
+    let manifest_path = project_dir.join(MANIFEST);
+    let mut manifest = read_manifest(&manifest_path)?;
+    manifest
+        .dependencies
+        .insert(spec.package_key(), version.to_owned());
+    fs::write(&manifest_path, toml::to_string_pretty(&manifest)?)?;
+    Ok(())
 }
 
 pub fn read_lockfile(path: impl AsRef<Path>) -> Result<OmcLock> {
@@ -500,6 +602,142 @@ pub fn read_manifest(path: impl AsRef<Path>) -> Result<OmcManifest> {
         return Ok(OmcManifest::new("omc-project"));
     }
     Ok(toml::from_str(&fs::read_to_string(path)?)?)
+}
+
+pub fn install_locked_packages(project_dir: impl AsRef<Path>) -> Result<InstallReport> {
+    let project_dir = project_dir.as_ref();
+    let lock = read_lockfile(project_dir.join(LOCKFILE))?;
+    let node_modules = project_dir.join("node_modules");
+    let python_site_packages = project_dir
+        .join(".omc")
+        .join("python")
+        .join("site-packages");
+    fs::create_dir_all(&node_modules)?;
+    fs::create_dir_all(&python_site_packages)?;
+
+    let mut report = InstallReport {
+        npm_packages: 0,
+        pypi_packages: 0,
+        node_modules,
+        python_site_packages,
+    };
+
+    for package in &lock.packages {
+        if package.verdict != Verdict::Accepted {
+            return Err(OmcRegistryError::BlockedLockedPackage(format!(
+                "{}:{}@{}",
+                package.ecosystem, package.name, package.version
+            )));
+        }
+
+        match package.ecosystem {
+            Ecosystem::Npm => {
+                install_npm_package(project_dir, package, &report.node_modules)?;
+                report.npm_packages += 1;
+            }
+            Ecosystem::Pypi => {
+                install_pypi_package(project_dir, package, &report.python_site_packages)?;
+                report.pypi_packages += 1;
+            }
+        }
+    }
+
+    Ok(report)
+}
+
+fn install_npm_package(
+    project_dir: &Path,
+    package: &LockedPackage,
+    node_modules: &Path,
+) -> Result<()> {
+    let archive_path = project_dir.join(&package.archive);
+    let target = npm_install_target(node_modules, &package.name);
+    if target.exists() {
+        fs::remove_dir_all(&target)?;
+    }
+    fs::create_dir_all(&target)?;
+
+    let bytes = fs::read(&archive_path)?;
+    let decoder = GzDecoder::new(Cursor::new(bytes));
+    let mut archive = Archive::new(decoder);
+    for entry in archive.entries()? {
+        let mut entry = entry?;
+        let raw_path = entry.path()?.to_string_lossy().into_owned();
+        let stripped = strip_first_path_component(Path::new(&raw_path))
+            .ok_or_else(|| OmcRegistryError::UnsafeArchivePath(raw_path.clone()))?;
+        let output = checked_join(&target, &stripped)?;
+
+        if entry.header().entry_type().is_dir() {
+            fs::create_dir_all(output)?;
+        } else if entry.header().entry_type().is_file() {
+            if let Some(parent) = output.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            entry.unpack(output)?;
+        }
+    }
+
+    Ok(())
+}
+
+fn install_pypi_package(
+    project_dir: &Path,
+    package: &LockedPackage,
+    site_packages: &Path,
+) -> Result<()> {
+    let archive_path = project_dir.join(&package.archive);
+    if archive_path.extension().and_then(|ext| ext.to_str()) != Some("whl") {
+        return Err(OmcRegistryError::UnsupportedInstallArtifact(
+            archive_path.display().to_string(),
+        ));
+    }
+
+    let reader = Cursor::new(fs::read(&archive_path)?);
+    let mut archive = zip::ZipArchive::new(reader)?;
+    for index in 0..archive.len() {
+        let mut file = archive.by_index(index)?;
+        let output = checked_join(site_packages, Path::new(file.name()))?;
+
+        if file.is_dir() {
+            fs::create_dir_all(output)?;
+        } else {
+            if let Some(parent) = output.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            let mut out = fs::File::create(output)?;
+            std::io::copy(&mut file, &mut out)?;
+        }
+    }
+
+    Ok(())
+}
+
+fn npm_install_target(node_modules: &Path, name: &str) -> PathBuf {
+    if let Some((scope, package)) = name.split_once('/') {
+        node_modules.join(scope).join(package)
+    } else {
+        node_modules.join(name)
+    }
+}
+
+fn strip_first_path_component(path: &Path) -> Option<PathBuf> {
+    let mut components = path.components();
+    components.next()?;
+    let stripped = components.as_path();
+    (!stripped.as_os_str().is_empty()).then(|| stripped.to_path_buf())
+}
+
+fn checked_join(base: &Path, relative: &Path) -> Result<PathBuf> {
+    if relative.is_absolute()
+        || relative
+            .components()
+            .any(|component| matches!(component, std::path::Component::ParentDir))
+    {
+        return Err(OmcRegistryError::UnsafeArchivePath(
+            relative.display().to_string(),
+        ));
+    }
+    Ok(base.join(relative))
 }
 
 pub fn parse_capability_grant(value: &str) -> Result<Capability> {
@@ -538,8 +776,17 @@ fn resolve_package(client: &Client, spec: &PackageSpec) -> Result<ResolvedPackag
 
 fn resolve_npm(client: &Client, spec: &PackageSpec) -> Result<ResolvedPackage> {
     let encoded = urlencoding::encode(&spec.name);
-    let version = match &spec.version {
-        Some(version) => version.clone(),
+    let version = match spec.version.as_deref() {
+        Some(requirement) if is_exact_npm_version(requirement) => requirement.to_owned(),
+        Some(requirement) => {
+            let url = format!("https://registry.npmjs.org/{encoded}");
+            let root = client
+                .get(url)
+                .send()?
+                .error_for_status()?
+                .json::<NpmRoot>()?;
+            choose_npm_version(&spec.name, requirement, &root)?
+        }
         None => {
             let url = format!("https://registry.npmjs.org/{encoded}");
             let root = client
@@ -556,6 +803,17 @@ fn resolve_npm(client: &Client, spec: &PackageSpec) -> Result<ResolvedPackage> {
         return Err(OmcRegistryError::PackageNotFound(spec.requested()));
     }
     let version_doc = response.error_for_status()?.json::<NpmVersion>()?;
+    let dependencies = version_doc
+        .dependencies
+        .clone()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|(name, requirement)| PackageSpec {
+            ecosystem: Ecosystem::Npm,
+            name,
+            version: Some(requirement),
+        })
+        .collect::<Vec<_>>();
     let filename = version_doc
         .dist
         .tarball
@@ -572,25 +830,52 @@ fn resolve_npm(client: &Client, spec: &PackageSpec) -> Result<ResolvedPackage> {
         filename,
         expected_sha256: None,
         npm_scripts: version_doc.scripts.unwrap_or_default(),
+        dependencies,
     })
 }
 
 fn resolve_pypi(client: &Client, spec: &PackageSpec) -> Result<ResolvedPackage> {
     let encoded = urlencoding::encode(&spec.name);
-    let url = match &spec.version {
-        Some(version) => format!("https://pypi.org/pypi/{encoded}/{version}/json"),
-        None => format!("https://pypi.org/pypi/{encoded}/json"),
+    let target_python = current_python_version();
+    let version = match spec.version.as_deref() {
+        Some(requirement) if is_exact_pypi_version(requirement) => requirement.to_owned(),
+        Some(requirement) => {
+            let url = format!("https://pypi.org/pypi/{encoded}/json");
+            let root = client
+                .get(url)
+                .send()?
+                .error_for_status()?
+                .json::<PypiRoot>()?;
+            choose_pypi_version(&spec.name, requirement, &root, target_python.as_deref())?
+        }
+        None => {
+            let url = format!("https://pypi.org/pypi/{encoded}/json");
+            let root = client
+                .get(url)
+                .send()?
+                .error_for_status()?
+                .json::<PypiRoot>()?;
+            root.info.version
+        }
     };
+    let url = format!("https://pypi.org/pypi/{encoded}/{version}/json");
     let response = client.get(url).send()?;
     if response.status().as_u16() == 404 {
         return Err(OmcRegistryError::PackageNotFound(spec.requested()));
     }
     let doc = response.error_for_status()?.json::<PypiResponse>()?;
-    let file = choose_pypi_file(&doc)
+    let file = choose_pypi_file(&doc, target_python.as_deref())
         .ok_or_else(|| OmcRegistryError::MissingArtifact(spec.requested()))?;
     let source_url = file.url.clone();
     let filename = file.filename.clone();
     let expected_sha256 = file.digests.sha256.clone();
+    let dependencies = doc
+        .info
+        .requires_dist
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|requirement| parse_pypi_requirement(&requirement))
+        .collect::<Vec<_>>();
 
     Ok(ResolvedPackage {
         ecosystem: Ecosystem::Pypi,
@@ -600,19 +885,279 @@ fn resolve_pypi(client: &Client, spec: &PackageSpec) -> Result<ResolvedPackage> 
         filename,
         expected_sha256: Some(expected_sha256),
         npm_scripts: BTreeMap::new(),
+        dependencies,
     })
 }
 
-fn choose_pypi_file(doc: &PypiResponse) -> Option<&PypiFile> {
+fn choose_pypi_file<'a>(
+    doc: &'a PypiResponse,
+    target_python: Option<&str>,
+) -> Option<&'a PypiFile> {
     doc.urls
         .iter()
-        .find(|file| file.packagetype == "sdist")
+        .filter(|file| pypi_file_python_compatible(file, target_python))
+        .find(|file| file.packagetype == "bdist_wheel" && file.filename.contains("py3-none-any"))
         .or_else(|| {
             doc.urls
                 .iter()
+                .filter(|file| pypi_file_python_compatible(file, target_python))
                 .find(|file| file.packagetype == "bdist_wheel")
         })
-        .or_else(|| doc.urls.first())
+        .or_else(|| {
+            doc.urls
+                .iter()
+                .filter(|file| pypi_file_python_compatible(file, target_python))
+                .find(|file| file.packagetype == "sdist")
+        })
+        .or_else(|| {
+            doc.urls
+                .iter()
+                .find(|file| pypi_file_python_compatible(file, target_python))
+        })
+}
+
+fn choose_npm_version(name: &str, requirement: &str, root: &NpmRoot) -> Result<String> {
+    if requirement == "latest" {
+        return Ok(root.dist_tags.latest.clone());
+    }
+
+    root.versions
+        .keys()
+        .filter(|version| npm_version_satisfies(version, requirement))
+        .max_by(|left, right| compare_npm_versions(left, right))
+        .cloned()
+        .ok_or_else(|| OmcRegistryError::UnsatisfiedRequirement {
+            name: name.to_owned(),
+            requirement: requirement.to_owned(),
+        })
+}
+
+fn is_exact_npm_version(requirement: &str) -> bool {
+    Version::parse(requirement).is_ok()
+}
+
+fn npm_version_satisfies(version: &str, requirement: &str) -> bool {
+    let Ok(version) = Version::parse(version) else {
+        return false;
+    };
+    let requirement = requirement.trim();
+
+    if requirement.is_empty() || requirement == "*" || requirement == "latest" {
+        return true;
+    }
+    if let Ok(exact) = Version::parse(requirement) {
+        return version == exact;
+    }
+    if let Some(base) = requirement
+        .strip_prefix('^')
+        .and_then(parse_partial_npm_version)
+    {
+        let upper = if base.major > 0 {
+            Version::new(base.major + 1, 0, 0)
+        } else if base.minor > 0 {
+            Version::new(0, base.minor + 1, 0)
+        } else {
+            Version::new(0, 0, base.patch + 1)
+        };
+        return version >= base && version < upper;
+    }
+    if let Some(base) = requirement
+        .strip_prefix('~')
+        .and_then(parse_partial_npm_version)
+    {
+        let upper = Version::new(base.major, base.minor + 1, 0);
+        return version >= base && version < upper;
+    }
+
+    requirement
+        .replace(',', " ")
+        .split_whitespace()
+        .all(|part| npm_comparator_satisfied(&version, part))
+}
+
+fn npm_comparator_satisfied(version: &Version, comparator: &str) -> bool {
+    for op in [">=", "<=", ">", "<", "="] {
+        if let Some(raw) = comparator.strip_prefix(op) {
+            let Some(required) = parse_partial_npm_version(raw) else {
+                return false;
+            };
+            return match op {
+                ">=" => version >= &required,
+                "<=" => version <= &required,
+                ">" => version > &required,
+                "<" => version < &required,
+                "=" => version == &required,
+                _ => false,
+            };
+        }
+    }
+
+    if comparator == "*" || comparator.eq_ignore_ascii_case("x") {
+        true
+    } else if comparator.ends_with(".x") || comparator.ends_with(".*") {
+        let prefix = comparator.trim_end_matches('x').trim_end_matches('*');
+        version.to_string().starts_with(prefix)
+    } else {
+        parse_partial_npm_version(comparator)
+            .map(|required| version == &required)
+            .unwrap_or(false)
+    }
+}
+
+fn parse_partial_npm_version(raw: &str) -> Option<Version> {
+    let mut parts = raw.trim().split('.');
+    let major = parts.next()?.parse().ok()?;
+    let minor = parts.next().and_then(|part| part.parse().ok()).unwrap_or(0);
+    let patch = parts.next().and_then(|part| part.parse().ok()).unwrap_or(0);
+    Some(Version::new(major, minor, patch))
+}
+
+fn compare_npm_versions(left: &str, right: &str) -> std::cmp::Ordering {
+    match (Version::parse(left), Version::parse(right)) {
+        (Ok(left), Ok(right)) => left.cmp(&right),
+        _ => left.cmp(right),
+    }
+}
+
+fn choose_pypi_version(
+    name: &str,
+    requirement: &str,
+    root: &PypiRoot,
+    target_python: Option<&str>,
+) -> Result<String> {
+    root.releases
+        .iter()
+        .filter(|(_, files)| {
+            files
+                .iter()
+                .any(|file| pypi_file_python_compatible(file, target_python))
+        })
+        .map(|(version, _)| version)
+        .filter(|version| pypi_version_satisfies(version, requirement))
+        .max_by(|left, right| compare_pypi_versions(left, right))
+        .cloned()
+        .ok_or_else(|| OmcRegistryError::UnsatisfiedRequirement {
+            name: name.to_owned(),
+            requirement: requirement.to_owned(),
+        })
+}
+
+fn is_exact_pypi_version(requirement: &str) -> bool {
+    !requirement
+        .chars()
+        .any(|ch| matches!(ch, '<' | '>' | '=' | '!' | '~' | ',' | '*' | ' '))
+}
+
+fn pypi_version_satisfies(version: &str, requirement: &str) -> bool {
+    let requirement = requirement.trim();
+    if requirement.is_empty() || requirement == "*" {
+        return true;
+    }
+
+    requirement
+        .trim_matches(|ch| ch == '(' || ch == ')')
+        .split(',')
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .all(|part| pypi_comparator_satisfied(version, part))
+}
+
+fn pypi_file_python_compatible(file: &PypiFile, target_python: Option<&str>) -> bool {
+    let Some(target_python) = target_python else {
+        return true;
+    };
+    file.requires_python
+        .as_deref()
+        .map(|requirement| pypi_version_satisfies(target_python, requirement))
+        .unwrap_or(true)
+}
+
+fn current_python_version() -> Option<String> {
+    let output = Command::new("python3")
+        .arg("-c")
+        .arg(
+            "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}')",
+        )
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let version = String::from_utf8(output.stdout).ok()?.trim().to_owned();
+    (!version.is_empty()).then_some(version)
+}
+
+fn pypi_comparator_satisfied(version: &str, comparator: &str) -> bool {
+    for op in [">=", "<=", "==", "!=", "~=", ">", "<"] {
+        if let Some(required) = comparator.strip_prefix(op) {
+            let ordering = compare_pypi_versions(version, required.trim());
+            return match op {
+                ">=" => ordering.is_ge(),
+                "<=" => ordering.is_le(),
+                "==" => ordering.is_eq(),
+                "!=" => !ordering.is_eq(),
+                ">" => ordering.is_gt(),
+                "<" => ordering.is_lt(),
+                "~=" => ordering.is_ge(),
+                _ => false,
+            };
+        }
+    }
+
+    compare_pypi_versions(version, comparator).is_eq()
+}
+
+fn compare_pypi_versions(left: &str, right: &str) -> std::cmp::Ordering {
+    comparable_version(left).cmp(&comparable_version(right))
+}
+
+fn comparable_version(version: &str) -> Vec<u64> {
+    version
+        .split(|ch: char| !ch.is_ascii_digit())
+        .filter(|part| !part.is_empty())
+        .map(|part| part.parse().unwrap_or(0))
+        .collect()
+}
+
+fn parse_pypi_requirement(requirement: &str) -> Option<PackageSpec> {
+    let mut parts = requirement.splitn(2, ';');
+    let requirement = parts.next()?.trim();
+    if parts
+        .next()
+        .map(|marker| marker.contains("extra ==") || marker.contains("extra=="))
+        .unwrap_or(false)
+    {
+        return None;
+    }
+
+    if requirement.is_empty() {
+        return None;
+    }
+
+    let name_end = requirement
+        .char_indices()
+        .find(|(_, ch)| !ch.is_ascii_alphanumeric() && !matches!(ch, '-' | '_' | '.' | '[' | ']'))
+        .map(|(index, _)| index)
+        .unwrap_or(requirement.len());
+    let mut name = requirement[..name_end].trim();
+    if let Some((base, _)) = name.split_once('[') {
+        name = base;
+    }
+    if name.is_empty() {
+        return None;
+    }
+
+    let version = requirement[name_end..]
+        .trim()
+        .trim_start_matches('(')
+        .trim_end_matches(')')
+        .replace(' ', "");
+
+    Some(PackageSpec {
+        ecosystem: Ecosystem::Pypi,
+        name: name.replace('_', "-"),
+        version: (!version.is_empty()).then_some(version),
+    })
 }
 
 fn download_artifact(client: &Client, package: &ResolvedPackage) -> Result<Vec<u8>> {
@@ -975,6 +1520,7 @@ fn relative_path(base: &Path, path: &Path) -> String {
 struct NpmRoot {
     #[serde(rename = "dist-tags")]
     dist_tags: NpmDistTags,
+    versions: BTreeMap<String, NpmVersion>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -989,6 +1535,8 @@ struct NpmVersion {
     dist: NpmDist,
     #[serde(default)]
     scripts: Option<BTreeMap<String, String>>,
+    #[serde(default)]
+    dependencies: Option<BTreeMap<String, String>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1006,6 +1554,14 @@ struct PypiResponse {
 struct PypiInfo {
     name: String,
     version: String,
+    #[serde(default)]
+    requires_dist: Option<Vec<String>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct PypiRoot {
+    info: PypiInfo,
+    releases: BTreeMap<String, Vec<PypiFile>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1014,6 +1570,8 @@ struct PypiFile {
     packagetype: String,
     url: String,
     digests: PypiDigests,
+    #[serde(default)]
+    requires_python: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1047,6 +1605,39 @@ mod tests {
         let spec = PackageSpec::parse("pypi:six@1.16.0").unwrap();
         assert_eq!(spec.name, "six");
         assert_eq!(spec.version.as_deref(), Some("1.16.0"));
+    }
+
+    #[test]
+    fn resolves_common_npm_ranges() {
+        assert!(npm_version_satisfies("6.0.0", "^6.0.0"));
+        assert!(npm_version_satisfies("6.1.2", "^6.0.0"));
+        assert!(!npm_version_satisfies("7.0.0", "^6.0.0"));
+        assert!(npm_version_satisfies("1.2.9", "~1.2.0"));
+        assert!(!npm_version_satisfies("1.3.0", "~1.2.0"));
+    }
+
+    #[test]
+    fn parses_pypi_requires_dist_without_extras() {
+        let spec = parse_pypi_requirement("urllib3<3,>=1.21.1").unwrap();
+        assert_eq!(spec.name, "urllib3");
+        assert_eq!(spec.version.as_deref(), Some("<3,>=1.21.1"));
+
+        assert!(parse_pypi_requirement("PySocks>=1.5.6; extra == 'socks'").is_none());
+    }
+
+    #[test]
+    fn applies_requires_python_constraints() {
+        let file = PypiFile {
+            filename: "pkg.whl".to_owned(),
+            packagetype: "bdist_wheel".to_owned(),
+            url: "https://example.invalid/pkg.whl".to_owned(),
+            digests: PypiDigests {
+                sha256: "abc".to_owned(),
+            },
+            requires_python: Some(">=3.10".to_owned()),
+        };
+        assert!(!pypi_file_python_compatible(&file, Some("3.9.6")));
+        assert!(pypi_file_python_compatible(&file, Some("3.11.0")));
     }
 
     #[test]
@@ -1103,6 +1694,7 @@ mod tests {
             filename: "date-helper.tgz".to_owned(),
             expected_sha256: None,
             npm_scripts: BTreeMap::new(),
+            dependencies: Vec::new(),
         };
         let findings = vec![CapabilityFinding {
             kind: CapabilityKind::EnvRead,
