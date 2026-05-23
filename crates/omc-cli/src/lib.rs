@@ -342,6 +342,9 @@ enum NpmCompatAction {
         command: String,
         args: Vec<String>,
     },
+    Explore {
+        action: NpmExploreAction,
+    },
     Path {
         kind: NpmPathKind,
     },
@@ -482,6 +485,14 @@ struct NpmRunListAction {
     workspaces: Vec<String>,
     all_workspaces: bool,
     include_workspace_root: bool,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct NpmExploreAction {
+    package: String,
+    command: Option<String>,
+    args: Vec<String>,
+    shell: Option<String>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -2004,6 +2015,42 @@ fn run_project_command(
     Ok(exit_code(status.code()))
 }
 
+fn run_npm_explore(
+    project_dir: &Path,
+    action: NpmExploreAction,
+) -> Result<ExitCode, OmcRegistryError> {
+    let package_dir = npm_installed_package_dir(project_dir, &action.package)?;
+    if !package_dir.join("package.json").exists() {
+        return Err(OmcRegistryError::UnsupportedSpec(format!(
+            "npm explore package `{}` is not installed under {}",
+            action.package,
+            project_dir.join("node_modules").display()
+        )));
+    }
+
+    let mut process = if let Some(command) = action.command {
+        ProcessCommand::new(command)
+    } else {
+        ProcessCommand::new(npm_explore_shell(action.shell))
+    };
+    apply_project_runtime_env_for_cwd(&mut process, project_dir, &package_dir)?;
+    let status = process.args(action.args).status()?;
+    Ok(exit_code(status.code()))
+}
+
+fn npm_explore_shell(shell: Option<String>) -> String {
+    shell
+        .or_else(|| env::var("SHELL").ok())
+        .filter(|shell| !shell.trim().is_empty())
+        .unwrap_or_else(|| {
+            if cfg!(windows) {
+                "cmd".to_owned()
+            } else {
+                "sh".to_owned()
+            }
+        })
+}
+
 fn run_npm_create(
     project_dir: &Path,
     action: NpmCreateAction,
@@ -2564,6 +2611,7 @@ fn run_npm_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
         NpmCompatAction::Exec { command, args } => {
             return run_project_command(project_dir, &command, &args)
         }
+        NpmCompatAction::Explore { action } => return run_npm_explore(project_dir, action),
         NpmCompatAction::Path { kind } => print_npm_path(project_dir, kind)?,
         NpmCompatAction::List { action } => print_locked_packages(
             project_dir,
@@ -3327,6 +3375,14 @@ fn npm_help_text(topic: Option<&str>) -> String {
                 "Aliases: x, npx. Common flags: --yes, --package, --cache, --registry.",
             ],
         ),
+        Some("explore") => npm_command_help(
+            "npm explore <package> [-- <command> [args...]]",
+            &[
+                "Run a command from an installed package directory with OMC npm/Python bins and imports on PATH.",
+                "Without a command, opens the configured shell in the package directory.",
+                "Supports --shell for the interactive shell path.",
+            ],
+        ),
         Some("remove") => npm_command_help(
             "npm remove <package-spec>...",
             &[
@@ -3584,7 +3640,7 @@ fn npm_general_help_text() -> String {
         "npm <command>",
         &[
             "OMC npm compatibility runs supported npm workflows through OMC's verifier, lockfile, cache, and project-local runtime paths.",
-            "Supported commands: install, link, install-test, ci, install-ci-test, remove, run, test, start, stop, restart, exec, list, query, explain, audit, outdated, fund, prune, dedupe, rebuild, cache, pkg, version, pack, publish, unpublish, deprecate, undeprecate, diff, search, star, unstar, stars, ping, whoami, login, adduser, logout, token, profile, owner, access, org, team, dist-tag, sbom, view, docs, repo, bugs, home, config, init, create, bin, root, prefix.",
+            "Supported commands: install, link, install-test, ci, install-ci-test, remove, run, test, start, stop, restart, exec, explore, list, query, explain, audit, outdated, fund, prune, dedupe, rebuild, cache, pkg, version, pack, publish, unpublish, deprecate, undeprecate, diff, search, star, unstar, stars, ping, whoami, login, adduser, logout, token, profile, owner, access, org, team, dist-tag, sbom, view, docs, repo, bugs, home, config, init, create, bin, root, prefix.",
             "Use `npm help <command>` for focused OMC compatibility notes.",
         ],
     )
@@ -3612,6 +3668,7 @@ fn npm_help_topic(topic: &str) -> Option<&'static str> {
         "install-ci-test" | "cit" => Some("install-ci-test"),
         "run" | "run-script" | "test" | "start" | "stop" | "restart" => Some("run"),
         "exec" | "x" | "npx" => Some("exec"),
+        "explore" => Some("explore"),
         "remove" | "uninstall" | "rm" | "un" => Some("remove"),
         "list" | "ls" | "ll" | "la" => Some("list"),
         "query" => Some("query"),
@@ -6123,6 +6180,51 @@ fn npm_node_modules_path(name: &str) -> String {
     format!("node_modules/{name}")
 }
 
+fn npm_package_name_from_spec(spec: &str) -> String {
+    let spec = spec.strip_prefix("npm:").unwrap_or(spec);
+    let spec = spec.split_once('#').map(|(base, _)| base).unwrap_or(spec);
+    if let Some(index) = spec.rfind('@') {
+        if index > 0 {
+            return spec[..index].to_owned();
+        }
+    }
+    spec.to_owned()
+}
+
+fn npm_installed_package_dir(
+    project_dir: &Path,
+    package: &str,
+) -> Result<PathBuf, OmcRegistryError> {
+    let name = npm_package_name_from_spec(package);
+    let Some(relative) = npm_package_relative_path(&name) else {
+        return Err(OmcRegistryError::UnsupportedSpec(format!(
+            "invalid npm package name `{package}`"
+        )));
+    };
+    Ok(project_dir.join("node_modules").join(relative))
+}
+
+fn npm_package_relative_path(name: &str) -> Option<PathBuf> {
+    if let Some(scoped) = name.strip_prefix('@') {
+        let (scope, package) = scoped.split_once('/')?;
+        if !npm_package_path_segment_valid(scope)
+            || !npm_package_path_segment_valid(package)
+            || package.contains('/')
+        {
+            return None;
+        }
+        return Some(PathBuf::from(format!("@{scope}")).join(package));
+    }
+    if name.contains('/') || !npm_package_path_segment_valid(name) {
+        return None;
+    }
+    Some(PathBuf::from(name))
+}
+
+fn npm_package_path_segment_valid(segment: &str) -> bool {
+    !segment.is_empty() && segment != "." && segment != ".."
+}
+
 fn npm_package_download_location(package: &LockedPackage) -> String {
     if package.source_url.is_empty() {
         "NOASSERTION".to_owned()
@@ -7503,14 +7605,7 @@ fn print_npm_fund_text(report: &NpmFundReport, package_filter: Option<&str>) {
 }
 
 fn npm_fund_filter_name(spec: &str) -> String {
-    let spec = spec.strip_prefix("npm:").unwrap_or(spec);
-    let spec = spec.split_once('#').map(|(base, _)| base).unwrap_or(spec);
-    if let Some(index) = spec.rfind('@') {
-        if index > 0 {
-            return spec[..index].to_owned();
-        }
-    }
-    spec.to_owned()
+    npm_package_name_from_spec(spec)
 }
 
 fn npm_fund_package_matches(package: &NpmFundPackage, filter: &str) -> bool {
@@ -11395,6 +11490,7 @@ fn parse_npm_compat_action(args: &[String]) -> Result<NpmCompatAction, OmcRegist
                 args: rest,
             })
         }
+        "explore" => parse_npm_explore_args(&args[1..]),
         "bin" => {
             parse_npm_path_args("npm bin", &args[1..])?;
             Ok(NpmCompatAction::Path {
@@ -11585,6 +11681,7 @@ fn npm_global_arg_supported_by_command(command: &str, arg: &str) -> bool {
                 | "ln"
                 | "install-test"
                 | "it"
+                | "explore"
                 | "init"
                 | "create"
                 | "innit"
@@ -11626,6 +11723,9 @@ fn npm_global_arg_supported_by_command(command: &str, arg: &str) -> bool {
                 | "c"
                 | "get"
         );
+    }
+    if matches!(arg, "--shell") || arg.starts_with("--shell=") {
+        return command == "explore";
     }
     if matches!(arg, "--otp") || arg.starts_with("--otp=") {
         return matches!(
@@ -11993,6 +12093,7 @@ fn npm_global_preserved_value_flag(arg: &str) -> bool {
             | "-w"
             | "--otp"
             | "--auth-type"
+            | "--shell"
             | "--token"
             | "--auth-token"
             | "--tag"
@@ -12033,6 +12134,7 @@ fn npm_global_preserved_equals_flag(arg: &str) -> bool {
         "--include-workspace-root=",
         "--otp=",
         "--auth-type=",
+        "--shell=",
         "--token=",
         "--auth-token=",
         "--tag=",
@@ -13128,7 +13230,7 @@ fn parse_npm_publish_args(args: &[String]) -> Result<NpmCompatAction, OmcRegistr
             arg.as_str(),
             "--silent" | "-s" | "--ignore-scripts" | "--foreground-scripts"
         ) {
-        } else if matches!(arg.as_str(), "--loglevel" | "--cache") {
+        } else if matches!(arg.as_str(), "--loglevel" | "--cache" | "--registry") {
             index += 1;
             let _ = npm_publish_flag_value(args, index, arg)?;
         } else if npm_publish_ignored_equals_flag(arg) {
@@ -16250,6 +16352,75 @@ fn npm_exec_equals_value_flag(arg: &str) -> bool {
         .any(|prefix| arg.starts_with(prefix))
 }
 
+fn parse_npm_explore_args(args: &[String]) -> Result<NpmCompatAction, OmcRegistryError> {
+    let mut package = None;
+    let mut command = None;
+    let mut command_args = Vec::new();
+    let mut shell = None;
+    let mut index = 0;
+    while index < args.len() {
+        let arg = &args[index];
+        if arg == "--" {
+            let Some(command_arg) = args.get(index + 1) else {
+                return Err(OmcRegistryError::UnsupportedSpec(
+                    "npm explore -- needs a command".to_owned(),
+                ));
+            };
+            command = Some(command_arg.clone());
+            command_args.extend(args[index + 2..].iter().cloned());
+            break;
+        } else if matches!(arg.as_str(), "--silent" | "-s" | "--parseable" | "-p") {
+        } else if arg == "--shell" {
+            index += 1;
+            let Some(value) = args.get(index) else {
+                return Err(OmcRegistryError::UnsupportedSpec(
+                    "--shell needs a value".to_owned(),
+                ));
+            };
+            shell = Some(value.clone());
+        } else if let Some(value) = arg.strip_prefix("--shell=") {
+            shell = Some(value.to_owned());
+        } else if matches!(arg.as_str(), "--loglevel" | "--cache" | "--registry") {
+            index += 1;
+            if args.get(index).is_none() {
+                return Err(OmcRegistryError::UnsupportedSpec(format!(
+                    "{arg} needs a value"
+                )));
+            }
+        } else if npm_explore_equals_value_flag(arg) {
+        } else if arg.starts_with('-') {
+            return Err(unsupported_compat_arg("npm explore", arg));
+        } else if package.is_none() {
+            package = Some(arg.clone());
+        } else {
+            return Err(OmcRegistryError::UnsupportedSpec(
+                "npm explore accepts one package before --".to_owned(),
+            ));
+        }
+        index += 1;
+    }
+
+    let Some(package) = package else {
+        return Err(OmcRegistryError::UnsupportedSpec(
+            "npm explore needs a package name".to_owned(),
+        ));
+    };
+    Ok(NpmCompatAction::Explore {
+        action: NpmExploreAction {
+            package,
+            command,
+            args: command_args,
+            shell,
+        },
+    })
+}
+
+fn npm_explore_equals_value_flag(arg: &str) -> bool {
+    ["--shell=", "--loglevel=", "--cache=", "--registry="]
+        .iter()
+        .any(|prefix| arg.starts_with(prefix))
+}
+
 fn parse_pip_compat_action(args: &[String]) -> Result<PipCompatAction, OmcRegistryError> {
     let normalized = normalize_pip_global_args(args)?;
     let args = normalized.as_slice();
@@ -19297,6 +19468,26 @@ mod tests {
             }
         );
         assert_eq!(
+            parse_npm_compat_action(&args(&[
+                "--shell",
+                "zsh",
+                "explore",
+                "@scope/pkg@1.2.3",
+                "--",
+                "pwd",
+                "-P",
+            ]))
+            .unwrap(),
+            NpmCompatAction::Explore {
+                action: NpmExploreAction {
+                    package: "@scope/pkg@1.2.3".to_owned(),
+                    command: Some("pwd".to_owned()),
+                    args: vec!["-P".to_owned()],
+                    shell: Some("zsh".to_owned()),
+                },
+            }
+        );
+        assert_eq!(
             parse_npm_compat_action(&args(&["bin", "--silent"])).unwrap(),
             NpmCompatAction::Path {
                 kind: NpmPathKind::Bin,
@@ -20741,6 +20932,21 @@ mod tests {
             npm_create_bin_name(&scoped, "@scope/create-tool").unwrap(),
             "only-bin".to_owned()
         );
+    }
+
+    #[test]
+    fn resolves_npm_installed_package_dirs() {
+        let root = Path::new("/tmp/omc-project");
+        assert_eq!(
+            npm_installed_package_dir(root, "left-pad@1.3.0").unwrap(),
+            root.join("node_modules/left-pad")
+        );
+        assert_eq!(
+            npm_installed_package_dir(root, "npm:@scope/pkg@1.2.3#readme").unwrap(),
+            root.join("node_modules/@scope/pkg")
+        );
+        assert!(npm_installed_package_dir(root, "../escape").is_err());
+        assert!(npm_installed_package_dir(root, "@scope/../escape").is_err());
     }
 
     #[test]

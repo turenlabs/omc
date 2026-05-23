@@ -129,6 +129,7 @@ cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm install-ci-tes
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm run --json
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm run test -- --watch
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm run build --workspace @demo/lib
+cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm explore left-pad -- pwd
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm audit --json
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm outdated --json
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm explain left-pad --json
