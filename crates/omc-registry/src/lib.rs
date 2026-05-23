@@ -967,6 +967,12 @@ fn discover_project_requirements_with_options(
         project.specs.extend(requirements.specs);
         project.constraints.extend(requirements.constraints);
         project.hashes.extend(requirements.hashes);
+        if requirements.pypi_index_url.is_some() {
+            project.pypi_index_url = requirements.pypi_index_url;
+        }
+        project
+            .pypi_extra_index_urls
+            .extend(requirements.pypi_extra_index_urls);
         project
             .python_local_paths
             .extend(requirements.python_local_paths);
@@ -2533,12 +2539,44 @@ fn read_pipfile_lock_requirements(
     let base_dir = path.parent().unwrap_or_else(|| Path::new("."));
     let mut requirements = ProjectRequirements::default();
 
+    collect_pipfile_lock_sources(&lock.metadata, &mut requirements);
     collect_pipfile_locked_packages(lock.default, base_dir, &mut requirements)?;
     if include_dev_dependencies {
         collect_pipfile_locked_packages(lock.develop, base_dir, &mut requirements)?;
     }
 
     Ok(requirements)
+}
+
+fn collect_pipfile_lock_sources(
+    metadata: &PipfileLockMetadata,
+    requirements: &mut ProjectRequirements,
+) {
+    for source in &metadata.sources {
+        let Some(index_url) = source
+            .url
+            .as_deref()
+            .and_then(normalize_pypi_simple_index_url)
+        else {
+            continue;
+        };
+
+        if requirements.pypi_index_url.is_none() {
+            requirements.pypi_index_url = Some(index_url);
+            continue;
+        }
+
+        if requirements.pypi_index_url.as_deref() == Some(index_url.as_str())
+            || requirements
+                .pypi_extra_index_urls
+                .iter()
+                .any(|extra| extra == &index_url)
+        {
+            continue;
+        }
+
+        requirements.pypi_extra_index_urls.push(index_url);
+    }
 }
 
 fn collect_pipfile_locked_packages(
@@ -4941,10 +4979,19 @@ from pathlib import Path
 import re
 import sys
 
-_site_packages = str(Path(__file__).resolve().parents[1] / "site-packages")
-sys.path = [_site_packages] + [
+_python_dir = Path(__file__).resolve().parents[1]
+_site_packages = str(_python_dir / "site-packages")
+_project_paths = [_site_packages]
+_local_paths = _python_dir / "local-paths"
+if _local_paths.exists():
+    _project_paths.extend(
+        line.strip()
+        for line in _local_paths.read_text().splitlines()
+        if line.strip()
+    )
+sys.path = _project_paths + [
     path for path in sys.path
-    if path != _site_packages
+    if path not in _project_paths
     and "site-packages" not in path
     and "dist-packages" not in path
 ]
@@ -8173,10 +8220,23 @@ enum NpmBinField {
 
 #[derive(Debug, Default, Deserialize)]
 struct PipfileLock {
+    #[serde(default, rename = "_meta")]
+    metadata: PipfileLockMetadata,
     #[serde(default)]
     default: BTreeMap<String, PipfileLockedPackage>,
     #[serde(default)]
     develop: BTreeMap<String, PipfileLockedPackage>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct PipfileLockMetadata {
+    #[serde(default)]
+    sources: Vec<PipfileLockSource>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct PipfileLockSource {
+    url: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -9854,6 +9914,12 @@ packages:
         let site_packages = dir.path().join(".omc").join("python").join("site-packages");
         let bin_dir = dir.path().join(".omc").join("python").join("bin");
         fs::create_dir_all(&site_packages).unwrap();
+        fs::write(src.join("localpkg").join("__init__.py"), "").unwrap();
+        fs::write(
+            src.join("localpkg").join("cli.py"),
+            "def main():\n    print('local-cli-ok')\n",
+        )
+        .unwrap();
         fs::write(
             local.join("pyproject.toml"),
             r#"
@@ -9882,6 +9948,13 @@ packages:
         assert!(script.contains("from localpkg.cli import main"));
         let script = fs::read_to_string(bin_dir.join("local-gui")).unwrap();
         assert!(script.contains("from localpkg.gui import main"));
+
+        let output = Command::new(bin_dir.join("local-cli")).output().unwrap();
+        assert!(output.status.success());
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout).trim(),
+            "local-cli-ok"
+        );
     }
 
     #[test]
@@ -9897,7 +9970,25 @@ packages:
             &pipfile_lock,
             format!(
                 r#"{{
-                    "_meta": {{}},
+                    "_meta": {{
+                        "sources": [
+                            {{
+                                "name": "pypi",
+                                "url": "https://pypi.org/simple",
+                                "verify_ssl": true
+                            }},
+                            {{
+                                "name": "private",
+                                "url": "https://packages.example/simple",
+                                "verify_ssl": true
+                            }},
+                            {{
+                                "name": "duplicate",
+                                "url": "https://packages.example/simple/",
+                                "verify_ssl": true
+                            }}
+                        ]
+                    }},
                     "default": {{
                         "Requests": {{
                             "version": "==2.32.3",
@@ -9952,6 +10043,14 @@ packages:
                 .map(String::as_str),
             Some(hash.as_str())
         );
+        assert_eq!(
+            production.pypi_index_url.as_deref(),
+            Some("https://pypi.org/simple/")
+        );
+        assert_eq!(
+            production.pypi_extra_index_urls,
+            vec!["https://packages.example/simple/".to_owned()]
+        );
         assert!(!production.specs.iter().any(|spec| spec.name == "pytest"));
         assert!(!production
             .specs
@@ -9972,6 +10071,14 @@ packages:
             .iter()
             .any(|spec| spec.name == "pytest" && spec.version.as_deref() == Some("8.2.0")));
         assert_eq!(
+            dev.pypi_index_url.as_deref(),
+            Some("https://pypi.org/simple/")
+        );
+        assert_eq!(
+            dev.pypi_extra_index_urls,
+            vec!["https://packages.example/simple/".to_owned()]
+        );
+        assert_eq!(
             dev.python_local_paths,
             vec![dir.path().join("."), editable_local, dev_local]
         );
@@ -9984,7 +10091,12 @@ packages:
         fs::write(
             dir.path().join("Pipfile.lock"),
             r#"{
-                "_meta": {},
+                "_meta": {
+                    "sources": [
+                        { "name": "pypi", "url": "https://pypi.org/simple", "verify_ssl": true },
+                        { "name": "internal", "url": "https://internal.example/simple", "verify_ssl": true }
+                    ]
+                },
                 "default": {
                     "idna": { "version": "==3.7" },
                     "localpkg": { "path": "localpkg" }
@@ -10006,6 +10118,14 @@ packages:
         assert_eq!(
             production.python_local_paths,
             vec![dir.path().join("localpkg")]
+        );
+        assert_eq!(
+            production.pypi_index_url.as_deref(),
+            Some("https://pypi.org/simple/")
+        );
+        assert_eq!(
+            production.pypi_extra_index_urls,
+            vec!["https://internal.example/simple/".to_owned()]
         );
         assert!(!production.specs.iter().any(|spec| spec.name == "pytest"));
 
@@ -11285,7 +11405,9 @@ wheels = [
             function: "cli_detect".to_owned(),
         });
 
-        assert!(script.contains("Path(__file__).resolve().parents[1] / \"site-packages\""));
+        assert!(script.contains("_python_dir / \"site-packages\""));
+        assert!(script.contains("_python_dir / \"local-paths\""));
+        assert!(script.contains("path not in _project_paths"));
         assert!(script.contains("\"site-packages\" not in path"));
         assert!(script.contains("\"dist-packages\" not in path"));
     }
