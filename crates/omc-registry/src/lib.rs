@@ -7372,6 +7372,36 @@ pub struct NpmPackageMetadata {
     pub manifest: serde_json::Value,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct NpmSearchPackage {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub keywords: Vec<String>,
+    pub version: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sanitized_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub publisher: Option<NpmSearchUser>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub maintainers: Vec<NpmSearchUser>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub license: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub date: Option<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub links: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct NpmSearchUser {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub email: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub username: Option<String>,
+}
+
 impl Default for NpmConfig {
     fn default() -> Self {
         Self {
@@ -7751,6 +7781,40 @@ pub fn read_npm_package_metadata(
         versions: root.versions.keys().cloned().collect(),
         manifest,
     })
+}
+
+pub fn read_npm_search(
+    project_dir: &Path,
+    query: &str,
+    limit: usize,
+    registry_override: Option<&str>,
+) -> Result<Vec<NpmSearchPackage>> {
+    let query = query.trim();
+    if query.is_empty() {
+        return Err(OmcRegistryError::UnsupportedSpec(
+            "npm search needs search terms".to_owned(),
+        ));
+    }
+
+    let client = Client::new();
+    let mut options = LinkOptions::new(project_dir);
+    options.npm_registry_url = registry_override.map(str::to_owned);
+    let npm_config = read_npm_config_for_options(project_dir, &options)?;
+    let url = format!(
+        "{}-/v1/search?text={}&size={}",
+        ensure_trailing_slash(&npm_config.registry),
+        urlencoding::encode(query),
+        limit
+    );
+    let response = npm_get(&client, &url, &npm_config)
+        .send()?
+        .error_for_status()?
+        .json::<NpmSearchResponse>()?;
+    Ok(response
+        .objects
+        .into_iter()
+        .map(|object| object.package)
+        .collect())
 }
 
 fn resolve_npm_direct_tarball(
@@ -11457,6 +11521,17 @@ struct NpmVersion {
     peer_dependencies: Option<BTreeMap<String, String>>,
     #[serde(default, rename = "peerDependenciesMeta")]
     peer_dependencies_meta: Option<BTreeMap<String, NpmPeerDependencyMeta>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct NpmSearchResponse {
+    #[serde(default)]
+    objects: Vec<NpmSearchObject>,
+}
+
+#[derive(Debug, Deserialize)]
+struct NpmSearchObject {
+    package: NpmSearchPackage,
 }
 
 #[derive(Debug, Deserialize)]
@@ -16353,6 +16428,43 @@ wheels = [
                     function: "main".to_owned(),
                 }
             ]
+        );
+    }
+
+    #[test]
+    fn parses_npm_search_response_packages() {
+        let response = serde_json::from_str::<NpmSearchResponse>(
+            r#"
+            {
+              "objects": [
+                {
+                  "package": {
+                    "name": "pad-left",
+                    "keywords": ["pad", "left"],
+                    "version": "2.1.0",
+                    "description": "Left pad a string",
+                    "sanitized_name": "pad-left",
+                    "publisher": {"username": "alice", "email": "alice@example.invalid"},
+                    "maintainers": [{"username": "alice"}],
+                    "license": "MIT",
+                    "date": "2016-05-07T10:18:51.750Z",
+                    "links": {"npm": "https://www.npmjs.com/package/pad-left"}
+                  }
+                }
+              ]
+            }
+            "#,
+        )
+        .unwrap();
+
+        assert_eq!(response.objects.len(), 1);
+        let package = &response.objects[0].package;
+        assert_eq!(package.name, "pad-left");
+        assert_eq!(package.version, "2.1.0");
+        assert_eq!(package.keywords, vec!["pad", "left"]);
+        assert_eq!(
+            package.links.get("npm").map(String::as_str),
+            Some("https://www.npmjs.com/package/pad-left")
         );
     }
 

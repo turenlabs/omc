@@ -132,6 +132,7 @@ cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm pkg get name v
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm version patch --no-git-tag-version
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm pack --pack-destination dist
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm pack left-pad@1.3.0 --pack-destination dist
+cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm search left-pad --searchlimit=5 --json
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm view left-pad version
 cargo run -p omc-cli --bin npx -- --omc-project-dir /tmp/omc-demo eslint -- .
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm root
@@ -422,7 +423,7 @@ Supported now:
   `upgrade`, `ci`, `prune`, `dedupe`, `test`, `start`, `stop`, `restart`,
   `run`, `exec`, `init`, `remove`, `bin`, `root`, `prefix`, `audit` / `audit --json`,
   `cache verify/ls/rm/clean --force`, `pkg get/set/delete`, `version`,
-  `pack`, `config get/set/delete/list`, `get`, `view` / `info` / `show`,
+  `pack`, `search` / `find`, `config get/set/delete/list`, `get`, `view` / `info` / `show`,
   `list` / `ls` / `ll` / `la`, including `--json`, common depth/omit/workspace
   flags, and package-name filters; `explain` / `why`,
   and `outdated` / `outdated --json` flows without delegating to npm, plus a direct

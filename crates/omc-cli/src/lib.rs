@@ -14,10 +14,10 @@ use omc_registry::{
     parse_capability_grant, parse_npm_direct_archive_reference,
     parse_pypi_direct_archive_reference, parse_pypi_vcs_requirement, read_constraint_files,
     read_lockfile, read_manifest, read_npm_config_snapshot, read_npm_package_metadata,
-    read_package_scripts, read_pip_config_snapshot, read_pypi_available_versions,
+    read_npm_search, read_package_scripts, read_pip_config_snapshot, read_pypi_available_versions,
     read_requirements_files, remove_manifest_dependency, Behavior, Ecosystem, InstallReport,
-    LinkOptions, LockedPackage, LockedPythonVcsDependency, OmcRegistryError, PackageSpec,
-    ProjectRequirements, PypiBinaryMode, PypiCheckIssue, PythonLocalRequirement,
+    LinkOptions, LockedPackage, LockedPythonVcsDependency, NpmSearchPackage, OmcRegistryError,
+    PackageSpec, ProjectRequirements, PypiBinaryMode, PypiCheckIssue, PythonLocalRequirement,
     PythonVcsRequirement, Verdict,
 };
 use sha2::{Digest, Sha256, Sha384, Sha512};
@@ -295,6 +295,9 @@ enum NpmCompatAction {
     Pack {
         action: NpmPackAction,
     },
+    Search {
+        action: NpmSearchAction,
+    },
     Config {
         action: NpmConfigAction,
         npm_registry: Option<String>,
@@ -379,6 +382,15 @@ struct NpmPackAction {
     destination: PathBuf,
     json: bool,
     dry_run: bool,
+    npm_registry: Option<String>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct NpmSearchAction {
+    query: String,
+    json: bool,
+    parseable: bool,
+    limit: usize,
     npm_registry: Option<String>,
 }
 
@@ -1180,6 +1192,7 @@ fn run_npm_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
         NpmCompatAction::Cache { action } => print_npm_cache(project_dir, action)?,
         NpmCompatAction::Pkg { action } => print_npm_pkg(project_dir, action)?,
         NpmCompatAction::Pack { action } => print_npm_pack(project_dir, action)?,
+        NpmCompatAction::Search { action } => print_npm_search(project_dir, action)?,
         NpmCompatAction::Config {
             action,
             npm_registry,
@@ -1704,6 +1717,89 @@ fn print_npm_view(
     }
 
     Ok(())
+}
+
+fn print_npm_search(project_dir: &Path, action: NpmSearchAction) -> Result<(), OmcRegistryError> {
+    let packages = read_npm_search(
+        project_dir,
+        &action.query,
+        action.limit,
+        action.npm_registry.as_deref(),
+    )?;
+    if action.json {
+        println!("{}", serde_json::to_string_pretty(&packages)?);
+    } else if action.parseable {
+        for package in &packages {
+            println!(
+                "{}\t{}\t{}\t{}\t{}",
+                package.name,
+                package.description.as_deref().unwrap_or_default(),
+                npm_search_short_date(package),
+                package.version,
+                package.keywords.join(",")
+            );
+        }
+    } else if packages.is_empty() {
+        println!("No matches found for \"{}\"", action.query);
+    } else {
+        for package in &packages {
+            println!("{}", package.name);
+            if let Some(description) = &package.description {
+                if !description.is_empty() {
+                    println!("{description}");
+                }
+            }
+            println!(
+                "Version {} published {}{}",
+                package.version,
+                npm_search_short_date(package),
+                npm_search_publisher_suffix(package)
+            );
+            let maintainers = npm_search_usernames(&package.maintainers);
+            if !maintainers.is_empty() {
+                println!("Maintainers: {}", maintainers.join(" "));
+            }
+            if !package.keywords.is_empty() {
+                println!("Keywords: {}", package.keywords.join(" "));
+            }
+            println!("{}", npm_search_package_url(package));
+            println!();
+        }
+    }
+    Ok(())
+}
+
+fn npm_search_short_date(package: &NpmSearchPackage) -> &str {
+    package
+        .date
+        .as_deref()
+        .and_then(|date| date.get(..10))
+        .unwrap_or("unknown")
+}
+
+fn npm_search_publisher_suffix(package: &NpmSearchPackage) -> String {
+    package
+        .publisher
+        .as_ref()
+        .and_then(npm_search_username)
+        .map(|publisher| format!(" by {publisher}"))
+        .unwrap_or_default()
+}
+
+fn npm_search_usernames(users: &[omc_registry::NpmSearchUser]) -> Vec<String> {
+    users.iter().filter_map(npm_search_username).collect()
+}
+
+fn npm_search_username(user: &omc_registry::NpmSearchUser) -> Option<String> {
+    user.username.clone().or_else(|| user.email.clone())
+}
+
+fn npm_search_package_url(package: &NpmSearchPackage) -> String {
+    package
+        .links
+        .get("npm")
+        .cloned()
+        .unwrap_or_else(|| format!("https://npm.im/{}", package.name))
 }
 
 #[derive(Debug)]
@@ -4593,6 +4689,7 @@ fn parse_npm_compat_action(args: &[String]) -> Result<NpmCompatAction, OmcRegist
         "cache" => parse_npm_cache_args(&args[1..]),
         "pkg" => parse_npm_pkg_args(&args[1..]),
         "pack" => parse_npm_pack_args(&args[1..]),
+        "search" | "s" | "se" | "find" => parse_npm_search_args(&args[1..]),
         "view" | "info" | "show" | "v" => parse_npm_view_args(&args[1..]),
         "config" | "c" => parse_npm_config_args(&args[1..]),
         "get" => parse_npm_config_get_args(&args[1..]),
@@ -4695,6 +4792,10 @@ fn npm_global_arg_supported_by_command(command: &str, arg: &str) -> bool {
                 | "ci"
                 | "outdated"
                 | "pack"
+                | "search"
+                | "s"
+                | "se"
+                | "find"
                 | "view"
                 | "info"
                 | "show"
@@ -4721,6 +4822,10 @@ fn npm_global_arg_supported_by_command(command: &str, arg: &str) -> bool {
                 | "audit"
                 | "pkg"
                 | "pack"
+                | "search"
+                | "s"
+                | "se"
+                | "find"
                 | "view"
                 | "info"
                 | "show"
@@ -4732,6 +4837,12 @@ fn npm_global_arg_supported_by_command(command: &str, arg: &str) -> bool {
     }
     if matches!(arg, "--depth") || arg.starts_with("--depth=") {
         return matches!(command, "list" | "ls" | "ll" | "la" | "outdated");
+    }
+    if matches!(arg, "--searchlimit" | "--limit")
+        || arg.starts_with("--searchlimit=")
+        || arg.starts_with("--limit=")
+    {
+        return matches!(command, "search" | "s" | "se" | "find");
     }
     if matches!(arg, "--omit" | "--include")
         || arg.starts_with("--omit=")
@@ -4767,7 +4878,13 @@ fn npm_global_preserved_bool_flag(arg: &str) -> bool {
 fn npm_global_preserved_value_flag(arg: &str) -> bool {
     matches!(
         arg,
-        "--registry" | "--userconfig" | "--depth" | "--omit" | "--include"
+        "--registry"
+            | "--userconfig"
+            | "--depth"
+            | "--omit"
+            | "--include"
+            | "--searchlimit"
+            | "--limit"
     )
 }
 
@@ -4778,6 +4895,8 @@ fn npm_global_preserved_equals_flag(arg: &str) -> bool {
         "--depth=",
         "--omit=",
         "--include=",
+        "--searchlimit=",
+        "--limit=",
     ]
     .iter()
     .any(|prefix| arg.starts_with(prefix))
@@ -5389,6 +5508,113 @@ fn npm_pack_ignored_equals_flag(arg: &str) -> bool {
         "--cache=",
         "--registry=",
         "--userconfig=",
+    ]
+    .iter()
+    .any(|prefix| arg.starts_with(prefix))
+}
+
+fn parse_npm_search_args(args: &[String]) -> Result<NpmCompatAction, OmcRegistryError> {
+    let mut json = false;
+    let mut parseable = false;
+    let mut limit = 20usize;
+    let mut npm_registry = None;
+    let mut terms = Vec::new();
+    let mut index = 0;
+    while index < args.len() {
+        let arg = &args[index];
+        if arg == "--json" || arg == "--json=true" {
+            json = true;
+        } else if arg == "--json=false" {
+            json = false;
+        } else if matches!(arg.as_str(), "--parseable" | "-p" | "--parseable=true") {
+            parseable = true;
+        } else if arg == "--parseable=false" {
+            parseable = false;
+        } else if arg == "--registry" {
+            index += 1;
+            let Some(registry) = args.get(index) else {
+                return Err(OmcRegistryError::UnsupportedSpec(
+                    "--registry needs a URL".to_owned(),
+                ));
+            };
+            npm_registry = Some(registry.clone());
+        } else if let Some(registry) = arg.strip_prefix("--registry=") {
+            npm_registry = Some(registry.to_owned());
+        } else if matches!(arg.as_str(), "--searchlimit" | "--limit") {
+            index += 1;
+            let Some(value) = args.get(index) else {
+                return Err(OmcRegistryError::UnsupportedSpec(format!(
+                    "{arg} needs a value"
+                )));
+            };
+            limit = parse_npm_search_limit(value)?;
+        } else if let Some(value) = arg
+            .strip_prefix("--searchlimit=")
+            .or_else(|| arg.strip_prefix("--limit="))
+        {
+            limit = parse_npm_search_limit(value)?;
+        } else if matches!(
+            arg.as_str(),
+            "--long"
+                | "--description"
+                | "--no-description"
+                | "--color=false"
+                | "--no-color"
+                | "--silent"
+                | "-s"
+        ) {
+        } else if matches!(
+            arg.as_str(),
+            "--loglevel" | "--searchopts" | "--searchexclude"
+        ) {
+            index += 1;
+            if args.get(index).is_none() {
+                return Err(OmcRegistryError::UnsupportedSpec(format!(
+                    "{arg} needs a value"
+                )));
+            }
+        } else if npm_search_ignored_equals_flag(arg) {
+        } else if arg.starts_with('-') {
+            return Err(unsupported_compat_arg("npm search", arg));
+        } else {
+            terms.push(arg.clone());
+        }
+        index += 1;
+    }
+    if terms.is_empty() {
+        return Err(OmcRegistryError::UnsupportedSpec(
+            "npm search needs search terms".to_owned(),
+        ));
+    }
+    Ok(NpmCompatAction::Search {
+        action: NpmSearchAction {
+            query: terms.join(" "),
+            json,
+            parseable,
+            limit,
+            npm_registry,
+        },
+    })
+}
+
+fn parse_npm_search_limit(value: &str) -> Result<usize, OmcRegistryError> {
+    value
+        .parse::<usize>()
+        .ok()
+        .filter(|limit| *limit > 0)
+        .map(|limit| limit.min(250))
+        .ok_or_else(|| {
+            OmcRegistryError::UnsupportedSpec(format!("invalid npm search limit `{value}`"))
+        })
+}
+
+fn npm_search_ignored_equals_flag(arg: &str) -> bool {
+    [
+        "--loglevel=",
+        "--searchopts=",
+        "--searchexclude=",
+        "--description=",
+        "--parseable=",
     ]
     .iter()
     .any(|prefix| arg.starts_with(prefix))
@@ -8331,6 +8557,40 @@ mod tests {
                 json: true,
                 parseable: true,
                 npm_registry: Some("https://registry.example.invalid/npm".to_owned()),
+            }
+        );
+        assert_eq!(
+            parse_npm_compat_action(&args(&[
+                "--searchlimit=3",
+                "--json",
+                "search",
+                "--registry",
+                "https://registry.example.invalid/npm",
+                "left",
+                "pad",
+            ]))
+            .unwrap(),
+            NpmCompatAction::Search {
+                action: NpmSearchAction {
+                    query: "left pad".to_owned(),
+                    json: true,
+                    parseable: false,
+                    limit: 3,
+                    npm_registry: Some("https://registry.example.invalid/npm".to_owned()),
+                },
+            }
+        );
+        assert_eq!(
+            parse_npm_compat_action(&args(&["find", "left-pad", "--parseable", "--limit=500"]))
+                .unwrap(),
+            NpmCompatAction::Search {
+                action: NpmSearchAction {
+                    query: "left-pad".to_owned(),
+                    json: false,
+                    parseable: true,
+                    limit: 250,
+                    npm_registry: None,
+                },
             }
         );
         assert_eq!(
