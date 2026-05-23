@@ -106,6 +106,7 @@ cargo run -p omc-cli -- --project-dir /tmp/omc-demo script test
 cargo run -p omc-cli -- --project-dir /tmp/omc-demo add pypi:requests==2.32.3 --allow-all-host
 cargo run -p omc-cli -- --project-dir /tmp/omc-demo python -c "import requests; print(requests.__version__)"
 cargo run -p omc-cli -- --project-dir /tmp/omc-demo install --omit-dev
+cargo run -p omc-cli -- --project-dir /tmp/omc-demo install -r requirements/prod.txt
 cargo run -p omc-cli -- --project-dir /tmp/omc-demo install --locked
 cargo run -p omc-cli -- --project-dir /tmp/omc-demo ci
 cargo run -p omc-cli -- --project-dir /tmp/omc-demo run normalizer --version
@@ -250,6 +251,7 @@ Supported now:
 - npm workspace and local directory package linking into `node_modules` and
   `node_modules/.bin`
 - production-style `omc install --omit-dev` installs
+- explicit `omc install -r FILE` and `omc ci -r FILE` requirements-file inputs
 - npm `optionalDependencies` and required `peerDependencies` ingestion
 - npm registry `optionalDependencies` and required `peerDependencies` resolution
 - npm platform filtering for optional dependencies using package `os`, `cpu`,

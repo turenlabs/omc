@@ -470,6 +470,7 @@ pub struct LinkOptions {
     pub pypi_find_links: Vec<String>,
     pub pypi_no_index: bool,
     pub python_local_paths: Vec<PathBuf>,
+    pub requirement_files: Vec<PathBuf>,
     pub project_extras: BTreeSet<String>,
     pub include_dev_dependencies: bool,
     pub save_dev_dependency: bool,
@@ -490,6 +491,7 @@ impl LinkOptions {
             pypi_find_links: Vec::new(),
             pypi_no_index: false,
             python_local_paths: Vec::new(),
+            requirement_files: Vec::new(),
             project_extras: BTreeSet::new(),
             include_dev_dependencies: true,
             save_dev_dependency: false,
@@ -751,6 +753,24 @@ fn project_requested_specs(options: &mut LinkOptions) -> Result<Vec<PackageSpec>
     options
         .python_local_paths
         .extend(discovered.python_local_paths);
+
+    if !options.requirement_files.is_empty() {
+        let requirements = read_requirements_files(&options.requirement_files)?;
+        specs.extend(requirements.specs);
+        options.constraints.extend(requirements.constraints);
+        options.hashes.extend(requirements.hashes);
+        if requirements.pypi_index_url.is_some() {
+            options.pypi_index_url = requirements.pypi_index_url;
+        }
+        options
+            .pypi_extra_index_urls
+            .extend(requirements.pypi_extra_index_urls);
+        options.pypi_find_links.extend(requirements.pypi_find_links);
+        options.pypi_no_index |= requirements.pypi_no_index;
+        options
+            .python_local_paths
+            .extend(requirements.python_local_paths);
+    }
 
     let mut seen = BTreeSet::new();
     specs.retain(|spec| seen.insert(spec.requested()));
@@ -10480,6 +10500,39 @@ packages:
         assert_eq!(
             dev.specs.iter().filter(|spec| spec.name == "idna").count(),
             1
+        );
+    }
+
+    #[test]
+    fn installs_explicit_requirement_files() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir_all(dir.path().join("requirements")).unwrap();
+        let local = dir.path().join("vendor").join("localpkg");
+        let src = local.join("src");
+        fs::create_dir_all(src.join("localpkg")).unwrap();
+        fs::write(
+            src.join("localpkg").join("__init__.py"),
+            "VALUE = 'explicit'\n",
+        )
+        .unwrap();
+        fs::write(
+            dir.path().join("requirements").join("prod.txt"),
+            "-e ../vendor/localpkg\n",
+        )
+        .unwrap();
+
+        let mut options = LinkOptions::new(dir.path());
+        options
+            .requirement_files
+            .push(dir.path().join("requirements").join("prod.txt"));
+        let report = install_project(&options).unwrap();
+        assert_eq!(report.pypi_packages, 0);
+
+        let local_paths =
+            fs::read_to_string(dir.path().join(".omc").join("python").join("local-paths")).unwrap();
+        assert_eq!(
+            local_paths.trim(),
+            fs::canonicalize(src).unwrap().to_string_lossy()
         );
     }
 

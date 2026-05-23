@@ -107,6 +107,13 @@ enum Command {
         )]
         extra: Vec<String>,
         #[arg(
+            short = 'r',
+            long = "requirement",
+            value_name = "PATH",
+            help = "Read an additional requirements file"
+        )]
+        requirements: Vec<PathBuf>,
+        #[arg(
             long = "omit-dev",
             alias = "production",
             help = "Skip dev dependency inputs across npm and Python project files"
@@ -129,6 +136,13 @@ enum Command {
             help = "Install a pyproject.toml optional dependency group"
         )]
         extra: Vec<String>,
+        #[arg(
+            short = 'r',
+            long = "requirement",
+            value_name = "PATH",
+            help = "Read an additional requirements file"
+        )]
+        requirements: Vec<PathBuf>,
         #[arg(
             long = "omit-dev",
             alias = "production",
@@ -266,12 +280,19 @@ fn run() -> Result<ExitCode, OmcRegistryError> {
         Command::Install {
             allow,
             extra,
+            requirements,
             omit_dev,
             locked,
             allow_all_host,
         } => {
-            let options =
-                install_options(&cli.project_dir, &allow, extra, omit_dev, allow_all_host)?;
+            let options = install_options(
+                &cli.project_dir,
+                &allow,
+                extra,
+                requirements,
+                omit_dev,
+                allow_all_host,
+            )?;
             let install = if locked {
                 install_locked_project(&options)?
             } else {
@@ -282,11 +303,18 @@ fn run() -> Result<ExitCode, OmcRegistryError> {
         Command::Ci {
             allow,
             extra,
+            requirements,
             omit_dev,
             allow_all_host,
         } => {
-            let options =
-                install_options(&cli.project_dir, &allow, extra, omit_dev, allow_all_host)?;
+            let options = install_options(
+                &cli.project_dir,
+                &allow,
+                extra,
+                requirements,
+                omit_dev,
+                allow_all_host,
+            )?;
             let install = install_locked_project(&options)?;
             print_install_report(&install);
         }
@@ -360,6 +388,7 @@ fn install_options(
     project_dir: &Path,
     allow: &[String],
     extra: Vec<String>,
+    requirements: Vec<PathBuf>,
     omit_dev: bool,
     allow_all_host: bool,
 ) -> Result<LinkOptions, OmcRegistryError> {
@@ -368,6 +397,16 @@ fn install_options(
     options.project_extras = extra
         .into_iter()
         .map(|extra| normalize_extra(&extra))
+        .collect();
+    options.requirement_files = requirements
+        .into_iter()
+        .map(|path| {
+            if path.is_absolute() {
+                path
+            } else {
+                project_dir.join(path)
+            }
+        })
         .collect();
     options.include_dev_dependencies = !omit_dev;
     Ok(options)
