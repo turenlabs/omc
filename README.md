@@ -142,6 +142,7 @@ cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm pack --pack-de
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm pack left-pad@1.3.0 --pack-destination dist
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm search left-pad --searchlimit=5 --json
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm view left-pad version
+cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm repo left-pad --browser=false
 cargo run -p omc-cli --bin npx -- --omc-project-dir /tmp/omc-demo eslint -- .
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm root
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm bin
@@ -435,7 +436,8 @@ Supported now:
   `upgrade`, `install-test` / `it`, `ci`, `install-ci-test` / `cit`, `prune`, `dedupe`, `rebuild`, `test`, `start`, `stop`, `restart`,
   `run`, `exec`, `init`, `remove`, `bin`, `root`, `prefix`, `audit` / `audit --json`,
   `help`, `fund` / `fund --json`, `cache verify/ls/rm/clean --force`, `pkg get/set/delete`, `version`,
-  `pack`, `search` / `find`, `config get/set/delete/list`, `get`, `view` / `info` / `show`,
+  `pack`, `search` / `find`, `config get/set/delete/list`, `get`,
+  `view` / `info` / `show`, `docs`, `repo`, `bugs`, `home`,
   `list` / `ls` / `ll` / `la`, including `--json`, common depth/omit/workspace
   flags, and package-name filters; `explain` / `why`,
   and `outdated` / `outdated --json` flows without delegating to npm, plus a direct

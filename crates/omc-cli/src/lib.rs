@@ -339,6 +339,12 @@ enum NpmCompatAction {
         json: bool,
         npm_registry: Option<String>,
     },
+    MetadataUrl {
+        kind: NpmMetadataUrlKind,
+        spec: Option<String>,
+        json: bool,
+        npm_registry: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -394,6 +400,14 @@ enum NpmVersionAction {
         allow_same_version: bool,
         json: bool,
     },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NpmMetadataUrlKind {
+    Docs,
+    Repo,
+    Bugs,
+    Home,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1838,6 +1852,18 @@ fn run_npm_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
             json,
             npm_registry,
         } => print_npm_view(project_dir, &spec, &fields, json, npm_registry.as_deref())?,
+        NpmCompatAction::MetadataUrl {
+            kind,
+            spec,
+            json,
+            npm_registry,
+        } => print_npm_metadata_url(
+            project_dir,
+            kind,
+            spec.as_deref(),
+            json,
+            npm_registry.as_deref(),
+        )?,
     }
 
     Ok(ExitCode::SUCCESS)
@@ -2276,6 +2302,13 @@ fn npm_help_text(topic: Option<&str>) -> String {
             "npm view <package-spec> [field...]",
             &["Read package metadata from the configured npm registry. Aliases: info, show, v. Supports --json."],
         ),
+        Some("metadata-url") => npm_command_help(
+            "npm <docs|repo|bugs|home> [package-spec]",
+            &[
+                "Print package metadata URLs from the npm registry or current package.json.",
+                "Supports --json and --registry. OMC prints URLs instead of launching a browser.",
+            ],
+        ),
         Some("config") => npm_command_help(
             "npm config <get|set|delete|list> ...",
             &[
@@ -2315,7 +2348,7 @@ fn npm_general_help_text() -> String {
         "npm <command>",
         &[
             "OMC npm compatibility runs supported npm workflows through OMC's verifier, lockfile, cache, and project-local runtime paths.",
-            "Supported commands: install, install-test, ci, install-ci-test, remove, run, test, start, stop, restart, exec, list, explain, audit, outdated, fund, prune, dedupe, rebuild, cache, pkg, version, pack, search, view, config, init, bin, root, prefix.",
+            "Supported commands: install, install-test, ci, install-ci-test, remove, run, test, start, stop, restart, exec, list, explain, audit, outdated, fund, prune, dedupe, rebuild, cache, pkg, version, pack, search, view, docs, repo, bugs, home, config, init, bin, root, prefix.",
             "Use `npm help <command>` for focused OMC compatibility notes.",
         ],
     )
@@ -2353,6 +2386,9 @@ fn npm_help_topic(topic: &str) -> Option<&'static str> {
         "pack" => Some("pack"),
         "search" | "s" | "se" | "find" => Some("search"),
         "view" | "info" | "show" | "v" => Some("view"),
+        "docs" | "doc" | "repo" | "repository" | "bugs" | "home" | "homepage" => {
+            Some("metadata-url")
+        }
         "config" | "c" | "get" => Some("config"),
         "cache" => Some("cache"),
         "pkg" => Some("pkg"),
@@ -2791,6 +2827,134 @@ fn print_npm_view(
     }
 
     Ok(())
+}
+
+fn print_npm_metadata_url(
+    project_dir: &Path,
+    kind: NpmMetadataUrlKind,
+    spec: Option<&str>,
+    json: bool,
+    npm_registry: Option<&str>,
+) -> Result<(), OmcRegistryError> {
+    let (package_name, manifest) = if let Some(spec) = spec {
+        let spec = parse_package_spec(spec, Some(Ecosystem::Npm))?;
+        let metadata = read_npm_package_metadata(project_dir, &spec, npm_registry)?;
+        (Some(metadata.name), metadata.manifest)
+    } else {
+        let package = read_npm_pkg_json(&project_dir.join("package.json"))?;
+        let name = package
+            .get("name")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned);
+        (name, package)
+    };
+    let url = npm_metadata_url(kind, &manifest, package_name.as_deref())?;
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({ "url": url }))?
+        );
+    } else {
+        println!("{url}");
+    }
+    Ok(())
+}
+
+fn npm_metadata_url(
+    kind: NpmMetadataUrlKind,
+    manifest: &serde_json::Value,
+    package_name: Option<&str>,
+) -> Result<String, OmcRegistryError> {
+    let url = match kind {
+        NpmMetadataUrlKind::Docs | NpmMetadataUrlKind::Home => {
+            npm_manifest_string_field(manifest, "homepage")
+                .or_else(|| package_name.map(npmjs_package_url))
+        }
+        NpmMetadataUrlKind::Repo => npm_repository_url(manifest),
+        NpmMetadataUrlKind::Bugs => npm_bugs_url(manifest)
+            .or_else(|| npm_repository_url(manifest).and_then(|repo| npm_github_issues_url(&repo))),
+    };
+    url.ok_or_else(|| {
+        OmcRegistryError::UnsupportedSpec(format!(
+            "package metadata does not define {}",
+            npm_metadata_url_label(kind)
+        ))
+    })
+}
+
+fn npm_metadata_url_label(kind: NpmMetadataUrlKind) -> &'static str {
+    match kind {
+        NpmMetadataUrlKind::Docs => "docs/homepage URL",
+        NpmMetadataUrlKind::Repo => "repository URL",
+        NpmMetadataUrlKind::Bugs => "bugs URL",
+        NpmMetadataUrlKind::Home => "homepage URL",
+    }
+}
+
+fn npm_manifest_string_field(manifest: &serde_json::Value, field: &str) -> Option<String> {
+    manifest
+        .get(field)
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+}
+
+fn npm_repository_url(manifest: &serde_json::Value) -> Option<String> {
+    let repository = manifest.get("repository")?;
+    let raw = repository
+        .as_str()
+        .or_else(|| repository.get("url").and_then(serde_json::Value::as_str))?;
+    normalize_npm_metadata_url(raw)
+}
+
+fn npm_bugs_url(manifest: &serde_json::Value) -> Option<String> {
+    let bugs = manifest.get("bugs")?;
+    if let Some(url) = bugs.as_str() {
+        return normalize_npm_metadata_url(url);
+    }
+    bugs.get("url")
+        .and_then(serde_json::Value::as_str)
+        .and_then(normalize_npm_metadata_url)
+        .or_else(|| {
+            bugs.get("email")
+                .and_then(serde_json::Value::as_str)
+                .map(str::trim)
+                .filter(|email| !email.is_empty())
+                .map(|email| format!("mailto:{email}"))
+        })
+}
+
+fn normalize_npm_metadata_url(raw: &str) -> Option<String> {
+    let mut url = raw.trim().trim_end_matches('/').to_owned();
+    if url.is_empty() {
+        return None;
+    }
+    if let Some(rest) = url.strip_prefix("git+") {
+        url = rest.to_owned();
+    }
+    if let Some(rest) = url.strip_prefix("git://") {
+        url = format!("https://{rest}");
+    } else if let Some(rest) = url.strip_prefix("ssh://git@github.com/") {
+        url = format!("https://github.com/{rest}");
+    } else if let Some(rest) = url.strip_prefix("git@github.com:") {
+        url = format!("https://github.com/{rest}");
+    }
+    if url.ends_with(".git") {
+        url.truncate(url.len() - 4);
+    }
+    Some(url)
+}
+
+fn npm_github_issues_url(repo: &str) -> Option<String> {
+    let repo = repo.trim_end_matches('/');
+    repo.strip_prefix("https://github.com/")
+        .filter(|path| path.split('/').count() >= 2)
+        .map(|_| format!("{repo}/issues"))
+}
+
+fn npmjs_package_url(package_name: &str) -> String {
+    format!("https://www.npmjs.com/package/{package_name}")
 }
 
 fn print_npm_search(project_dir: &Path, action: NpmSearchAction) -> Result<(), OmcRegistryError> {
@@ -6308,6 +6472,16 @@ fn parse_npm_compat_action(args: &[String]) -> Result<NpmCompatAction, OmcRegist
         "pack" => parse_npm_pack_args(&args[1..]),
         "search" | "s" | "se" | "find" => parse_npm_search_args(&args[1..]),
         "view" | "info" | "show" | "v" => parse_npm_view_args(&args[1..]),
+        "docs" | "doc" => {
+            parse_npm_metadata_url_args(command, NpmMetadataUrlKind::Docs, &args[1..])
+        }
+        "repo" | "repository" => {
+            parse_npm_metadata_url_args(command, NpmMetadataUrlKind::Repo, &args[1..])
+        }
+        "bugs" => parse_npm_metadata_url_args(command, NpmMetadataUrlKind::Bugs, &args[1..]),
+        "home" | "homepage" => {
+            parse_npm_metadata_url_args(command, NpmMetadataUrlKind::Home, &args[1..])
+        }
         "config" | "c" => parse_npm_config_args(&args[1..]),
         "get" => parse_npm_config_get_args(&args[1..]),
         other => Err(OmcRegistryError::UnsupportedSpec(format!(
@@ -7717,6 +7891,60 @@ fn parse_npm_view_args(args: &[String]) -> Result<NpmCompatAction, OmcRegistryEr
         json,
         npm_registry,
     })
+}
+
+fn parse_npm_metadata_url_args(
+    command: &str,
+    kind: NpmMetadataUrlKind,
+    args: &[String],
+) -> Result<NpmCompatAction, OmcRegistryError> {
+    let mut json = false;
+    let mut filtered = Vec::new();
+    let mut index = 0;
+    while index < args.len() {
+        let arg = &args[index];
+        if arg == "--json" {
+            json = true;
+        } else if matches!(
+            arg.as_str(),
+            "--browser" | "--browser=true" | "--browser=false"
+        ) {
+        } else if matches!(arg.as_str(), "--userconfig" | "--loglevel") {
+            index += 1;
+            if args.get(index).is_none() {
+                return Err(OmcRegistryError::UnsupportedSpec(format!(
+                    "{arg} needs a value"
+                )));
+            }
+        } else if matches!(arg.as_str(), "--silent" | "-s" | "--parseable")
+            || npm_metadata_url_equals_value_flag(arg)
+        {
+        } else {
+            filtered.push(arg.clone());
+        }
+        index += 1;
+    }
+
+    let CommonCompatFlags {
+        npm_registry,
+        mut positionals,
+        ..
+    } = parse_common_compat_flags(&filtered, true)?;
+    if positionals.len() > 1 {
+        return Err(unsupported_compat_arg(command, &positionals[1]));
+    }
+    Ok(NpmCompatAction::MetadataUrl {
+        kind,
+        spec: positionals.pop(),
+        json,
+        npm_registry,
+    })
+}
+
+fn npm_metadata_url_equals_value_flag(arg: &str) -> bool {
+    ["--browser=", "--userconfig=", "--loglevel="]
+        .iter()
+        .any(|prefix| arg.starts_with(prefix))
 }
 
 fn npm_view_equals_value_flag(arg: &str) -> bool {
@@ -10923,6 +11151,31 @@ mod tests {
             NpmCompatAction::View {
                 spec: "@scope/pkg".to_owned(),
                 fields: vec!["versions".to_owned()],
+                json: false,
+                npm_registry: None,
+            }
+        );
+        assert_eq!(
+            parse_npm_compat_action(&args(&[
+                "repo",
+                "left-pad",
+                "--browser=false",
+                "--json",
+                "--registry=https://registry.example.invalid/npm",
+            ]))
+            .unwrap(),
+            NpmCompatAction::MetadataUrl {
+                kind: NpmMetadataUrlKind::Repo,
+                spec: Some("left-pad".to_owned()),
+                json: true,
+                npm_registry: Some("https://registry.example.invalid/npm".to_owned()),
+            }
+        );
+        assert_eq!(
+            parse_npm_compat_action(&args(&["docs", "--browser=false"])).unwrap(),
+            NpmCompatAction::MetadataUrl {
+                kind: NpmMetadataUrlKind::Docs,
+                spec: None,
                 json: false,
                 npm_registry: None,
             }
