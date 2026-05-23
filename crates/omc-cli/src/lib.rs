@@ -9652,11 +9652,10 @@ fn save_npm_package_json_dependency(
     let mut package = read_npm_pkg_json(&package_json)?;
     remove_npm_package_json_dependency(&mut package, name);
     let field = npm_package_json_dependency_field(kind);
-    npm_pkg_set_path(
-        &mut package,
-        &format!("{field}.{name}"),
+    npm_package_json_dependency_map_mut(&mut package, field)?.insert(
+        name.to_owned(),
         serde_json::Value::String(requirement.to_owned()),
-    )?;
+    );
     write_npm_pkg_json(&package_json, &package)
 }
 
@@ -9689,8 +9688,31 @@ fn remove_npm_package_json_dependency(package: &mut serde_json::Value, name: &st
         "optionalDependencies",
         "peerDependencies",
     ] {
-        npm_pkg_delete_path(package, &format!("{field}.{name}"));
+        if let Some(dependencies) = package
+            .get_mut(field)
+            .and_then(serde_json::Value::as_object_mut)
+        {
+            dependencies.remove(name);
+        }
     }
+}
+
+fn npm_package_json_dependency_map_mut<'a>(
+    package: &'a mut serde_json::Value,
+    field: &str,
+) -> Result<&'a mut serde_json::Map<String, serde_json::Value>, OmcRegistryError> {
+    let object = package.as_object_mut().ok_or_else(|| {
+        OmcRegistryError::UnsupportedSpec("package.json must contain a JSON object".to_owned())
+    })?;
+    let dependencies = object
+        .entry(field.to_owned())
+        .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
+    if !dependencies.is_object() {
+        *dependencies = serde_json::Value::Object(serde_json::Map::new());
+    }
+    dependencies.as_object_mut().ok_or_else(|| {
+        OmcRegistryError::UnsupportedSpec(format!("cannot update package.json `{field}`"))
+    })
 }
 
 fn npm_pkg_get_path<'a>(value: &'a serde_json::Value, path: &str) -> Option<&'a serde_json::Value> {
@@ -23339,17 +23361,24 @@ verdict = "accepted"
 
         save_npm_package_json_dependency(
             &dir.join("packages/lib"),
-            "left-pad",
+            "left.pad",
             "1.3.0",
             ManifestDependencyKind::Production,
         )
         .unwrap();
         let package = read_npm_pkg_json(&dir.join("packages/lib/package.json")).unwrap();
         assert_eq!(
-            npm_pkg_get_path(&package, "dependencies.left-pad").and_then(serde_json::Value::as_str),
+            package
+                .get("dependencies")
+                .and_then(serde_json::Value::as_object)
+                .and_then(|dependencies| dependencies.get("left.pad"))
+                .and_then(serde_json::Value::as_str),
             Some("1.3.0")
         );
-        assert!(npm_pkg_get_path(&package, "devDependencies.left-pad").is_none());
+        assert!(package
+            .get("devDependencies")
+            .and_then(serde_json::Value::as_object)
+            .is_some_and(|dependencies| !dependencies.contains_key("left.pad")));
 
         fs::create_dir_all(dir.join("vendor/local-pkg")).unwrap();
         fs::write(
@@ -23365,7 +23394,10 @@ verdict = "accepted"
         )
         .unwrap();
         let package = read_npm_pkg_json(&dir.join("packages/lib/package.json")).unwrap();
-        let saved = npm_pkg_get_path(&package, "devDependencies.@demo/local")
+        let saved = package
+            .get("devDependencies")
+            .and_then(serde_json::Value::as_object)
+            .and_then(|dependencies| dependencies.get("@demo/local"))
             .and_then(serde_json::Value::as_str)
             .unwrap();
         assert!(saved.starts_with("file:"));
