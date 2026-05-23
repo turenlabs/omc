@@ -9,6 +9,14 @@ version.workspace = true
 name = "omc"
 path = "src/main.rs"
 
+[[bin]]
+name = "npm"
+path = "src/bin/npm.rs"
+
+[[bin]]
+name = "pip"
+path = "src/bin/pip.rs"
+
 [dependencies]
 clap = { version = "4", features = ["derive"] }
 omc-cap = { path = "../omc-cap" }

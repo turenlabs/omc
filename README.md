@@ -97,6 +97,8 @@ illegal.
 The `omc` CLI is the first working slice of a PyPI/npm replacement:
 
 ```bash
+cargo install --path crates/omc-cli --bins
+
 cargo run -p omc-cli -- --project-dir /tmp/omc-demo init --name demo
 cargo run -p omc-cli -- --project-dir /tmp/omc-demo allow http:api.example.com env:API_TOKEN
 cargo run -p omc-cli -- --project-dir /tmp/omc-demo add --npm is-odd@3.0.1 left-pad@1.3.0
@@ -126,6 +128,13 @@ cargo run -p omc-cli -- --project-dir /tmp/omc-demo audit
 cargo run -p omc-cli -- --project-dir /tmp/omc-demo audit --json
 cargo run -p omc-cli -- --project-dir /tmp/omc-demo remove --npm is-odd left-pad
 ```
+
+Installing with `--bins` also provides `npm` and `pip` compatibility binaries.
+They dispatch directly into OMC when they are first on `PATH`, so existing
+scripts can call `npm install`, `npm test`, `pip install`, `pip freeze`, and
+related supported commands without spelling `omc npm` or `omc pip`. They default
+to the current directory; use `OMC_PROJECT_DIR=/path/to/project`,
+`--project-dir PATH`, or `--omc-project-dir PATH` for an explicit project root.
 
 For existing projects, `install` reads normal project files:
 
@@ -357,11 +366,12 @@ Supported now:
   package.json and Pipfile project scripts
 - `omc npm` compatibility commands for common `install`, `ci`, `test`,
   `start`, `stop`, `restart`, `run`, `exec`, `remove`, `bin`, `root`,
-  `prefix`, and `list` / `list --json` flows without delegating to npm
+  `prefix`, and `list` / `list --json` flows without delegating to npm, plus a
+  direct `npm` compatibility binary
 - `omc pip` compatibility commands for common `install`, `uninstall`, `freeze`,
   `show`, and `list --format=columns|freeze|json` flows, including `-r`, index
   URL, constraints, extra-index, find-links, and no-index install flags without
-  delegating to pip
+  delegating to pip, plus a direct `pip` compatibility binary
 - isolated `omc python` execution that uses OMC site-packages without ambient
   user/global Python site-packages or startup/hook environment variables
 - isolated Node execution wrappers that remove ambient `NODE_PATH` module
