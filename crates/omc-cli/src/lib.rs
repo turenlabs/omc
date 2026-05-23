@@ -7,8 +7,8 @@ use clap::{Parser, Subcommand};
 use omc_cap::Capability;
 use omc_registry::{
     add_manifest_npm_local_paths, add_manifest_policy_grants, add_package_graph,
-    apply_pypi_binary_option, check_pypi_lock, compare_pypi_versions, init_project,
-    install_locked_packages, install_locked_project, install_project, lock_project,
+    apply_pypi_binary_option, check_pypi_lock, compare_npm_versions, compare_pypi_versions,
+    init_project, install_locked_packages, install_locked_project, install_project, lock_project,
     parse_capability_grant, parse_npm_direct_archive_reference,
     parse_pypi_direct_archive_reference, read_lockfile, read_npm_config_snapshot,
     read_npm_package_metadata, read_package_scripts, read_pip_config_snapshot,
@@ -256,6 +256,11 @@ enum NpmCompatAction {
     },
     List {
         json: bool,
+    },
+    Outdated {
+        json: bool,
+        parseable: bool,
+        npm_registry: Option<String>,
     },
     Audit {
         json: bool,
@@ -964,6 +969,11 @@ fn run_npm_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
         NpmCompatAction::List { json } => {
             print_locked_packages(project_dir, Some(Ecosystem::Npm), json)?
         }
+        NpmCompatAction::Outdated {
+            json,
+            parseable,
+            npm_registry,
+        } => return print_npm_outdated(project_dir, json, parseable, npm_registry.as_deref()),
         NpmCompatAction::Audit { json } => return print_audit_report(project_dir, json),
         NpmCompatAction::Config {
             action,
@@ -1365,6 +1375,116 @@ fn print_npm_view(
     }
 
     Ok(())
+}
+
+#[derive(Debug)]
+struct NpmOutdatedPackage {
+    name: String,
+    current: String,
+    wanted: String,
+    latest: String,
+    location: PathBuf,
+    dependent: String,
+}
+
+fn print_npm_outdated(
+    project_dir: &Path,
+    json: bool,
+    parseable: bool,
+    npm_registry: Option<&str>,
+) -> Result<ExitCode, OmcRegistryError> {
+    let lock = read_lockfile(project_dir.join("omc.lock"))?;
+    let dependent = npm_outdated_dependent(project_dir);
+    let mut rows = Vec::new();
+    for package in lock
+        .packages
+        .into_iter()
+        .filter(|package| package.ecosystem == Ecosystem::Npm)
+    {
+        let spec = parse_package_spec(&package.name, Some(Ecosystem::Npm))?;
+        let metadata = read_npm_package_metadata(project_dir, &spec, npm_registry)?;
+        if compare_npm_versions(&metadata.version, &package.version).is_gt() {
+            rows.push(NpmOutdatedPackage {
+                location: npm_outdated_location(project_dir, &package.name),
+                name: package.name.clone(),
+                current: package.version.clone(),
+                wanted: metadata.version.clone(),
+                latest: metadata.version,
+                dependent: dependent.clone(),
+            });
+        }
+    }
+    rows.sort_by(|left, right| left.name.cmp(&right.name));
+
+    if json {
+        let packages = rows
+            .iter()
+            .map(|row| {
+                (
+                    row.name.clone(),
+                    serde_json::json!({
+                        "current": row.current,
+                        "wanted": row.wanted,
+                        "latest": row.latest,
+                        "dependent": row.dependent,
+                        "location": row.location.display().to_string(),
+                    }),
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+        println!("{}", serde_json::to_string_pretty(&packages)?);
+    } else if parseable {
+        for row in &rows {
+            println!(
+                "{}:{}:{}:{}",
+                row.location.display(),
+                row.current,
+                row.wanted,
+                row.latest
+            );
+        }
+    } else if !rows.is_empty() {
+        println!("Package Current Wanted Latest Location Depended by");
+        for row in &rows {
+            println!(
+                "{} {} {} {} {} {}",
+                row.name,
+                row.current,
+                row.wanted,
+                row.latest,
+                row.location.display(),
+                row.dependent
+            );
+        }
+    }
+
+    if rows.is_empty() {
+        Ok(ExitCode::SUCCESS)
+    } else {
+        Ok(ExitCode::from(1))
+    }
+}
+
+fn npm_outdated_location(project_dir: &Path, package: &str) -> PathBuf {
+    project_dir.join("node_modules").join(package)
+}
+
+fn npm_outdated_dependent(project_dir: &Path) -> String {
+    let package_json = project_dir.join("package.json");
+    if let Ok(content) = fs::read_to_string(package_json) {
+        if let Ok(value) = serde_json::from_str::<serde_json::Value>(&content) {
+            if let Some(name) = value.get("name").and_then(serde_json::Value::as_str) {
+                if !name.is_empty() {
+                    return name.to_owned();
+                }
+            }
+        }
+    }
+    project_dir
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("omc-project")
+        .to_owned()
 }
 
 fn npm_view_field_value(
@@ -2479,6 +2599,7 @@ fn parse_npm_compat_action(args: &[String]) -> Result<NpmCompatAction, OmcRegist
         "list" | "ls" => Ok(NpmCompatAction::List {
             json: parse_json_list_flag("npm list", &args[1..])?,
         }),
+        "outdated" => parse_npm_outdated_args(&args[1..]),
         "audit" => parse_npm_audit_args(&args[1..]),
         "view" | "info" | "show" | "v" => parse_npm_view_args(&args[1..]),
         "config" | "c" => parse_npm_config_args(&args[1..]),
@@ -2580,6 +2701,75 @@ fn parse_npm_audit_args(args: &[String]) -> Result<NpmCompatAction, OmcRegistryE
     }
 
     Ok(NpmCompatAction::Audit { json })
+}
+
+fn parse_npm_outdated_args(args: &[String]) -> Result<NpmCompatAction, OmcRegistryError> {
+    let mut json = false;
+    let mut parseable = false;
+    let mut filtered = Vec::new();
+    let mut index = 0;
+    while index < args.len() {
+        let arg = &args[index];
+        if arg == "--json" {
+            json = true;
+        } else if matches!(arg.as_str(), "--parseable" | "-p") {
+            parseable = true;
+        } else if matches!(
+            arg.as_str(),
+            "--all"
+                | "--long"
+                | "--silent"
+                | "-s"
+                | "--global"
+                | "-g"
+                | "--dev"
+                | "--prod"
+                | "--production"
+                | "--color=false"
+        ) {
+        } else if matches!(
+            arg.as_str(),
+            "--depth" | "--omit" | "--include" | "--loglevel" | "--userconfig"
+        ) {
+            index += 1;
+            if args.get(index).is_none() {
+                return Err(OmcRegistryError::UnsupportedSpec(format!(
+                    "{arg} needs a value"
+                )));
+            }
+        } else if npm_outdated_equals_value_flag(arg) {
+        } else {
+            filtered.push(arg.clone());
+        }
+        index += 1;
+    }
+
+    let CommonCompatFlags {
+        npm_registry,
+        positionals,
+        ..
+    } = parse_common_compat_flags(&filtered, true)?;
+    if !positionals.is_empty() {
+        return Err(unsupported_compat_arg("npm outdated", &positionals[0]));
+    }
+
+    Ok(NpmCompatAction::Outdated {
+        json,
+        parseable,
+        npm_registry,
+    })
+}
+
+fn npm_outdated_equals_value_flag(arg: &str) -> bool {
+    [
+        "--depth=",
+        "--omit=",
+        "--include=",
+        "--loglevel=",
+        "--userconfig=",
+    ]
+    .iter()
+    .any(|prefix| arg.starts_with(prefix))
 }
 
 fn parse_npm_config_args(args: &[String]) -> Result<NpmCompatAction, OmcRegistryError> {
@@ -4402,6 +4592,22 @@ mod tests {
             NpmCompatAction::Audit { json: true }
         );
         assert!(parse_npm_compat_action(&args(&["audit", "fix"])).is_err());
+        assert_eq!(
+            parse_npm_compat_action(&args(&[
+                "outdated",
+                "--json",
+                "--parseable",
+                "--depth=0",
+                "--registry",
+                "https://registry.example.invalid/npm",
+            ]))
+            .unwrap(),
+            NpmCompatAction::Outdated {
+                json: true,
+                parseable: true,
+                npm_registry: Some("https://registry.example.invalid/npm".to_owned()),
+            }
+        );
         assert_eq!(
             parse_npm_compat_action(&args(&[
                 "view",

@@ -8942,7 +8942,7 @@ fn parse_partial_npm_version(raw: &str) -> Option<Version> {
     Some(Version::new(major, minor, patch))
 }
 
-fn compare_npm_versions(left: &str, right: &str) -> std::cmp::Ordering {
+pub fn compare_npm_versions(left: &str, right: &str) -> std::cmp::Ordering {
     match (Version::parse(left), Version::parse(right)) {
         (Ok(left), Ok(right)) => left.cmp(&right),
         _ => left.cmp(right),
