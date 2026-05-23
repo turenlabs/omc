@@ -863,14 +863,16 @@ fn discover_project_requirements_with_options(
         )?);
     }
 
-    let package_lock_json = project_dir.join("package-lock.json");
-    if package_lock_json.exists() {
-        let lock_requirements = read_package_lock_requirements(&package_lock_json)?;
-        project.constraints.extend(lock_requirements.constraints);
-        project
-            .npm_integrities
-            .extend(lock_requirements.npm_integrities);
-        project.npm_resolved.extend(lock_requirements.npm_resolved);
+    for lockfile_name in ["package-lock.json", "npm-shrinkwrap.json"] {
+        let lockfile = project_dir.join(lockfile_name);
+        if lockfile.exists() {
+            let lock_requirements = read_package_lock_requirements(&lockfile)?;
+            project.constraints.extend(lock_requirements.constraints);
+            project
+                .npm_integrities
+                .extend(lock_requirements.npm_integrities);
+            project.npm_resolved.extend(lock_requirements.npm_resolved);
+        }
     }
 
     let requirements_txt = project_dir.join("requirements.txt");
@@ -6203,6 +6205,55 @@ mod tests {
                 .get("npm:left-pad")
                 .map(String::as_str),
             Some("1.1.3")
+        );
+    }
+
+    #[test]
+    fn discovers_npm_shrinkwrap_constraints() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(
+            dir.path().join("package.json"),
+            r#"{ "dependencies": { "left-pad": "^1.1.0" } }"#,
+        )
+        .unwrap();
+        fs::write(
+            dir.path().join("npm-shrinkwrap.json"),
+            r#"{
+                "lockfileVersion": 3,
+                "packages": {
+                    "": { "name": "demo", "version": "0.1.0" },
+                    "node_modules/left-pad": {
+                        "version": "1.1.3",
+                        "resolved": "https://registry.example.invalid/left-pad-1.1.3.tgz",
+                        "integrity": "sha512-leftpad"
+                    }
+                }
+            }"#,
+        )
+        .unwrap();
+
+        let discovered = discover_project_requirements(dir.path()).unwrap();
+        assert_eq!(
+            discovered
+                .constraints
+                .get("npm:left-pad")
+                .map(String::as_str),
+            Some("1.1.3")
+        );
+        assert_eq!(
+            discovered
+                .npm_resolved
+                .get("npm:left-pad")
+                .map(String::as_str),
+            Some("https://registry.example.invalid/left-pad-1.1.3.tgz")
+        );
+        assert_eq!(
+            discovered
+                .npm_integrities
+                .get("npm:left-pad")
+                .and_then(|integrities| integrities.iter().next())
+                .map(String::as_str),
+            Some("sha512-leftpad")
         );
     }
 

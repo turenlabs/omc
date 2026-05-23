@@ -121,6 +121,7 @@ For existing projects, `install` reads normal project files:
 package.json       dependencies, devDependencies, optionalDependencies, peers; use --omit-dev for production installs
 .npmrc             npm registry, scoped registry, and host-scoped auth token configuration
 package-lock.json  exact versions, resolved tarball URLs, and integrity hashes for uniquely locked npm packages
+npm-shrinkwrap.json exact versions, resolved tarball URLs, and integrity hashes for uniquely locked npm packages
 pip.conf           PyPI index-url, extra-index-url, find-links, and no-index configuration
 requirements.txt  PyPI requirements, direct wheel URLs, hashes, extras, -r includes, -c constraints, markers, simple indexes, find-links wheelhouses
 pyproject.toml    PEP 621 project dependencies, selected optional groups
@@ -140,7 +141,7 @@ use project/user `pip.conf` PyPI simple-index settings when no project index is 
 use `PIP_INDEX_URL` / `PIP_EXTRA_INDEX_URL` when no project PyPI index is set
 use pip-style `find-links` and `no-index` config/env values for wheelhouses
 verify npm shasum/integrity and PyPI sha256 when the registry provides them
-use package-lock.json npm resolved tarball URLs and integrity hashes when present
+use package-lock.json/npm-shrinkwrap.json npm resolved tarball URLs and integrity hashes when present
 cache the source artifact under .omc/cache
 profile runtime source files into OMC capability findings
 run the OMC verifier with deny-by-default policy
@@ -238,8 +239,9 @@ Supported now:
   and `libc` metadata
 - npm bundled dependency metadata so bundled packages are not resolved from the
   registry a second time
-- `package-lock.json` exact-version constraints, resolved tarball URLs, and
-  integrity verification for uniquely locked npm packages
+- `package-lock.json` and `npm-shrinkwrap.json` exact-version constraints,
+  resolved tarball URLs, and integrity verification for uniquely locked npm
+  packages
 - `requirements.txt` ingestion with hashes, line continuations, extras,
   direct wheel URLs, recursive `-r` includes, `-c` constraints,
   `--index-url` / `--extra-index-url` simple indexes, `--find-links` / `-f`
