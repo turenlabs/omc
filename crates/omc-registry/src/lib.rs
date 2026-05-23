@@ -1454,6 +1454,16 @@ pub fn discover_project_specs(project_dir: impl AsRef<Path>) -> Result<Vec<Packa
     Ok(discover_project_requirements(project_dir)?.specs)
 }
 
+pub fn parse_pypi_direct_archive_reference(
+    reference: &str,
+    base_dir: impl AsRef<Path>,
+) -> Result<Option<(PackageSpec, BTreeSet<String>)>> {
+    if let Some(archive) = parse_pypi_local_archive_requirement(reference, base_dir.as_ref())? {
+        return Ok(Some(archive));
+    }
+    parse_pypi_direct_archive_url_reference(reference)
+}
+
 pub fn read_package_scripts(project_dir: impl AsRef<Path>) -> Result<BTreeMap<String, String>> {
     let project_dir = project_dir.as_ref();
     let mut scripts = BTreeMap::new();
@@ -8639,6 +8649,35 @@ fn parse_pypi_local_archive_requirement(
     )))
 }
 
+fn parse_pypi_direct_archive_url_reference(
+    reference: &str,
+) -> Result<Option<(PackageSpec, BTreeSet<String>)>> {
+    let (source_url, hashes) = direct_requirement_url_and_hashes(reference.trim());
+    let Ok(url) = reqwest::Url::parse(&source_url) else {
+        return Ok(None);
+    };
+    if !matches!(url.scheme(), "https" | "file") {
+        return Ok(None);
+    }
+    let filename = url
+        .path_segments()
+        .and_then(|mut segments| segments.next_back())
+        .and_then(|filename| urlencoding::decode(filename).ok())
+        .map(|filename| filename.into_owned())
+        .ok_or_else(|| OmcRegistryError::UnsupportedRequirement(reference.to_owned()))?;
+    let name = if let Some((name, _version)) = parse_wheel_name_and_version(&filename) {
+        name
+    } else if let Some((name, _version)) = parse_sdist_name_and_version(&filename) {
+        name
+    } else {
+        return Ok(None);
+    };
+    Ok(Some((
+        PackageSpec::with_direct_url(Ecosystem::Pypi, name, source_url, BTreeSet::new()),
+        hashes,
+    )))
+}
+
 fn local_pypi_archive_url_and_hashes(
     value: &str,
     base_dir: &Path,
@@ -13824,6 +13863,37 @@ wheels = [
         assert_eq!(
             zip_candidate.local_path.as_deref(),
             Some(zip_sdist.as_path())
+        );
+    }
+
+    #[test]
+    fn parses_direct_archive_references() {
+        let dir = tempfile::tempdir().unwrap();
+        let wheel = dir.path().join("demo_pkg-1.0.0-py3-none-any.whl");
+        fs::write(&wheel, b"not a real wheel").unwrap();
+
+        let (spec, hashes) =
+            parse_pypi_direct_archive_reference("demo_pkg-1.0.0-py3-none-any.whl", dir.path())
+                .unwrap()
+                .unwrap();
+        assert_eq!(spec.name, "demo-pkg");
+        assert!(spec.direct_url.as_deref().unwrap().starts_with("file://"));
+        assert!(hashes.is_empty());
+
+        let (spec, hashes) = parse_pypi_direct_archive_reference(
+            "https://files.example/source_pkg-2.0.0.tar.gz#sha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            dir.path(),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(spec.name, "source-pkg");
+        assert_eq!(
+            spec.direct_url.as_deref(),
+            Some("https://files.example/source_pkg-2.0.0.tar.gz")
+        );
+        assert_eq!(
+            hashes.into_iter().collect::<Vec<_>>(),
+            vec!["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"]
         );
     }
 

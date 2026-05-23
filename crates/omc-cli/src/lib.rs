@@ -7,9 +7,10 @@ use clap::{Parser, Subcommand};
 use omc_cap::Capability;
 use omc_registry::{
     add_manifest_policy_grants, add_package_graph, init_project, install_locked_packages,
-    install_locked_project, install_project, parse_capability_grant, read_lockfile,
-    read_package_scripts, remove_manifest_dependency, Behavior, Ecosystem, InstallReport,
-    LinkOptions, LockedPackage, OmcRegistryError, PackageSpec, Verdict,
+    install_locked_project, install_project, parse_capability_grant,
+    parse_pypi_direct_archive_reference, read_lockfile, read_package_scripts,
+    remove_manifest_dependency, Behavior, Ecosystem, InstallReport, LinkOptions, LockedPackage,
+    OmcRegistryError, PackageSpec, Verdict,
 };
 
 #[derive(Debug, Parser)]
@@ -261,6 +262,7 @@ enum PipCompatAction {
         specs: Vec<String>,
         requirements: Vec<PathBuf>,
         constraints: Vec<PathBuf>,
+        archive_references: Vec<String>,
         local_paths: Vec<PathBuf>,
         index_url: Option<String>,
         extra_index_urls: Vec<String>,
@@ -753,6 +755,7 @@ fn run_pip_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
             specs,
             requirements,
             constraints,
+            archive_references,
             local_paths,
             index_url,
             extra_index_urls,
@@ -762,7 +765,7 @@ fn run_pip_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
             allow_all_host,
         } => {
             let allowed_capabilities = parse_grants(&allow, allow_all_host)?;
-            if specs.is_empty() {
+            if specs.is_empty() && archive_references.is_empty() {
                 let mut options = LinkOptions::new(project_dir);
                 options.allowed_capabilities = allowed_capabilities;
                 options.requirement_files = absolutize_paths(project_dir, requirements);
@@ -778,7 +781,6 @@ fn run_pip_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
                 let install = install_project(&options)?;
                 print_install_report(&install);
             } else {
-                let specs = parse_package_specs(&specs, Some(Ecosystem::Pypi))?;
                 let mut options = LinkOptions::new(project_dir);
                 options.allowed_capabilities = allowed_capabilities;
                 options.requirement_files = absolutize_paths(project_dir, requirements);
@@ -791,6 +793,12 @@ fn run_pip_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
                     find_links,
                     no_index,
                 );
+                let mut specs = parse_package_specs(&specs, Some(Ecosystem::Pypi))?;
+                specs.extend(parse_pip_archive_references(
+                    project_dir,
+                    &archive_references,
+                    &mut options,
+                )?);
                 let mut all_reports = Vec::new();
                 for spec in &specs {
                     all_reports.extend(add_package_graph(spec, &options)?);
@@ -873,6 +881,31 @@ fn remove_specs(
     println!("removed {}", removed.join(", "));
     print_install_report(&install);
     Ok(())
+}
+
+fn parse_pip_archive_references(
+    project_dir: &Path,
+    references: &[String],
+    options: &mut LinkOptions,
+) -> Result<Vec<PackageSpec>, OmcRegistryError> {
+    let mut specs = Vec::new();
+    for reference in references {
+        let Some((spec, hashes)) = parse_pypi_direct_archive_reference(reference, project_dir)?
+        else {
+            return Err(OmcRegistryError::UnsupportedSpec(format!(
+                "unsupported direct PyPI archive `{reference}`"
+            )));
+        };
+        if !hashes.is_empty() {
+            options
+                .hashes
+                .entry(spec.package_key())
+                .or_default()
+                .extend(hashes);
+        }
+        specs.push(spec);
+    }
+    Ok(specs)
 }
 
 fn print_locked_packages(
@@ -1478,6 +1511,7 @@ fn parse_pip_install_args(args: &[String]) -> Result<PipCompatAction, OmcRegistr
     let mut extra_index_urls = Vec::new();
     let mut find_links = Vec::new();
     let mut no_index = false;
+    let mut archive_references = Vec::new();
     let mut local_paths = Vec::new();
     let mut filtered = Vec::new();
     let mut index = 0;
@@ -1555,6 +1589,8 @@ fn parse_pip_install_args(args: &[String]) -> Result<PipCompatAction, OmcRegistr
                 | "--no-cache-dir"
                 | "--progress-bar=off"
         ) {
+        } else if is_pip_archive_arg(arg) {
+            archive_references.push(arg.clone());
         } else if is_pip_local_directory_arg(arg) {
             local_paths.push(pip_local_path_arg(arg)?);
         } else {
@@ -1574,6 +1610,7 @@ fn parse_pip_install_args(args: &[String]) -> Result<PipCompatAction, OmcRegistr
         specs: positionals.into_iter().filter(|spec| spec != ".").collect(),
         requirements,
         constraints,
+        archive_references,
         local_paths,
         index_url,
         extra_index_urls,
@@ -1585,7 +1622,7 @@ fn parse_pip_install_args(args: &[String]) -> Result<PipCompatAction, OmcRegistr
 }
 
 fn pip_local_path_arg(value: &str) -> Result<PathBuf, OmcRegistryError> {
-    if value.contains("://") || value.starts_with("git+") {
+    if value.contains("://") || value.starts_with("git+") || is_pip_archive_arg(value) {
         return Err(OmcRegistryError::UnsupportedSpec(format!(
             "pip editable path `{value}` must be a local directory"
         )));
@@ -2017,6 +2054,7 @@ mod tests {
                 specs: vec!["requests==2.32.3".to_owned()],
                 requirements: vec![PathBuf::from("requirements.txt")],
                 constraints: vec![PathBuf::from("constraints.txt")],
+                archive_references: Vec::new(),
                 local_paths: Vec::new(),
                 index_url: Some("https://mirror.example/simple".to_owned()),
                 extra_index_urls: vec!["https://extra.example/simple".to_owned()],
@@ -2044,11 +2082,40 @@ mod tests {
                 specs: vec!["requests==2.32.3".to_owned()],
                 requirements: Vec::new(),
                 constraints: Vec::new(),
+                archive_references: Vec::new(),
                 local_paths: vec![
                     PathBuf::from("../editable_pkg"),
                     PathBuf::from("./another_pkg"),
                     PathBuf::from("./local_pkg"),
                 ],
+                index_url: None,
+                extra_index_urls: Vec::new(),
+                find_links: Vec::new(),
+                no_index: false,
+                allow: Vec::new(),
+                allow_all_host: false,
+            }
+        );
+    }
+
+    #[test]
+    fn parses_pip_install_archive_references() {
+        assert_eq!(
+            parse_pip_compat_action(&args(&[
+                "install",
+                "./wheelhouse/demo_pkg-1.0.0-py3-none-any.whl",
+                "https://files.example/source_pkg-2.0.0.tar.gz#sha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            ]))
+            .unwrap(),
+            PipCompatAction::Install {
+                specs: Vec::new(),
+                requirements: Vec::new(),
+                constraints: Vec::new(),
+                archive_references: vec![
+                    "./wheelhouse/demo_pkg-1.0.0-py3-none-any.whl".to_owned(),
+                    "https://files.example/source_pkg-2.0.0.tar.gz#sha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_owned(),
+                ],
+                local_paths: Vec::new(),
                 index_url: None,
                 extra_index_urls: Vec::new(),
                 find_links: Vec::new(),
