@@ -561,6 +561,7 @@ struct NpmExecAction {
     command: String,
     args: Vec<String>,
     no_install: bool,
+    prefer_project_bin: bool,
     npm_registry: Option<String>,
     allow: Vec<String>,
     allow_all_host: bool,
@@ -1267,7 +1268,7 @@ fn direct_compat_mode(program: Option<&std::ffi::OsStr>) -> Option<DirectCompatM
 
 fn npx_compat_args(args: Vec<String>) -> Vec<String> {
     let mut compat_args = Vec::with_capacity(args.len() + 1);
-    compat_args.push("exec".to_owned());
+    compat_args.push("npx".to_owned());
     compat_args.extend(args);
     compat_args
 }
@@ -2102,6 +2103,9 @@ fn run_npm_exec(project_dir: &Path, action: NpmExecAction) -> Result<ExitCode, O
     if action.packages.is_empty() || action.no_install {
         return run_project_command(project_dir, &action.command, &action.args);
     }
+    if action.prefer_project_bin && project_command_exists(project_dir, &action.command)? {
+        return run_project_command(project_dir, &action.command, &action.args);
+    }
 
     let temp_project = TempOmcProject::empty("npm-exec")?;
     let specs = parse_package_specs(&action.packages, Some(Ecosystem::Npm))?;
@@ -2121,6 +2125,35 @@ fn run_npm_exec(project_dir: &Path, action: NpmExecAction) -> Result<ExitCode, O
     apply_project_runtime_env_for_cwd(&mut process, temp_project.path(), project_dir)?;
     let status = process.args(action.args).status()?;
     Ok(exit_code(status.code()))
+}
+
+fn project_command_exists(project_dir: &Path, command: &str) -> Result<bool, OmcRegistryError> {
+    if command.is_empty() {
+        return Ok(false);
+    }
+    if command.starts_with("./")
+        || command.starts_with("../")
+        || Path::new(command).is_absolute()
+        || command.contains('\\')
+    {
+        return Ok(Path::new(command).exists());
+    }
+    let path = project_path_for_cwd(project_dir, project_dir)?;
+    for dir in env::split_paths(&path) {
+        let candidate = dir.join(command);
+        if candidate.is_file() {
+            return Ok(true);
+        }
+        #[cfg(windows)]
+        {
+            if candidate.with_extension("cmd").is_file()
+                || candidate.with_extension("exe").is_file()
+            {
+                return Ok(true);
+            }
+        }
+    }
+    Ok(false)
 }
 
 fn run_npm_explore(
@@ -12050,7 +12083,7 @@ fn parse_npm_compat_action(args: &[String]) -> Result<NpmCompatAction, OmcRegist
             })
         }
         "exec" | "x" | "npx" => Ok(NpmCompatAction::Exec {
-            action: parse_npm_exec_args(&args[1..])?,
+            action: parse_npm_exec_args(command, &args[1..])?,
         }),
         "explore" => parse_npm_explore_args(&args[1..]),
         "bin" => {
@@ -16965,7 +16998,10 @@ fn npm_run_equals_value_flag(arg: &str) -> bool {
         .any(|prefix| arg.starts_with(prefix))
 }
 
-fn parse_npm_exec_args(args: &[String]) -> Result<NpmExecAction, OmcRegistryError> {
+fn parse_npm_exec_args(
+    command_name: &str,
+    args: &[String],
+) -> Result<NpmExecAction, OmcRegistryError> {
     let mut packages = Vec::new();
     let mut no_install = false;
     let mut npm_registry = None;
@@ -17038,12 +17074,22 @@ fn parse_npm_exec_args(args: &[String]) -> Result<NpmExecAction, OmcRegistryErro
         }
         index += 1;
     }
-    let (command, args) = split_first_position("npm exec", &filtered)?;
+    let (mut command, args) = split_first_position("npm exec", &filtered)?;
+    let prefer_project_bin = command_name == "npx"
+        && packages.is_empty()
+        && !no_install
+        && npm_exec_should_infer_package(&command);
+    if prefer_project_bin {
+        let package = command.clone();
+        command = npm_exec_inferred_bin_name(&package)?;
+        packages.push(package);
+    }
     Ok(NpmExecAction {
         packages,
         command,
         args,
         no_install,
+        prefer_project_bin,
         npm_registry,
         allow,
         allow_all_host,
@@ -17054,6 +17100,20 @@ fn npm_exec_equals_value_flag(arg: &str) -> bool {
     ["--cache=", "--userconfig="]
         .iter()
         .any(|prefix| arg.starts_with(prefix))
+}
+
+fn npm_exec_should_infer_package(command: &str) -> bool {
+    !command.is_empty()
+        && !command.starts_with("./")
+        && !command.starts_with("../")
+        && !Path::new(command).is_absolute()
+        && !command.contains('\\')
+}
+
+fn npm_exec_inferred_bin_name(package: &str) -> Result<String, OmcRegistryError> {
+    let package = package.strip_prefix("npm:").unwrap_or(package);
+    let (name, _) = npm_create_split_version(package)?;
+    Ok(npm_package_bin_name(name).to_owned())
 }
 
 fn parse_npm_explore_args(args: &[String]) -> Result<NpmCompatAction, OmcRegistryError> {
@@ -19606,7 +19666,7 @@ mod tests {
         );
         assert_eq!(
             npx_compat_args(args(&["eslint", "--", "."])),
-            args(&["exec", "eslint", "--", "."])
+            args(&["npx", "eslint", "--", "."])
         );
         assert_eq!(
             parse_direct_compat_invocation(
@@ -20285,6 +20345,7 @@ mod tests {
                     command: "eslint".to_owned(),
                     args: vec![".".to_owned()],
                     no_install: false,
+                    prefer_project_bin: false,
                     npm_registry: None,
                     allow: Vec::new(),
                     allow_all_host: false,
@@ -20305,6 +20366,7 @@ mod tests {
                     command: "eslint".to_owned(),
                     args: vec!["--help".to_owned()],
                     no_install: false,
+                    prefer_project_bin: false,
                     npm_registry: None,
                     allow: Vec::new(),
                     allow_all_host: false,
@@ -20329,6 +20391,7 @@ mod tests {
                     command: "eslint".to_owned(),
                     args: vec![".".to_owned()],
                     no_install: false,
+                    prefer_project_bin: false,
                     npm_registry: None,
                     allow: Vec::new(),
                     allow_all_host: false,
@@ -20351,6 +20414,37 @@ mod tests {
                     command: "tsc".to_owned(),
                     args: vec!["--version".to_owned()],
                     no_install: false,
+                    prefer_project_bin: false,
+                    npm_registry: None,
+                    allow: Vec::new(),
+                    allow_all_host: false,
+                },
+            }
+        );
+        assert_eq!(
+            parse_npm_compat_action(&args(&["npx", "semver@7.6.3", "1.2.3"])).unwrap(),
+            NpmCompatAction::Exec {
+                action: NpmExecAction {
+                    packages: vec!["semver@7.6.3".to_owned()],
+                    command: "semver".to_owned(),
+                    args: vec!["1.2.3".to_owned()],
+                    no_install: false,
+                    prefer_project_bin: true,
+                    npm_registry: None,
+                    allow: Vec::new(),
+                    allow_all_host: false,
+                },
+            }
+        );
+        assert_eq!(
+            parse_npm_compat_action(&args(&["npx", "@scope/tool@1.2.3", "--help"])).unwrap(),
+            NpmCompatAction::Exec {
+                action: NpmExecAction {
+                    packages: vec!["@scope/tool@1.2.3".to_owned()],
+                    command: "tool".to_owned(),
+                    args: vec!["--help".to_owned()],
+                    no_install: false,
+                    prefer_project_bin: true,
                     npm_registry: None,
                     allow: Vec::new(),
                     allow_all_host: false,
@@ -20376,6 +20470,7 @@ mod tests {
                     command: "tool".to_owned(),
                     args: vec!["--help".to_owned()],
                     no_install: false,
+                    prefer_project_bin: false,
                     npm_registry: Some("https://registry.example".to_owned()),
                     allow: vec!["env:TOOL_TOKEN".to_owned()],
                     allow_all_host: true,
@@ -20397,6 +20492,7 @@ mod tests {
                     command: "eslint".to_owned(),
                     args: Vec::new(),
                     no_install: true,
+                    prefer_project_bin: false,
                     npm_registry: None,
                     allow: Vec::new(),
                     allow_all_host: false,

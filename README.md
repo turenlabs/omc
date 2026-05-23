@@ -189,7 +189,7 @@ cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm sbom --sbom-fo
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm view left-pad version
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm repo left-pad --browser=false
 cargo run -p omc-cli --bin npx -- --omc-project-dir /tmp/omc-demo eslint -- .
-cargo run -p omc-cli --bin npx -- --omc-project-dir /tmp/omc-demo -p semver@7.6.3 --allow-all-host semver 1.2.3
+cargo run -p omc-cli --bin npx -- --omc-project-dir /tmp/omc-demo --allow-all-host semver@7.6.3 1.2.3
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm root
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm bin
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip install -r requirements.txt -c constraints.txt
@@ -513,9 +513,9 @@ Supported now:
   name-based links from OMC's user link store; `npm pack` supports local
   package directories and registry specs; common `npm exec` / `npx`
   flags such as `--yes`, `--no-install`, `--package`, `--cache`,
-  `--registry`, `--allow`, and `--allow-all-host` are parsed; explicit
-  `--package` specs are installed into a temporary verified OMC project before
-  dispatching to the requested executable; `--no-save`,
+  `--registry`, `--allow`, and `--allow-all-host` are parsed; direct `npx`
+  package specs and explicit `--package` specs are installed into a temporary
+  verified OMC project before dispatching to the requested executable; `--no-save`,
   `--package-lock-only`, `--package-lock=false`, `--dry-run`, `--registry`,
   `--omit=...`, `--include=...`, and common audit/fund/peer/install-strategy flags are
   understood for install/ci compatibility; common global npm flags such as
