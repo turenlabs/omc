@@ -6,12 +6,12 @@ use std::{env, ffi::OsString, fs};
 use clap::{Parser, Subcommand};
 use omc_cap::Capability;
 use omc_registry::{
-    add_manifest_npm_local_paths, add_manifest_policy_grants, add_package_graph, init_project,
-    install_locked_packages, install_locked_project, install_project, lock_project,
+    add_manifest_npm_local_paths, add_manifest_policy_grants, add_package_graph, check_pypi_lock,
+    init_project, install_locked_packages, install_locked_project, install_project, lock_project,
     parse_capability_grant, parse_npm_direct_archive_reference,
     parse_pypi_direct_archive_reference, read_lockfile, read_package_scripts,
     remove_manifest_dependency, Behavior, Ecosystem, InstallReport, LinkOptions, LockedPackage,
-    OmcRegistryError, PackageSpec, Verdict,
+    OmcRegistryError, PackageSpec, PypiCheckIssue, Verdict,
 };
 
 #[derive(Debug, Parser)]
@@ -286,6 +286,7 @@ enum PipCompatAction {
         specs: Vec<String>,
         files: bool,
     },
+    Check,
     Freeze,
     List {
         format: PipListFormat,
@@ -873,6 +874,7 @@ fn run_pip_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
         PipCompatAction::Show { specs, files } => {
             return print_locked_pip_show(project_dir, &specs, files)
         }
+        PipCompatAction::Check => return print_locked_pip_check(project_dir),
         PipCompatAction::Freeze => print_locked_freeze(project_dir)?,
         PipCompatAction::List { format } => match format {
             PipListFormat::Columns => {
@@ -1073,6 +1075,39 @@ fn print_locked_pip_show(
     }
 
     Ok(ExitCode::SUCCESS)
+}
+
+fn print_locked_pip_check(project_dir: &Path) -> Result<ExitCode, OmcRegistryError> {
+    let lock = read_lockfile(project_dir.join("omc.lock"))?;
+    let issues = check_pypi_lock(&lock);
+    if issues.is_empty() {
+        println!("No broken requirements found.");
+        return Ok(ExitCode::SUCCESS);
+    }
+
+    for issue in issues {
+        match issue {
+            PypiCheckIssue::Missing {
+                package,
+                version,
+                requirement,
+            } => {
+                println!("{package} {version} requires {requirement}, which is not installed.");
+            }
+            PypiCheckIssue::Incompatible {
+                package,
+                version,
+                requirement,
+                installed_name,
+                installed_version,
+            } => {
+                println!(
+                    "{package} {version} has requirement {requirement}, but you have {installed_name} {installed_version}."
+                );
+            }
+        }
+    }
+    Ok(ExitCode::FAILURE)
 }
 
 fn print_pip_show_package(
@@ -1551,6 +1586,10 @@ fn parse_pip_compat_action(args: &[String]) -> Result<PipCompatAction, OmcRegist
             })
         }
         "show" => parse_pip_show_args(&args[1..]),
+        "check" => {
+            parse_pip_check_args(&args[1..])?;
+            Ok(PipCompatAction::Check)
+        }
         "freeze" => Ok(PipCompatAction::Freeze),
         "list" => Ok(PipCompatAction::List {
             format: parse_pip_list_format(&args[1..])?,
@@ -1586,6 +1625,19 @@ fn parse_pip_show_args(args: &[String]) -> Result<PipCompatAction, OmcRegistryEr
         ));
     }
     Ok(PipCompatAction::Show { specs, files })
+}
+
+fn parse_pip_check_args(args: &[String]) -> Result<(), OmcRegistryError> {
+    for arg in args {
+        if matches!(
+            arg.as_str(),
+            "--disable-pip-version-check" | "-v" | "--verbose"
+        ) {
+            continue;
+        }
+        return Err(unsupported_compat_arg("pip check", arg));
+    }
+    Ok(())
 }
 
 fn parse_pip_install_args(args: &[String]) -> Result<PipCompatAction, OmcRegistryError> {
@@ -2429,6 +2481,10 @@ mod tests {
         assert_eq!(
             parse_pip_compat_action(&args(&["freeze"])).unwrap(),
             PipCompatAction::Freeze
+        );
+        assert_eq!(
+            parse_pip_compat_action(&args(&["check", "--disable-pip-version-check"])).unwrap(),
+            PipCompatAction::Check
         );
         assert_eq!(
             parse_pip_compat_action(&args(&["show", "-f", "requests"])).unwrap(),

@@ -443,6 +443,22 @@ pub struct LockedPythonVcsDependency {
     pub extras: Vec<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PypiCheckIssue {
+    Missing {
+        package: String,
+        version: String,
+        requirement: String,
+    },
+    Incompatible {
+        package: String,
+        version: String,
+        requirement: String,
+        installed_name: String,
+        installed_version: String,
+    },
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Behavior {
@@ -784,6 +800,66 @@ pub fn remove_manifest_dependency(
             .is_some();
     fs::write(&manifest_path, toml::to_string_pretty(&manifest)?)?;
     Ok(removed)
+}
+
+pub fn check_pypi_lock(lock: &OmcLock) -> Vec<PypiCheckIssue> {
+    let constraints = BTreeMap::new();
+    let hashes = BTreeMap::new();
+    let mut issues = Vec::new();
+    for package in lock
+        .packages
+        .iter()
+        .filter(|package| package.ecosystem == Ecosystem::Pypi)
+    {
+        for dependency in &package.dependencies {
+            let Ok(spec) = PackageSpec::parse(dependency) else {
+                continue;
+            };
+            if spec.ecosystem != Ecosystem::Pypi {
+                continue;
+            }
+            if find_locked_package_for_spec(lock, &spec, &constraints, &hashes).is_some() {
+                continue;
+            }
+
+            let requirement = pypi_requirement_label(&spec);
+            if let Some(installed) = lock.packages.iter().find(|installed| {
+                installed.ecosystem == Ecosystem::Pypi
+                    && normalize_pypi_name(&installed.name) == spec.name
+            }) {
+                issues.push(PypiCheckIssue::Incompatible {
+                    package: package.name.clone(),
+                    version: package.version.clone(),
+                    requirement,
+                    installed_name: installed.name.clone(),
+                    installed_version: installed.version.clone(),
+                });
+            } else {
+                issues.push(PypiCheckIssue::Missing {
+                    package: package.name.clone(),
+                    version: package.version.clone(),
+                    requirement,
+                });
+            }
+        }
+    }
+    issues
+}
+
+fn pypi_requirement_label(spec: &PackageSpec) -> String {
+    let mut name = spec.name.clone();
+    if !spec.extras.is_empty() {
+        name.push('[');
+        name.push_str(&spec.extras.iter().cloned().collect::<Vec<_>>().join(","));
+        name.push(']');
+    }
+    if let Some(url) = &spec.direct_url {
+        format!("{name} @ {url}")
+    } else if let Some(version) = &spec.version {
+        format!("{name}{version}")
+    } else {
+        name
+    }
 }
 
 pub fn add_manifest_npm_local_paths(
@@ -12218,6 +12294,46 @@ packages:
         assert_eq!(removed, 1);
         assert_eq!(lock.packages.len(), 1);
         assert_eq!(lock.packages[0].name, "left-pad");
+    }
+
+    #[test]
+    fn checks_pypi_lock_dependencies() {
+        let mut root = locked_package_for_test(Ecosystem::Pypi, "root", "1.0.0");
+        root.dependencies = vec!["pypi:dep>=2".to_owned(), "pypi:missing>=1".to_owned()];
+        let dep = locked_package_for_test(Ecosystem::Pypi, "dep", "1.5.0");
+        let lock = OmcLock {
+            version: 1,
+            packages: vec![root, dep],
+            python_vcs: Vec::new(),
+        };
+
+        assert_eq!(
+            check_pypi_lock(&lock),
+            vec![
+                PypiCheckIssue::Incompatible {
+                    package: "root".to_owned(),
+                    version: "1.0.0".to_owned(),
+                    requirement: "dep>=2".to_owned(),
+                    installed_name: "dep".to_owned(),
+                    installed_version: "1.5.0".to_owned(),
+                },
+                PypiCheckIssue::Missing {
+                    package: "root".to_owned(),
+                    version: "1.0.0".to_owned(),
+                    requirement: "missing>=1".to_owned(),
+                },
+            ]
+        );
+
+        let mut root = locked_package_for_test(Ecosystem::Pypi, "root", "1.0.0");
+        root.dependencies = vec!["pypi:dep>=1".to_owned()];
+        let dep = locked_package_for_test(Ecosystem::Pypi, "dep", "1.5.0");
+        let lock = OmcLock {
+            version: 1,
+            packages: vec![root, dep],
+            python_vcs: Vec::new(),
+        };
+        assert!(check_pypi_lock(&lock).is_empty());
     }
 
     #[test]
