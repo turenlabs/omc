@@ -7180,7 +7180,11 @@ impl NpmConfig {
     fn auth_token_for_url(&self, url: &str) -> Option<&str> {
         let url = reqwest::Url::parse(url).ok()?;
         let host = url.host_str()?;
-        let target = format!("{host}{}", url.path());
+        let authority = url
+            .port()
+            .map(|port| format!("{host}:{port}"))
+            .unwrap_or_else(|| host.to_owned());
+        let target = format!("{authority}{}", url.path());
         self.auth_tokens
             .iter()
             .filter(|token| target.starts_with(&token.scope))
@@ -7191,9 +7195,8 @@ impl NpmConfig {
 
 fn read_npm_config(project_dir: &Path) -> Result<NpmConfig> {
     let mut config = NpmConfig::default();
-    if let Some(home) = env::var_os("HOME") {
-        read_npmrc_into(&PathBuf::from(home).join(".npmrc"), &mut config)?;
-    }
+    let user_config = npm_userconfig_env_path();
+    read_npm_user_config(project_dir, user_config.as_deref(), &mut config)?;
     read_npmrc_into(&project_dir.join(".npmrc"), &mut config)?;
     apply_npm_environment_config(&mut config);
     Ok(config)
@@ -7219,6 +7222,38 @@ fn apply_npm_environment_config(config: &mut NpmConfig) {
 fn apply_npm_environment_values(config: &mut NpmConfig, registry: Option<&str>) {
     if let Some(registry) = registry.and_then(normalize_npm_registry) {
         config.registry = registry;
+    }
+}
+
+fn npm_userconfig_env_path() -> Option<PathBuf> {
+    env::var_os("npm_config_userconfig")
+        .or_else(|| env::var_os("NPM_CONFIG_USERCONFIG"))
+        .map(PathBuf::from)
+        .filter(|path| !path.as_os_str().is_empty())
+}
+
+fn read_npm_user_config(
+    project_dir: &Path,
+    user_config: Option<&Path>,
+    config: &mut NpmConfig,
+) -> Result<()> {
+    if let Some(user_config) = user_config {
+        return read_npmrc_into(
+            &resolve_npm_userconfig_path(project_dir, user_config),
+            config,
+        );
+    }
+    if let Some(home) = env::var_os("HOME") {
+        read_npmrc_into(&PathBuf::from(home).join(".npmrc"), config)?;
+    }
+    Ok(())
+}
+
+fn resolve_npm_userconfig_path(project_dir: &Path, path: &Path) -> PathBuf {
+    if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        project_dir.join(path)
     }
 }
 
@@ -15943,6 +15978,7 @@ wheels = [
             @scope:registry=https://scope.example.invalid/
             //scope.example.invalid/:_authToken=scope-token
             //registry.example.invalid/npm/:_authToken=default-token
+            //registry.example.invalid:4873/npm/:_authToken=port-token
             "#,
             &mut config,
         );
@@ -15964,6 +16000,12 @@ wheels = [
             config
                 .auth_token_for_url("https://registry.example.invalid/npm/left-pad/-/left-pad.tgz"),
             Some("default-token")
+        );
+        assert_eq!(
+            config.auth_token_for_url(
+                "https://registry.example.invalid:4873/npm/left-pad/-/left-pad.tgz"
+            ),
+            Some("port-token")
         );
     }
 
@@ -15991,6 +16033,24 @@ wheels = [
         apply_npm_environment_values(&mut config, Some("https://env.example.invalid/npm"));
 
         assert_eq!(config.registry, "https://env.example.invalid/npm/");
+    }
+
+    #[test]
+    fn npm_userconfig_override_reads_custom_user_npmrc() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(
+            dir.path().join("ci.npmrc"),
+            "registry=https://ci-userconfig.example.invalid/npm\n",
+        )
+        .unwrap();
+
+        let mut config = NpmConfig::default();
+        read_npm_user_config(dir.path(), Some(Path::new("ci.npmrc")), &mut config).unwrap();
+
+        assert_eq!(
+            config.registry,
+            "https://ci-userconfig.example.invalid/npm/"
+        );
     }
 
     #[test]
