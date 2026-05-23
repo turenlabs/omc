@@ -117,6 +117,7 @@ cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm init -y
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm help install
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm install left-pad@1.3.0
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm install --registry https://registry.npmjs.org left-pad@1.3.0
+cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm install --dry-run left-pad@1.3.0
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm update --package-lock-only
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm install-test -- --watch
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm ci --omit=dev
@@ -445,8 +446,8 @@ Supported now:
   flags such as `--yes`,
   `--package`, `--cache`, and `--registry` are parsed before dispatching to
   project-local executables; `--no-save`,
-  `--package-lock-only`, `--package-lock=false`, `--registry`, `--omit=...`,
-  `--include=...`, and common audit/fund/peer/install-strategy flags are
+  `--package-lock-only`, `--package-lock=false`, `--dry-run`, `--registry`,
+  `--omit=...`, `--include=...`, and common audit/fund/peer/install-strategy flags are
   understood for install/ci compatibility; common global npm flags such as
   `--silent`, `--loglevel`, and `--cache` are accepted before the subcommand,
   while `--registry`, `--userconfig`, and `--json` are forwarded to subcommands

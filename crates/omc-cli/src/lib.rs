@@ -241,6 +241,7 @@ enum NpmCompatAction {
         dev: bool,
         omit_dev: bool,
         lock_only: bool,
+        dry_run: bool,
         npm_registry: Option<String>,
         allow: Vec<String>,
         allow_all_host: bool,
@@ -255,6 +256,7 @@ enum NpmCompatAction {
         dev: bool,
         omit_dev: bool,
         lock_only: bool,
+        dry_run: bool,
         npm_registry: Option<String>,
         allow: Vec<String>,
         allow_all_host: bool,
@@ -1040,9 +1042,18 @@ impl TempOmcProject {
         let path = env::temp_dir().join(format!("omc-{prefix}-{}-{nonce}", std::process::id()));
         let _ = fs::remove_dir_all(&path);
         fs::create_dir_all(&path)?;
-        let source_manifest = source_project_dir.join("omc.toml");
-        if source_manifest.exists() {
-            fs::copy(source_manifest, path.join("omc.toml"))?;
+        for file in [
+            "omc.toml",
+            "package.json",
+            "package-lock.json",
+            "npm-shrinkwrap.json",
+            "yarn.lock",
+            "pnpm-lock.yaml",
+        ] {
+            let source = source_project_dir.join(file);
+            if source.exists() {
+                fs::copy(source, path.join(file))?;
+            }
         }
         Ok(Self { path })
     }
@@ -1454,6 +1465,7 @@ struct NpmInstallCompatRequest {
     dev: bool,
     omit_dev: bool,
     lock_only: bool,
+    dry_run: bool,
     npm_registry: Option<String>,
     allow: Vec<String>,
     allow_all_host: bool,
@@ -1471,10 +1483,29 @@ fn run_npm_install_compat(
         dev,
         omit_dev,
         lock_only,
+        dry_run,
         npm_registry,
         allow,
         allow_all_host,
     } = request;
+    if dry_run {
+        return run_npm_install_dry_run(
+            project_dir,
+            NpmInstallCompatRequest {
+                specs,
+                archive_references,
+                local_paths,
+                save,
+                dev,
+                omit_dev,
+                lock_only,
+                dry_run,
+                npm_registry,
+                allow,
+                allow_all_host,
+            },
+        );
+    }
     let allowed_capabilities = parse_grants(&allow, allow_all_host)?;
     if specs.is_empty() && archive_references.is_empty() {
         let mut options = LinkOptions::new(project_dir);
@@ -1529,6 +1560,86 @@ fn run_npm_install_compat(
     Ok(ExitCode::SUCCESS)
 }
 
+fn run_npm_install_dry_run(
+    project_dir: &Path,
+    request: NpmInstallCompatRequest,
+) -> Result<ExitCode, OmcRegistryError> {
+    let NpmInstallCompatRequest {
+        specs,
+        archive_references,
+        local_paths,
+        save: _,
+        dev: _,
+        omit_dev,
+        lock_only,
+        dry_run: _,
+        npm_registry,
+        allow,
+        allow_all_host,
+    } = request;
+
+    let dry_run_project = TempOmcProject::new("npm-dry-run", project_dir)?;
+    let mut options = LinkOptions::new(dry_run_project.path());
+    options.save_manifest_dependency = false;
+    options.discover_project_requirements = specs.is_empty() && archive_references.is_empty();
+    options.allowed_capabilities = parse_grants(&allow, allow_all_host)?;
+    options.npm_registry_url = npm_registry.clone();
+    options.include_dev_dependencies = !omit_dev;
+
+    let mut reports = Vec::new();
+    if specs.is_empty() && archive_references.is_empty() {
+        if options.discover_project_requirements {
+            reports.extend(lock_project(&options)?);
+        }
+    } else {
+        let mut specs = parse_package_specs(&specs, Some(Ecosystem::Npm))?;
+        specs.extend(parse_npm_archive_references(
+            project_dir,
+            &archive_references,
+        )?);
+        for spec in &specs {
+            reports.extend(add_package_graph(spec, &options)?);
+        }
+    }
+
+    if !reports.is_empty() {
+        print_link_reports(&reports);
+    }
+    if !local_paths.is_empty() {
+        if !reports.is_empty() {
+            println!();
+        }
+        println!("dry-run: would link npm local paths:");
+        for path in &local_paths {
+            println!(
+                "  - {}",
+                absolutize_path(project_dir, path.clone()).display()
+            );
+        }
+    }
+
+    let npm_packages = reports
+        .iter()
+        .filter(|report| report.locked.ecosystem == Ecosystem::Npm)
+        .count();
+    if !reports.is_empty() || !local_paths.is_empty() {
+        println!();
+    }
+    let lock_detail = if lock_only {
+        " and update omc.lock"
+    } else {
+        ""
+    };
+    println!(
+        "dry-run: would install npm={} local_paths={} node_modules={}{}",
+        npm_packages,
+        local_paths.len(),
+        project_dir.join("node_modules").display(),
+        lock_detail
+    );
+    Ok(ExitCode::SUCCESS)
+}
+
 fn run_npm_ci_compat(
     project_dir: &Path,
     omit_dev: bool,
@@ -1557,6 +1668,7 @@ fn run_npm_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
             dev,
             omit_dev,
             lock_only,
+            dry_run,
             npm_registry,
             allow,
             allow_all_host,
@@ -1571,6 +1683,7 @@ fn run_npm_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
                     dev,
                     omit_dev,
                     lock_only,
+                    dry_run,
                     npm_registry,
                     allow,
                     allow_all_host,
@@ -1587,6 +1700,7 @@ fn run_npm_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
             dev,
             omit_dev,
             lock_only,
+            dry_run,
             npm_registry,
             allow,
             allow_all_host,
@@ -1605,6 +1719,7 @@ fn run_npm_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
                         dev,
                         omit_dev,
                         lock_only,
+                        dry_run,
                         npm_registry,
                         allow,
                         allow_all_host,
@@ -2055,7 +2170,7 @@ fn npm_help_text(topic: Option<&str>) -> String {
             &[
                 "Resolve, verify, lock, and install npm packages with OMC.",
                 "Aliases: i, add, update, up, upgrade.",
-                "Common flags: --save, --no-save, --save-dev, --omit=dev, --include=dev, --package-lock-only, --registry, --allow, --allow-all-host.",
+                "Common flags: --save, --no-save, --save-dev, --omit=dev, --include=dev, --package-lock-only, --dry-run, --registry, --allow, --allow-all-host.",
                 "Direct local inputs are supported for .tgz archives and local package directories.",
             ],
         ),
@@ -6051,6 +6166,7 @@ fn parse_npm_compat_action(args: &[String]) -> Result<NpmCompatAction, OmcRegist
             dev: false,
             omit_dev: false,
             lock_only: false,
+            dry_run: false,
             npm_registry: None,
             allow: Vec::new(),
             allow_all_host: false,
@@ -6793,11 +6909,14 @@ fn npm_version_ignored_equals_flag(arg: &str) -> bool {
 fn parse_npm_install_args(args: &[String]) -> Result<NpmCompatAction, OmcRegistryError> {
     let mut archive_references = Vec::new();
     let mut local_paths = Vec::new();
+    let mut dry_run = false;
     let mut filtered = Vec::new();
     let mut index = 0;
     while index < args.len() {
         let arg = &args[index];
-        if is_npm_archive_arg(arg) {
+        if arg == "--dry-run" {
+            dry_run = true;
+        } else if is_npm_archive_arg(arg) {
             archive_references.push(arg.clone());
         } else if ignored_npm_value_flag(arg) {
             filtered.push(arg.clone());
@@ -6835,6 +6954,7 @@ fn parse_npm_install_args(args: &[String]) -> Result<NpmCompatAction, OmcRegistr
         dev,
         omit_dev,
         lock_only,
+        dry_run,
         npm_registry,
         allow,
         allow_all_host,
@@ -6880,6 +7000,7 @@ fn parse_npm_install_test_args(
             dev: false,
             omit_dev,
             lock_only: false,
+            dry_run: false,
             npm_registry: None,
             allow,
             allow_all_host,
@@ -6896,6 +7017,7 @@ fn parse_npm_install_test_args(
         dev,
         omit_dev,
         lock_only,
+        dry_run,
         npm_registry,
         allow,
         allow_all_host,
@@ -6913,6 +7035,7 @@ fn parse_npm_install_test_args(
         dev,
         omit_dev,
         lock_only,
+        dry_run,
         npm_registry,
         allow,
         allow_all_host,
@@ -10049,6 +10172,7 @@ mod tests {
                 dev: false,
                 omit_dev: false,
                 lock_only: false,
+                dry_run: false,
                 npm_registry: Some("https://registry.example.invalid/npm".to_owned()),
                 allow: Vec::new(),
                 allow_all_host: false,
@@ -10183,6 +10307,7 @@ mod tests {
             "--legacy-peer-deps=true",
             "--strict-peer-deps=false",
             "--foreground-scripts",
+            "--dry-run",
             "--allow-all-host",
             "left-pad@1.3.0",
         ]))
@@ -10198,6 +10323,7 @@ mod tests {
                 dev: true,
                 omit_dev: true,
                 lock_only: false,
+                dry_run: true,
                 npm_registry: Some("https://registry.example.invalid/npm".to_owned()),
                 allow: Vec::new(),
                 allow_all_host: true,
@@ -10223,6 +10349,7 @@ mod tests {
                 dev: false,
                 omit_dev: false,
                 lock_only: false,
+                dry_run: false,
                 npm_registry: None,
                 allow: Vec::new(),
                 allow_all_host: false,
@@ -10250,6 +10377,7 @@ mod tests {
                 dev: false,
                 omit_dev: false,
                 lock_only: false,
+                dry_run: false,
                 npm_registry: None,
                 allow: Vec::new(),
                 allow_all_host: false,
@@ -10270,6 +10398,7 @@ mod tests {
                 dev: false,
                 omit_dev: false,
                 lock_only: true,
+                dry_run: false,
                 npm_registry: None,
                 allow: Vec::new(),
                 allow_all_host: false,
@@ -10296,6 +10425,7 @@ mod tests {
                 dev: false,
                 omit_dev: true,
                 lock_only: false,
+                dry_run: false,
                 npm_registry: Some("https://registry.example.invalid/npm".to_owned()),
                 allow: Vec::new(),
                 allow_all_host: false,
@@ -10315,6 +10445,7 @@ mod tests {
                 dev: false,
                 omit_dev: true,
                 lock_only: false,
+                dry_run: false,
                 npm_registry: None,
                 allow: Vec::new(),
                 allow_all_host: false,
@@ -10341,6 +10472,7 @@ mod tests {
                 dev: false,
                 omit_dev: true,
                 lock_only: true,
+                dry_run: false,
                 npm_registry: Some("https://registry.example.invalid/npm".to_owned()),
                 allow: Vec::new(),
                 allow_all_host: false,
