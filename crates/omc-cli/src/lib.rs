@@ -6,11 +6,11 @@ use std::{env, ffi::OsString, fs};
 use clap::{Parser, Subcommand};
 use omc_cap::Capability;
 use omc_registry::{
-    add_manifest_policy_grants, add_package_graph, init_project, install_locked_packages,
-    install_locked_project, install_project, parse_capability_grant,
-    parse_pypi_direct_archive_reference, read_lockfile, read_package_scripts,
-    remove_manifest_dependency, Behavior, Ecosystem, InstallReport, LinkOptions, LockedPackage,
-    OmcRegistryError, PackageSpec, Verdict,
+    add_manifest_npm_local_paths, add_manifest_policy_grants, add_package_graph, init_project,
+    install_locked_packages, install_locked_project, install_project, parse_capability_grant,
+    parse_npm_direct_archive_reference, parse_pypi_direct_archive_reference, read_lockfile,
+    read_package_scripts, remove_manifest_dependency, Behavior, Ecosystem, InstallReport,
+    LinkOptions, LockedPackage, OmcRegistryError, PackageSpec, Verdict,
 };
 
 #[derive(Debug, Parser)]
@@ -217,6 +217,8 @@ enum NpmCompatAction {
     Version,
     Install {
         specs: Vec<String>,
+        archive_references: Vec<String>,
+        local_paths: Vec<PathBuf>,
         dev: bool,
         omit_dev: bool,
         allow: Vec<String>,
@@ -682,29 +684,48 @@ fn run_npm_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
         NpmCompatAction::Version => println!("{}", env!("CARGO_PKG_VERSION")),
         NpmCompatAction::Install {
             specs,
+            archive_references,
+            local_paths,
             dev,
             omit_dev,
             allow,
             allow_all_host,
         } => {
             let allowed_capabilities = parse_grants(&allow, allow_all_host)?;
-            if specs.is_empty() {
+            if specs.is_empty() && archive_references.is_empty() {
                 let mut options = LinkOptions::new(project_dir);
                 options.allowed_capabilities = allowed_capabilities;
                 options.include_dev_dependencies = !omit_dev;
+                options.npm_local_paths = absolutize_paths(project_dir, local_paths.clone());
+                if !local_paths.is_empty() {
+                    add_manifest_npm_local_paths(project_dir, &local_paths, dev)?;
+                }
                 let install = install_project(&options)?;
                 print_install_report(&install);
             } else {
-                let specs = parse_package_specs(&specs, Some(Ecosystem::Npm))?;
                 let mut options = LinkOptions::new(project_dir);
                 options.allowed_capabilities = allowed_capabilities;
                 options.save_dev_dependency = dev;
+                options.include_dev_dependencies = !omit_dev;
+                options.npm_local_paths = absolutize_paths(project_dir, local_paths.clone());
+                if !local_paths.is_empty() {
+                    add_manifest_npm_local_paths(project_dir, &local_paths, dev)?;
+                }
+                let mut specs = parse_package_specs(&specs, Some(Ecosystem::Npm))?;
+                specs.extend(parse_npm_archive_references(
+                    project_dir,
+                    &archive_references,
+                )?);
                 let mut all_reports = Vec::new();
                 for spec in &specs {
                     all_reports.extend(add_package_graph(spec, &options)?);
                 }
                 print_link_reports(&all_reports);
-                let install = install_locked_packages(project_dir)?;
+                let install = if options.npm_local_paths.is_empty() {
+                    install_locked_packages(project_dir)?
+                } else {
+                    install_project(&options)?
+                };
                 println!();
                 print_install_report(&install);
             }
@@ -903,6 +924,22 @@ fn parse_pip_archive_references(
                 .or_default()
                 .extend(hashes);
         }
+        specs.push(spec);
+    }
+    Ok(specs)
+}
+
+fn parse_npm_archive_references(
+    project_dir: &Path,
+    references: &[String],
+) -> Result<Vec<PackageSpec>, OmcRegistryError> {
+    let mut specs = Vec::new();
+    for reference in references {
+        let Some(spec) = parse_npm_direct_archive_reference(reference, project_dir)? else {
+            return Err(OmcRegistryError::UnsupportedSpec(format!(
+                "unsupported direct npm archive `{reference}`"
+            )));
+        };
         specs.push(spec);
     }
     Ok(specs)
@@ -1322,6 +1359,8 @@ fn parse_npm_compat_action(args: &[String]) -> Result<NpmCompatAction, OmcRegist
     let Some(command) = args.first().map(String::as_str) else {
         return Ok(NpmCompatAction::Install {
             specs: Vec::new(),
+            archive_references: Vec::new(),
+            local_paths: Vec::new(),
             dev: false,
             omit_dev: false,
             allow: Vec::new(),
@@ -1420,16 +1459,31 @@ fn parse_npm_path_args(command: &str, args: &[String]) -> Result<(), OmcRegistry
 }
 
 fn parse_npm_install_args(args: &[String]) -> Result<NpmCompatAction, OmcRegistryError> {
+    let mut archive_references = Vec::new();
+    let mut local_paths = Vec::new();
+    let mut filtered = Vec::new();
+    for arg in args {
+        if is_npm_archive_arg(arg) {
+            archive_references.push(arg.clone());
+        } else if is_npm_local_directory_arg(arg) {
+            local_paths.push(npm_local_path_arg(arg)?);
+        } else {
+            filtered.push(arg.clone());
+        }
+    }
+
     let CommonCompatFlags {
         dev,
         omit_dev,
         allow,
         allow_all_host,
         positionals,
-    } = parse_common_compat_flags(args, true)?;
+    } = parse_common_compat_flags(&filtered, true)?;
 
     Ok(NpmCompatAction::Install {
         specs: positionals,
+        archive_references,
+        local_paths,
         dev,
         omit_dev,
         allow,
@@ -1619,6 +1673,59 @@ fn parse_pip_install_args(args: &[String]) -> Result<PipCompatAction, OmcRegistr
         allow,
         allow_all_host,
     })
+}
+
+fn npm_local_path_arg(value: &str) -> Result<PathBuf, OmcRegistryError> {
+    let path = value
+        .strip_prefix("file:")
+        .or_else(|| value.strip_prefix("link:"))
+        .unwrap_or(value);
+    if path.starts_with("//") {
+        let url = reqwest::Url::parse(value)
+            .map_err(|_| OmcRegistryError::UnsupportedSpec(value.to_owned()))?;
+        return url.to_file_path().map_err(|_| {
+            OmcRegistryError::UnsupportedSpec(format!(
+                "local npm dependency `{value}` must use a valid file URL"
+            ))
+        });
+    }
+    if path.trim().is_empty() {
+        return Err(OmcRegistryError::UnsupportedSpec(
+            "local npm path cannot be empty".to_owned(),
+        ));
+    }
+    Ok(PathBuf::from(path))
+}
+
+fn is_npm_local_directory_arg(value: &str) -> bool {
+    if is_npm_archive_arg(value) {
+        return false;
+    }
+    let value = value
+        .strip_prefix("file:")
+        .or_else(|| value.strip_prefix("link:"))
+        .unwrap_or(value);
+    value == "."
+        || value.starts_with("./")
+        || value.starts_with("../")
+        || value.starts_with('/')
+        || value.starts_with("~/")
+        || value.contains('\\')
+}
+
+fn is_npm_archive_arg(value: &str) -> bool {
+    let path = value.strip_prefix("file:").unwrap_or(value);
+    let path = path.split_once('#').map(|(path, _)| path).unwrap_or(path);
+    let path = path.split_once('?').map(|(path, _)| path).unwrap_or(path);
+    let lower = path.to_ascii_lowercase();
+    (lower.ends_with(".tgz") || lower.ends_with(".tar.gz"))
+        && (path.starts_with("https://")
+            || path.starts_with("http://")
+            || path.starts_with("./")
+            || path.starts_with("../")
+            || path.starts_with('/')
+            || path.starts_with("~/")
+            || path.contains('\\'))
 }
 
 fn pip_local_path_arg(value: &str) -> Result<PathBuf, OmcRegistryError> {
@@ -1978,10 +2085,34 @@ mod tests {
             action,
             NpmCompatAction::Install {
                 specs: vec!["left-pad@1.3.0".to_owned()],
+                archive_references: Vec::new(),
+                local_paths: Vec::new(),
                 dev: true,
                 omit_dev: true,
                 allow: Vec::new(),
                 allow_all_host: true,
+            }
+        );
+
+        let action = parse_npm_compat_action(&args(&[
+            "install",
+            "./pkg.tgz",
+            "file:../other.tgz",
+            "../local-pkg",
+            "@scope/runtime",
+        ]))
+        .unwrap();
+
+        assert_eq!(
+            action,
+            NpmCompatAction::Install {
+                specs: vec!["@scope/runtime".to_owned()],
+                archive_references: vec!["./pkg.tgz".to_owned(), "file:../other.tgz".to_owned()],
+                local_paths: vec![PathBuf::from("../local-pkg")],
+                dev: false,
+                omit_dev: false,
+                allow: Vec::new(),
+                allow_all_host: false,
             }
         );
     }

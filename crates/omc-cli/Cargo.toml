@@ -21,5 +21,6 @@ path = "src/bin/pip.rs"
 clap = { version = "4", features = ["derive"] }
 omc-cap = { path = "../omc-cap" }
 omc-registry = { path = "../omc-registry" }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
 serde_json = "1"
 thiserror = "2"

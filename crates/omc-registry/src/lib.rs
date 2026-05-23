@@ -30,6 +30,7 @@ const MANIFEST: &str = "omc.toml";
 const ARTIFACT_SCHEMA: u32 = 1;
 const ARTIFACT_SIGNING_KEY: &str = "artifact-ed25519.key";
 const MAX_FILE_BYTES: u64 = 2 * 1024 * 1024;
+const NPM_DIRECT_TARBALL_PLACEHOLDER: &str = "__omc_direct_tarball__";
 
 #[derive(Debug, Error)]
 pub enum OmcRegistryError {
@@ -268,6 +269,18 @@ pub struct OmcManifest {
     pub dependencies: BTreeMap<String, String>,
     #[serde(default, rename = "dev-dependencies")]
     pub dev_dependencies: BTreeMap<String, String>,
+    #[serde(
+        default,
+        rename = "npm-local-paths",
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub npm_local_paths: Vec<String>,
+    #[serde(
+        default,
+        rename = "npm-dev-local-paths",
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub npm_dev_local_paths: Vec<String>,
     #[serde(default, skip_serializing_if = "ManifestPolicy::is_empty")]
     pub policy: ManifestPolicy,
     #[serde(default, skip_serializing_if = "ManifestRegistries::is_empty")]
@@ -315,6 +328,8 @@ impl OmcManifest {
             },
             dependencies: BTreeMap::new(),
             dev_dependencies: BTreeMap::new(),
+            npm_local_paths: Vec::new(),
+            npm_dev_local_paths: Vec::new(),
             policy: ManifestPolicy::default(),
             registries: ManifestRegistries::default(),
         }
@@ -524,6 +539,7 @@ pub struct LinkOptions {
     pub pypi_extra_index_urls: Vec<String>,
     pub pypi_find_links: Vec<String>,
     pub pypi_no_index: bool,
+    pub npm_local_paths: Vec<PathBuf>,
     pub python_local_paths: Vec<PathBuf>,
     pub python_vcs_requirements: Vec<PythonVcsRequirement>,
     pub python_vcs_locks: Vec<LockedPythonVcsDependency>,
@@ -548,6 +564,7 @@ impl LinkOptions {
             pypi_extra_index_urls: Vec::new(),
             pypi_find_links: Vec::new(),
             pypi_no_index: false,
+            npm_local_paths: Vec::new(),
             python_local_paths: Vec::new(),
             python_vcs_requirements: Vec::new(),
             python_vcs_locks: Vec::new(),
@@ -731,9 +748,10 @@ pub fn add_package_graph(spec: &PackageSpec, options: &LinkOptions) -> Result<Ve
     let reports = resolve_package_graph(&client, spec, &options)?;
 
     if let Some(root) = reports.first() {
+        let spec = manifest_spec_for_locked_root(spec, &root.locked);
         write_manifest_dependency(
             &options.project_dir,
-            spec,
+            &spec,
             &root.locked.version,
             options.save_dev_dependency,
         )?;
@@ -758,6 +776,41 @@ pub fn remove_manifest_dependency(
             .is_some();
     fs::write(&manifest_path, toml::to_string_pretty(&manifest)?)?;
     Ok(removed)
+}
+
+pub fn add_manifest_npm_local_paths(
+    project_dir: impl AsRef<Path>,
+    paths: &[PathBuf],
+    dev_dependency: bool,
+) -> Result<Vec<String>> {
+    let project_dir = project_dir.as_ref();
+    init_project(project_dir, None)?;
+
+    let manifest_path = project_dir.join(MANIFEST);
+    let mut manifest = read_manifest(&manifest_path)?;
+    let (target, other) = if dev_dependency {
+        (
+            &mut manifest.npm_dev_local_paths,
+            &mut manifest.npm_local_paths,
+        )
+    } else {
+        (
+            &mut manifest.npm_local_paths,
+            &mut manifest.npm_dev_local_paths,
+        )
+    };
+    let mut existing = target.iter().cloned().collect::<BTreeSet<_>>();
+    let mut added = Vec::new();
+    for path in paths {
+        let path = path.to_string_lossy().into_owned();
+        other.retain(|existing| existing != &path);
+        if existing.insert(path.clone()) {
+            added.push(path);
+        }
+    }
+    *target = existing.into_iter().collect();
+    fs::write(&manifest_path, toml::to_string_pretty(&manifest)?)?;
+    Ok(added)
 }
 
 pub fn add_manifest_policy_grants(
@@ -815,6 +868,11 @@ pub fn install_project(options: &LinkOptions) -> Result<InstallReport> {
         &report.npm_bin_dir,
         options.include_dev_dependencies,
     )?;
+    report.npm_bins += install_npm_direct_local_links(
+        &options.npm_local_paths,
+        &report.node_modules,
+        &report.npm_bin_dir,
+    )?;
     report.python_scripts += install_python_local_paths(
         &options.python_local_paths,
         &report.python_site_packages,
@@ -842,6 +900,11 @@ pub fn install_locked_project(options: &LinkOptions) -> Result<InstallReport> {
         &report.npm_bin_dir,
         options.include_dev_dependencies,
     )?;
+    report.npm_bins += install_npm_direct_local_links(
+        &options.npm_local_paths,
+        &report.node_modules,
+        &report.npm_bin_dir,
+    )?;
     report.python_scripts += install_python_local_paths(
         &options.python_local_paths,
         &report.python_site_packages,
@@ -854,12 +917,12 @@ fn project_requested_specs(options: &mut LinkOptions, locked: bool) -> Result<Ve
     let manifest = read_manifest(options.project_dir.join(MANIFEST))?;
     apply_manifest_config(&manifest, options)?;
     let mut specs = Vec::new();
-    for (key, version) in manifest.dependencies {
-        specs.push(PackageSpec::parse(&format!("{key}@{version}"))?);
+    for (key, requirement) in manifest.dependencies {
+        specs.push(parse_manifest_dependency(&key, &requirement)?);
     }
     if options.include_dev_dependencies {
-        for (key, version) in manifest.dev_dependencies {
-            specs.push(PackageSpec::parse(&format!("{key}@{version}"))?);
+        for (key, requirement) in manifest.dev_dependencies {
+            specs.push(parse_manifest_dependency(&key, &requirement)?);
         }
     }
     let discovered = discover_project_requirements_with_options(
@@ -896,6 +959,19 @@ fn project_requested_specs(options: &mut LinkOptions, locked: bool) -> Result<Ve
     let mut seen = BTreeSet::new();
     specs.retain(|spec| seen.insert(spec.requested()));
     Ok(specs)
+}
+
+fn parse_manifest_dependency(key: &str, requirement: &str) -> Result<PackageSpec> {
+    if is_direct_dependency_requirement(requirement) {
+        return PackageSpec::parse(&format!("{key} @ {requirement}"));
+    }
+    PackageSpec::parse(&format!("{key}@{requirement}"))
+}
+
+fn is_direct_dependency_requirement(requirement: &str) -> bool {
+    requirement.starts_with("https://")
+        || requirement.starts_with("file:")
+        || requirement.starts_with("git+")
 }
 
 fn resolve_python_vcs_requirements(
@@ -1464,6 +1540,108 @@ pub fn parse_pypi_direct_archive_reference(
     parse_pypi_direct_archive_url_reference(reference)
 }
 
+pub fn parse_npm_direct_archive_reference(
+    reference: &str,
+    base_dir: impl AsRef<Path>,
+) -> Result<Option<PackageSpec>> {
+    let Some((source_url, local_path)) =
+        npm_direct_cli_tarball_url(reference.trim(), base_dir.as_ref())?
+    else {
+        return Ok(None);
+    };
+
+    let name = if let Some(path) = local_path {
+        npm_tarball_manifest_name(&path)?
+    } else {
+        NPM_DIRECT_TARBALL_PLACEHOLDER.to_owned()
+    };
+
+    Ok(Some(PackageSpec::with_direct_url(
+        Ecosystem::Npm,
+        name,
+        source_url,
+        BTreeSet::new(),
+    )))
+}
+
+fn npm_direct_cli_tarball_url(
+    requirement: &str,
+    base_dir: &Path,
+) -> Result<Option<(String, Option<PathBuf>)>> {
+    if requirement.is_empty() {
+        return Ok(None);
+    }
+
+    if let Some(url) = npm_direct_tarball_url(requirement, base_dir)? {
+        let local_path = npm_file_url_path(&url)?;
+        return Ok(Some((url, local_path)));
+    }
+
+    if !is_explicit_local_path(requirement) {
+        return Ok(None);
+    }
+
+    let path = expand_local_path(requirement, base_dir);
+    require_npm_tarball_path(path.to_string_lossy().as_ref())?;
+    let url = reqwest::Url::from_file_path(&path).map_err(|_| {
+        OmcRegistryError::UnsupportedSpec(format!(
+            "direct npm tarball path `{}` could not be converted to a file URL",
+            path.display()
+        ))
+    })?;
+    Ok(Some((url.to_string(), Some(path))))
+}
+
+fn npm_file_url_path(url: &str) -> Result<Option<PathBuf>> {
+    let url =
+        reqwest::Url::parse(url).map_err(|_| OmcRegistryError::UnsupportedSpec(url.to_owned()))?;
+    if url.scheme() != "file" {
+        return Ok(None);
+    }
+    url.to_file_path().map(Some).map_err(|_| {
+        OmcRegistryError::UnsupportedSpec(format!(
+            "direct npm tarball URL `{url}` must use a valid file URL"
+        ))
+    })
+}
+
+fn npm_tarball_manifest_name(path: &Path) -> Result<String> {
+    let bytes = fs::read(path)?;
+    let manifest = npm_manifest_from_tgz(&bytes)?;
+    manifest
+        .name
+        .filter(|name| !name.is_empty())
+        .ok_or_else(|| {
+            OmcRegistryError::UnsupportedSpec(format!(
+                "direct npm tarball `{}` did not declare a package name",
+                path.display()
+            ))
+        })
+}
+
+fn is_explicit_local_path(value: &str) -> bool {
+    value == "."
+        || value.starts_with("./")
+        || value.starts_with("../")
+        || value.starts_with('/')
+        || value.starts_with("~/")
+        || value.contains('\\')
+}
+
+fn expand_local_path(value: &str, base_dir: &Path) -> PathBuf {
+    if let Some(rest) = value.strip_prefix("~/") {
+        if let Some(home) = env::var_os("HOME") {
+            return PathBuf::from(home).join(rest);
+        }
+    }
+    let path = Path::new(value);
+    if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        base_dir.join(path)
+    }
+}
+
 pub fn read_package_scripts(project_dir: impl AsRef<Path>) -> Result<BTreeMap<String, String>> {
     let project_dir = project_dir.as_ref();
     let mut scripts = BTreeMap::new();
@@ -1849,9 +2027,10 @@ fn link_package_inner(
     }
 
     if update_manifest {
+        let spec = manifest_spec_for_locked_root(spec, &locked);
         write_manifest_dependency(
             &options.project_dir,
-            spec,
+            &spec,
             &resolved.version,
             options.save_dev_dependency,
         )?;
@@ -1882,19 +2061,33 @@ fn write_manifest_dependency(
 ) -> Result<()> {
     let manifest_path = project_dir.join(MANIFEST);
     let mut manifest = read_manifest(&manifest_path)?;
+    let requirement = spec
+        .direct_url
+        .as_ref()
+        .cloned()
+        .unwrap_or_else(|| version.to_owned());
     if dev_dependency {
         manifest.dependencies.remove(&spec.package_key());
         manifest
             .dev_dependencies
-            .insert(spec.package_key(), version.to_owned());
+            .insert(spec.package_key(), requirement);
     } else {
         manifest.dev_dependencies.remove(&spec.package_key());
         manifest
             .dependencies
-            .insert(spec.package_key(), version.to_owned());
+            .insert(spec.package_key(), requirement);
     }
     fs::write(&manifest_path, toml::to_string_pretty(&manifest)?)?;
     Ok(())
+}
+
+fn manifest_spec_for_locked_root(spec: &PackageSpec, locked: &LockedPackage) -> PackageSpec {
+    if spec.direct_url.is_none() || spec.name == locked.name {
+        return spec.clone();
+    }
+    let mut spec = spec.clone();
+    spec.name = locked.name.clone();
+    spec
 }
 
 pub fn read_lockfile(path: impl AsRef<Path>) -> Result<OmcLock> {
@@ -1926,6 +2119,19 @@ fn apply_manifest_config(manifest: &OmcManifest, options: &mut LinkOptions) -> R
             .allowed_capabilities
             .push(parse_capability_grant(grant)?);
     }
+    let project_dir = options.project_dir.clone();
+    for path in &manifest.npm_local_paths {
+        options
+            .npm_local_paths
+            .push(resolve_manifest_path(&project_dir, path));
+    }
+    if options.include_dev_dependencies {
+        for path in &manifest.npm_dev_local_paths {
+            options
+                .npm_local_paths
+                .push(resolve_manifest_path(&project_dir, path));
+        }
+    }
     if options.pypi_index_url.is_none() {
         options.pypi_index_url = manifest
             .registries
@@ -1942,12 +2148,20 @@ fn apply_manifest_config(manifest: &OmcManifest, options: &mut LinkOptions) -> R
     );
     let manifest_or_explicit_index = options.pypi_index_url.is_some();
     if !manifest_or_explicit_index {
-        let project_dir = options.project_dir.clone();
         apply_pip_config_files(&project_dir, options)?;
     }
     apply_pypi_environment_config(options, !manifest_or_explicit_index);
     dedupe_pypi_extra_index_urls(options);
     Ok(())
+}
+
+fn resolve_manifest_path(project_dir: &Path, path: &str) -> PathBuf {
+    let path = PathBuf::from(path);
+    if path.is_absolute() {
+        path
+    } else {
+        project_dir.join(path)
+    }
 }
 
 fn apply_pypi_environment_config(options: &mut LinkOptions, override_index: bool) {
@@ -5566,6 +5780,49 @@ fn install_npm_project_links(
         )?)
 }
 
+fn install_npm_direct_local_links(
+    paths: &[PathBuf],
+    node_modules: &Path,
+    bin_dir: &Path,
+) -> Result<usize> {
+    let mut count = 0;
+    let mut seen = BTreeSet::new();
+    for path in paths {
+        if !seen.insert(path.to_string_lossy().into_owned()) {
+            continue;
+        }
+        if !path.is_dir() {
+            return Err(OmcRegistryError::UnsupportedSpec(format!(
+                "local npm path `{}` must point to an existing directory",
+                path.display()
+            )));
+        }
+        let package_json = path.join("package.json");
+        if !package_json.exists() {
+            return Err(OmcRegistryError::UnsupportedSpec(format!(
+                "local npm path `{}` must contain package.json",
+                path.display()
+            )));
+        }
+        let package =
+            serde_json::from_str::<ProjectPackageJson>(&fs::read_to_string(&package_json)?)?;
+        let Some(name) = package.name.as_deref().filter(|name| !name.is_empty()) else {
+            return Err(OmcRegistryError::UnsupportedSpec(format!(
+                "local npm path `{}` package.json must declare name",
+                path.display()
+            )));
+        };
+        let target = npm_install_target(node_modules, name);
+        remove_path_if_exists(&target)?;
+        if let Some(parent) = target.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        create_directory_link(path, &target)?;
+        count += install_npm_bins(path, name, bin_dir)?;
+    }
+    Ok(count)
+}
+
 fn install_npm_root_bins(project_dir: &Path, bin_dir: &Path) -> Result<usize> {
     let package_json = project_dir.join("package.json");
     if !package_json.exists() {
@@ -6866,12 +7123,25 @@ fn resolve_npm_direct_tarball(
     };
     let bytes = download_artifact(client, &preliminary, &options.project_dir)?;
     let manifest = npm_manifest_from_tgz(&bytes)?;
+    let resolved_name = if spec.name == NPM_DIRECT_TARBALL_PLACEHOLDER {
+        manifest
+            .name
+            .clone()
+            .filter(|name| !name.is_empty())
+            .ok_or_else(|| {
+                OmcRegistryError::UnsupportedSpec(format!(
+                    "direct npm tarball `{source_url}` did not declare a package name"
+                ))
+            })?
+    } else {
+        spec.name.clone()
+    };
     let platform_compatible = npm_manifest_platform_compatible(&manifest);
     let dependencies = npm_manifest_runtime_dependencies(&manifest);
 
     Ok(ResolvedPackage {
         ecosystem: Ecosystem::Npm,
-        name: spec.name.clone(),
+        name: resolved_name,
         version: manifest.version,
         source_url,
         download_url: None,
@@ -10414,6 +10684,8 @@ struct NpmVersion {
 
 #[derive(Debug, Deserialize)]
 struct NpmPackageManifest {
+    #[serde(default)]
+    name: Option<String>,
     version: String,
     #[serde(default)]
     os: Option<NpmStringList>,
@@ -10637,6 +10909,54 @@ mod tests {
             spec.direct_url.as_deref(),
             Some("https://example.invalid/local-pkg-1.0.0.tgz")
         );
+    }
+
+    #[test]
+    fn parses_npm_direct_local_tarball_reference() {
+        let dir = tempfile::tempdir().unwrap();
+        let archive = dir.path().join("local-pkg-1.0.0.tgz");
+        fs::write(
+            &archive,
+            npm_tgz_for_test(r#"{ "name": "local-pkg", "version": "1.0.0" }"#),
+        )
+        .unwrap();
+
+        let spec = parse_npm_direct_archive_reference("./local-pkg-1.0.0.tgz", dir.path())
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(spec.name, "local-pkg");
+        assert_eq!(spec.ecosystem, Ecosystem::Npm);
+        assert!(spec.direct_url.as_deref().unwrap().starts_with("file://"));
+        assert!(spec
+            .direct_url
+            .as_deref()
+            .unwrap()
+            .ends_with("/local-pkg-1.0.0.tgz"));
+    }
+
+    #[test]
+    fn writes_direct_url_manifest_dependencies() {
+        let dir = tempfile::tempdir().unwrap();
+        let archive = dir.path().join("local-pkg-1.0.0.tgz");
+        fs::write(
+            &archive,
+            npm_tgz_for_test(r#"{ "name": "local-pkg", "version": "1.0.0" }"#),
+        )
+        .unwrap();
+        let spec = parse_npm_direct_archive_reference("./local-pkg-1.0.0.tgz", dir.path())
+            .unwrap()
+            .unwrap();
+
+        add_package_graph(&spec, &LinkOptions::new(dir.path())).unwrap();
+
+        let manifest = read_manifest(dir.path().join("omc.toml")).unwrap();
+        let requirement = manifest.dependencies.get("npm:local-pkg").unwrap();
+        assert!(requirement.starts_with("file://"));
+        assert!(parse_manifest_dependency("npm:local-pkg", requirement)
+            .unwrap()
+            .direct_url
+            .is_some());
     }
 
     #[test]
@@ -11033,6 +11353,64 @@ mod tests {
     }
 
     #[test]
+    fn installs_manifest_npm_local_paths() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir_all(dir.path().join("vendor/direct-pkg")).unwrap();
+        fs::write(
+            dir.path().join("vendor/direct-pkg/index.js"),
+            "module.exports = 43;\n",
+        )
+        .unwrap();
+        fs::write(
+            dir.path().join("vendor/direct-pkg/package.json"),
+            r#"{ "name": "direct-pkg", "bin": { "direct-tool": "cli.js" } }"#,
+        )
+        .unwrap();
+        fs::write(
+            dir.path().join("vendor/direct-pkg/cli.js"),
+            "#!/usr/bin/env node\n",
+        )
+        .unwrap();
+
+        add_manifest_npm_local_paths(dir.path(), &[PathBuf::from("vendor/direct-pkg")], false)
+            .unwrap();
+        let report = install_project(&LinkOptions::new(dir.path())).unwrap();
+
+        assert_eq!(report.npm_bins, 1);
+        assert_eq!(
+            fs::read_to_string(dir.path().join("node_modules/direct-pkg/index.js")).unwrap(),
+            "module.exports = 43;\n"
+        );
+        assert!(dir.path().join("node_modules/.bin/direct-tool").exists());
+        let manifest = read_manifest(dir.path().join("omc.toml")).unwrap();
+        assert_eq!(manifest.npm_local_paths, vec!["vendor/direct-pkg"]);
+    }
+
+    #[test]
+    fn dev_manifest_npm_local_paths_respect_omit_dev() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir_all(dir.path().join("vendor/dev-pkg")).unwrap();
+        fs::write(
+            dir.path().join("vendor/dev-pkg/package.json"),
+            r#"{ "name": "dev-pkg" }"#,
+        )
+        .unwrap();
+
+        add_manifest_npm_local_paths(dir.path(), &[PathBuf::from("vendor/dev-pkg")], true).unwrap();
+
+        let mut options = LinkOptions::new(dir.path());
+        options.include_dev_dependencies = false;
+        install_project(&options).unwrap();
+        assert!(!dir.path().join("node_modules/dev-pkg").exists());
+
+        options.include_dev_dependencies = true;
+        install_project(&options).unwrap();
+        assert!(dir.path().join("node_modules/dev-pkg").exists());
+        let manifest = read_manifest(dir.path().join("omc.toml")).unwrap();
+        assert_eq!(manifest.npm_dev_local_paths, vec!["vendor/dev-pkg"]);
+    }
+
+    #[test]
     fn reads_workspace_package_json_specs_from_object_form() {
         let dir = tempfile::tempdir().unwrap();
         fs::create_dir_all(dir.path().join("apps/web")).unwrap();
@@ -11068,6 +11446,8 @@ mod tests {
             },
             dependencies: BTreeMap::from([("npm:left-pad".to_owned(), "1.3.0".to_owned())]),
             dev_dependencies: BTreeMap::from([("npm:is-odd".to_owned(), "3.0.1".to_owned())]),
+            npm_local_paths: Vec::new(),
+            npm_dev_local_paths: Vec::new(),
             policy: ManifestPolicy {
                 allow: vec!["http:api.example.com".to_owned()],
             },

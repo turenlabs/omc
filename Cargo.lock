@@ -842,6 +842,7 @@ dependencies = [
  "clap",
  "omc-cap",
  "omc-registry",
+ "reqwest",
  "serde_json",
  "thiserror",
 ]

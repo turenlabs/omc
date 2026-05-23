@@ -186,6 +186,8 @@ install PyPI wheels and pure Python sdists into .omc/python/site-packages
 verify cached archive sha256 from omc.lock before extracting locked installs
 install npm package bins, including root project bins, into node_modules/.bin
 link npm workspace/local directory packages into node_modules and node_modules/.bin
+persist direct npm local directory installs in omc.toml, including dev-only
+local paths, and link them during install/ci
 clone Python git/VCS dependencies into .omc/python/vcs and install them as isolated local imports
 record resolved Python git/VCS commits in omc.lock and reuse those commits for --locked/ci installs
 cache pinned Python git/VCS checkout archives under .omc/cache/python-vcs for locked restore
@@ -275,6 +277,10 @@ Supported now:
 - npm `overrides` and Yarn-style `resolutions` as version constraints
 - npm workspace and local directory package linking into `node_modules` and
   `node_modules/.bin`
+- direct `npm install ./package.tgz`, `npm install file:./package.tgz`, and
+  `npm install ./local-package` compatibility paths through OMC-managed
+  artifacts or local links; local package directories installed with `-D`
+  are omitted by `--omit-dev`
 - production-style `omc install --omit-dev` installs
 - explicit `omc install -r FILE` and `omc ci -r FILE` requirements-file inputs
 - npm `optionalDependencies` and required `peerDependencies` ingestion
@@ -369,7 +375,8 @@ Supported now:
 - `omc npm` compatibility commands for common `install`, `ci`, `test`,
   `start`, `stop`, `restart`, `run`, `exec`, `remove`, `bin`, `root`,
   `prefix`, and `list` / `list --json` flows without delegating to npm, plus a
-  direct `npm` compatibility binary
+  direct `npm` compatibility binary; direct local npm tarballs and local
+  package directories are accepted as install inputs
 - `omc pip` compatibility commands for common `install`, `uninstall`, `freeze`,
   `show`, and `list --format=columns|freeze|json` flows, including `-r`, index
   URL, constraints, extra-index, find-links, and no-index install flags without
