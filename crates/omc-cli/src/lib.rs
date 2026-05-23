@@ -4154,6 +4154,8 @@ fn behavior_label(behavior: Behavior) -> &'static str {
 }
 
 fn parse_npm_compat_action(args: &[String]) -> Result<NpmCompatAction, OmcRegistryError> {
+    let normalized = normalize_npm_global_args(args)?;
+    let args = normalized.as_slice();
     let Some(command) = args.first().map(String::as_str) else {
         return Ok(NpmCompatAction::Install {
             specs: Vec::new(),
@@ -4281,6 +4283,170 @@ fn parse_npm_compat_action(args: &[String]) -> Result<NpmCompatAction, OmcRegist
             "unsupported npm compatibility command `{other}`"
         ))),
     }
+}
+
+fn normalize_npm_global_args(args: &[String]) -> Result<Vec<String>, OmcRegistryError> {
+    let mut preserved = Vec::new();
+    let mut index = 0;
+    while index < args.len() {
+        let arg = &args[index];
+        if matches!(arg.as_str(), "--version" | "-v") {
+            return Ok(vec![arg.clone()]);
+        } else if npm_global_preserved_bool_flag(arg) {
+            preserved.push(arg.clone());
+        } else if npm_global_preserved_value_flag(arg) {
+            preserved.push(arg.clone());
+            index += 1;
+            let Some(value) = args.get(index) else {
+                return Err(OmcRegistryError::UnsupportedSpec(format!(
+                    "{arg} needs a value"
+                )));
+            };
+            preserved.push(value.clone());
+        } else if npm_global_preserved_equals_flag(arg) {
+            preserved.push(arg.clone());
+        } else if npm_global_ignored_bool_flag(arg) || npm_global_ignored_equals_flag(arg) {
+        } else if npm_global_ignored_value_flag(arg) {
+            index += 1;
+            if args.get(index).is_none() {
+                return Err(OmcRegistryError::UnsupportedSpec(format!(
+                    "{arg} needs a value"
+                )));
+            }
+        } else if arg.starts_with('-') {
+            return Ok(args[index..].to_vec());
+        } else {
+            if preserved.is_empty() && index == 0 {
+                return Ok(args.to_vec());
+            }
+            let preserved = npm_preserved_global_args_for_command(arg, preserved);
+            let mut normalized = Vec::with_capacity(args.len());
+            normalized.push(arg.clone());
+            normalized.extend(preserved);
+            normalized.extend(args[index + 1..].iter().cloned());
+            return Ok(normalized);
+        }
+        index += 1;
+    }
+
+    if preserved.is_empty() {
+        Ok(Vec::new())
+    } else {
+        let preserved = npm_preserved_global_args_for_command("install", preserved);
+        let mut normalized = Vec::with_capacity(preserved.len() + 1);
+        normalized.push("install".to_owned());
+        normalized.extend(preserved);
+        Ok(normalized)
+    }
+}
+
+fn npm_preserved_global_args_for_command(command: &str, args: Vec<String>) -> Vec<String> {
+    let mut selected = Vec::new();
+    let mut index = 0;
+    while index < args.len() {
+        let arg = &args[index];
+        let include = npm_global_arg_supported_by_command(command, arg);
+        if include {
+            selected.push(arg.clone());
+        }
+        if npm_global_preserved_value_flag(arg) {
+            index += 1;
+            if include {
+                if let Some(value) = args.get(index) {
+                    selected.push(value.clone());
+                }
+            }
+        }
+        index += 1;
+    }
+    selected
+}
+
+fn npm_global_arg_supported_by_command(command: &str, arg: &str) -> bool {
+    if matches!(arg, "--global" | "-g") {
+        return true;
+    }
+    if matches!(arg, "--registry") || arg.starts_with("--registry=") {
+        return matches!(
+            command,
+            "install"
+                | "i"
+                | "add"
+                | "update"
+                | "up"
+                | "upgrade"
+                | "ci"
+                | "outdated"
+                | "view"
+                | "info"
+                | "show"
+                | "v"
+                | "config"
+                | "c"
+                | "get"
+        );
+    }
+    if matches!(arg, "--userconfig") || arg.starts_with("--userconfig=") {
+        return matches!(command, "config" | "c" | "get");
+    }
+    if arg == "--json" {
+        return matches!(
+            command,
+            "version"
+                | "list"
+                | "ls"
+                | "outdated"
+                | "audit"
+                | "pkg"
+                | "view"
+                | "info"
+                | "show"
+                | "v"
+                | "config"
+                | "c"
+                | "get"
+        );
+    }
+    false
+}
+
+fn npm_global_preserved_bool_flag(arg: &str) -> bool {
+    matches!(arg, "--json" | "--global" | "-g")
+}
+
+fn npm_global_preserved_value_flag(arg: &str) -> bool {
+    matches!(arg, "--registry" | "--userconfig")
+}
+
+fn npm_global_preserved_equals_flag(arg: &str) -> bool {
+    ["--registry=", "--userconfig="]
+        .iter()
+        .any(|prefix| arg.starts_with(prefix))
+}
+
+fn npm_global_ignored_bool_flag(arg: &str) -> bool {
+    matches!(
+        arg,
+        "--silent"
+            | "-s"
+            | "--quiet"
+            | "-q"
+            | "--no-progress"
+            | "--progress=false"
+            | "--no-color"
+            | "--color=false"
+            | "--foreground-scripts"
+    )
+}
+
+fn npm_global_ignored_value_flag(arg: &str) -> bool {
+    matches!(arg, "--cache" | "--loglevel")
+}
+
+fn npm_global_ignored_equals_flag(arg: &str) -> bool {
+    ["--cache=", "--loglevel="]
+        .iter()
+        .any(|prefix| arg.starts_with(prefix))
 }
 
 fn parse_npm_path_args(command: &str, args: &[String]) -> Result<(), OmcRegistryError> {
@@ -5282,6 +5448,8 @@ fn npm_exec_equals_value_flag(arg: &str) -> bool {
 }
 
 fn parse_pip_compat_action(args: &[String]) -> Result<PipCompatAction, OmcRegistryError> {
+    let normalized = normalize_pip_global_args(args)?;
+    let args = normalized.as_slice();
     let Some(command) = args.first().map(String::as_str) else {
         return Err(OmcRegistryError::UnsupportedSpec(
             "pip compatibility needs a command such as install, uninstall, freeze, or list"
@@ -5313,6 +5481,77 @@ fn parse_pip_compat_action(args: &[String]) -> Result<PipCompatAction, OmcRegist
             "unsupported pip compatibility command `{other}`"
         ))),
     }
+}
+
+fn normalize_pip_global_args(args: &[String]) -> Result<Vec<String>, OmcRegistryError> {
+    let mut index = 0;
+    while index < args.len() {
+        let arg = &args[index];
+        if matches!(arg.as_str(), "--version" | "-V") {
+            return Ok(vec![arg.clone()]);
+        } else if pip_global_ignored_bool_flag(arg) || pip_global_ignored_equals_flag(arg) {
+        } else if pip_global_ignored_value_flag(arg) {
+            index += 1;
+            if args.get(index).is_none() {
+                return Err(OmcRegistryError::UnsupportedSpec(format!(
+                    "{arg} needs a value"
+                )));
+            }
+        } else if arg.starts_with('-') {
+            return Ok(args[index..].to_vec());
+        } else if index == 0 {
+            return Ok(args.to_vec());
+        } else {
+            return Ok(args[index..].to_vec());
+        }
+        index += 1;
+    }
+    Ok(Vec::new())
+}
+
+fn pip_global_ignored_bool_flag(arg: &str) -> bool {
+    matches!(
+        arg,
+        "--disable-pip-version-check"
+            | "--no-cache-dir"
+            | "--isolated"
+            | "--require-virtualenv"
+            | "-q"
+            | "--quiet"
+            | "-v"
+            | "--verbose"
+    )
+}
+
+fn pip_global_ignored_value_flag(arg: &str) -> bool {
+    matches!(
+        arg,
+        "--log"
+            | "--proxy"
+            | "--retries"
+            | "--timeout"
+            | "--exists-action"
+            | "--trusted-host"
+            | "--cert"
+            | "--client-cert"
+            | "--cache-dir"
+    )
+}
+
+fn pip_global_ignored_equals_flag(arg: &str) -> bool {
+    [
+        "--log=",
+        "--proxy=",
+        "--retries=",
+        "--timeout=",
+        "--exists-action=",
+        "--trusted-host=",
+        "--cert=",
+        "--client-cert=",
+        "--cache-dir=",
+    ]
+    .iter()
+    .any(|prefix| arg.starts_with(prefix))
 }
 
 fn parse_pip_index_args(args: &[String]) -> Result<PipCompatAction, OmcRegistryError> {
@@ -7067,6 +7306,55 @@ mod tests {
             NpmCompatAction::Version
         );
         assert_eq!(
+            parse_npm_compat_action(&args(&["--silent", "--version"])).unwrap(),
+            NpmCompatAction::Version
+        );
+        assert_eq!(
+            parse_npm_compat_action(&args(&[
+                "--silent",
+                "--registry",
+                "https://registry.example.invalid/npm",
+                "install",
+                "left-pad",
+            ]))
+            .unwrap(),
+            NpmCompatAction::Install {
+                specs: vec!["left-pad".to_owned()],
+                archive_references: Vec::new(),
+                local_paths: Vec::new(),
+                save: true,
+                dev: false,
+                omit_dev: false,
+                lock_only: false,
+                npm_registry: Some("https://registry.example.invalid/npm".to_owned()),
+                allow: Vec::new(),
+                allow_all_host: false,
+            }
+        );
+        assert_eq!(
+            parse_npm_compat_action(&args(&["--json", "view", "left-pad", "version"])).unwrap(),
+            NpmCompatAction::View {
+                spec: "left-pad".to_owned(),
+                fields: vec!["version".to_owned()],
+                json: true,
+                npm_registry: None,
+            }
+        );
+        assert_eq!(
+            parse_npm_compat_action(&args(&[
+                "--registry=https://registry.example.invalid/npm",
+                "run",
+                "build",
+            ]))
+            .unwrap(),
+            NpmCompatAction::RunScript {
+                command: "run".to_owned(),
+                name: "build".to_owned(),
+                args: Vec::new(),
+                if_present: false,
+            }
+        );
+        assert_eq!(
             parse_npm_compat_action(&args(&[
                 "init",
                 "-y",
@@ -7934,6 +8222,10 @@ mod tests {
     #[test]
     fn parses_pip_install_requirements_and_indexes() {
         let action = parse_pip_compat_action(&args(&[
+            "--disable-pip-version-check",
+            "--quiet",
+            "--timeout",
+            "5",
             "install",
             "-r",
             "requirements.txt",
@@ -8185,6 +8477,10 @@ mod tests {
     fn parses_pip_uninstall_and_freeze() {
         assert_eq!(
             parse_pip_compat_action(&args(&["--version"])).unwrap(),
+            PipCompatAction::Version
+        );
+        assert_eq!(
+            parse_pip_compat_action(&args(&["--quiet", "--version"])).unwrap(),
             PipCompatAction::Version
         );
         assert_eq!(

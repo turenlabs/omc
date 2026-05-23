@@ -428,7 +428,10 @@ Supported now:
   project-local executables; `--no-save`,
   `--package-lock-only`, `--package-lock=false`, `--registry`, `--omit=...`,
   `--include=...`, and common audit/fund/peer/install-strategy flags are
-  understood for install/ci compatibility; package scripts receive npm-style
+  understood for install/ci compatibility; common global npm flags such as
+  `--silent`, `--loglevel`, and `--cache` are accepted before the subcommand,
+  while `--registry`, `--userconfig`, and `--json` are forwarded to subcommands
+  that support them; package scripts receive npm-style
   lifecycle/package environment variables such as `npm_lifecycle_event`,
   `npm_lifecycle_script`, `npm_package_name`, `npm_package_version`,
   `npm_package_config_*`, `npm_package_bin_*`, `npm_package_json`,
@@ -444,7 +447,10 @@ Supported now:
   constraints, extra-index, find-links, no-index,
   require-hashes, no-deps, target-directory, trusted-host, retry/timeout,
   reinstall, warning, build-isolation, and binary-policy install flags without
-  delegating to pip; `pip uninstall -r requirements.txt` removes named
+  delegating to pip; common global pip flags such as
+  `--disable-pip-version-check`, `--quiet`, `--timeout`, `--retries`,
+  `--trusted-host`, `--cert`, `--client-cert`, and `--cache-dir` are accepted
+  before the subcommand; `pip uninstall -r requirements.txt` removes named
   requirements from the OMC manifest and reinstalls the remaining graph; common
   read-only `pip freeze` / `pip list` scope flags such as `--all`, `--local`,
   `--user`, `--path`, `--exclude`, and `--exclude-editable` are accepted;
