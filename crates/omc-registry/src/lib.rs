@@ -4829,7 +4829,7 @@ fn install_npm_bins(package_dir: &Path, package_name: &str, bin_dir: &Path) -> R
 fn install_python_entry_points(entry_points: &[String], bin_dir: &Path) -> Result<usize> {
     let entries = entry_points
         .iter()
-        .flat_map(|content| parse_console_scripts(content))
+        .flat_map(|content| parse_python_entry_points(content))
         .collect::<Vec<_>>();
     install_python_entry_point_scripts(&entries, bin_dir)
 }
@@ -4865,6 +4865,7 @@ fn read_python_local_entry_points(package_dir: &Path) -> Result<Vec<PythonEntryP
     let mut entries = Vec::new();
     if let Some(project) = pyproject.project {
         collect_python_script_entries(project.scripts, &mut entries);
+        collect_python_script_entries(project.gui_scripts, &mut entries);
     }
     if let Some(poetry) = pyproject.tool.and_then(|tool| tool.poetry) {
         collect_python_script_entries(poetry.scripts, &mut entries);
@@ -4883,8 +4884,8 @@ fn collect_python_script_entries(
     );
 }
 
-fn parse_console_scripts(content: &str) -> Vec<PythonEntryPoint> {
-    let mut in_console_scripts = false;
+fn parse_python_entry_points(content: &str) -> Vec<PythonEntryPoint> {
+    let mut in_supported_scripts = false;
     let mut entries = Vec::new();
 
     for raw_line in content.lines() {
@@ -4893,10 +4894,10 @@ fn parse_console_scripts(content: &str) -> Vec<PythonEntryPoint> {
             continue;
         }
         if line.starts_with('[') && line.ends_with(']') {
-            in_console_scripts = line == "[console_scripts]";
+            in_supported_scripts = matches!(line, "[console_scripts]" | "[gui_scripts]");
             continue;
         }
-        if !in_console_scripts {
+        if !in_supported_scripts {
             continue;
         }
 
@@ -8046,6 +8047,8 @@ struct PyProjectProject {
     optional_dependencies: BTreeMap<String, Vec<String>>,
     #[serde(default)]
     scripts: BTreeMap<String, String>,
+    #[serde(default, rename = "gui-scripts")]
+    gui_scripts: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -9859,6 +9862,9 @@ packages:
 
             [project.scripts]
             local-cli = "localpkg.cli:main"
+
+            [project.gui-scripts]
+            local-gui = "localpkg.gui:main"
             "#,
         )
         .unwrap();
@@ -9866,7 +9872,7 @@ packages:
         let scripts =
             install_python_local_paths(std::slice::from_ref(&local), &site_packages, &bin_dir)
                 .unwrap();
-        assert_eq!(scripts, 1);
+        assert_eq!(scripts, 2);
 
         let expected = fs::canonicalize(src).unwrap();
         let content =
@@ -9874,6 +9880,8 @@ packages:
         assert_eq!(content.trim(), expected.to_string_lossy());
         let script = fs::read_to_string(bin_dir.join("local-cli")).unwrap();
         assert!(script.contains("from localpkg.cli import main"));
+        let script = fs::read_to_string(bin_dir.join("local-gui")).unwrap();
+        assert!(script.contains("from localpkg.gui import main"));
     }
 
     #[test]
@@ -11242,23 +11250,30 @@ wheels = [
     }
 
     #[test]
-    fn parses_console_script_entry_points() {
-        let entries = parse_console_scripts(
+    fn parses_python_script_entry_points() {
+        let entries = parse_python_entry_points(
             r#"
             [console_scripts]
             normalizer = charset_normalizer.cli.normalizer:cli_detect
 
             [gui_scripts]
-            ignored = ignored:main
+            image-viewer = localpkg.gui:main
             "#,
         );
         assert_eq!(
             entries,
-            vec![PythonEntryPoint {
-                name: "normalizer".to_owned(),
-                module: "charset_normalizer.cli.normalizer".to_owned(),
-                function: "cli_detect".to_owned(),
-            }]
+            vec![
+                PythonEntryPoint {
+                    name: "normalizer".to_owned(),
+                    module: "charset_normalizer.cli.normalizer".to_owned(),
+                    function: "cli_detect".to_owned(),
+                },
+                PythonEntryPoint {
+                    name: "image-viewer".to_owned(),
+                    module: "localpkg.gui".to_owned(),
+                    function: "main".to_owned(),
+                }
+            ]
         );
     }
 
