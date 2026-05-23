@@ -118,7 +118,7 @@ cargo run -p omc-cli -- --project-dir /tmp/omc-demo remove npm:is-odd
 For existing projects, `install` reads normal project files:
 
 ```text
-package.json       root/workspace dependencies, devDependencies, optionalDependencies, peers, HTTPS/file tarball deps; use --omit-dev for production installs
+package.json       root/workspace dependencies, devDependencies, optionalDependencies, peers, HTTPS/file tarball deps, local file/link dirs; use --omit-dev for production installs
 .npmrc             npm registry, scoped registry, and host-scoped auth token configuration
 package-lock.json  exact versions, resolved tarball URLs, and integrity hashes for uniquely locked npm packages
 npm-shrinkwrap.json exact versions, resolved tarball URLs, and integrity hashes for uniquely locked npm packages
@@ -240,7 +240,8 @@ Supported now:
   filtering
 - recursive runtime dependency locking
 - root and npm workspace `package.json` dependency/devDependency ingestion,
-  including HTTPS and local `file:` `.tgz` / `.tar.gz` tarball dependencies
+  including HTTPS/local `file:` `.tgz` / `.tar.gz` tarball dependencies and
+  local `file:` / `link:` directory dependencies
 - npm workspace package linking into `node_modules`
 - production-style `omc install --omit-dev` installs
 - npm `optionalDependencies` and required `peerDependencies` ingestion

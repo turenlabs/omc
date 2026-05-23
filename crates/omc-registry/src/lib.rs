@@ -674,7 +674,13 @@ pub fn install_project(options: &LinkOptions) -> Result<InstallReport> {
     }
 
     prune_lockfile(&options.project_dir, &retained)?;
-    let report = install_locked_packages(&options.project_dir)?;
+    let lock = read_lockfile(options.project_dir.join(LOCKFILE))?;
+    let report = install_lock(&options.project_dir, &lock)?;
+    install_npm_project_links(
+        &options.project_dir,
+        &report.node_modules,
+        options.include_dev_dependencies,
+    )?;
     install_python_local_paths(&options.python_local_paths, &report.python_site_packages)?;
     Ok(report)
 }
@@ -692,6 +698,11 @@ pub fn install_locked_project(options: &LinkOptions) -> Result<InstallReport> {
         .retain(|package| retained.contains(&locked_package_key(package)));
 
     let report = install_lock(&options.project_dir, &selected)?;
+    install_npm_project_links(
+        &options.project_dir,
+        &report.node_modules,
+        options.include_dev_dependencies,
+    )?;
     install_python_local_paths(&options.python_local_paths, &report.python_site_packages)?;
     Ok(report)
 }
@@ -1605,7 +1616,11 @@ fn npm_package_json_dependency_spec(
     base_dir: &Path,
 ) -> Result<Option<PackageSpec>> {
     let requirement = requirement.trim();
-    if requirement.starts_with("workspace:") || requirement.starts_with("link:") {
+    if requirement.starts_with("workspace:") {
+        return Ok(None);
+    }
+
+    if npm_local_directory_requirement_path(requirement, base_dir)?.is_some() {
         return Ok(None);
     }
 
@@ -1623,6 +1638,59 @@ fn npm_package_json_dependency_spec(
         name,
         Some(requirement.to_owned()),
     )))
+}
+
+fn npm_local_directory_requirement_path(
+    requirement: &str,
+    base_dir: &Path,
+) -> Result<Option<PathBuf>> {
+    if let Some(path) = npm_local_protocol_path(requirement, "link:", base_dir)? {
+        if path.is_dir() {
+            return Ok(Some(path));
+        }
+        return Err(OmcRegistryError::UnsupportedSpec(format!(
+            "local npm link dependency `{requirement}` must point to an existing directory"
+        )));
+    }
+
+    let Some(path) = npm_local_protocol_path(requirement, "file:", base_dir)? else {
+        return Ok(None);
+    };
+    if path.is_dir() {
+        return Ok(Some(path));
+    }
+    if is_npm_tarball_path(path.to_string_lossy().as_ref()) {
+        return Ok(None);
+    }
+    Err(OmcRegistryError::UnsupportedSpec(format!(
+        "local npm file dependency `{requirement}` must be a .tgz/.tar.gz tarball or an existing directory"
+    )))
+}
+
+fn npm_local_protocol_path(
+    requirement: &str,
+    protocol: &str,
+    base_dir: &Path,
+) -> Result<Option<PathBuf>> {
+    let Some(path) = requirement.strip_prefix(protocol) else {
+        return Ok(None);
+    };
+    let path = path.trim();
+    if path.starts_with("//") {
+        let url = reqwest::Url::parse(requirement)
+            .map_err(|_| OmcRegistryError::UnsupportedSpec(requirement.to_owned()))?;
+        return url.to_file_path().map(Some).map_err(|_| {
+            OmcRegistryError::UnsupportedSpec(format!(
+                "local npm dependency `{requirement}` must use a valid file URL"
+            ))
+        });
+    }
+    let path = Path::new(path);
+    Ok(Some(if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        base_dir.join(path)
+    }))
 }
 
 fn npm_direct_tarball_url(requirement: &str, base_dir: &Path) -> Result<Option<String>> {
@@ -1671,18 +1739,22 @@ fn npm_direct_tarball_url(requirement: &str, base_dir: &Path) -> Result<Option<S
 }
 
 fn require_npm_tarball_path(path: &str) -> Result<()> {
-    let lower = path
-        .split(['?', '#'])
-        .next()
-        .unwrap_or(path)
-        .to_ascii_lowercase();
-    if lower.ends_with(".tgz") || lower.ends_with(".tar.gz") {
+    if is_npm_tarball_path(path) {
         return Ok(());
     }
 
     Err(OmcRegistryError::UnsupportedSpec(format!(
         "direct npm dependency `{path}` must be a .tgz or .tar.gz archive"
     )))
+}
+
+fn is_npm_tarball_path(path: &str) -> bool {
+    let lower = path
+        .split(['?', '#'])
+        .next()
+        .unwrap_or(path)
+        .to_ascii_lowercase();
+    lower.ends_with(".tgz") || lower.ends_with(".tar.gz")
 }
 
 fn workspace_package_json_paths(root: &Path, workspaces: &ProjectWorkspaces) -> Vec<PathBuf> {
@@ -3592,7 +3664,9 @@ fn normalize_sha256_hash(value: &str) -> Option<String> {
 pub fn install_locked_packages(project_dir: impl AsRef<Path>) -> Result<InstallReport> {
     let project_dir = project_dir.as_ref();
     let lock = read_lockfile(project_dir.join(LOCKFILE))?;
-    install_lock(project_dir, &lock)
+    let report = install_lock(project_dir, &lock)?;
+    install_npm_project_links(project_dir, &report.node_modules, true)?;
+    Ok(report)
 }
 
 fn install_lock(project_dir: &Path, lock: &OmcLock) -> Result<InstallReport> {
@@ -3657,7 +3731,6 @@ fn install_lock(project_dir: &Path, lock: &OmcLock) -> Result<InstallReport> {
     }
 
     install_nested_npm_dependencies(project_dir, lock, &report.node_modules)?;
-    install_npm_workspace_links(project_dir, &report.node_modules)?;
 
     Ok(report)
 }
@@ -3798,6 +3871,15 @@ fn install_nested_npm_dependencies(
     Ok(())
 }
 
+fn install_npm_project_links(
+    project_dir: &Path,
+    node_modules: &Path,
+    include_dev_dependencies: bool,
+) -> Result<usize> {
+    Ok(install_npm_workspace_links(project_dir, node_modules)?
+        + install_npm_local_dependency_links(project_dir, node_modules, include_dev_dependencies)?)
+}
+
 fn install_npm_workspace_links(project_dir: &Path, node_modules: &Path) -> Result<usize> {
     let package_json = project_dir.join("package.json");
     if !package_json.exists() {
@@ -3827,6 +3909,108 @@ fn install_npm_workspace_links(project_dir: &Path, node_modules: &Path) -> Resul
     }
 
     Ok(count)
+}
+
+fn install_npm_local_dependency_links(
+    project_dir: &Path,
+    node_modules: &Path,
+    include_dev_dependencies: bool,
+) -> Result<usize> {
+    let mut count = 0;
+    for package_json in npm_project_package_jsons(project_dir)? {
+        let base_dir = package_json.parent().unwrap_or(project_dir);
+        let package =
+            serde_json::from_str::<ProjectPackageJson>(&fs::read_to_string(&package_json)?)?;
+        let mut links = Vec::new();
+        collect_npm_local_dependency_links(
+            &package,
+            include_dev_dependencies,
+            base_dir,
+            &mut links,
+        )?;
+        for link in links {
+            let target = npm_install_target(node_modules, &link.name);
+            remove_path_if_exists(&target)?;
+            if let Some(parent) = target.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            create_directory_link(&link.path, &target)?;
+            count += 1;
+        }
+    }
+    Ok(count)
+}
+
+fn npm_project_package_jsons(project_dir: &Path) -> Result<Vec<PathBuf>> {
+    let package_json = project_dir.join("package.json");
+    if !package_json.exists() {
+        return Ok(Vec::new());
+    }
+
+    let root = serde_json::from_str::<ProjectPackageJson>(&fs::read_to_string(&package_json)?)?;
+    let mut package_jsons = vec![package_json];
+    if let Some(workspaces) = root.workspaces {
+        package_jsons.extend(workspace_package_json_paths(project_dir, &workspaces));
+    }
+    Ok(package_jsons)
+}
+
+#[derive(Debug)]
+struct NpmLocalLink {
+    name: String,
+    path: PathBuf,
+}
+
+fn collect_npm_local_dependency_links(
+    package: &ProjectPackageJson,
+    include_dev_dependencies: bool,
+    base_dir: &Path,
+    links: &mut Vec<NpmLocalLink>,
+) -> Result<()> {
+    collect_npm_local_dependency_links_from_map(&package.dependencies, base_dir, links)?;
+    if include_dev_dependencies {
+        collect_npm_local_dependency_links_from_map(&package.dev_dependencies, base_dir, links)?;
+    }
+    collect_npm_local_dependency_links_from_map(&package.optional_dependencies, base_dir, links)?;
+    for (name, requirement) in &package.peer_dependencies {
+        if package
+            .peer_dependencies_meta
+            .get(name)
+            .map(|meta| meta.optional)
+            .unwrap_or(false)
+        {
+            continue;
+        }
+        collect_npm_local_dependency_link(name, requirement, base_dir, links)?;
+    }
+    Ok(())
+}
+
+fn collect_npm_local_dependency_links_from_map(
+    dependencies: &BTreeMap<String, String>,
+    base_dir: &Path,
+    links: &mut Vec<NpmLocalLink>,
+) -> Result<()> {
+    for (name, requirement) in dependencies {
+        collect_npm_local_dependency_link(name, requirement, base_dir, links)?;
+    }
+    Ok(())
+}
+
+fn collect_npm_local_dependency_link(
+    name: &str,
+    requirement: &str,
+    base_dir: &Path,
+    links: &mut Vec<NpmLocalLink>,
+) -> Result<()> {
+    let Some(path) = npm_local_directory_requirement_path(requirement.trim(), base_dir)? else {
+        return Ok(());
+    };
+    links.push(NpmLocalLink {
+        name: name.to_owned(),
+        path,
+    });
+    Ok(())
 }
 
 fn install_nested_npm_dependencies_for_package(
@@ -7396,12 +7580,18 @@ mod tests {
     #[test]
     fn reads_project_package_json_specs() {
         let dir = tempfile::tempdir().unwrap();
+        fs::create_dir_all(dir.path().join("vendor/local-dir")).unwrap();
+        fs::create_dir_all(dir.path().join("vendor/linked-pkg")).unwrap();
         let package_json = dir.path().join("package.json");
         fs::write(
             &package_json,
             r#"{
                 "scripts": { "check": "node -e \"console.log('ok')\"" },
-                "dependencies": { "is-odd": "3.0.1" },
+                "dependencies": {
+                    "is-odd": "3.0.1",
+                    "local-dir": "file:vendor/local-dir",
+                    "linked-pkg": "link:vendor/linked-pkg"
+                },
                 "devDependencies": { "which": "^2.0.2" },
                 "optionalDependencies": {
                     "is-even": "1.0.0",
@@ -7447,6 +7637,8 @@ mod tests {
         assert!(specs.iter().any(|spec| spec.name == "remote-pkg"
             && spec.direct_url.as_deref() == Some("https://example.invalid/remote-pkg-2.0.0.tgz")));
         assert!(!specs.iter().any(|spec| spec.name == "workspace-pkg"));
+        assert!(!specs.iter().any(|spec| spec.name == "local-dir"));
+        assert!(!specs.iter().any(|spec| spec.name == "linked-pkg"));
 
         let scripts = read_package_scripts(dir.path()).unwrap();
         assert_eq!(
@@ -7472,7 +7664,9 @@ mod tests {
         .unwrap();
 
         let error = read_package_json_specs(&package_json, true).unwrap_err();
-        assert!(error.to_string().contains("must be a .tgz"));
+        assert!(error
+            .to_string()
+            .contains("must be a .tgz/.tar.gz tarball or an existing directory"));
     }
 
     #[test]
@@ -7559,6 +7753,48 @@ mod tests {
         assert_eq!(
             fs::read_to_string(dir.path().join("node_modules/@demo/lib/index.js")).unwrap(),
             "module.exports = 41;\n"
+        );
+    }
+
+    #[test]
+    fn installs_npm_local_directory_links_respecting_omit_dev() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir_all(dir.path().join("vendor/local-pkg")).unwrap();
+        fs::create_dir_all(dir.path().join("vendor/dev-pkg")).unwrap();
+        fs::write(
+            dir.path().join("package.json"),
+            r#"{
+                "name": "local-link-root",
+                "dependencies": { "local-pkg": "file:vendor/local-pkg" },
+                "devDependencies": { "dev-pkg": "link:vendor/dev-pkg" }
+            }"#,
+        )
+        .unwrap();
+        fs::write(
+            dir.path().join("vendor/local-pkg/index.js"),
+            "module.exports = 41;\n",
+        )
+        .unwrap();
+        fs::write(
+            dir.path().join("vendor/dev-pkg/index.js"),
+            "module.exports = 42;\n",
+        )
+        .unwrap();
+
+        let mut options = LinkOptions::new(dir.path());
+        options.include_dev_dependencies = false;
+        install_project(&options).unwrap();
+        assert_eq!(
+            fs::read_to_string(dir.path().join("node_modules/local-pkg/index.js")).unwrap(),
+            "module.exports = 41;\n"
+        );
+        assert!(!dir.path().join("node_modules/dev-pkg").exists());
+
+        options.include_dev_dependencies = true;
+        install_project(&options).unwrap();
+        assert_eq!(
+            fs::read_to_string(dir.path().join("node_modules/dev-pkg/index.js")).unwrap(),
+            "module.exports = 42;\n"
         );
     }
 
