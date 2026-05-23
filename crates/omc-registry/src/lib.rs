@@ -1200,11 +1200,44 @@ fn apply_manifest_config(manifest: &OmcManifest, options: &mut LinkOptions) -> R
             .iter()
             .filter_map(|index_url| normalize_pypi_simple_index_url(index_url)),
     );
+    apply_pypi_environment_config(options);
+    dedupe_pypi_extra_index_urls(options);
+    Ok(())
+}
+
+fn apply_pypi_environment_config(options: &mut LinkOptions) {
+    let index_url = env::var("PIP_INDEX_URL").ok();
+    let extra_index_urls = env::var("PIP_EXTRA_INDEX_URL").ok();
+    apply_pypi_environment_values(options, index_url.as_deref(), extra_index_urls.as_deref());
+}
+
+fn apply_pypi_environment_values(
+    options: &mut LinkOptions,
+    index_url: Option<&str>,
+    extra_index_urls: Option<&str>,
+) {
+    if options.pypi_index_url.is_none() {
+        options.pypi_index_url = index_url.and_then(normalize_pypi_simple_index_url);
+    }
+    if let Some(extra_index_urls) = extra_index_urls {
+        options.pypi_extra_index_urls.extend(
+            pypi_index_url_values(extra_index_urls)
+                .into_iter()
+                .filter_map(|index_url| normalize_pypi_simple_index_url(&index_url)),
+        );
+    }
+    dedupe_pypi_extra_index_urls(options);
+}
+
+fn pypi_index_url_values(value: &str) -> Vec<String> {
+    shell_like_tokens(value)
+}
+
+fn dedupe_pypi_extra_index_urls(options: &mut LinkOptions) {
     let mut seen = BTreeSet::new();
     options
         .pypi_extra_index_urls
         .retain(|index_url| seen.insert(index_url.clone()));
-    Ok(())
 }
 
 fn prune_lockfile(project_dir: &Path, retained: &BTreeSet<String>) -> Result<usize> {
@@ -6422,6 +6455,46 @@ mod tests {
         assert_eq!(
             options.pypi_extra_index_urls,
             vec!["https://extra.example/simple/".to_owned()]
+        );
+    }
+
+    #[test]
+    fn applies_pypi_environment_indexes() {
+        let mut options = LinkOptions::new(".");
+        apply_pypi_environment_values(
+            &mut options,
+            Some("https://env.example/simple"),
+            Some("https://extra.example/simple 'https://quoted.example/simple' https://extra.example/simple"),
+        );
+
+        assert_eq!(
+            options.pypi_index_url.as_deref(),
+            Some("https://env.example/simple/")
+        );
+        assert_eq!(
+            options.pypi_extra_index_urls,
+            vec![
+                "https://extra.example/simple/".to_owned(),
+                "https://quoted.example/simple/".to_owned(),
+            ]
+        );
+
+        apply_pypi_environment_values(
+            &mut options,
+            Some("https://ignored.example/simple"),
+            Some("https://another.example/simple"),
+        );
+        assert_eq!(
+            options.pypi_index_url.as_deref(),
+            Some("https://env.example/simple/")
+        );
+        assert_eq!(
+            options.pypi_extra_index_urls,
+            vec![
+                "https://extra.example/simple/".to_owned(),
+                "https://quoted.example/simple/".to_owned(),
+                "https://another.example/simple/".to_owned(),
+            ]
         );
     }
 

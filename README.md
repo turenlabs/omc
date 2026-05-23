@@ -135,6 +135,7 @@ walk runtime dependencies recursively
 download the registry artifact without executing it
 use project/user `.npmrc` registry, scoped registry, and auth token settings for npm
 use `omc.toml` PyPI simple-index settings for OMC-managed PyPI adds
+use `PIP_INDEX_URL` / `PIP_EXTRA_INDEX_URL` when no project PyPI index is set
 verify npm shasum/integrity and PyPI sha256 when the registry provides them
 use package-lock.json npm resolved tarball URLs and integrity hashes when present
 cache the source artifact under .omc/cache
@@ -188,6 +189,9 @@ pypi-index-url = "https://pypi.org/simple"
 pypi-extra-index-urls = ["https://packages.example/simple"]
 ```
 
+If the project does not set a PyPI index, OMC also honors pip-style
+`PIP_INDEX_URL` and `PIP_EXTRA_INDEX_URL` environment variables.
+
 This is still a prototype. It replaces install-time execution with registry
 resolution, source caching, OMC artifact generation, capability verification,
 lockfile recording, and local install trees for Node/Python imports. It does
@@ -212,6 +216,8 @@ Supported now:
   host-scoped `_authToken` npm registry access
 - project `omc.toml` PyPI simple-index support for `pypi-index-url` and
   `pypi-extra-index-urls`
+- pip-style `PIP_INDEX_URL` and `PIP_EXTRA_INDEX_URL` support when no project
+  PyPI index is configured
 - credential-bearing PyPI simple-index URLs are used for downloads without
   recording those credentials in `omc.lock`
 - PyPI dependency range resolution with local `python3` `Requires-Python`
