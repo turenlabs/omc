@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::io::Read as _;
 use std::path::{Path, PathBuf};
 use std::process::{Command as ProcessCommand, ExitCode};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -13,16 +14,16 @@ use omc_registry::{
     apply_pypi_binary_option, check_pypi_lock, compare_npm_versions, compare_pypi_versions,
     init_project, install_locked_packages, install_locked_project, install_project, lock_project,
     parse_capability_grant, parse_npm_direct_archive_reference,
-    parse_pypi_direct_archive_reference, parse_pypi_vcs_requirement, read_constraint_files,
-    read_lockfile, read_manifest, read_npm_config_snapshot, read_npm_package_metadata,
-    read_npm_ping_with_userconfig, read_npm_search, read_npm_token_list, read_npm_whoami,
-    read_npm_workspace_packages, read_package_scripts, read_pip_config_snapshot,
+    parse_pypi_direct_archive_reference, parse_pypi_vcs_requirement, publish_npm_package,
+    read_constraint_files, read_lockfile, read_manifest, read_npm_config_snapshot,
+    read_npm_package_metadata, read_npm_ping_with_userconfig, read_npm_search, read_npm_token_list,
+    read_npm_whoami, read_npm_workspace_packages, read_package_scripts, read_pip_config_snapshot,
     read_pypi_available_versions, read_requirements_files, remove_manifest_dependency,
     revoke_npm_token, Behavior, Ecosystem, InstallReport, LinkOptions, LockedPackage,
-    LockedPythonVcsDependency, NpmAccessToken, NpmPingResult, NpmSearchPackage, NpmTokenListResult,
-    NpmTokenRevokeResult, NpmWhoamiResult, NpmWorkspacePackage, OmcRegistryError, PackageSpec,
-    ProjectRequirements, PypiBinaryMode, PypiCheckIssue, PythonLocalRequirement,
-    PythonVcsRequirement, Verdict,
+    LockedPythonVcsDependency, NpmAccessToken, NpmPingResult, NpmPublishPackage, NpmPublishResult,
+    NpmSearchPackage, NpmTokenListResult, NpmTokenRevokeResult, NpmWhoamiResult,
+    NpmWorkspacePackage, OmcRegistryError, PackageSpec, ProjectRequirements, PypiBinaryMode,
+    PypiCheckIssue, PythonLocalRequirement, PythonVcsRequirement, Verdict,
 };
 use sha2::{Digest, Sha256, Sha384, Sha512};
 
@@ -329,6 +330,9 @@ enum NpmCompatAction {
     Pack {
         action: NpmPackAction,
     },
+    Publish {
+        action: NpmPublishAction,
+    },
     Search {
         action: NpmSearchAction,
     },
@@ -518,6 +522,21 @@ struct NpmPackAction {
     json: bool,
     dry_run: bool,
     npm_registry: Option<String>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct NpmPublishAction {
+    package: Option<PathBuf>,
+    tag: String,
+    access: Option<String>,
+    dry_run: bool,
+    json: bool,
+    npm_registry: Option<String>,
+    userconfig: Option<PathBuf>,
+    otp: Option<String>,
+    workspaces: Vec<String>,
+    all_workspaces: bool,
+    include_workspace_root: bool,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -1925,6 +1944,7 @@ fn run_npm_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
         NpmCompatAction::Cache { action } => print_npm_cache(project_dir, action)?,
         NpmCompatAction::Pkg { action } => print_npm_pkg(project_dir, action)?,
         NpmCompatAction::Pack { action } => print_npm_pack(project_dir, action)?,
+        NpmCompatAction::Publish { action } => print_npm_publish(project_dir, action)?,
         NpmCompatAction::Search { action } => print_npm_search(project_dir, action)?,
         NpmCompatAction::Ping {
             json,
@@ -2409,6 +2429,14 @@ fn npm_help_text(topic: Option<&str>) -> String {
                 "Common flags: --pack-destination, --json, --dry-run, --registry.",
             ],
         ),
+        Some("publish") => npm_command_help(
+            "npm publish [<local-dir>|<tarball>]",
+            &[
+                "Pack and publish a local npm package through the configured registry.",
+                "Supports --dry-run, --json, --registry, --userconfig, --tag, --access, --otp, and workspace selectors.",
+                "Remote package specs, git URLs, and provenance bundles are not implemented yet.",
+            ],
+        ),
         Some("search") => npm_command_help(
             "npm search <terms...>",
             &["Search the configured npm registry. Aliases: s, se, find. Supports --json, --parseable, --searchlimit."],
@@ -2515,7 +2543,7 @@ fn npm_general_help_text() -> String {
         "npm <command>",
         &[
             "OMC npm compatibility runs supported npm workflows through OMC's verifier, lockfile, cache, and project-local runtime paths.",
-            "Supported commands: install, install-test, ci, install-ci-test, remove, run, test, start, stop, restart, exec, list, explain, audit, outdated, fund, prune, dedupe, rebuild, cache, pkg, version, pack, search, ping, whoami, login, adduser, logout, token, dist-tag, sbom, view, docs, repo, bugs, home, config, init, bin, root, prefix.",
+            "Supported commands: install, install-test, ci, install-ci-test, remove, run, test, start, stop, restart, exec, list, explain, audit, outdated, fund, prune, dedupe, rebuild, cache, pkg, version, pack, publish, search, ping, whoami, login, adduser, logout, token, dist-tag, sbom, view, docs, repo, bugs, home, config, init, bin, root, prefix.",
             "Use `npm help <command>` for focused OMC compatibility notes.",
         ],
     )
@@ -2551,6 +2579,7 @@ fn npm_help_topic(topic: &str) -> Option<&'static str> {
         "prune" | "dedupe" | "ddp" | "find-dupes" => Some("maintenance"),
         "rebuild" | "rb" => Some("rebuild"),
         "pack" => Some("pack"),
+        "publish" => Some("publish"),
         "search" | "s" | "se" | "find" => Some("search"),
         "ping" => Some("ping"),
         "whoami" => Some("whoami"),
@@ -5473,6 +5502,379 @@ fn print_npm_pack(project_dir: &Path, action: NpmPackAction) -> Result<(), OmcRe
     Ok(())
 }
 
+fn print_npm_publish(project_dir: &Path, action: NpmPublishAction) -> Result<(), OmcRegistryError> {
+    let mut outputs = Vec::new();
+    for source in npm_publish_sources(project_dir, &action)? {
+        let mut prepared = prepare_npm_publish_package(&source)?;
+        prepared.package.tag = action.tag.clone();
+        prepared.package.access = action.access.clone();
+        if npm_manifest_bool_field(&prepared.manifest, "private") && !action.dry_run {
+            return Err(OmcRegistryError::UnsupportedSpec(format!(
+                "npm publish refuses private package {}@{}",
+                prepared.package.name, prepared.package.version
+            )));
+        }
+        if prepared.package.access.as_deref() == Some("restricted")
+            && npm_package_scope(&prepared.package.name).is_none()
+        {
+            return Err(OmcRegistryError::UnsupportedSpec(
+                "npm publish --access=restricted requires a scoped package".to_owned(),
+            ));
+        }
+
+        let registry_override = action
+            .npm_registry
+            .clone()
+            .or_else(|| npm_publish_config_registry(&prepared.manifest));
+        if action.dry_run {
+            let target = npm_auth_target(
+                project_dir,
+                registry_override.as_deref(),
+                action.userconfig.as_deref(),
+                npm_package_scope(&prepared.package.name).as_deref(),
+            )?;
+            outputs.push(NpmPublishOutput::dry_run(
+                prepared.package,
+                target.registry,
+                prepared.pack.entry_count,
+                prepared.pack.unpacked_size,
+            ));
+        } else {
+            let result = publish_npm_package(
+                project_dir,
+                prepared.package,
+                registry_override.as_deref(),
+                action.userconfig.as_deref(),
+                action.otp.as_deref(),
+            )?;
+            outputs.push(NpmPublishOutput::published(
+                result,
+                prepared.pack.entry_count,
+                prepared.pack.unpacked_size,
+            ));
+        }
+    }
+
+    if action.json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(
+                &outputs
+                    .into_iter()
+                    .map(NpmPublishOutput::into_json)
+                    .collect::<Vec<_>>()
+            )?
+        );
+    } else {
+        for output in outputs {
+            if output.dry_run {
+                println!("+ {}@{} (dry-run)", output.name, output.version);
+            } else {
+                println!("+ {}@{}", output.name, output.version);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn npm_publish_sources(
+    project_dir: &Path,
+    action: &NpmPublishAction,
+) -> Result<Vec<NpmPublishSource>, OmcRegistryError> {
+    if let Some(package) = &action.package {
+        if !action.workspaces.is_empty() || action.all_workspaces {
+            return Err(OmcRegistryError::UnsupportedSpec(
+                "npm publish accepts either a package path or workspace selectors, not both"
+                    .to_owned(),
+            ));
+        }
+        return Ok(vec![npm_publish_source_from_path(project_dir, package)?]);
+    }
+
+    let targets = npm_script_target_dirs(
+        project_dir,
+        &action.workspaces,
+        action.all_workspaces,
+        action.include_workspace_root,
+    )?;
+    Ok(targets
+        .into_iter()
+        .map(NpmPublishSource::Directory)
+        .collect())
+}
+
+fn npm_publish_source_from_path(
+    project_dir: &Path,
+    path: &Path,
+) -> Result<NpmPublishSource, OmcRegistryError> {
+    let path = absolutize_path(project_dir, path.to_path_buf());
+    if path.is_dir() {
+        Ok(NpmPublishSource::Directory(path))
+    } else if path.is_file() && npm_publish_tarball_path(&path) {
+        Ok(NpmPublishSource::Tarball(path))
+    } else {
+        Err(OmcRegistryError::UnsupportedSpec(format!(
+            "npm publish supports local package directories and .tgz/.tar.gz tarballs; unsupported package `{}`",
+            path.display()
+        )))
+    }
+}
+
+fn npm_publish_tarball_path(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .map(|name| name.ends_with(".tgz") || name.ends_with(".tar.gz"))
+        .unwrap_or(false)
+}
+
+enum NpmPublishSource {
+    Directory(PathBuf),
+    Tarball(PathBuf),
+}
+
+struct PreparedNpmPublish {
+    package: NpmPublishPackage,
+    manifest: serde_json::Value,
+    pack: NpmPublishPackSummary,
+}
+
+struct NpmPublishPackSummary {
+    entry_count: usize,
+    unpacked_size: u64,
+}
+
+#[derive(Debug)]
+struct NpmPublishOutput {
+    name: String,
+    version: String,
+    filename: String,
+    registry: String,
+    tag: String,
+    access: Option<String>,
+    dry_run: bool,
+    status: Option<u16>,
+    shasum: Option<String>,
+    integrity: Option<String>,
+    entry_count: usize,
+    unpacked_size: u64,
+}
+
+impl NpmPublishOutput {
+    fn dry_run(
+        package: NpmPublishPackage,
+        registry: String,
+        entry_count: usize,
+        unpacked_size: u64,
+    ) -> Self {
+        Self {
+            name: package.name,
+            version: package.version,
+            filename: package.filename,
+            registry,
+            tag: package.tag,
+            access: package.access,
+            dry_run: true,
+            status: None,
+            shasum: None,
+            integrity: None,
+            entry_count,
+            unpacked_size,
+        }
+    }
+
+    fn published(result: NpmPublishResult, entry_count: usize, unpacked_size: u64) -> Self {
+        Self {
+            name: result.name,
+            version: result.version,
+            filename: result.filename,
+            registry: result.registry,
+            tag: result.tag,
+            access: result.access,
+            dry_run: false,
+            status: Some(result.status),
+            shasum: Some(result.shasum),
+            integrity: Some(result.integrity),
+            entry_count,
+            unpacked_size,
+        }
+    }
+
+    fn into_json(self) -> serde_json::Value {
+        serde_json::json!({
+            "name": self.name,
+            "version": self.version,
+            "filename": self.filename,
+            "registry": self.registry,
+            "tag": self.tag,
+            "access": self.access,
+            "dryRun": self.dry_run,
+            "status": self.status,
+            "shasum": self.shasum,
+            "integrity": self.integrity,
+            "entryCount": self.entry_count,
+            "unpackedSize": self.unpacked_size,
+        })
+    }
+}
+
+fn prepare_npm_publish_package(
+    source: &NpmPublishSource,
+) -> Result<PreparedNpmPublish, OmcRegistryError> {
+    match source {
+        NpmPublishSource::Directory(root) => {
+            let (pack, manifest, tarball) = npm_pack_package_for_publish(root)?;
+            let tag = "latest".to_owned();
+            let access = None;
+            Ok(prepared_npm_publish_from_parts(
+                manifest,
+                pack.filename,
+                tarball,
+                tag,
+                access,
+                pack.files.len(),
+                pack.unpacked_size,
+            )?)
+        }
+        NpmPublishSource::Tarball(path) => {
+            let tarball = fs::read(path)?;
+            let manifest = npm_manifest_from_tarball(&tarball)?;
+            let filename = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("package.tgz")
+                .to_owned();
+            let files = npm_packed_files_from_tarball(&tarball)?;
+            let unpacked_size = files.iter().map(|file| file.size).sum();
+            Ok(prepared_npm_publish_from_parts(
+                manifest,
+                filename,
+                tarball,
+                "latest".to_owned(),
+                None,
+                files.len(),
+                unpacked_size,
+            )?)
+        }
+    }
+}
+
+fn prepared_npm_publish_from_parts(
+    manifest: serde_json::Value,
+    filename: String,
+    tarball: Vec<u8>,
+    tag: String,
+    access: Option<String>,
+    entry_count: usize,
+    unpacked_size: u64,
+) -> Result<PreparedNpmPublish, OmcRegistryError> {
+    let name = npm_package_json_name(&manifest)?;
+    let version = npm_package_json_version(&manifest)?;
+    Ok(PreparedNpmPublish {
+        package: NpmPublishPackage {
+            name,
+            version,
+            manifest: manifest.clone(),
+            filename,
+            tarball,
+            tag,
+            access,
+        },
+        manifest,
+        pack: NpmPublishPackSummary {
+            entry_count,
+            unpacked_size,
+        },
+    })
+}
+
+fn npm_pack_package_for_publish(
+    root: &Path,
+) -> Result<(NpmPackResult, serde_json::Value, Vec<u8>), OmcRegistryError> {
+    if !root.is_dir() {
+        return Err(OmcRegistryError::UnsupportedSpec(format!(
+            "npm publish local path `{}` is not a directory",
+            root.display()
+        )));
+    }
+    let package_json = root.join("package.json");
+    let package = read_npm_pkg_json(&package_json)?;
+    let name = npm_package_json_name(&package)?;
+    let version = npm_package_json_version(&package)?;
+    let filename = npm_pack_filename(&name, &version);
+    let files = collect_npm_pack_files(root)?;
+    if files.is_empty() {
+        return Err(OmcRegistryError::UnsupportedSpec(format!(
+            "npm publish local path `{}` has no files",
+            root.display()
+        )));
+    }
+    let tarball = npm_pack_tarball_bytes(&files)?;
+    let unpacked_size = files.iter().map(|file| file.size).sum();
+    let result = NpmPackResult {
+        id: format!("{name}@{version}"),
+        name,
+        version,
+        filename,
+        size: tarball.len() as u64,
+        unpacked_size,
+        files: files
+            .into_iter()
+            .map(|file| NpmPackedFile {
+                path: file.relative_path,
+                size: file.size,
+            })
+            .collect(),
+    };
+    Ok((result, package, tarball))
+}
+
+fn npm_manifest_from_tarball(bytes: &[u8]) -> Result<serde_json::Value, OmcRegistryError> {
+    let decoder = flate2::read::GzDecoder::new(std::io::Cursor::new(bytes));
+    let mut archive = tar::Archive::new(decoder);
+    for entry in archive.entries()? {
+        let mut entry = entry?;
+        if !entry.header().entry_type().is_file() {
+            continue;
+        }
+        let path = entry.path()?.to_string_lossy().into_owned();
+        if path == "package/package.json" || path == "package.json" {
+            let mut content = String::new();
+            entry.read_to_string(&mut content)?;
+            let manifest: serde_json::Value = serde_json::from_str(&content)?;
+            if manifest.is_object() {
+                return Ok(manifest);
+            }
+            break;
+        }
+    }
+    Err(OmcRegistryError::UnsupportedSpec(
+        "npm publish tarball does not contain package/package.json".to_owned(),
+    ))
+}
+
+fn npm_publish_config_registry(manifest: &serde_json::Value) -> Option<String> {
+    manifest
+        .get("publishConfig")
+        .and_then(|value| value.get("registry"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+}
+
+fn npm_manifest_bool_field(manifest: &serde_json::Value, field: &str) -> bool {
+    manifest
+        .get(field)
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
+}
+
+fn npm_package_scope(name: &str) -> Option<String> {
+    name.strip_prefix('@')
+        .and_then(|rest| rest.split_once('/'))
+        .map(|(scope, _)| format!("@{scope}"))
+}
+
 fn npm_pack_registry_package(
     project_dir: &Path,
     spec: &str,
@@ -5665,8 +6067,12 @@ fn write_npm_pack_tarball(
     tarball: &Path,
     files: &[NpmPackSourceFile],
 ) -> Result<(), OmcRegistryError> {
-    let file = fs::File::create(tarball)?;
-    let encoder = GzEncoder::new(file, Compression::default());
+    fs::write(tarball, npm_pack_tarball_bytes(files)?)?;
+    Ok(())
+}
+
+fn npm_pack_tarball_bytes(files: &[NpmPackSourceFile]) -> Result<Vec<u8>, OmcRegistryError> {
+    let encoder = GzEncoder::new(Vec::new(), Compression::default());
     let mut archive = tar::Builder::new(encoder);
     for file in files {
         let mut input = fs::File::open(&file.source)?;
@@ -5678,8 +6084,7 @@ fn write_npm_pack_tarball(
         archive.append_data(&mut header, &file.archive_path, &mut input)?;
     }
     let encoder = archive.into_inner()?;
-    encoder.finish()?;
-    Ok(())
+    Ok(encoder.finish()?)
 }
 
 fn npm_package_json_name(package: &serde_json::Value) -> Result<String, OmcRegistryError> {
@@ -7553,6 +7958,7 @@ fn parse_npm_compat_action(args: &[String]) -> Result<NpmCompatAction, OmcRegist
         "cache" => parse_npm_cache_args(&args[1..]),
         "pkg" => parse_npm_pkg_args(&args[1..]),
         "pack" => parse_npm_pack_args(&args[1..]),
+        "publish" => parse_npm_publish_args(&args[1..]),
         "search" | "s" | "se" | "find" => parse_npm_search_args(&args[1..]),
         "ping" => parse_npm_ping_args(&args[1..]),
         "whoami" => parse_npm_whoami_args(&args[1..]),
@@ -7704,6 +8110,7 @@ fn npm_global_arg_supported_by_command(command: &str, arg: &str) -> bool {
                 | "ci"
                 | "outdated"
                 | "pack"
+                | "publish"
                 | "search"
                 | "s"
                 | "se"
@@ -7728,7 +8135,10 @@ fn npm_global_arg_supported_by_command(command: &str, arg: &str) -> bool {
         );
     }
     if matches!(arg, "--otp") || arg.starts_with("--otp=") {
-        return matches!(command, "login" | "adduser" | "add-user" | "token");
+        return matches!(
+            command,
+            "login" | "adduser" | "add-user" | "publish" | "token"
+        );
     }
     if matches!(arg, "--auth-type") || arg.starts_with("--auth-type=") {
         return matches!(command, "login" | "adduser" | "add-user");
@@ -7741,6 +8151,19 @@ fn npm_global_arg_supported_by_command(command: &str, arg: &str) -> bool {
     }
     if matches!(arg, "--scope") || arg.starts_with("--scope=") {
         return matches!(command, "login" | "adduser" | "add-user" | "logout");
+    }
+    if matches!(arg, "--tag" | "--access" | "--provenance-file")
+        || arg.starts_with("--tag=")
+        || arg.starts_with("--access=")
+        || arg.starts_with("--provenance-file=")
+    {
+        return matches!(command, "publish");
+    }
+    if matches!(arg, "--dry-run" | "--provenance" | "--no-provenance")
+        || arg.starts_with("--dry-run=")
+        || arg.starts_with("--provenance=")
+    {
+        return matches!(command, "publish");
     }
     if matches!(arg, "--sbom-format" | "--sbom-type")
         || arg.starts_with("--sbom-format=")
@@ -7762,6 +8185,7 @@ fn npm_global_arg_supported_by_command(command: &str, arg: &str) -> bool {
                 | "login"
                 | "adduser"
                 | "add-user"
+                | "publish"
                 | "logout"
                 | "token"
         );
@@ -7779,6 +8203,7 @@ fn npm_global_arg_supported_by_command(command: &str, arg: &str) -> bool {
                 | "stop"
                 | "restart"
                 | "fund"
+                | "publish"
                 | "dist-tag"
                 | "dist-tags"
                 | "sbom"
@@ -7796,6 +8221,7 @@ fn npm_global_arg_supported_by_command(command: &str, arg: &str) -> bool {
                 | "stop"
                 | "restart"
                 | "fund"
+                | "publish"
                 | "dist-tag"
                 | "dist-tags"
                 | "sbom"
@@ -7818,6 +8244,7 @@ fn npm_global_arg_supported_by_command(command: &str, arg: &str) -> bool {
                 | "fund"
                 | "pkg"
                 | "pack"
+                | "publish"
                 | "search"
                 | "s"
                 | "se"
@@ -7888,6 +8315,9 @@ fn npm_global_preserved_bool_flag(arg: &str) -> bool {
         "--json"
             | "--global"
             | "-g"
+            | "--dry-run"
+            | "--provenance"
+            | "--no-provenance"
             | "--workspaces"
             | "--include-workspace-root"
             | "--package-lock-only"
@@ -7910,6 +8340,9 @@ fn npm_global_preserved_value_flag(arg: &str) -> bool {
             | "--auth-type"
             | "--token"
             | "--auth-token"
+            | "--tag"
+            | "--access"
+            | "--provenance-file"
             | "--scope"
             | "--sbom-format"
             | "--sbom-type"
@@ -7932,6 +8365,11 @@ fn npm_global_preserved_equals_flag(arg: &str) -> bool {
         "--auth-type=",
         "--token=",
         "--auth-token=",
+        "--tag=",
+        "--access=",
+        "--dry-run=",
+        "--provenance=",
+        "--provenance-file=",
         "--scope=",
         "--sbom-format=",
         "--sbom-type=",
@@ -8798,6 +9236,158 @@ fn npm_pack_ignored_equals_flag(arg: &str) -> bool {
     ]
     .iter()
     .any(|prefix| arg.starts_with(prefix))
+}
+
+fn parse_npm_publish_args(args: &[String]) -> Result<NpmCompatAction, OmcRegistryError> {
+    let mut package = None;
+    let mut tag = "latest".to_owned();
+    let mut access = None;
+    let mut dry_run = false;
+    let mut json = false;
+    let mut npm_registry = None;
+    let mut userconfig = None;
+    let mut otp = None;
+    let mut workspaces = Vec::new();
+    let mut all_workspaces = false;
+    let mut include_workspace_root = false;
+    let mut index = 0;
+    while index < args.len() {
+        let arg = &args[index];
+        if arg == "--json" || arg == "--json=true" {
+            json = true;
+        } else if arg == "--json=false" {
+            json = false;
+        } else if matches!(arg.as_str(), "--dry-run" | "--dry-run=true") {
+            dry_run = true;
+        } else if arg == "--dry-run=false" {
+            dry_run = false;
+        } else if arg == "--tag" {
+            index += 1;
+            tag = npm_publish_flag_value(args, index, arg)?;
+        } else if let Some(value) = arg.strip_prefix("--tag=") {
+            tag = value.to_owned();
+        } else if arg == "--access" {
+            index += 1;
+            access = Some(parse_npm_publish_access(&npm_publish_flag_value(
+                args, index, arg,
+            )?)?);
+        } else if let Some(value) = arg.strip_prefix("--access=") {
+            access = Some(parse_npm_publish_access(value)?);
+        } else if arg == "--registry" {
+            index += 1;
+            npm_registry = Some(npm_publish_flag_value(args, index, arg)?);
+        } else if let Some(value) = arg.strip_prefix("--registry=") {
+            npm_registry = Some(value.to_owned());
+        } else if arg == "--userconfig" {
+            index += 1;
+            userconfig = Some(PathBuf::from(npm_publish_flag_value(args, index, arg)?));
+        } else if let Some(value) = arg.strip_prefix("--userconfig=") {
+            userconfig = Some(PathBuf::from(value));
+        } else if arg == "--otp" {
+            index += 1;
+            otp = Some(npm_publish_flag_value(args, index, arg)?);
+        } else if let Some(value) = arg.strip_prefix("--otp=") {
+            otp = Some(value.to_owned());
+        } else if matches!(arg.as_str(), "--workspace" | "-w") {
+            index += 1;
+            workspaces.push(npm_publish_flag_value(args, index, arg)?);
+        } else if let Some(value) = arg
+            .strip_prefix("--workspace=")
+            .or_else(|| arg.strip_prefix("-w="))
+        {
+            workspaces.push(value.to_owned());
+        } else if matches!(arg.as_str(), "--workspaces" | "--workspaces=true") {
+            all_workspaces = true;
+        } else if arg == "--workspaces=false" {
+            all_workspaces = false;
+        } else if matches!(
+            arg.as_str(),
+            "--include-workspace-root" | "--include-workspace-root=true"
+        ) {
+            include_workspace_root = true;
+        } else if arg == "--include-workspace-root=false" {
+            include_workspace_root = false;
+        } else if matches!(arg.as_str(), "--provenance" | "--provenance=true") {
+            return Err(OmcRegistryError::UnsupportedSpec(
+                "npm publish --provenance is not implemented yet".to_owned(),
+            ));
+        } else if matches!(arg.as_str(), "--no-provenance" | "--provenance=false") {
+        } else if arg == "--provenance-file" {
+            index += 1;
+            let _ = npm_publish_flag_value(args, index, arg)?;
+            return Err(OmcRegistryError::UnsupportedSpec(
+                "npm publish --provenance-file is not implemented yet".to_owned(),
+            ));
+        } else if arg.starts_with("--provenance-file=") {
+            return Err(OmcRegistryError::UnsupportedSpec(
+                "npm publish --provenance-file is not implemented yet".to_owned(),
+            ));
+        } else if matches!(
+            arg.as_str(),
+            "--silent" | "-s" | "--ignore-scripts" | "--foreground-scripts"
+        ) {
+        } else if matches!(arg.as_str(), "--loglevel" | "--cache") {
+            index += 1;
+            let _ = npm_publish_flag_value(args, index, arg)?;
+        } else if npm_publish_ignored_equals_flag(arg) {
+        } else if arg.starts_with('-') {
+            return Err(unsupported_compat_arg("npm publish", arg));
+        } else if package.is_none() {
+            package = Some(PathBuf::from(arg));
+        } else {
+            return Err(OmcRegistryError::UnsupportedSpec(
+                "npm publish accepts at most one package path".to_owned(),
+            ));
+        }
+        index += 1;
+    }
+
+    if tag.trim().is_empty() {
+        return Err(OmcRegistryError::UnsupportedSpec(
+            "npm publish --tag cannot be empty".to_owned(),
+        ));
+    }
+
+    Ok(NpmCompatAction::Publish {
+        action: NpmPublishAction {
+            package,
+            tag,
+            access,
+            dry_run,
+            json,
+            npm_registry,
+            userconfig,
+            otp,
+            workspaces,
+            all_workspaces,
+            include_workspace_root,
+        },
+    })
+}
+
+fn npm_publish_flag_value(
+    args: &[String],
+    index: usize,
+    flag: &str,
+) -> Result<String, OmcRegistryError> {
+    args.get(index)
+        .cloned()
+        .ok_or_else(|| OmcRegistryError::UnsupportedSpec(format!("{flag} needs a value")))
+}
+
+fn parse_npm_publish_access(value: &str) -> Result<String, OmcRegistryError> {
+    match value {
+        "public" | "restricted" => Ok(value.to_owned()),
+        _ => Err(OmcRegistryError::UnsupportedSpec(format!(
+            "npm publish --access must be public or restricted, got `{value}`"
+        ))),
+    }
+}
+
+fn npm_publish_ignored_equals_flag(arg: &str) -> bool {
+    ["--loglevel=", "--cache="]
+        .iter()
+        .any(|prefix| arg.starts_with(prefix))
 }
 
 fn parse_npm_search_args(args: &[String]) -> Result<NpmCompatAction, OmcRegistryError> {
@@ -12663,6 +13253,62 @@ mod tests {
         );
         assert_eq!(
             parse_npm_compat_action(&args(&[
+                "--json",
+                "--registry",
+                "https://registry.example.invalid/npm",
+                "--userconfig=ci.npmrc",
+                "--otp",
+                "123456",
+                "publish",
+                "--tag=beta",
+                "--access",
+                "public",
+                "--workspace",
+                "@demo/pkg",
+            ]))
+            .unwrap(),
+            NpmCompatAction::Publish {
+                action: NpmPublishAction {
+                    package: None,
+                    tag: "beta".to_owned(),
+                    access: Some("public".to_owned()),
+                    dry_run: false,
+                    json: true,
+                    npm_registry: Some("https://registry.example.invalid/npm".to_owned()),
+                    userconfig: Some(PathBuf::from("ci.npmrc")),
+                    otp: Some("123456".to_owned()),
+                    workspaces: vec!["@demo/pkg".to_owned()],
+                    all_workspaces: false,
+                    include_workspace_root: false,
+                },
+            }
+        );
+        assert_eq!(
+            parse_npm_compat_action(&args(&[
+                "publish",
+                "./pkg.tgz",
+                "--dry-run",
+                "--no-provenance",
+            ]))
+            .unwrap(),
+            NpmCompatAction::Publish {
+                action: NpmPublishAction {
+                    package: Some(PathBuf::from("./pkg.tgz")),
+                    tag: "latest".to_owned(),
+                    access: None,
+                    dry_run: true,
+                    json: false,
+                    npm_registry: None,
+                    userconfig: None,
+                    otp: None,
+                    workspaces: Vec::new(),
+                    all_workspaces: false,
+                    include_workspace_root: false,
+                },
+            }
+        );
+        assert_eq!(
+            parse_npm_compat_action(&args(&[
                 "prune",
                 "--omit=dev",
                 "--loglevel=silent",
@@ -13750,6 +14396,35 @@ mod tests {
         )
         .unwrap();
         assert!(!dir.join("dry").exists());
+    }
+
+    #[test]
+    fn dry_runs_npm_publish_local_package() {
+        let dir = test_dir("npm-publish-dry-run");
+        fs::write(
+            dir.join("package.json"),
+            r#"{ "name": "@scope/publish-demo", "version": "1.2.3", "publishConfig": {"registry": "https://publish.example.invalid/npm"} }"#,
+        )
+        .unwrap();
+        fs::write(dir.join("index.js"), "module.exports = 1\n").unwrap();
+
+        print_npm_publish(
+            &dir,
+            NpmPublishAction {
+                package: None,
+                tag: "beta".to_owned(),
+                access: Some("public".to_owned()),
+                dry_run: true,
+                json: true,
+                npm_registry: None,
+                userconfig: Some(PathBuf::from("ci.npmrc")),
+                otp: None,
+                workspaces: Vec::new(),
+                all_workspaces: false,
+                include_workspace_root: false,
+            },
+        )
+        .unwrap();
     }
 
     #[test]

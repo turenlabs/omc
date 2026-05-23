@@ -7427,6 +7427,33 @@ pub struct NpmTokenRevokeResult {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct NpmPublishPackage {
+    pub name: String,
+    pub version: String,
+    pub manifest: serde_json::Value,
+    pub filename: String,
+    pub tarball: Vec<u8>,
+    pub tag: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub access: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct NpmPublishResult {
+    pub registry: String,
+    pub name: String,
+    pub version: String,
+    pub filename: String,
+    pub tag: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub access: Option<String>,
+    pub status: u16,
+    pub shasum: String,
+    pub integrity: String,
+    pub response: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct NpmAccessToken {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub key: Option<String>,
@@ -7737,6 +7764,15 @@ fn npm_delete(client: &Client, url: &str, config: &NpmConfig) -> reqwest::blocki
     }
 }
 
+fn npm_put(client: &Client, url: &str, config: &NpmConfig) -> reqwest::blocking::RequestBuilder {
+    let request = client.put(url);
+    if let Some(token) = config.auth_token_for_url(url) {
+        request.bearer_auth(token)
+    } else {
+        request
+    }
+}
+
 fn resolve_package(
     client: &Client,
     spec: &PackageSpec,
@@ -8009,6 +8045,159 @@ pub fn revoke_npm_token(
         token: token.to_owned(),
         status,
     })
+}
+
+pub fn publish_npm_package(
+    project_dir: &Path,
+    package: NpmPublishPackage,
+    registry_override: Option<&str>,
+    userconfig_override: Option<&Path>,
+    otp: Option<&str>,
+) -> Result<NpmPublishResult> {
+    if package.name.trim().is_empty() || package.version.trim().is_empty() {
+        return Err(OmcRegistryError::UnsupportedSpec(
+            "npm publish needs package name and version".to_owned(),
+        ));
+    }
+    if package.filename.trim().is_empty() || package.tarball.is_empty() {
+        return Err(OmcRegistryError::UnsupportedSpec(
+            "npm publish needs a non-empty package tarball".to_owned(),
+        ));
+    }
+
+    let client = Client::new();
+    let npm_config =
+        read_npm_config_with_overrides(project_dir, registry_override, userconfig_override)?;
+    let registry = ensure_trailing_slash(npm_config.registry_for(&package.name));
+    let encoded = urlencoding::encode(&package.name);
+    let url = npm_registry_package_url(&registry, &encoded);
+    if npm_config.auth_token_for_url(&url).is_none() {
+        return Err(OmcRegistryError::UnsupportedSpec(
+            "npm publish needs authentication; run npm login or configure a registry _authToken"
+                .to_owned(),
+        ));
+    }
+
+    let shasum = sha1_hex(&package.tarball);
+    let integrity = npm_publish_integrity(&package.tarball);
+    let document = npm_publish_document(&registry, &package, &shasum, &integrity)?;
+    let mut request = npm_put(&client, &url, &npm_config).json(&document);
+    if let Some(otp) = otp.map(str::trim).filter(|otp| !otp.is_empty()) {
+        request = request.header("npm-otp", otp);
+    }
+    let response = request.send()?;
+    response.error_for_status_ref()?;
+    let status = response.status().as_u16();
+    let text = response.text()?;
+    let response = if text.trim().is_empty() {
+        serde_json::Value::Null
+    } else {
+        serde_json::from_str(&text).unwrap_or_else(|_| {
+            serde_json::json!({
+                "text": text,
+            })
+        })
+    };
+
+    Ok(NpmPublishResult {
+        registry,
+        name: package.name,
+        version: package.version,
+        filename: package.filename,
+        tag: package.tag,
+        access: package.access,
+        status,
+        shasum,
+        integrity,
+        response,
+    })
+}
+
+fn npm_publish_integrity(bytes: &[u8]) -> String {
+    let mut digest = Sha512::new();
+    digest.update(bytes);
+    format!("sha512-{}", STANDARD.encode(digest.finalize()))
+}
+
+fn npm_publish_document(
+    registry: &str,
+    package: &NpmPublishPackage,
+    shasum: &str,
+    integrity: &str,
+) -> Result<serde_json::Value> {
+    let mut root = serde_json::Map::new();
+    root.insert("_id".to_owned(), serde_json::json!(package.name));
+    root.insert("name".to_owned(), serde_json::json!(package.name));
+    if let Some(description) = package
+        .manifest
+        .get("description")
+        .and_then(serde_json::Value::as_str)
+    {
+        root.insert("description".to_owned(), serde_json::json!(description));
+    }
+    let mut dist_tags = serde_json::Map::new();
+    dist_tags.insert(
+        package.tag.clone(),
+        serde_json::Value::String(package.version.clone()),
+    );
+    root.insert("dist-tags".to_owned(), serde_json::Value::Object(dist_tags));
+    if let Some(access) = &package.access {
+        root.insert("access".to_owned(), serde_json::json!(access));
+    }
+
+    let mut version = package.manifest.clone();
+    let Some(version_object) = version.as_object_mut() else {
+        return Err(OmcRegistryError::UnsupportedSpec(
+            "npm publish package manifest must be a JSON object".to_owned(),
+        ));
+    };
+    version_object.insert(
+        "_id".to_owned(),
+        serde_json::json!(format!("{}@{}", package.name, package.version)),
+    );
+    version_object.insert("name".to_owned(), serde_json::json!(package.name));
+    version_object.insert("version".to_owned(), serde_json::json!(package.version));
+    version_object.insert(
+        "dist".to_owned(),
+        serde_json::json!({
+            "shasum": shasum,
+            "integrity": integrity,
+            "tarball": npm_publish_tarball_url(registry, &package.name, &package.filename),
+        }),
+    );
+
+    let mut versions = serde_json::Map::new();
+    versions.insert(package.version.clone(), version);
+    root.insert("versions".to_owned(), serde_json::Value::Object(versions));
+
+    let mut attachment = serde_json::Map::new();
+    attachment.insert(
+        "content_type".to_owned(),
+        serde_json::Value::String("application/octet-stream".to_owned()),
+    );
+    attachment.insert(
+        "data".to_owned(),
+        serde_json::Value::String(STANDARD.encode(&package.tarball)),
+    );
+    attachment.insert(
+        "length".to_owned(),
+        serde_json::json!(package.tarball.len()),
+    );
+    let mut attachments = serde_json::Map::new();
+    attachments.insert(
+        package.filename.clone(),
+        serde_json::Value::Object(attachment),
+    );
+    root.insert(
+        "_attachments".to_owned(),
+        serde_json::Value::Object(attachments),
+    );
+    Ok(serde_json::Value::Object(root))
+}
+
+fn npm_publish_tarball_url(registry: &str, name: &str, filename: &str) -> String {
+    let encoded = urlencoding::encode(name);
+    format!("{}{encoded}/-/{filename}", ensure_trailing_slash(registry))
 }
 
 pub fn read_npm_search(
@@ -16910,6 +17099,124 @@ wheels = [
         assert_eq!(revoked.token, "a1b2c3");
         assert_eq!(revoked.status, 204);
         handle.join().unwrap();
+    }
+
+    #[test]
+    fn publishes_npm_package_with_userconfig_auth_and_otp() {
+        use std::io::{Read as _, Write as _};
+
+        let tarball = npm_tgz_for_test(r#"{"name":"demo-pkg","version":"1.0.0"}"#);
+        let expected_tarball = tarball.clone();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let handle = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+                .unwrap();
+            let mut buffer = Vec::new();
+            let mut chunk = [0_u8; 4096];
+            loop {
+                let len = stream.read(&mut chunk).unwrap();
+                if len == 0 {
+                    break;
+                }
+                buffer.extend_from_slice(&chunk[..len]);
+                if let Some(body_start) = http_body_start(&buffer) {
+                    let headers = String::from_utf8_lossy(&buffer[..body_start]);
+                    let content_length = http_content_length(&headers);
+                    if buffer.len() >= body_start + content_length {
+                        break;
+                    }
+                }
+            }
+
+            let body_start = http_body_start(&buffer).unwrap();
+            let headers = String::from_utf8_lossy(&buffer[..body_start]);
+            assert!(headers.starts_with("PUT /demo-pkg "));
+            let lower = headers.to_ascii_lowercase();
+            assert!(lower.contains("authorization: bearer registry-token"));
+            assert!(lower.contains("npm-otp: 123456"));
+
+            let body: serde_json::Value = serde_json::from_slice(&buffer[body_start..]).unwrap();
+            assert_eq!(body["_id"], "demo-pkg");
+            assert_eq!(body["dist-tags"]["beta"], "1.0.0");
+            assert_eq!(body["versions"]["1.0.0"]["name"], "demo-pkg");
+            assert_eq!(
+                body["versions"]["1.0.0"]["dist"]["shasum"],
+                sha1_hex(&expected_tarball)
+            );
+            assert_eq!(
+                body["versions"]["1.0.0"]["dist"]["integrity"],
+                npm_publish_integrity(&expected_tarball)
+            );
+            let encoded = body["_attachments"]["demo-pkg-1.0.0.tgz"]["data"]
+                .as_str()
+                .unwrap();
+            assert_eq!(STANDARD.decode(encoded).unwrap(), expected_tarball);
+
+            let response_body = r#"{"ok":true}"#;
+            let response = format!(
+                "HTTP/1.1 201 Created\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                response_body.len(),
+                response_body
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+        });
+
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(
+            dir.path().join("ci.npmrc"),
+            format!("registry=http://{addr}/\n//{addr}/:_authToken=registry-token\n"),
+        )
+        .unwrap();
+
+        let result = publish_npm_package(
+            dir.path(),
+            NpmPublishPackage {
+                name: "demo-pkg".to_owned(),
+                version: "1.0.0".to_owned(),
+                manifest: serde_json::json!({
+                    "name": "demo-pkg",
+                    "version": "1.0.0",
+                    "description": "demo",
+                }),
+                filename: "demo-pkg-1.0.0.tgz".to_owned(),
+                tarball,
+                tag: "beta".to_owned(),
+                access: Some("public".to_owned()),
+            },
+            None,
+            Some(Path::new("ci.npmrc")),
+            Some("123456"),
+        )
+        .unwrap();
+        assert_eq!(result.registry, format!("http://{addr}/"));
+        assert_eq!(result.name, "demo-pkg");
+        assert_eq!(result.version, "1.0.0");
+        assert_eq!(result.tag, "beta");
+        assert_eq!(result.status, 201);
+        assert_eq!(result.response["ok"], true);
+        handle.join().unwrap();
+    }
+
+    fn http_body_start(buffer: &[u8]) -> Option<usize> {
+        buffer
+            .windows(4)
+            .position(|window| window == b"\r\n\r\n")
+            .map(|index| index + 4)
+    }
+
+    fn http_content_length(headers: &str) -> usize {
+        headers
+            .lines()
+            .find_map(|line| {
+                let (name, value) = line.split_once(':')?;
+                name.eq_ignore_ascii_case("content-length")
+                    .then(|| value.trim().parse::<usize>().ok())
+                    .flatten()
+            })
+            .unwrap_or(0)
     }
 
     #[test]
