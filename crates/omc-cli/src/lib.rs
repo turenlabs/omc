@@ -245,6 +245,21 @@ enum NpmCompatAction {
         allow: Vec<String>,
         allow_all_host: bool,
     },
+    InstallTest {
+        command: String,
+        use_ci: bool,
+        specs: Vec<String>,
+        archive_references: Vec<String>,
+        local_paths: Vec<PathBuf>,
+        save: bool,
+        dev: bool,
+        omit_dev: bool,
+        lock_only: bool,
+        npm_registry: Option<String>,
+        allow: Vec<String>,
+        allow_all_host: bool,
+        test_args: Vec<String>,
+    },
     Ci {
         omit_dev: bool,
         allow: Vec<String>,
@@ -1314,6 +1329,104 @@ fn run_project_command(
     Ok(exit_code(status.code()))
 }
 
+#[derive(Debug)]
+struct NpmInstallCompatRequest {
+    specs: Vec<String>,
+    archive_references: Vec<String>,
+    local_paths: Vec<PathBuf>,
+    save: bool,
+    dev: bool,
+    omit_dev: bool,
+    lock_only: bool,
+    npm_registry: Option<String>,
+    allow: Vec<String>,
+    allow_all_host: bool,
+}
+
+fn run_npm_install_compat(
+    project_dir: &Path,
+    request: NpmInstallCompatRequest,
+) -> Result<ExitCode, OmcRegistryError> {
+    let NpmInstallCompatRequest {
+        specs,
+        archive_references,
+        local_paths,
+        save,
+        dev,
+        omit_dev,
+        lock_only,
+        npm_registry,
+        allow,
+        allow_all_host,
+    } = request;
+    let allowed_capabilities = parse_grants(&allow, allow_all_host)?;
+    if specs.is_empty() && archive_references.is_empty() {
+        let mut options = LinkOptions::new(project_dir);
+        options.allowed_capabilities = allowed_capabilities;
+        options.npm_registry_url = npm_registry.clone();
+        options.include_dev_dependencies = !omit_dev;
+        options.npm_local_paths = absolutize_paths(project_dir, local_paths.clone());
+        if save && !local_paths.is_empty() {
+            add_manifest_npm_local_paths(project_dir, &local_paths, dev)?;
+        }
+        if lock_only {
+            let reports = lock_project(&options)?;
+            print_link_reports(&reports);
+            print_lock_only_report(project_dir);
+        } else {
+            let install = install_project(&options)?;
+            print_install_report(&install);
+        }
+    } else {
+        let mut options = LinkOptions::new(project_dir);
+        options.allowed_capabilities = allowed_capabilities;
+        options.npm_registry_url = npm_registry.clone();
+        options.save_manifest_dependency = save;
+        options.save_dev_dependency = dev;
+        options.include_dev_dependencies = !omit_dev;
+        options.npm_local_paths = absolutize_paths(project_dir, local_paths.clone());
+        if save && !local_paths.is_empty() {
+            add_manifest_npm_local_paths(project_dir, &local_paths, dev)?;
+        }
+        let mut specs = parse_package_specs(&specs, Some(Ecosystem::Npm))?;
+        specs.extend(parse_npm_archive_references(
+            project_dir,
+            &archive_references,
+        )?);
+        let mut all_reports = Vec::new();
+        for spec in &specs {
+            all_reports.extend(add_package_graph(spec, &options)?);
+        }
+        print_link_reports(&all_reports);
+        if lock_only {
+            print_lock_only_report(project_dir);
+            return Ok(ExitCode::SUCCESS);
+        }
+        let install = if options.npm_local_paths.is_empty() {
+            install_locked_packages(project_dir)?
+        } else {
+            install_project(&options)?
+        };
+        println!();
+        print_install_report(&install);
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+fn run_npm_ci_compat(
+    project_dir: &Path,
+    omit_dev: bool,
+    allow: Vec<String>,
+    allow_all_host: bool,
+) -> Result<ExitCode, OmcRegistryError> {
+    let mut options = LinkOptions::new(project_dir);
+    options.allowed_capabilities = parse_grants(&allow, allow_all_host)?;
+    options.include_dev_dependencies = !omit_dev;
+    let install = install_locked_project(&options)?;
+    print_install_report(&install);
+    Ok(ExitCode::SUCCESS)
+}
+
 fn run_npm_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRegistryError> {
     match parse_npm_compat_action(args)? {
         NpmCompatAction::Help { topic } => print_npm_help(topic.as_deref()),
@@ -1332,69 +1445,77 @@ fn run_npm_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
             allow,
             allow_all_host,
         } => {
-            let allowed_capabilities = parse_grants(&allow, allow_all_host)?;
-            if specs.is_empty() && archive_references.is_empty() {
-                let mut options = LinkOptions::new(project_dir);
-                options.allowed_capabilities = allowed_capabilities;
-                options.npm_registry_url = npm_registry.clone();
-                options.include_dev_dependencies = !omit_dev;
-                options.npm_local_paths = absolutize_paths(project_dir, local_paths.clone());
-                if save && !local_paths.is_empty() {
-                    add_manifest_npm_local_paths(project_dir, &local_paths, dev)?;
-                }
-                if lock_only {
-                    let reports = lock_project(&options)?;
-                    print_link_reports(&reports);
-                    print_lock_only_report(project_dir);
-                } else {
-                    let install = install_project(&options)?;
-                    print_install_report(&install);
-                }
+            return run_npm_install_compat(
+                project_dir,
+                NpmInstallCompatRequest {
+                    specs,
+                    archive_references,
+                    local_paths,
+                    save,
+                    dev,
+                    omit_dev,
+                    lock_only,
+                    npm_registry,
+                    allow,
+                    allow_all_host,
+                },
+            )
+        }
+        NpmCompatAction::InstallTest {
+            command,
+            use_ci,
+            specs,
+            archive_references,
+            local_paths,
+            save,
+            dev,
+            omit_dev,
+            lock_only,
+            npm_registry,
+            allow,
+            allow_all_host,
+            test_args,
+        } => {
+            let status = if use_ci {
+                run_npm_ci_compat(project_dir, omit_dev, allow, allow_all_host)?
             } else {
-                let mut options = LinkOptions::new(project_dir);
-                options.allowed_capabilities = allowed_capabilities;
-                options.npm_registry_url = npm_registry.clone();
-                options.save_manifest_dependency = save;
-                options.save_dev_dependency = dev;
-                options.include_dev_dependencies = !omit_dev;
-                options.npm_local_paths = absolutize_paths(project_dir, local_paths.clone());
-                if save && !local_paths.is_empty() {
-                    add_manifest_npm_local_paths(project_dir, &local_paths, dev)?;
-                }
-                let mut specs = parse_package_specs(&specs, Some(Ecosystem::Npm))?;
-                specs.extend(parse_npm_archive_references(
+                run_npm_install_compat(
                     project_dir,
-                    &archive_references,
-                )?);
-                let mut all_reports = Vec::new();
-                for spec in &specs {
-                    all_reports.extend(add_package_graph(spec, &options)?);
-                }
-                print_link_reports(&all_reports);
-                if lock_only {
-                    print_lock_only_report(project_dir);
-                    return Ok(ExitCode::SUCCESS);
-                }
-                let install = if options.npm_local_paths.is_empty() {
-                    install_locked_packages(project_dir)?
-                } else {
-                    install_project(&options)?
-                };
-                println!();
-                print_install_report(&install);
+                    NpmInstallCompatRequest {
+                        specs,
+                        archive_references,
+                        local_paths,
+                        save,
+                        dev,
+                        omit_dev,
+                        lock_only,
+                        npm_registry,
+                        allow,
+                        allow_all_host,
+                    },
+                )?
+            };
+            if status != ExitCode::SUCCESS {
+                return Ok(status);
             }
+            return run_package_script_with_npm_command_for_workspaces(
+                project_dir,
+                &command,
+                "test",
+                &test_args,
+                false,
+                NpmScriptTargets {
+                    workspaces: &[],
+                    all_workspaces: false,
+                    include_workspace_root: false,
+                },
+            );
         }
         NpmCompatAction::Ci {
             omit_dev,
             allow,
             allow_all_host,
-        } => {
-            let mut options = LinkOptions::new(project_dir);
-            options.allowed_capabilities = parse_grants(&allow, allow_all_host)?;
-            options.include_dev_dependencies = !omit_dev;
-            let install = install_locked_project(&options)?;
-            print_install_report(&install);
-        }
+        } => return run_npm_ci_compat(project_dir, omit_dev, allow, allow_all_host),
         NpmCompatAction::Remove {
             specs,
             allow,
@@ -1708,6 +1829,20 @@ fn npm_help_text(topic: Option<&str>) -> String {
                 "Common flags: --omit=dev, --include=dev, --allow, --allow-all-host.",
             ],
         ),
+        Some("install-test") => npm_command_help(
+            "npm install-test [<package-spec>...] [-- <test-args>...]",
+            &[
+                "Run OMC npm install, then run the root package's test script.",
+                "Alias: it.",
+            ],
+        ),
+        Some("install-ci-test") => npm_command_help(
+            "npm install-ci-test [-- <test-args>...]",
+            &[
+                "Run OMC npm ci, then run the root package's test script.",
+                "Alias: cit.",
+            ],
+        ),
         Some("run") => npm_command_help(
             "npm run [<script>] [-- <args>...]",
             &[
@@ -1828,7 +1963,7 @@ fn npm_general_help_text() -> String {
         "npm <command>",
         &[
             "OMC npm compatibility runs supported npm workflows through OMC's verifier, lockfile, cache, and project-local runtime paths.",
-            "Supported commands: install, ci, remove, run, test, start, stop, restart, exec, list, explain, audit, outdated, fund, prune, dedupe, rebuild, cache, pkg, version, pack, search, view, config, init, bin, root, prefix.",
+            "Supported commands: install, install-test, ci, install-ci-test, remove, run, test, start, stop, restart, exec, list, explain, audit, outdated, fund, prune, dedupe, rebuild, cache, pkg, version, pack, search, view, config, init, bin, root, prefix.",
             "Use `npm help <command>` for focused OMC compatibility notes.",
         ],
     )
@@ -1850,7 +1985,9 @@ fn npm_help_topic(topic: &str) -> Option<&'static str> {
     match topic {
         "help" | "--help" | "-h" => None,
         "install" | "i" | "add" | "update" | "up" | "upgrade" => Some("install"),
+        "install-test" | "it" => Some("install-test"),
         "ci" => Some("ci"),
+        "install-ci-test" | "cit" => Some("install-ci-test"),
         "run" | "run-script" | "test" | "start" | "stop" | "restart" => Some("run"),
         "exec" | "x" | "npx" => Some("exec"),
         "remove" | "uninstall" | "rm" | "un" => Some("remove"),
@@ -5687,6 +5824,8 @@ fn parse_npm_compat_action(args: &[String]) -> Result<NpmCompatAction, OmcRegist
         "--version" | "-v" => Ok(NpmCompatAction::Version),
         "init" => parse_npm_init_args(&args[1..]),
         "version" => parse_npm_version_args(&args[1..]),
+        "install-test" | "it" => parse_npm_install_test_args(command, false, &args[1..]),
+        "install-ci-test" | "cit" => parse_npm_install_test_args(command, true, &args[1..]),
         "install" | "i" | "add" | "update" | "up" | "upgrade" => parse_npm_install_args(&args[1..]),
         "ci" => {
             let CommonCompatFlags {
@@ -5943,6 +6082,8 @@ fn npm_global_arg_supported_by_command(command: &str, arg: &str) -> bool {
                 | "update"
                 | "up"
                 | "upgrade"
+                | "install-test"
+                | "it"
                 | "ci"
                 | "outdated"
                 | "pack"
@@ -6030,7 +6171,11 @@ fn npm_global_arg_supported_by_command(command: &str, arg: &str) -> bool {
                 | "update"
                 | "up"
                 | "upgrade"
+                | "install-test"
+                | "it"
                 | "ci"
+                | "install-ci-test"
+                | "cit"
                 | "prune"
                 | "dedupe"
                 | "ddp"
@@ -6456,6 +6601,85 @@ fn parse_npm_install_args(args: &[String]) -> Result<NpmCompatAction, OmcRegistr
         npm_registry,
         allow,
         allow_all_host,
+    })
+}
+
+fn parse_npm_install_test_args(
+    command: &str,
+    use_ci: bool,
+    args: &[String],
+) -> Result<NpmCompatAction, OmcRegistryError> {
+    let mut command_args = Vec::new();
+    let mut test_args = Vec::new();
+    let mut index = 0;
+    while index < args.len() {
+        let arg = &args[index];
+        if arg == "--" {
+            test_args.extend(args[index + 1..].iter().cloned());
+            break;
+        }
+        command_args.push(arg.clone());
+        index += 1;
+    }
+
+    if use_ci {
+        let CommonCompatFlags {
+            omit_dev,
+            allow,
+            allow_all_host,
+            positionals,
+            ..
+        } = parse_common_compat_flags(&command_args, true)?;
+        if !positionals.is_empty() {
+            return Err(unsupported_compat_arg(command, &positionals[0]));
+        }
+        return Ok(NpmCompatAction::InstallTest {
+            command: command.to_owned(),
+            use_ci,
+            specs: Vec::new(),
+            archive_references: Vec::new(),
+            local_paths: Vec::new(),
+            save: true,
+            dev: false,
+            omit_dev,
+            lock_only: false,
+            npm_registry: None,
+            allow,
+            allow_all_host,
+            test_args,
+        });
+    }
+
+    let install = parse_npm_install_args(&command_args)?;
+    let NpmCompatAction::Install {
+        specs,
+        archive_references,
+        local_paths,
+        save,
+        dev,
+        omit_dev,
+        lock_only,
+        npm_registry,
+        allow,
+        allow_all_host,
+    } = install
+    else {
+        unreachable!("parse_npm_install_args only returns install actions")
+    };
+    Ok(NpmCompatAction::InstallTest {
+        command: command.to_owned(),
+        use_ci,
+        specs,
+        archive_references,
+        local_paths,
+        save,
+        dev,
+        omit_dev,
+        lock_only,
+        npm_registry,
+        allow,
+        allow_all_host,
+        test_args,
     })
 }
 
@@ -9554,6 +9778,7 @@ mod tests {
         );
         assert!(npm_help_text(None).contains("Supported commands: install"));
         assert!(npm_help_text(Some("fund")).contains("npm fund [<package-spec>]"));
+        assert!(npm_help_text(Some("install-test")).contains("npm install-test"));
         assert_eq!(
             parse_npm_compat_action(&args(&[
                 "--silent",
@@ -9795,6 +10020,52 @@ mod tests {
                 npm_registry: None,
                 allow: Vec::new(),
                 allow_all_host: false,
+            }
+        );
+
+        assert_eq!(
+            parse_npm_compat_action(&args(&[
+                "--registry=https://registry.example.invalid/npm",
+                "it",
+                "--omit=dev",
+                "left-pad",
+                "--",
+                "--watch",
+            ]))
+            .unwrap(),
+            NpmCompatAction::InstallTest {
+                command: "it".to_owned(),
+                use_ci: false,
+                specs: vec!["left-pad".to_owned()],
+                archive_references: Vec::new(),
+                local_paths: Vec::new(),
+                save: true,
+                dev: false,
+                omit_dev: true,
+                lock_only: false,
+                npm_registry: Some("https://registry.example.invalid/npm".to_owned()),
+                allow: Vec::new(),
+                allow_all_host: false,
+                test_args: vec!["--watch".to_owned()],
+            }
+        );
+
+        assert_eq!(
+            parse_npm_compat_action(&args(&["cit", "--omit=dev", "--", "--runInBand"])).unwrap(),
+            NpmCompatAction::InstallTest {
+                command: "cit".to_owned(),
+                use_ci: true,
+                specs: Vec::new(),
+                archive_references: Vec::new(),
+                local_paths: Vec::new(),
+                save: true,
+                dev: false,
+                omit_dev: true,
+                lock_only: false,
+                npm_registry: None,
+                allow: Vec::new(),
+                allow_all_host: false,
+                test_args: vec!["--runInBand".to_owned()],
             }
         );
 

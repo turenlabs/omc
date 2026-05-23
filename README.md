@@ -118,7 +118,9 @@ cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm help install
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm install left-pad@1.3.0
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm install --registry https://registry.npmjs.org left-pad@1.3.0
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm update --package-lock-only
+cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm install-test -- --watch
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm ci --omit=dev
+cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm install-ci-test
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm run --json
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm run test -- --watch
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm run build --workspace @demo/lib
@@ -427,7 +429,7 @@ Supported now:
 - `omc node`, `omc python`, `omc script`, and `omc run` wrappers, including
   package.json and Pipfile project scripts
 - `omc npm` compatibility commands for common `install`, `update` / `up` /
-  `upgrade`, `ci`, `prune`, `dedupe`, `rebuild`, `test`, `start`, `stop`, `restart`,
+  `upgrade`, `install-test` / `it`, `ci`, `install-ci-test` / `cit`, `prune`, `dedupe`, `rebuild`, `test`, `start`, `stop`, `restart`,
   `run`, `exec`, `init`, `remove`, `bin`, `root`, `prefix`, `audit` / `audit --json`,
   `help`, `fund` / `fund --json`, `cache verify/ls/rm/clean --force`, `pkg get/set/delete`, `version`,
   `pack`, `search` / `find`, `config get/set/delete/list`, `get`, `view` / `info` / `show`,
