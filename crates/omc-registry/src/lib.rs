@@ -7825,6 +7825,14 @@ pub struct NpmPublishPackage {
     pub tag: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub access: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provenance: Option<NpmProvenanceBundle>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct NpmProvenanceBundle {
+    pub media_type: String,
+    pub data: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -11264,6 +11272,25 @@ fn npm_publish_document(
         package.filename.clone(),
         serde_json::Value::Object(attachment),
     );
+    if let Some(provenance) = &package.provenance {
+        let mut attachment = serde_json::Map::new();
+        attachment.insert(
+            "content_type".to_owned(),
+            serde_json::Value::String(provenance.media_type.clone()),
+        );
+        attachment.insert(
+            "data".to_owned(),
+            serde_json::Value::String(provenance.data.clone()),
+        );
+        attachment.insert(
+            "length".to_owned(),
+            serde_json::json!(provenance.data.len()),
+        );
+        attachments.insert(
+            format!("{}-{}.sigstore", package.name, package.version),
+            serde_json::Value::Object(attachment),
+        );
+    }
     root.insert(
         "_attachments".to_owned(),
         serde_json::Value::Object(attachments),
@@ -21981,6 +22008,14 @@ wheels = [
                 .as_str()
                 .unwrap();
             assert_eq!(STANDARD.decode(encoded).unwrap(), expected_tarball);
+            assert_eq!(
+                body["_attachments"]["demo-pkg-1.0.0.sigstore"]["content_type"],
+                "application/vnd.dev.sigstore.bundle+json;version=0.3"
+            );
+            assert_eq!(
+                body["_attachments"]["demo-pkg-1.0.0.sigstore"]["data"],
+                r#"{"mediaType":"application/vnd.dev.sigstore.bundle+json;version=0.3","dsseEnvelope":{"payload":"e30="}}"#
+            );
 
             let response_body = r#"{"ok":true}"#;
             let response = format!(
@@ -22012,6 +22047,10 @@ wheels = [
                 tarball,
                 tag: "beta".to_owned(),
                 access: Some("public".to_owned()),
+                provenance: Some(NpmProvenanceBundle {
+                    media_type: "application/vnd.dev.sigstore.bundle+json;version=0.3".to_owned(),
+                    data: r#"{"mediaType":"application/vnd.dev.sigstore.bundle+json;version=0.3","dsseEnvelope":{"payload":"e30="}}"#.to_owned(),
+                }),
             },
             None,
             Some(Path::new("ci.npmrc")),

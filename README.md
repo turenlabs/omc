@@ -155,6 +155,7 @@ cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm version patch 
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm pack --pack-destination dist
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm pack left-pad@1.3.0 --pack-destination dist
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm publish --dry-run --json
+cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm publish --dry-run --provenance-file build.sigstore
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm publish --tag beta --access public --registry https://registry.npmjs.org/
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm unpublish left-pad@1.3.0 --dry-run
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm unpublish left-pad --force --otp 123456

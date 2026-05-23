@@ -42,6 +42,7 @@ name = "twine"
 path = "src/bin/twine.rs"
 
 [dependencies]
+base64 = "0.22"
 clap = { version = "4", features = ["derive"] }
 flate2 = "1"
 omc-cap = { path = "../omc-cap" }

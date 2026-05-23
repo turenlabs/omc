@@ -6,6 +6,7 @@ use std::process::{Command as ProcessCommand, ExitCode};
 use std::time::{SystemTime, UNIX_EPOCH};
 use std::{env, ffi::OsString, fs};
 
+use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use clap::{Parser, Subcommand};
 use flate2::write::GzEncoder;
 use flate2::Compression;
@@ -33,8 +34,8 @@ use omc_registry::{
     NpmAccessMapResult, NpmAccessMutationResult, NpmAccessStatusResult, NpmAccessToken,
     NpmDeprecateResult, NpmDistTagMutationResult, NpmOrgListResult, NpmOrgMutationResult,
     NpmOwnerListResult, NpmOwnerMutationResult, NpmPackageTarball, NpmPingResult,
-    NpmProfileMutationResult, NpmProfileResult, NpmPublishPackage, NpmPublishResult,
-    NpmSearchPackage, NpmStarMutationResult, NpmStarsResult, NpmTeamListResult,
+    NpmProfileMutationResult, NpmProfileResult, NpmProvenanceBundle, NpmPublishPackage,
+    NpmPublishResult, NpmSearchPackage, NpmStarMutationResult, NpmStarsResult, NpmTeamListResult,
     NpmTeamMutationResult, NpmTokenCreateOptions, NpmTokenCreateResult, NpmTokenListResult,
     NpmTokenRevokeResult, NpmUnpublishResult, NpmWhoamiResult, NpmWorkspacePackage,
     OmcRegistryError, PackageSpec, ProjectRequirements, PypiBinaryMode, PypiCheckIssue,
@@ -875,6 +876,7 @@ struct NpmPublishAction {
     package: Option<PathBuf>,
     tag: String,
     access: Option<String>,
+    provenance: NpmPublishProvenance,
     dry_run: bool,
     json: bool,
     npm_registry: Option<String>,
@@ -883,6 +885,13 @@ struct NpmPublishAction {
     workspaces: Vec<String>,
     all_workspaces: bool,
     include_workspace_root: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum NpmPublishProvenance {
+    None,
+    Generate,
+    File(PathBuf),
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -3887,8 +3896,9 @@ fn npm_help_text(topic: Option<&str>) -> String {
             "npm publish [<local-dir>|<tarball>]",
             &[
                 "Pack and publish a local npm package through the configured registry.",
-                "Supports --dry-run, --json, --registry, --userconfig, --tag, --access, --otp, and workspace selectors.",
-                "Remote package specs, git URLs, and provenance bundles are not implemented yet.",
+                "Supports --dry-run, --json, --registry, --userconfig, --tag, --access, --otp, --provenance-file, and workspace selectors.",
+                "Automatic --provenance generation needs trusted publishing/OIDC and is currently limited to dry-run reporting.",
+                "Remote package specs and git URLs are not implemented yet.",
             ],
         ),
         Some("unpublish") => npm_command_help(
@@ -8793,6 +8803,7 @@ fn print_npm_publish(project_dir: &Path, action: NpmPublishAction) -> Result<(),
         let mut prepared = prepare_npm_publish_package(&source)?;
         prepared.package.tag = action.tag.clone();
         prepared.package.access = action.access.clone();
+        apply_npm_publish_provenance(&mut prepared.package, &action.provenance, action.dry_run)?;
         if npm_manifest_bool_field(&prepared.manifest, "private") && !action.dry_run {
             return Err(OmcRegistryError::UnsupportedSpec(format!(
                 "npm publish refuses private package {}@{}",
@@ -8823,6 +8834,7 @@ fn print_npm_publish(project_dir: &Path, action: NpmPublishAction) -> Result<(),
                 target.registry,
                 prepared.pack.entry_count,
                 prepared.pack.unpacked_size,
+                &action.provenance,
             ));
         } else {
             let result = publish_npm_package(
@@ -8836,6 +8848,7 @@ fn print_npm_publish(project_dir: &Path, action: NpmPublishAction) -> Result<(),
                 result,
                 prepared.pack.entry_count,
                 prepared.pack.unpacked_size,
+                &action.provenance,
             ));
         }
     }
@@ -9431,6 +9444,8 @@ struct NpmPublishOutput {
     status: Option<u16>,
     shasum: Option<String>,
     integrity: Option<String>,
+    provenance: Option<String>,
+    provenance_file: Option<String>,
     entry_count: usize,
     unpacked_size: u64,
 }
@@ -9441,6 +9456,7 @@ impl NpmPublishOutput {
         registry: String,
         entry_count: usize,
         unpacked_size: u64,
+        provenance: &NpmPublishProvenance,
     ) -> Self {
         Self {
             name: package.name,
@@ -9453,12 +9469,19 @@ impl NpmPublishOutput {
             status: None,
             shasum: None,
             integrity: None,
+            provenance: npm_publish_provenance_json_label(provenance),
+            provenance_file: npm_publish_provenance_file_label(provenance),
             entry_count,
             unpacked_size,
         }
     }
 
-    fn published(result: NpmPublishResult, entry_count: usize, unpacked_size: u64) -> Self {
+    fn published(
+        result: NpmPublishResult,
+        entry_count: usize,
+        unpacked_size: u64,
+        provenance: &NpmPublishProvenance,
+    ) -> Self {
         Self {
             name: result.name,
             version: result.version,
@@ -9470,6 +9493,8 @@ impl NpmPublishOutput {
             status: Some(result.status),
             shasum: Some(result.shasum),
             integrity: Some(result.integrity),
+            provenance: npm_publish_provenance_json_label(provenance),
+            provenance_file: npm_publish_provenance_file_label(provenance),
             entry_count,
             unpacked_size,
         }
@@ -9487,10 +9512,115 @@ impl NpmPublishOutput {
             "status": self.status,
             "shasum": self.shasum,
             "integrity": self.integrity,
+            "provenance": self.provenance,
+            "provenanceFile": self.provenance_file,
             "entryCount": self.entry_count,
             "unpackedSize": self.unpacked_size,
         })
     }
+}
+
+fn apply_npm_publish_provenance(
+    package: &mut NpmPublishPackage,
+    provenance: &NpmPublishProvenance,
+    dry_run: bool,
+) -> Result<(), OmcRegistryError> {
+    match provenance {
+        NpmPublishProvenance::None => Ok(()),
+        NpmPublishProvenance::Generate if dry_run => Ok(()),
+        NpmPublishProvenance::Generate => Err(OmcRegistryError::UnsupportedSpec(
+            "npm publish --provenance generation is not implemented; use --provenance-file with a Sigstore bundle".to_owned(),
+        )),
+        NpmPublishProvenance::File(path) => {
+            package.provenance = Some(read_npm_provenance_bundle(path, &package.tarball)?);
+            Ok(())
+        }
+    }
+}
+
+fn read_npm_provenance_bundle(
+    path: &Path,
+    tarball: &[u8],
+) -> Result<NpmProvenanceBundle, OmcRegistryError> {
+    let data = fs::read_to_string(path)?;
+    let bundle: serde_json::Value = serde_json::from_str(&data)?;
+    let media_type = bundle
+        .get("mediaType")
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| {
+            OmcRegistryError::UnsupportedSpec(format!(
+                "npm provenance file `{}` must contain a non-empty mediaType",
+                path.display()
+            ))
+        })?
+        .to_owned();
+    let payload = bundle
+        .pointer("/dsseEnvelope/payload")
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| {
+            OmcRegistryError::UnsupportedSpec(format!(
+                "npm provenance file `{}` must contain a DSSE payload",
+                path.display()
+            ))
+        })?;
+    verify_npm_provenance_subject(path, payload, tarball)?;
+    Ok(NpmProvenanceBundle { media_type, data })
+}
+
+fn verify_npm_provenance_subject(
+    path: &Path,
+    payload: &str,
+    tarball: &[u8],
+) -> Result<(), OmcRegistryError> {
+    let decoded = BASE64_STANDARD.decode(payload).map_err(|error| {
+        OmcRegistryError::UnsupportedSpec(format!(
+            "npm provenance file `{}` has an invalid DSSE payload: {error}",
+            path.display()
+        ))
+    })?;
+    let statement: serde_json::Value = serde_json::from_slice(&decoded)?;
+    let expected = sha512_hex(tarball);
+    let subject_matches = statement
+        .get("subject")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .any(|subject| {
+            subject
+                .pointer("/digest/sha512")
+                .and_then(serde_json::Value::as_str)
+                == Some(expected.as_str())
+        });
+    if !subject_matches {
+        return Err(OmcRegistryError::UnsupportedSpec(format!(
+            "npm provenance file `{}` does not contain a subject sha512 matching the package tarball",
+            path.display()
+        )));
+    }
+    Ok(())
+}
+
+fn npm_publish_provenance_json_label(provenance: &NpmPublishProvenance) -> Option<String> {
+    match provenance {
+        NpmPublishProvenance::None => None,
+        NpmPublishProvenance::Generate => Some("generate".to_owned()),
+        NpmPublishProvenance::File(_) => Some("file".to_owned()),
+    }
+}
+
+fn npm_publish_provenance_file_label(provenance: &NpmPublishProvenance) -> Option<String> {
+    match provenance {
+        NpmPublishProvenance::File(path) => Some(path.display().to_string()),
+        NpmPublishProvenance::None | NpmPublishProvenance::Generate => None,
+    }
+}
+
+fn sha512_hex(bytes: &[u8]) -> String {
+    let mut digest = Sha512::new();
+    digest.update(bytes);
+    format!("{:x}", digest.finalize())
 }
 
 fn prepare_npm_publish_package(
@@ -9554,6 +9684,7 @@ fn prepared_npm_publish_from_parts(
             tarball,
             tag,
             access,
+            provenance: None,
         },
         manifest,
         pack: NpmPublishPackSummary {
@@ -14449,6 +14580,7 @@ fn parse_npm_publish_args(args: &[String]) -> Result<NpmCompatAction, OmcRegistr
     let mut package = None;
     let mut tag = "latest".to_owned();
     let mut access = None;
+    let mut provenance = NpmPublishProvenance::None;
     let mut dry_run = false;
     let mut json = false;
     let mut npm_registry = None;
@@ -14515,20 +14647,16 @@ fn parse_npm_publish_args(args: &[String]) -> Result<NpmCompatAction, OmcRegistr
         } else if arg == "--include-workspace-root=false" {
             include_workspace_root = false;
         } else if matches!(arg.as_str(), "--provenance" | "--provenance=true") {
-            return Err(OmcRegistryError::UnsupportedSpec(
-                "npm publish --provenance is not implemented yet".to_owned(),
-            ));
+            provenance = NpmPublishProvenance::Generate;
         } else if matches!(arg.as_str(), "--no-provenance" | "--provenance=false") {
+            provenance = NpmPublishProvenance::None;
         } else if arg == "--provenance-file" {
             index += 1;
-            let _ = npm_publish_flag_value(args, index, arg)?;
-            return Err(OmcRegistryError::UnsupportedSpec(
-                "npm publish --provenance-file is not implemented yet".to_owned(),
-            ));
-        } else if arg.starts_with("--provenance-file=") {
-            return Err(OmcRegistryError::UnsupportedSpec(
-                "npm publish --provenance-file is not implemented yet".to_owned(),
-            ));
+            provenance = NpmPublishProvenance::File(PathBuf::from(npm_publish_flag_value(
+                args, index, arg,
+            )?));
+        } else if let Some(value) = arg.strip_prefix("--provenance-file=") {
+            provenance = NpmPublishProvenance::File(PathBuf::from(value));
         } else if matches!(
             arg.as_str(),
             "--silent" | "-s" | "--ignore-scripts" | "--foreground-scripts"
@@ -14560,6 +14688,7 @@ fn parse_npm_publish_args(args: &[String]) -> Result<NpmCompatAction, OmcRegistr
             package,
             tag,
             access,
+            provenance,
             dry_run,
             json,
             npm_registry,
@@ -21409,6 +21538,7 @@ mod tests {
                     package: None,
                     tag: "beta".to_owned(),
                     access: Some("public".to_owned()),
+                    provenance: NpmPublishProvenance::None,
                     dry_run: false,
                     json: true,
                     npm_registry: Some("https://registry.example.invalid/npm".to_owned()),
@@ -21433,6 +21563,33 @@ mod tests {
                     package: Some(PathBuf::from("./pkg.tgz")),
                     tag: "latest".to_owned(),
                     access: None,
+                    provenance: NpmPublishProvenance::None,
+                    dry_run: true,
+                    json: false,
+                    npm_registry: None,
+                    userconfig: None,
+                    otp: None,
+                    workspaces: Vec::new(),
+                    all_workspaces: false,
+                    include_workspace_root: false,
+                },
+            }
+        );
+        assert_eq!(
+            parse_npm_compat_action(&args(&[
+                "publish",
+                "--dry-run",
+                "--provenance-file=build.sigstore",
+                "--provenance=false",
+                "--provenance",
+            ]))
+            .unwrap(),
+            NpmCompatAction::Publish {
+                action: NpmPublishAction {
+                    package: None,
+                    tag: "latest".to_owned(),
+                    access: None,
+                    provenance: NpmPublishProvenance::Generate,
                     dry_run: true,
                     json: false,
                     npm_registry: None,
@@ -23751,6 +23908,27 @@ verdict = "accepted"
         )
         .unwrap();
         fs::write(dir.join("index.js"), "module.exports = 1\n").unwrap();
+        let (_, _, tarball) = npm_pack_package_for_publish(&dir).unwrap();
+        let payload = serde_json::json!({
+            "subject": [{
+                "digest": {
+                    "sha512": sha512_hex(&tarball)
+                }
+            }]
+        })
+        .to_string();
+        let provenance_file = dir.with_extension("sigstore");
+        fs::write(
+            &provenance_file,
+            serde_json::json!({
+                "mediaType": "application/vnd.dev.sigstore.bundle+json;version=0.3",
+                "dsseEnvelope": {
+                    "payload": BASE64_STANDARD.encode(payload)
+                }
+            })
+            .to_string(),
+        )
+        .unwrap();
 
         print_npm_publish(
             &dir,
@@ -23758,6 +23936,7 @@ verdict = "accepted"
                 package: None,
                 tag: "beta".to_owned(),
                 access: Some("public".to_owned()),
+                provenance: NpmPublishProvenance::File(provenance_file),
                 dry_run: true,
                 json: true,
                 npm_registry: None,
