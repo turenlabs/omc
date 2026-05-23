@@ -149,6 +149,7 @@ cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm unpublish left
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm unpublish left-pad --force --otp 123456
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm deprecate left-pad@1.x "old release line" --dry-run
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm undeprecate left-pad@1.3.0
+cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm diff --diff left-pad@1.1.0 --diff left-pad@1.3.0 --diff-name-only
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm search left-pad --searchlimit=5 --json
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm star left-pad --otp 123456
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm unstar left-pad --otp 123456
@@ -481,7 +482,7 @@ Supported now:
   `upgrade`, `install-test` / `it`, `ci`, `install-ci-test` / `cit`, `prune`, `dedupe`, `rebuild`, `test`, `start`, `stop`, `restart`,
   `run`, `exec`, `init`, `remove`, `bin`, `root`, `prefix`, `audit` / `audit --json`,
   `help`, `fund` / `fund --json`, `cache verify/ls/rm/clean --force`, `pkg get/set/delete`, `version`,
-  `pack`, `publish`, `unpublish`, `deprecate`, `undeprecate`, `search` / `find`,
+  `pack`, `publish`, `unpublish`, `deprecate`, `undeprecate`, `diff`, `search` / `find`,
   `star`, `unstar`, `stars`, `ping`, `whoami`, `login` / `adduser`, `logout`,
   `token list/create/revoke`, `profile get/set`, `owner ls/add/rm`,
   `access list/get/set/grant/revoke`, `org set/rm/ls`, `team create/destroy/add/rm/ls`, `dist-tag ls/add/rm`, `sbom --sbom-format=cyclonedx|spdx`, `config get/set/delete/list`, `get`,

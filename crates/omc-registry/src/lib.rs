@@ -7734,13 +7734,19 @@ pub struct NpmAccessToken {
     pub bypass_2fa: Option<bool>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NpmPackageMetadata {
     pub name: String,
     pub version: String,
     pub dist_tags: BTreeMap<String, String>,
     pub versions: Vec<String>,
     pub manifest: serde_json::Value,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NpmPackageTarball {
+    pub metadata: NpmPackageMetadata,
+    pub bytes: Vec<u8>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -8186,6 +8192,36 @@ pub fn read_npm_package_metadata_with_userconfig(
         versions: root.versions.keys().cloned().collect(),
         manifest,
     })
+}
+
+pub fn download_npm_package_tarball(
+    project_dir: &Path,
+    spec: &PackageSpec,
+    registry_override: Option<&str>,
+    userconfig_override: Option<&Path>,
+) -> Result<NpmPackageTarball> {
+    let metadata = read_npm_package_metadata_with_userconfig(
+        project_dir,
+        spec,
+        registry_override,
+        userconfig_override,
+    )?;
+    let tarball_url = metadata
+        .manifest
+        .pointer("/dist/tarball")
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| OmcRegistryError::MissingArtifact(metadata.name.clone()))?
+        .to_owned();
+    let client = Client::new();
+    let npm_config =
+        read_npm_config_with_overrides(project_dir, registry_override, userconfig_override)?;
+    let bytes = npm_get(&client, &tarball_url, &npm_config)
+        .send()?
+        .error_for_status()?
+        .bytes()?
+        .to_vec();
+    Ok(NpmPackageTarball { metadata, bytes })
 }
 
 pub fn read_npm_ping(project_dir: &Path, registry_override: Option<&str>) -> Result<NpmPingResult> {
@@ -19718,6 +19754,94 @@ wheels = [
             ),
             Some("port-token")
         );
+    }
+
+    #[test]
+    fn downloads_npm_package_tarball_with_userconfig_auth() {
+        use std::io::Write as _;
+
+        let tarball = npm_tgz_for_test(r#"{ "name": "demo-pkg", "version": "1.0.1" }"#);
+        let expected = tarball.clone();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let handle = std::thread::spawn(move || {
+            let root = format!(
+                r#"{{
+                  "dist-tags": {{"latest": "1.0.1"}},
+                  "versions": {{
+                    "1.0.1": {{"name": "demo-pkg", "version": "1.0.1", "dist": {{"tarball": "http://{addr}/demo-pkg/-/demo-pkg-1.0.1.tgz"}}}}
+                  }}
+                }}"#
+            );
+            let version = format!(
+                r#"{{
+                  "name": "demo-pkg",
+                  "version": "1.0.1",
+                  "dist": {{"tarball": "http://{addr}/demo-pkg/-/demo-pkg-1.0.1.tgz"}}
+                }}"#
+            );
+
+            let (mut stream, _) = listener.accept().unwrap();
+            let buffer = read_http_request_bytes(&mut stream);
+            let body_start = http_body_start(&buffer).unwrap();
+            let headers = String::from_utf8_lossy(&buffer[..body_start]);
+            assert!(headers.starts_with("GET /demo-pkg "));
+            assert!(headers
+                .to_ascii_lowercase()
+                .contains("authorization: bearer registry-token"));
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                root.len(),
+                root
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+
+            let (mut stream, _) = listener.accept().unwrap();
+            let buffer = read_http_request_bytes(&mut stream);
+            let body_start = http_body_start(&buffer).unwrap();
+            let headers = String::from_utf8_lossy(&buffer[..body_start]);
+            assert!(headers.starts_with("GET /demo-pkg/1.0.1 "));
+            assert!(headers
+                .to_ascii_lowercase()
+                .contains("authorization: bearer registry-token"));
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                version.len(),
+                version
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+
+            let (mut stream, _) = listener.accept().unwrap();
+            let buffer = read_http_request_bytes(&mut stream);
+            let body_start = http_body_start(&buffer).unwrap();
+            let headers = String::from_utf8_lossy(&buffer[..body_start]);
+            assert!(headers.starts_with("GET /demo-pkg/-/demo-pkg-1.0.1.tgz "));
+            assert!(headers
+                .to_ascii_lowercase()
+                .contains("authorization: bearer registry-token"));
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                expected.len()
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+            stream.write_all(&expected).unwrap();
+        });
+
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(
+            dir.path().join("ci.npmrc"),
+            format!("registry=http://{addr}/\n//{addr}/:_authToken=registry-token\n"),
+        )
+        .unwrap();
+
+        let spec = PackageSpec::parse("npm:demo-pkg@^1.0.0").unwrap();
+        let result =
+            download_npm_package_tarball(dir.path(), &spec, None, Some(Path::new("ci.npmrc")))
+                .unwrap();
+        assert_eq!(result.metadata.name, "demo-pkg");
+        assert_eq!(result.metadata.version, "1.0.1");
+        assert_eq!(result.bytes, tarball);
+        handle.join().unwrap();
     }
 
     #[test]

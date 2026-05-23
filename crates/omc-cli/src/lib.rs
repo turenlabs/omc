@@ -14,8 +14,8 @@ use omc_registry::{
     add_manifest_npm_local_paths, add_manifest_policy_grants, add_npm_dist_tag, add_npm_team_user,
     add_package_graph, apply_pypi_binary_option, check_pypi_distribution, check_pypi_lock,
     compare_npm_versions, compare_pypi_versions, create_npm_team, create_npm_token,
-    deprecate_npm_package, destroy_npm_team, grant_npm_access, init_project,
-    install_locked_packages, install_locked_project, install_project, lock_project,
+    deprecate_npm_package, destroy_npm_team, download_npm_package_tarball, grant_npm_access,
+    init_project, install_locked_packages, install_locked_project, install_project, lock_project,
     mutate_npm_package_owner, mutate_npm_package_star, parse_capability_grant,
     parse_npm_direct_archive_reference, parse_pypi_direct_archive_reference,
     parse_pypi_vcs_requirement, publish_npm_package, read_constraint_files, read_lockfile,
@@ -32,12 +32,12 @@ use omc_registry::{
     InstallReport, LinkOptions, LockedPackage, LockedPythonVcsDependency, NpmAccessMapResult,
     NpmAccessMutationResult, NpmAccessStatusResult, NpmAccessToken, NpmDeprecateResult,
     NpmDistTagMutationResult, NpmOrgListResult, NpmOrgMutationResult, NpmOwnerListResult,
-    NpmOwnerMutationResult, NpmPingResult, NpmProfileMutationResult, NpmProfileResult,
-    NpmPublishPackage, NpmPublishResult, NpmSearchPackage, NpmStarMutationResult, NpmStarsResult,
-    NpmTeamListResult, NpmTeamMutationResult, NpmTokenCreateOptions, NpmTokenCreateResult,
-    NpmTokenListResult, NpmTokenRevokeResult, NpmUnpublishResult, NpmWhoamiResult,
-    NpmWorkspacePackage, OmcRegistryError, PackageSpec, ProjectRequirements, PypiBinaryMode,
-    PypiCheckIssue, PypiUploadOptions, PypiUploadResult, PythonLocalRequirement,
+    NpmOwnerMutationResult, NpmPackageTarball, NpmPingResult, NpmProfileMutationResult,
+    NpmProfileResult, NpmPublishPackage, NpmPublishResult, NpmSearchPackage, NpmStarMutationResult,
+    NpmStarsResult, NpmTeamListResult, NpmTeamMutationResult, NpmTokenCreateOptions,
+    NpmTokenCreateResult, NpmTokenListResult, NpmTokenRevokeResult, NpmUnpublishResult,
+    NpmWhoamiResult, NpmWorkspacePackage, OmcRegistryError, PackageSpec, ProjectRequirements,
+    PypiBinaryMode, PypiCheckIssue, PypiUploadOptions, PypiUploadResult, PythonLocalRequirement,
     PythonVcsRequirement, Verdict,
 };
 use sha2::{Digest, Sha256, Sha384, Sha512};
@@ -377,6 +377,9 @@ enum NpmCompatAction {
     },
     Deprecate {
         action: NpmDeprecateAction,
+    },
+    Diff {
+        action: NpmDiffAction,
     },
     Search {
         action: NpmSearchAction,
@@ -820,6 +823,21 @@ struct NpmDeprecateAction {
     userconfig: Option<PathBuf>,
     otp: Option<String>,
     undeprecate: bool,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct NpmDiffAction {
+    specs: Vec<String>,
+    paths: Vec<String>,
+    name_only: bool,
+    unified: usize,
+    ignore_all_space: bool,
+    no_prefix: bool,
+    src_prefix: String,
+    dst_prefix: String,
+    text: bool,
+    npm_registry: Option<String>,
+    userconfig: Option<PathBuf>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -2507,6 +2525,7 @@ fn run_npm_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
         NpmCompatAction::Publish { action } => print_npm_publish(project_dir, action)?,
         NpmCompatAction::Unpublish { action } => print_npm_unpublish(project_dir, action)?,
         NpmCompatAction::Deprecate { action } => print_npm_deprecate(project_dir, action)?,
+        NpmCompatAction::Diff { action } => print_npm_diff(project_dir, action)?,
         NpmCompatAction::Search { action } => print_npm_search(project_dir, action)?,
         NpmCompatAction::Star { action } => print_npm_star(project_dir, action)?,
         NpmCompatAction::Ping {
@@ -3326,6 +3345,14 @@ fn npm_help_text(topic: Option<&str>) -> String {
                 "Use npm undeprecate <package-spec> to clear matching deprecation warnings.",
             ],
         ),
+        Some("diff") => npm_command_help(
+            "npm diff --diff=<spec-a> --diff=<spec-b> [<paths>...]",
+            &[
+                "Compare two npm registry package tarballs and print unified patches.",
+                "This OMC compatibility path currently supports two registry package specs.",
+                "Supports --diff-name-only, --diff-unified, --diff-ignore-all-space, --diff-no-prefix, --diff-src-prefix, --diff-dst-prefix, --diff-text, --registry, and --userconfig.",
+            ],
+        ),
         Some("search") => npm_command_help(
             "npm search <terms...>",
             &["Search the configured npm registry. Aliases: s, se, find. Supports --json, --parseable, --searchlimit."],
@@ -3482,7 +3509,7 @@ fn npm_general_help_text() -> String {
         "npm <command>",
         &[
             "OMC npm compatibility runs supported npm workflows through OMC's verifier, lockfile, cache, and project-local runtime paths.",
-            "Supported commands: install, link, install-test, ci, install-ci-test, remove, run, test, start, stop, restart, exec, list, explain, audit, outdated, fund, prune, dedupe, rebuild, cache, pkg, version, pack, publish, unpublish, deprecate, undeprecate, search, star, unstar, stars, ping, whoami, login, adduser, logout, token, profile, owner, access, org, team, dist-tag, sbom, view, docs, repo, bugs, home, config, init, bin, root, prefix.",
+            "Supported commands: install, link, install-test, ci, install-ci-test, remove, run, test, start, stop, restart, exec, list, explain, audit, outdated, fund, prune, dedupe, rebuild, cache, pkg, version, pack, publish, unpublish, deprecate, undeprecate, diff, search, star, unstar, stars, ping, whoami, login, adduser, logout, token, profile, owner, access, org, team, dist-tag, sbom, view, docs, repo, bugs, home, config, init, bin, root, prefix.",
             "Use `npm help <command>` for focused OMC compatibility notes.",
         ],
     )
@@ -3522,6 +3549,7 @@ fn npm_help_topic(topic: &str) -> Option<&'static str> {
         "publish" => Some("publish"),
         "unpublish" => Some("unpublish"),
         "deprecate" | "undeprecate" => Some("deprecate"),
+        "diff" => Some("diff"),
         "search" | "s" | "se" | "find" => Some("search"),
         "star" | "unstar" | "stars" => Some("star"),
         "ping" => Some("ping"),
@@ -7849,6 +7877,262 @@ fn npm_deprecate_json(result: &NpmDeprecateResult) -> serde_json::Value {
     })
 }
 
+fn print_npm_diff(project_dir: &Path, action: NpmDiffAction) -> Result<(), OmcRegistryError> {
+    let left_spec = parse_package_spec(&action.specs[0], Some(Ecosystem::Npm))?;
+    let right_spec = parse_package_spec(&action.specs[1], Some(Ecosystem::Npm))?;
+    if left_spec.direct_url.is_some() || right_spec.direct_url.is_some() {
+        return Err(OmcRegistryError::UnsupportedSpec(
+            "npm diff compatibility currently supports registry package specs, not local paths or direct tarballs".to_owned(),
+        ));
+    }
+    let left = download_npm_package_tarball(
+        project_dir,
+        &left_spec,
+        action.npm_registry.as_deref(),
+        action.userconfig.as_deref(),
+    )?;
+    let right = download_npm_package_tarball(
+        project_dir,
+        &right_spec,
+        action.npm_registry.as_deref(),
+        action.userconfig.as_deref(),
+    )?;
+    let files = npm_diff_changed_files(&left, &right, &action)?;
+    if action.name_only {
+        for file in files {
+            println!("{}", file.path);
+        }
+    } else {
+        for file in files {
+            print!("{}", npm_diff_file_patch(&left, &right, &file, &action)?);
+        }
+    }
+    Ok(())
+}
+
+#[derive(Debug)]
+struct NpmDiffFile {
+    path: String,
+    before: Option<Vec<u8>>,
+    after: Option<Vec<u8>>,
+}
+
+fn npm_diff_changed_files(
+    left: &NpmPackageTarball,
+    right: &NpmPackageTarball,
+    action: &NpmDiffAction,
+) -> Result<Vec<NpmDiffFile>, OmcRegistryError> {
+    let left_files = npm_diff_tarball_files(&left.bytes)?;
+    let right_files = npm_diff_tarball_files(&right.bytes)?;
+    let mut paths = left_files.keys().cloned().collect::<BTreeSet<_>>();
+    paths.extend(right_files.keys().cloned());
+    let mut changed = Vec::new();
+    for path in paths {
+        if !npm_diff_path_selected(&path, &action.paths) {
+            continue;
+        }
+        let before = left_files.get(&path).map(Vec::as_slice);
+        let after = right_files.get(&path).map(Vec::as_slice);
+        if npm_diff_bytes_equal(before, after, action.ignore_all_space, action.text) {
+            continue;
+        }
+        changed.push(NpmDiffFile {
+            path,
+            before: before.map(<[u8]>::to_vec),
+            after: after.map(<[u8]>::to_vec),
+        });
+    }
+    Ok(changed)
+}
+
+fn npm_diff_tarball_files(bytes: &[u8]) -> Result<BTreeMap<String, Vec<u8>>, OmcRegistryError> {
+    let decoder = flate2::read::GzDecoder::new(std::io::Cursor::new(bytes));
+    let mut archive = tar::Archive::new(decoder);
+    let mut files = BTreeMap::new();
+    for entry in archive.entries()? {
+        let mut entry = entry?;
+        if !entry.header().entry_type().is_file() {
+            continue;
+        }
+        let path = entry.path()?.to_string_lossy().into_owned();
+        let path = path
+            .strip_prefix("package/")
+            .unwrap_or(path.as_str())
+            .to_owned();
+        if path.is_empty() {
+            continue;
+        }
+        let mut bytes = Vec::new();
+        entry.read_to_end(&mut bytes)?;
+        files.insert(path, bytes);
+    }
+    Ok(files)
+}
+
+fn npm_diff_path_selected(path: &str, filters: &[String]) -> bool {
+    filters.is_empty()
+        || filters.iter().any(|filter| {
+            let filter = filter
+                .trim_start_matches("./")
+                .trim_start_matches('/')
+                .trim_end_matches('/');
+            !filter.is_empty() && (path == filter || path.starts_with(&format!("{filter}/")))
+        })
+}
+
+fn npm_diff_bytes_equal(
+    before: Option<&[u8]>,
+    after: Option<&[u8]>,
+    ignore_all_space: bool,
+    text: bool,
+) -> bool {
+    match (before, after) {
+        (Some(before), Some(after)) if before == after => true,
+        (Some(before), Some(after)) if ignore_all_space => {
+            let before = npm_diff_text(before, text);
+            let after = npm_diff_text(after, text);
+            before.zip(after).is_some_and(|(before, after)| {
+                npm_diff_strip_all_space(&before) == npm_diff_strip_all_space(&after)
+            })
+        }
+        _ => false,
+    }
+}
+
+fn npm_diff_file_patch(
+    left: &NpmPackageTarball,
+    right: &NpmPackageTarball,
+    file: &NpmDiffFile,
+    action: &NpmDiffAction,
+) -> Result<String, OmcRegistryError> {
+    let old_path = npm_diff_prefixed_path(&file.path, &action.src_prefix, action.no_prefix);
+    let new_path = npm_diff_prefixed_path(&file.path, &action.dst_prefix, action.no_prefix);
+    let old_label = if file.before.is_some() {
+        old_path.as_str()
+    } else {
+        "/dev/null"
+    };
+    let new_label = if file.after.is_some() {
+        new_path.as_str()
+    } else {
+        "/dev/null"
+    };
+
+    let mut output = String::new();
+    output.push_str(&format!("diff --git {old_path} {new_path}\n"));
+    output.push_str(&format!(
+        "index v{}..v{} 100644\n",
+        left.metadata.version, right.metadata.version
+    ));
+    output.push_str(&format!("--- {old_label}\n"));
+    output.push_str(&format!("+++ {new_label}\n"));
+
+    let Some(before) = file
+        .before
+        .as_ref()
+        .map(|bytes| npm_diff_text(bytes, action.text))
+    else {
+        output.push_str(&npm_diff_added_hunk(
+            file.after.as_deref().unwrap_or_default(),
+            action,
+        ));
+        return Ok(output);
+    };
+    let Some(after) = file
+        .after
+        .as_ref()
+        .map(|bytes| npm_diff_text(bytes, action.text))
+    else {
+        output.push_str(&npm_diff_removed_hunk(
+            file.before.as_deref().unwrap_or_default(),
+            action,
+        ));
+        return Ok(output);
+    };
+
+    let Some((before, after)) = before.zip(after) else {
+        output.push_str(&format!(
+            "Binary files {old_label} and {new_label} differ\n"
+        ));
+        return Ok(output);
+    };
+
+    let before_lines = npm_diff_lines(&before);
+    let after_lines = npm_diff_lines(&after);
+    if before_lines.is_empty() && after_lines.is_empty() {
+        return Ok(output);
+    }
+    output.push_str(&format!(
+        "@@ -1,{} +1,{} @@\n",
+        before_lines.len(),
+        after_lines.len()
+    ));
+    let _context = action.unified;
+    for line in before_lines {
+        output.push('-');
+        output.push_str(line);
+        output.push('\n');
+    }
+    for line in after_lines {
+        output.push('+');
+        output.push_str(line);
+        output.push('\n');
+    }
+    Ok(output)
+}
+
+fn npm_diff_added_hunk(bytes: &[u8], action: &NpmDiffAction) -> String {
+    let Some(text) = npm_diff_text(bytes, action.text) else {
+        return "Binary files /dev/null and added file differ\n".to_owned();
+    };
+    let lines = npm_diff_lines(&text);
+    let mut output = format!("@@ -0,0 +1,{} @@\n", lines.len());
+    for line in lines {
+        output.push('+');
+        output.push_str(line);
+        output.push('\n');
+    }
+    output
+}
+
+fn npm_diff_removed_hunk(bytes: &[u8], action: &NpmDiffAction) -> String {
+    let Some(text) = npm_diff_text(bytes, action.text) else {
+        return "Binary files removed file and /dev/null differ\n".to_owned();
+    };
+    let lines = npm_diff_lines(&text);
+    let mut output = format!("@@ -1,{} +0,0 @@\n", lines.len());
+    for line in lines {
+        output.push('-');
+        output.push_str(line);
+        output.push('\n');
+    }
+    output
+}
+
+fn npm_diff_prefixed_path(path: &str, prefix: &str, no_prefix: bool) -> String {
+    if no_prefix {
+        path.to_owned()
+    } else {
+        format!("{prefix}{path}")
+    }
+}
+
+fn npm_diff_text(bytes: &[u8], force_text: bool) -> Option<String> {
+    if force_text {
+        Some(String::from_utf8_lossy(bytes).into_owned())
+    } else {
+        std::str::from_utf8(bytes).ok().map(str::to_owned)
+    }
+}
+
+fn npm_diff_lines(text: &str) -> Vec<&str> {
+    text.lines().collect()
+}
+
+fn npm_diff_strip_all_space(text: &str) -> String {
+    text.chars().filter(|ch| !ch.is_whitespace()).collect()
+}
+
 fn npm_publish_sources(
     project_dir: &Path,
     action: &NpmPublishAction,
@@ -10235,6 +10519,7 @@ fn parse_npm_compat_action(args: &[String]) -> Result<NpmCompatAction, OmcRegist
         "unpublish" => parse_npm_unpublish_args(&args[1..]),
         "deprecate" => parse_npm_deprecate_args(false, &args[1..]),
         "undeprecate" => parse_npm_deprecate_args(true, &args[1..]),
+        "diff" => parse_npm_diff_args(&args[1..]),
         "search" | "s" | "se" | "find" => parse_npm_search_args(&args[1..]),
         "star" => parse_npm_star_args(true, &args[1..]),
         "unstar" => parse_npm_star_args(false, &args[1..]),
@@ -10400,6 +10685,7 @@ fn npm_global_arg_supported_by_command(command: &str, arg: &str) -> bool {
                 | "unpublish"
                 | "deprecate"
                 | "undeprecate"
+                | "diff"
                 | "search"
                 | "s"
                 | "se"
@@ -10441,6 +10727,7 @@ fn npm_global_arg_supported_by_command(command: &str, arg: &str) -> bool {
                 | "unpublish"
                 | "deprecate"
                 | "undeprecate"
+                | "diff"
                 | "star"
                 | "unstar"
                 | "token"
@@ -10538,6 +10825,27 @@ fn npm_global_arg_supported_by_command(command: &str, arg: &str) -> bool {
     {
         return matches!(command, "sbom");
     }
+    if matches!(
+        arg,
+        "--diff"
+            | "--diff-unified"
+            | "--diff-src-prefix"
+            | "--diff-dst-prefix"
+            | "--diff-name-only"
+            | "--diff-ignore-all-space"
+            | "--diff-no-prefix"
+            | "--diff-text"
+    ) || arg.starts_with("--diff=")
+        || arg.starts_with("--diff-unified=")
+        || arg.starts_with("--diff-src-prefix=")
+        || arg.starts_with("--diff-dst-prefix=")
+        || arg.starts_with("--diff-name-only=")
+        || arg.starts_with("--diff-ignore-all-space=")
+        || arg.starts_with("--diff-no-prefix=")
+        || arg.starts_with("--diff-text=")
+    {
+        return matches!(command, "diff");
+    }
     if matches!(arg, "--package-lock-only") || arg.starts_with("--package-lock-only=") {
         return matches!(command, "sbom" | "link" | "ln");
     }
@@ -10556,6 +10864,7 @@ fn npm_global_arg_supported_by_command(command: &str, arg: &str) -> bool {
                 | "unpublish"
                 | "deprecate"
                 | "undeprecate"
+                | "diff"
                 | "star"
                 | "unstar"
                 | "stars"
@@ -10632,6 +10941,7 @@ fn npm_global_arg_supported_by_command(command: &str, arg: &str) -> bool {
                 | "unpublish"
                 | "deprecate"
                 | "undeprecate"
+                | "diff"
                 | "search"
                 | "s"
                 | "se"
@@ -10739,6 +11049,10 @@ fn npm_global_preserved_bool_flag(arg: &str) -> bool {
             | "--workspaces"
             | "--include-workspace-root"
             | "--package-lock-only"
+            | "--diff-name-only"
+            | "--diff-ignore-all-space"
+            | "--diff-no-prefix"
+            | "--diff-text"
     )
 }
 
@@ -10774,6 +11088,10 @@ fn npm_global_preserved_value_flag(arg: &str) -> bool {
             | "--password"
             | "--sbom-format"
             | "--sbom-type"
+            | "--diff"
+            | "--diff-unified"
+            | "--diff-src-prefix"
+            | "--diff-dst-prefix"
     )
 }
 
@@ -10817,6 +11135,14 @@ fn npm_global_preserved_equals_flag(arg: &str) -> bool {
         "--sbom-format=",
         "--sbom-type=",
         "--package-lock-only=",
+        "--diff=",
+        "--diff-unified=",
+        "--diff-name-only=",
+        "--diff-ignore-all-space=",
+        "--diff-no-prefix=",
+        "--diff-src-prefix=",
+        "--diff-dst-prefix=",
+        "--diff-text=",
     ]
     .iter()
     .any(|prefix| arg.starts_with(prefix))
@@ -12108,6 +12434,144 @@ fn npm_deprecate_ignored_equals_flag(arg: &str) -> bool {
     ["--loglevel=", "--cache="]
         .iter()
         .any(|prefix| arg.starts_with(prefix))
+}
+
+fn parse_npm_diff_args(args: &[String]) -> Result<NpmCompatAction, OmcRegistryError> {
+    let mut specs = Vec::new();
+    let mut paths = Vec::new();
+    let mut name_only = false;
+    let mut unified = 3usize;
+    let mut ignore_all_space = false;
+    let mut no_prefix = false;
+    let mut src_prefix = "a/".to_owned();
+    let mut dst_prefix = "b/".to_owned();
+    let mut text = false;
+    let mut npm_registry = None;
+    let mut userconfig = None;
+    let mut index = 0;
+    while index < args.len() {
+        let arg = &args[index];
+        if arg == "--diff" {
+            index += 1;
+            specs.push(npm_diff_flag_value(args, index, arg)?);
+        } else if let Some(value) = arg.strip_prefix("--diff=") {
+            specs.push(value.to_owned());
+        } else if matches!(arg.as_str(), "--diff-name-only" | "--diff-name-only=true") {
+            name_only = true;
+        } else if arg == "--diff-name-only=false" {
+            name_only = false;
+        } else if matches!(
+            arg.as_str(),
+            "--diff-ignore-all-space" | "--diff-ignore-all-space=true"
+        ) {
+            ignore_all_space = true;
+        } else if arg == "--diff-ignore-all-space=false" {
+            ignore_all_space = false;
+        } else if matches!(arg.as_str(), "--diff-no-prefix" | "--diff-no-prefix=true") {
+            no_prefix = true;
+        } else if arg == "--diff-no-prefix=false" {
+            no_prefix = false;
+        } else if matches!(arg.as_str(), "--diff-text" | "--diff-text=true") {
+            text = true;
+        } else if arg == "--diff-text=false" {
+            text = false;
+        } else if arg == "--diff-unified" {
+            index += 1;
+            unified = parse_npm_diff_unified(&npm_diff_flag_value(args, index, arg)?)?;
+        } else if let Some(value) = arg.strip_prefix("--diff-unified=") {
+            unified = parse_npm_diff_unified(value)?;
+        } else if arg == "--diff-src-prefix" {
+            index += 1;
+            src_prefix = npm_diff_flag_value(args, index, arg)?;
+        } else if let Some(value) = arg.strip_prefix("--diff-src-prefix=") {
+            src_prefix = value.to_owned();
+        } else if arg == "--diff-dst-prefix" {
+            index += 1;
+            dst_prefix = npm_diff_flag_value(args, index, arg)?;
+        } else if let Some(value) = arg.strip_prefix("--diff-dst-prefix=") {
+            dst_prefix = value.to_owned();
+        } else if arg == "--registry" {
+            index += 1;
+            npm_registry = Some(npm_diff_flag_value(args, index, arg)?);
+        } else if let Some(value) = arg.strip_prefix("--registry=") {
+            npm_registry = Some(value.to_owned());
+        } else if arg == "--userconfig" {
+            index += 1;
+            userconfig = Some(PathBuf::from(npm_diff_flag_value(args, index, arg)?));
+        } else if let Some(value) = arg.strip_prefix("--userconfig=") {
+            userconfig = Some(PathBuf::from(value));
+        } else if matches!(
+            arg.as_str(),
+            "--silent" | "-s" | "--parseable" | "-p" | "--json" | "--json=true" | "--json=false"
+        ) {
+        } else if matches!(
+            arg.as_str(),
+            "--workspace" | "-w" | "--loglevel" | "--cache" | "--tag"
+        ) {
+            index += 1;
+            if args.get(index).is_none() {
+                return Err(OmcRegistryError::UnsupportedSpec(format!(
+                    "{arg} needs a value"
+                )));
+            }
+        } else if npm_diff_ignored_equals_flag(arg) {
+        } else if arg.starts_with('-') {
+            return Err(unsupported_compat_arg("npm diff", arg));
+        } else {
+            paths.push(arg.clone());
+        }
+        index += 1;
+    }
+    if specs.len() != 2 {
+        return Err(OmcRegistryError::UnsupportedSpec(
+            "npm diff compatibility currently needs exactly two --diff package specs".to_owned(),
+        ));
+    }
+    Ok(NpmCompatAction::Diff {
+        action: NpmDiffAction {
+            specs,
+            paths,
+            name_only,
+            unified,
+            ignore_all_space,
+            no_prefix,
+            src_prefix,
+            dst_prefix,
+            text,
+            npm_registry,
+            userconfig,
+        },
+    })
+}
+
+fn parse_npm_diff_unified(value: &str) -> Result<usize, OmcRegistryError> {
+    value.parse::<usize>().map_err(|_| {
+        OmcRegistryError::UnsupportedSpec(format!("invalid npm diff unified context `{value}`"))
+    })
+}
+
+fn npm_diff_ignored_equals_flag(arg: &str) -> bool {
+    [
+        "--loglevel=",
+        "--cache=",
+        "--tag=",
+        "--workspace=",
+        "-w=",
+        "--workspaces=",
+        "--include-workspace-root=",
+    ]
+    .iter()
+    .any(|prefix| arg.starts_with(prefix))
+}
+
+fn npm_diff_flag_value(
+    args: &[String],
+    index: usize,
+    flag: &str,
+) -> Result<String, OmcRegistryError> {
+    args.get(index)
+        .cloned()
+        .ok_or_else(|| OmcRegistryError::UnsupportedSpec(format!("{flag} needs a value")))
 }
 
 fn parse_npm_search_args(args: &[String]) -> Result<NpmCompatAction, OmcRegistryError> {
@@ -18144,6 +18608,40 @@ mod tests {
         );
         assert_eq!(
             parse_npm_compat_action(&args(&[
+                "--diff=left-pad@1.1.0",
+                "--diff",
+                "left-pad@1.3.0",
+                "--registry",
+                "https://registry.example.invalid/npm",
+                "--userconfig=ci.npmrc",
+                "diff",
+                "--diff-name-only",
+                "--diff-unified=5",
+                "--diff-ignore-all-space",
+                "--diff-src-prefix=old/",
+                "--diff-dst-prefix",
+                "new/",
+                "index.js",
+            ]))
+            .unwrap(),
+            NpmCompatAction::Diff {
+                action: NpmDiffAction {
+                    specs: vec!["left-pad@1.1.0".to_owned(), "left-pad@1.3.0".to_owned()],
+                    paths: vec!["index.js".to_owned()],
+                    name_only: true,
+                    unified: 5,
+                    ignore_all_space: true,
+                    no_prefix: false,
+                    src_prefix: "old/".to_owned(),
+                    dst_prefix: "new/".to_owned(),
+                    text: false,
+                    npm_registry: Some("https://registry.example.invalid/npm".to_owned()),
+                    userconfig: Some(PathBuf::from("ci.npmrc")),
+                },
+            }
+        );
+        assert_eq!(
+            parse_npm_compat_action(&args(&[
                 "--json",
                 "--registry",
                 "https://registry.example.invalid/npm",
@@ -19599,6 +20097,88 @@ mod tests {
         )
         .unwrap();
         assert!(!dir.join("dry").exists());
+    }
+
+    #[test]
+    fn diffs_npm_package_tarballs() {
+        fn package_tarball(root: &Path, version: &str) -> NpmPackageTarball {
+            let (pack, manifest, bytes) = npm_pack_package_for_publish(root).unwrap();
+            NpmPackageTarball {
+                metadata: omc_registry::NpmPackageMetadata {
+                    name: pack.name,
+                    version: version.to_owned(),
+                    dist_tags: BTreeMap::new(),
+                    versions: Vec::new(),
+                    manifest,
+                },
+                bytes,
+            }
+        }
+
+        let root = test_dir("npm-diff");
+        let left_dir = root.join("left");
+        let right_dir = root.join("right");
+        fs::create_dir_all(&left_dir).unwrap();
+        fs::create_dir_all(&right_dir).unwrap();
+        for dir in [&left_dir, &right_dir] {
+            fs::write(
+                dir.join("package.json"),
+                r#"{ "name": "demo-pkg", "version": "1.0.0" }"#,
+            )
+            .unwrap();
+        }
+        fs::write(left_dir.join("index.js"), "module.exports = 1\n").unwrap();
+        fs::write(right_dir.join("index.js"), "module.exports = 2\n").unwrap();
+        fs::write(left_dir.join("removed.txt"), "remove me\n").unwrap();
+        fs::write(right_dir.join("added.txt"), "add me\n").unwrap();
+
+        let left = package_tarball(&left_dir, "1.0.0");
+        let right = package_tarball(&right_dir, "1.0.1");
+        let action = NpmDiffAction {
+            specs: vec!["demo-pkg@1.0.0".to_owned(), "demo-pkg@1.0.1".to_owned()],
+            paths: Vec::new(),
+            name_only: false,
+            unified: 3,
+            ignore_all_space: false,
+            no_prefix: false,
+            src_prefix: "a/".to_owned(),
+            dst_prefix: "b/".to_owned(),
+            text: false,
+            npm_registry: None,
+            userconfig: None,
+        };
+
+        let files = npm_diff_changed_files(&left, &right, &action).unwrap();
+        assert_eq!(
+            files
+                .iter()
+                .map(|file| file.path.as_str())
+                .collect::<Vec<_>>(),
+            vec!["added.txt", "index.js", "removed.txt"]
+        );
+        let index_file = files
+            .iter()
+            .find(|file| file.path == "index.js")
+            .expect("changed index.js");
+        let patch = npm_diff_file_patch(&left, &right, index_file, &action).unwrap();
+        assert!(patch.contains("diff --git a/index.js b/index.js"));
+        assert!(patch.contains("-module.exports = 1\n"));
+        assert!(patch.contains("+module.exports = 2\n"));
+
+        let filtered_action = NpmDiffAction {
+            paths: vec!["index.js".to_owned()],
+            ..action
+        };
+        let filtered = npm_diff_changed_files(&left, &right, &filtered_action).unwrap();
+        assert_eq!(
+            filtered
+                .iter()
+                .map(|file| file.path.as_str())
+                .collect::<Vec<_>>(),
+            vec!["index.js"]
+        );
+
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
