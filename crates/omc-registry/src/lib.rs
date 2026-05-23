@@ -3173,12 +3173,16 @@ fn read_pyproject_requirements(
 ) -> Result<ProjectRequirements> {
     let pyproject = toml::from_str::<PyProjectToml>(&fs::read_to_string(path)?)?;
     let mut discovered = ProjectRequirements::default();
+    let base_dir = path.parent().unwrap_or_else(|| Path::new("."));
 
     if let Some(project) = pyproject.project {
         for dependency in project.dependencies {
-            if let Some(spec) = parse_pypi_requirement(&dependency) {
-                discovered.specs.push(spec);
-            }
+            collect_pypi_project_requirement(
+                &mut discovered,
+                &dependency,
+                &BTreeSet::new(),
+                base_dir,
+            )?;
         }
 
         let optional_dependencies = project
@@ -3190,24 +3194,32 @@ fn read_pyproject_requirements(
         for extra in project_extras {
             if let Some(dependencies) = optional_dependencies.get(extra) {
                 for dependency in dependencies {
-                    if let Some(spec) =
-                        parse_pypi_requirement_with_extras(dependency, project_extras)
-                    {
-                        discovered.specs.push(spec);
-                    }
+                    collect_pypi_project_requirement(
+                        &mut discovered,
+                        dependency,
+                        project_extras,
+                        base_dir,
+                    )?;
                 }
             }
         }
     }
 
-    discovered.specs.extend(read_pyproject_dependency_groups(
+    let group_requirements = read_pyproject_dependency_groups(
         pyproject.dependency_groups,
         project_extras,
         include_dev_dependencies,
-    )?);
+        base_dir,
+    )?;
+    discovered.specs.extend(group_requirements.specs);
+    for (key, hashes) in group_requirements.hashes {
+        discovered.hashes.entry(key).or_default().extend(hashes);
+    }
+    discovered
+        .python_local_paths
+        .extend(group_requirements.python_local_paths);
 
     if let Some(poetry) = pyproject.tool.and_then(|tool| tool.poetry) {
-        let base_dir = path.parent().unwrap_or_else(|| Path::new("."));
         let poetry_requirements = read_poetry_dependencies(
             &poetry.dependencies,
             &poetry.extras,
@@ -3264,7 +3276,8 @@ fn read_pyproject_dependency_groups(
     dependency_groups: BTreeMap<String, Vec<PyProjectDependencyGroupItem>>,
     project_extras: &BTreeSet<String>,
     include_dev_dependencies: bool,
-) -> Result<Vec<PackageSpec>> {
+    base_dir: &Path,
+) -> Result<ProjectRequirements> {
     let dependency_groups = dependency_groups
         .into_iter()
         .map(|(name, items)| (normalize_pypi_extra(&name), items))
@@ -3274,25 +3287,27 @@ fn read_pyproject_dependency_groups(
         selected_groups.insert("dev".to_owned());
     }
 
-    let mut specs = Vec::new();
+    let mut requirements = ProjectRequirements::default();
     for group in selected_groups {
         if dependency_groups.contains_key(&group) {
             collect_pyproject_dependency_group(
                 &group,
                 &dependency_groups,
                 &mut BTreeSet::new(),
-                &mut specs,
+                &mut requirements,
+                base_dir,
             )?;
         }
     }
-    Ok(specs)
+    Ok(requirements)
 }
 
 fn collect_pyproject_dependency_group(
     group: &str,
     dependency_groups: &BTreeMap<String, Vec<PyProjectDependencyGroupItem>>,
     stack: &mut BTreeSet<String>,
-    specs: &mut Vec<PackageSpec>,
+    requirements: &mut ProjectRequirements,
+    base_dir: &Path,
 ) -> Result<()> {
     if !stack.insert(group.to_owned()) {
         return Err(OmcRegistryError::UnsupportedRequirement(format!(
@@ -3309,11 +3324,12 @@ fn collect_pyproject_dependency_group(
     for item in items {
         match item {
             PyProjectDependencyGroupItem::Requirement(requirement) => {
-                if let Some(spec) =
-                    parse_pypi_requirement_with_extras(requirement, &BTreeSet::new())
-                {
-                    specs.push(spec);
-                }
+                collect_pypi_project_requirement(
+                    requirements,
+                    requirement,
+                    &BTreeSet::new(),
+                    base_dir,
+                )?;
             }
             PyProjectDependencyGroupItem::Include { include_group } => {
                 let include_group = normalize_pypi_extra(include_group);
@@ -3321,7 +3337,8 @@ fn collect_pyproject_dependency_group(
                     &include_group,
                     dependency_groups,
                     stack,
-                    specs,
+                    requirements,
+                    base_dir,
                 )?;
             }
         }
@@ -6402,6 +6419,129 @@ fn parse_pypi_local_direct_requirement(
         PackageSpec::with_direct_url(Ecosystem::Pypi, name, url, extras),
         hashes,
     )))
+}
+
+enum PypiProjectRequirement {
+    Spec(PackageSpec, BTreeSet<String>),
+    LocalPath(PathBuf),
+}
+
+fn collect_pypi_project_requirement(
+    requirements: &mut ProjectRequirements,
+    requirement: &str,
+    active_extras: &BTreeSet<String>,
+    base_dir: &Path,
+) -> Result<()> {
+    let Some(requirement) = parse_pypi_project_requirement(requirement, active_extras, base_dir)?
+    else {
+        return Ok(());
+    };
+
+    match requirement {
+        PypiProjectRequirement::Spec(spec, hashes) => {
+            if !hashes.is_empty() {
+                requirements
+                    .hashes
+                    .entry(spec.constraint_key())
+                    .or_default()
+                    .extend(hashes);
+            }
+            requirements.specs.push(spec);
+        }
+        PypiProjectRequirement::LocalPath(path) => {
+            requirements.python_local_paths.push(path);
+        }
+    }
+
+    Ok(())
+}
+
+fn parse_pypi_project_requirement(
+    requirement: &str,
+    active_extras: &BTreeSet<String>,
+    base_dir: &Path,
+) -> Result<Option<PypiProjectRequirement>> {
+    let direct_requirement = parse_pypi_direct_requirement(requirement, active_extras).or(
+        parse_pypi_local_direct_requirement(requirement, active_extras, base_dir)?,
+    );
+    if let Some((spec, hashes)) = direct_requirement {
+        if let Some(path) = pypi_direct_file_url_local_directory(spec.direct_url.as_deref())? {
+            return Ok(Some(PypiProjectRequirement::LocalPath(path)));
+        }
+        return Ok(Some(PypiProjectRequirement::Spec(spec, hashes)));
+    }
+
+    if let Some(path) =
+        parse_pypi_local_direct_path_requirement(requirement, active_extras, base_dir)?
+    {
+        return Ok(Some(PypiProjectRequirement::LocalPath(path)));
+    }
+
+    if pypi_direct_reference_applies(requirement, active_extras) {
+        return Err(OmcRegistryError::UnsupportedRequirement(
+            requirement.to_owned(),
+        ));
+    }
+
+    Ok(
+        parse_pypi_requirement_with_extras(requirement, active_extras)
+            .map(|spec| PypiProjectRequirement::Spec(spec, BTreeSet::new())),
+    )
+}
+
+fn pypi_direct_file_url_local_directory(direct_url: Option<&str>) -> Result<Option<PathBuf>> {
+    let Some(direct_url) = direct_url else {
+        return Ok(None);
+    };
+    let Ok(url) = reqwest::Url::parse(direct_url) else {
+        return Ok(None);
+    };
+    if url.scheme() != "file" {
+        return Ok(None);
+    }
+    let path = url
+        .to_file_path()
+        .map_err(|_| OmcRegistryError::UnsupportedRequirement(direct_url.to_owned()))?;
+    Ok(path.is_dir().then_some(path))
+}
+
+fn parse_pypi_local_direct_path_requirement(
+    requirement: &str,
+    active_extras: &BTreeSet<String>,
+    base_dir: &Path,
+) -> Result<Option<PathBuf>> {
+    let mut parts = requirement.splitn(2, ';');
+    let requirement_body = parts.next().unwrap_or_default().trim();
+    if let Some(marker) = parts.next() {
+        if !pypi_marker_applies(marker, active_extras) {
+            return Ok(None);
+        }
+    }
+
+    let Some((name, path)) = requirement_body.split_once(" @ ") else {
+        return Ok(None);
+    };
+    let (name, _) = parse_pypi_name_and_extras(name.trim());
+    if name.is_empty() {
+        return Ok(None);
+    }
+    let (path, _) = direct_requirement_url_and_hashes(path.trim());
+    if path.contains("://") || path.to_ascii_lowercase().ends_with(".whl") {
+        return Ok(None);
+    }
+    let path = resolved_local_path(&path, base_dir);
+    Ok(path.is_dir().then_some(path))
+}
+
+fn pypi_direct_reference_applies(requirement: &str, active_extras: &BTreeSet<String>) -> bool {
+    let mut parts = requirement.splitn(2, ';');
+    let requirement = parts.next().unwrap_or_default().trim();
+    if let Some(marker) = parts.next() {
+        if !pypi_marker_applies(marker, active_extras) {
+            return false;
+        }
+    }
+    requirement.contains(" @ ")
 }
 
 fn parse_pypi_local_wheel_requirement(
@@ -9930,18 +10070,31 @@ wheels = [
     fn reads_pyproject_dependencies_and_selected_extras() {
         let dir = tempfile::tempdir().unwrap();
         let pyproject = dir.path().join("pyproject.toml");
+        let wheel = dir
+            .path()
+            .join("wheels")
+            .join("local_idna-3.7-py3-none-any.whl");
+        fs::create_dir_all(wheel.parent().unwrap()).unwrap();
+        fs::create_dir_all(dir.path().join("vendor/local-package")).unwrap();
+        fs::create_dir_all(dir.path().join("vendor/extra-local")).unwrap();
+        fs::create_dir_all(dir.path().join("vendor/group-local")).unwrap();
+        fs::write(&wheel, b"not a real wheel").unwrap();
         fs::write(
             &pyproject,
             r#"
             [project]
             dependencies = [
                 "idna==3.7",
+                "local-idna @ ./wheels/local_idna-3.7-py3-none-any.whl#sha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "local-package @ ./vendor/local-package",
+                "skipped-local @ ./missing; sys_platform == 'win32'",
                 "colorama; extra == 'windows'"
             ]
 
             [project.optional-dependencies]
             dev = [
                 "charset-normalizer==3.4.0",
+                "extra-local @ ./vendor/extra-local",
                 "urllib3<3; python_version >= '3.0'"
             ]
             docs = ["markdown==3.6"]
@@ -9949,7 +10102,7 @@ wheels = [
             [dependency-groups]
             typing = ["typing-extensions==4.12.2"]
             test = ["pytest==8.2.0", { include-group = "typing" }]
-            dev = ["ruff==0.5.0", { include-group = "test" }]
+            dev = ["ruff==0.5.0", "group-local @ ./vendor/group-local", { include-group = "test" }]
             "#,
         )
         .unwrap();
@@ -9960,7 +10113,18 @@ wheels = [
             .iter()
             .any(|spec| spec.name == "idna" && spec.version.as_deref() == Some("==3.7")));
         assert!(!base.specs.iter().any(|spec| spec.name == "colorama"));
-        assert_eq!(base.specs.len(), 1);
+        assert!(base.specs.iter().any(|spec| spec.name == "local-idna"
+            && spec.direct_url.as_deref().unwrap().starts_with("file://")));
+        assert_eq!(
+            base.hashes.get("pypi:local-idna").cloned().unwrap(),
+            BTreeSet::from([
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_owned()
+            ])
+        );
+        assert_eq!(
+            base.python_local_paths,
+            vec![dir.path().join("vendor/local-package")]
+        );
 
         let default_dev = read_pyproject_requirements(&pyproject, &BTreeSet::new(), true).unwrap();
         assert!(default_dev
@@ -9976,6 +10140,9 @@ wheels = [
             .iter()
             .any(|spec| spec.name == "typing-extensions"
                 && spec.version.as_deref() == Some("==4.12.2")));
+        assert!(default_dev
+            .python_local_paths
+            .contains(&dir.path().join("vendor/group-local")));
 
         let dev =
             read_pyproject_requirements(&pyproject, &BTreeSet::from(["dev".to_owned()]), true)
@@ -9994,6 +10161,9 @@ wheels = [
             .specs
             .iter()
             .any(|spec| spec.name == "ruff" && spec.version.as_deref() == Some("==0.5.0")));
+        assert!(dev
+            .python_local_paths
+            .contains(&dir.path().join("vendor/extra-local")));
         assert!(!dev.specs.iter().any(|spec| spec.name == "markdown"));
     }
 
@@ -10013,6 +10183,25 @@ wheels = [
 
         let error = read_pyproject_requirements(&pyproject, &BTreeSet::new(), true).unwrap_err();
         assert!(error.to_string().contains("cyclic dependency group"));
+    }
+
+    #[test]
+    fn rejects_unsupported_pyproject_direct_paths() {
+        let dir = tempfile::tempdir().unwrap();
+        let pyproject = dir.path().join("pyproject.toml");
+        fs::write(
+            &pyproject,
+            r#"
+            [project]
+            dependencies = ["local-package @ ./missing"]
+            "#,
+        )
+        .unwrap();
+
+        let error = read_pyproject_requirements(&pyproject, &BTreeSet::new(), false).unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("unsupported requirements entry `local-package @ ./missing`"));
     }
 
     #[test]
