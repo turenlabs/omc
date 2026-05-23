@@ -272,7 +272,7 @@ enum NpmCompatAction {
         kind: NpmPathKind,
     },
     List {
-        json: bool,
+        action: NpmListAction,
     },
     Explain {
         specs: Vec<String>,
@@ -312,6 +312,12 @@ enum NpmCompatAction {
 enum NpmMaintenanceCommand {
     Prune,
     Dedupe,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct NpmListAction {
+    json: bool,
+    packages: Vec<String>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -1156,9 +1162,12 @@ fn run_npm_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
             return run_project_command(project_dir, &command, &args)
         }
         NpmCompatAction::Path { kind } => print_npm_path(project_dir, kind)?,
-        NpmCompatAction::List { json } => {
-            print_locked_packages(project_dir, Some(Ecosystem::Npm), json)?
-        }
+        NpmCompatAction::List { action } => print_locked_packages(
+            project_dir,
+            Some(Ecosystem::Npm),
+            action.json,
+            &action.packages,
+        )?,
         NpmCompatAction::Explain { specs, json } => {
             return print_npm_explain(project_dir, &specs, json)
         }
@@ -1344,7 +1353,7 @@ fn run_pip_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
             } else {
                 match format {
                     PipListFormat::Columns => {
-                        print_locked_packages(project_dir, Some(Ecosystem::Pypi), false)?
+                        print_locked_packages(project_dir, Some(Ecosystem::Pypi), false, &[])?
                     }
                     PipListFormat::Freeze => print_locked_freeze(project_dir)?,
                     PipListFormat::Json => print_locked_pip_json(project_dir)?,
@@ -3637,7 +3646,9 @@ fn print_locked_packages(
     project_dir: &Path,
     ecosystem: Option<Ecosystem>,
     json: bool,
+    filters: &[String],
 ) -> Result<(), OmcRegistryError> {
+    let filter_names = package_list_filter_names(filters, ecosystem)?;
     let lock = read_lockfile(project_dir.join("omc.lock"))?;
     let packages = lock
         .packages
@@ -3647,6 +3658,7 @@ fn print_locked_packages(
                 .map(|ecosystem| package.ecosystem == ecosystem)
                 .unwrap_or(true)
         })
+        .filter(|package| filter_names.is_empty() || filter_names.contains(&package.name))
         .collect::<Vec<_>>();
     if json {
         println!("{}", serde_json::to_string_pretty(&packages)?);
@@ -3665,6 +3677,16 @@ fn print_locked_packages(
         }
     }
     Ok(())
+}
+
+fn package_list_filter_names(
+    filters: &[String],
+    ecosystem: Option<Ecosystem>,
+) -> Result<BTreeSet<String>, OmcRegistryError> {
+    filters
+        .iter()
+        .map(|filter| parse_package_spec(filter, ecosystem).map(|spec| spec.name))
+        .collect()
 }
 
 fn print_locked_freeze(project_dir: &Path) -> Result<(), OmcRegistryError> {
@@ -4564,9 +4586,7 @@ fn parse_npm_compat_action(args: &[String]) -> Result<NpmCompatAction, OmcRegist
                 kind: NpmPathKind::Prefix,
             })
         }
-        "list" | "ls" => Ok(NpmCompatAction::List {
-            json: parse_json_list_flag("npm list", &args[1..])?,
-        }),
+        "list" | "ls" | "ll" | "la" => parse_npm_list_args(&args[1..]),
         "explain" | "why" => parse_npm_explain_args(&args[1..]),
         "outdated" => parse_npm_outdated_args(&args[1..]),
         "audit" => parse_npm_audit_args(&args[1..]),
@@ -4693,6 +4713,8 @@ fn npm_global_arg_supported_by_command(command: &str, arg: &str) -> bool {
             "version"
                 | "list"
                 | "ls"
+                | "ll"
+                | "la"
                 | "explain"
                 | "why"
                 | "outdated"
@@ -4708,6 +4730,33 @@ fn npm_global_arg_supported_by_command(command: &str, arg: &str) -> bool {
                 | "get"
         );
     }
+    if matches!(arg, "--depth") || arg.starts_with("--depth=") {
+        return matches!(command, "list" | "ls" | "ll" | "la" | "outdated");
+    }
+    if matches!(arg, "--omit" | "--include")
+        || arg.starts_with("--omit=")
+        || arg.starts_with("--include=")
+    {
+        return matches!(
+            command,
+            "install"
+                | "i"
+                | "add"
+                | "update"
+                | "up"
+                | "upgrade"
+                | "ci"
+                | "prune"
+                | "dedupe"
+                | "ddp"
+                | "find-dupes"
+                | "list"
+                | "ls"
+                | "ll"
+                | "la"
+                | "outdated"
+        );
+    }
     false
 }
 
@@ -4716,13 +4765,22 @@ fn npm_global_preserved_bool_flag(arg: &str) -> bool {
 }
 
 fn npm_global_preserved_value_flag(arg: &str) -> bool {
-    matches!(arg, "--registry" | "--userconfig")
+    matches!(
+        arg,
+        "--registry" | "--userconfig" | "--depth" | "--omit" | "--include"
+    )
 }
 
 fn npm_global_preserved_equals_flag(arg: &str) -> bool {
-    ["--registry=", "--userconfig="]
-        .iter()
-        .any(|prefix| arg.starts_with(prefix))
+    [
+        "--registry=",
+        "--userconfig=",
+        "--depth=",
+        "--omit=",
+        "--include=",
+    ]
+    .iter()
+    .any(|prefix| arg.starts_with(prefix))
 }
 
 fn npm_global_ignored_bool_flag(arg: &str) -> bool {
@@ -7288,17 +7346,68 @@ fn ignored_npm_equals_flag(arg: &str) -> bool {
         .any(|prefix| arg.starts_with(prefix))
 }
 
-fn parse_json_list_flag(command: &str, args: &[String]) -> Result<bool, OmcRegistryError> {
+fn parse_npm_list_args(args: &[String]) -> Result<NpmCompatAction, OmcRegistryError> {
     let mut json = false;
-    for arg in args {
-        if arg == "--json" {
+    let mut packages = Vec::new();
+    let mut index = 0;
+    while index < args.len() {
+        let arg = &args[index];
+        if arg == "--json" || arg == "--json=true" {
             json = true;
-        } else if arg == "--depth=0" || arg == "--all" {
+        } else if arg == "--json=false" {
+            json = false;
+        } else if matches!(
+            arg.as_str(),
+            "--all"
+                | "--long"
+                | "--parseable"
+                | "-p"
+                | "--production"
+                | "--prod"
+                | "--dev"
+                | "--global"
+                | "-g"
+                | "--silent"
+                | "-s"
+                | "--workspaces"
+                | "--color=false"
+                | "--no-color"
+        ) {
+        } else if matches!(
+            arg.as_str(),
+            "--depth" | "--omit" | "--include" | "--loglevel" | "--workspace" | "-w"
+        ) {
+            index += 1;
+            if args.get(index).is_none() {
+                return Err(OmcRegistryError::UnsupportedSpec(format!(
+                    "{arg} needs a value"
+                )));
+            }
+        } else if npm_list_ignored_equals_flag(arg) {
+        } else if arg.starts_with('-') {
+            return Err(unsupported_compat_arg("npm list", arg));
         } else {
-            return Err(unsupported_compat_arg(command, arg));
+            packages.push(arg.clone());
         }
+        index += 1;
     }
-    Ok(json)
+    Ok(NpmCompatAction::List {
+        action: NpmListAction { json, packages },
+    })
+}
+
+fn npm_list_ignored_equals_flag(arg: &str) -> bool {
+    [
+        "--depth=",
+        "--omit=",
+        "--include=",
+        "--loglevel=",
+        "--workspace=",
+        "--userconfig=",
+        "--parseable=",
+    ]
+    .iter()
+    .any(|prefix| arg.starts_with(prefix))
 }
 
 fn parse_pip_list_args(args: &[String]) -> Result<PipCompatAction, OmcRegistryError> {
@@ -9072,7 +9181,40 @@ mod tests {
     fn parses_npm_and_pip_machine_readable_lists() {
         assert_eq!(
             parse_npm_compat_action(&args(&["list", "--json"])).unwrap(),
-            NpmCompatAction::List { json: true }
+            NpmCompatAction::List {
+                action: NpmListAction {
+                    json: true,
+                    packages: Vec::new(),
+                },
+            }
+        );
+        assert_eq!(
+            parse_npm_compat_action(&args(&[
+                "--depth=0",
+                "ls",
+                "--omit",
+                "dev",
+                "--loglevel",
+                "silent",
+                "left-pad@1.3.0",
+                "@scope/pkg",
+                "--json",
+            ]))
+            .unwrap(),
+            NpmCompatAction::List {
+                action: NpmListAction {
+                    json: true,
+                    packages: vec!["left-pad@1.3.0".to_owned(), "@scope/pkg".to_owned()],
+                },
+            }
+        );
+        assert_eq!(
+            package_list_filter_names(
+                &args(&["left-pad@1.3.0", "@scope/pkg"]),
+                Some(Ecosystem::Npm),
+            )
+            .unwrap(),
+            BTreeSet::from(["@scope/pkg".to_owned(), "left-pad".to_owned()])
         );
         assert_eq!(
             parse_pip_compat_action(&args(&[
