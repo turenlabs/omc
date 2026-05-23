@@ -4420,7 +4420,7 @@ fn pip_help_text(topic: Option<&str>) -> String {
         ),
         Some("config") => pip_command_help(
             "pip config <get|set|unset|list> ...",
-            &["Read and update pip config used by OMC. Supports --site, --user, and --json where relevant."],
+            &["Read and update pip config used by OMC. Supports --site, --user, --global, and --json where relevant."],
         ),
         Some(_) => pip_command_help(
             "pip help [command]",
@@ -10416,21 +10416,20 @@ fn pip_config_write_path(
 ) -> Result<PathBuf, OmcRegistryError> {
     match location {
         PipConfigLocation::Auto => {
-            if let Some(path) = env::var_os("PIP_CONFIG_FILE")
-                .map(PathBuf::from)
-                .filter(|path| !path.as_os_str().is_empty())
-            {
-                Ok(absolutize_path(project_dir, path))
-            } else {
-                Ok(project_dir.join("pip.conf"))
-            }
+            Ok(pip_config_file_override(project_dir)
+                .unwrap_or_else(|| project_dir.join("pip.conf")))
         }
         PipConfigLocation::Site => Ok(project_dir.join("pip.conf")),
         PipConfigLocation::User => Ok(pip_user_config_path(project_dir)),
-        PipConfigLocation::Global => Err(OmcRegistryError::UnsupportedSpec(
-            "pip config --global writes are not supported by OMC compatibility".to_owned(),
-        )),
+        PipConfigLocation::Global => Ok(pip_global_config_path(project_dir)),
     }
+}
+
+fn pip_config_file_override(project_dir: &Path) -> Option<PathBuf> {
+    env::var_os("PIP_CONFIG_FILE")
+        .map(PathBuf::from)
+        .filter(|path| !path.as_os_str().is_empty())
+        .map(|path| absolutize_path(project_dir, path))
 }
 
 fn pip_user_config_path(project_dir: &Path) -> PathBuf {
@@ -10447,6 +10446,39 @@ fn pip_user_config_path(project_dir: &Path) -> PathBuf {
         return home.join(".config").join("pip").join("pip.conf");
     }
     project_dir.join("pip.conf")
+}
+
+fn pip_global_config_path(project_dir: &Path) -> PathBuf {
+    if let Some(path) = pip_config_file_override(project_dir) {
+        return path;
+    }
+    #[cfg(test)]
+    if let Some(path) = env::var_os("OMC_TEST_PIP_GLOBAL_CONFIG_FILE")
+        .map(PathBuf::from)
+        .filter(|path| !path.as_os_str().is_empty())
+    {
+        return absolutize_path(project_dir, path);
+    }
+    pip_global_config_default_path(project_dir)
+}
+
+#[cfg(target_os = "macos")]
+fn pip_global_config_default_path(_project_dir: &Path) -> PathBuf {
+    PathBuf::from("/Library/Application Support/pip/pip.conf")
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn pip_global_config_default_path(_project_dir: &Path) -> PathBuf {
+    PathBuf::from("/etc/pip.conf")
+}
+
+#[cfg(windows)]
+fn pip_global_config_default_path(project_dir: &Path) -> PathBuf {
+    env::var_os("PROGRAMDATA")
+        .map(PathBuf::from)
+        .filter(|path| !path.as_os_str().is_empty())
+        .map(|path| path.join("pip").join("pip.ini"))
+        .unwrap_or_else(|| project_dir.join("pip.ini"))
 }
 
 fn read_pip_config_lines(path: &Path) -> Result<Vec<String>, OmcRegistryError> {
@@ -20010,21 +20042,39 @@ mod tests {
         dir
     }
 
-    fn with_env_var<T>(key: &str, value: &Path, f: impl FnOnce() -> T) -> T {
+    fn with_env_lock<T>(f: impl FnOnce() -> T) -> T {
         static ENV_MUTEX: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
         let _guard = ENV_MUTEX
             .get_or_init(|| std::sync::Mutex::new(()))
             .lock()
             .unwrap();
-        let old = env::var_os(key);
-        env::set_var(key, value);
-        let result = f();
-        if let Some(old) = old {
-            env::set_var(key, old);
-        } else {
+        f()
+    }
+
+    fn with_env_var<T>(key: &str, value: &Path, f: impl FnOnce() -> T) -> T {
+        with_env_lock(|| {
+            let old = env::var_os(key);
+            env::set_var(key, value);
+            let result = f();
+            if let Some(old) = old {
+                env::set_var(key, old);
+            } else {
+                env::remove_var(key);
+            }
+            result
+        })
+    }
+
+    fn without_env_var<T>(key: &str, f: impl FnOnce() -> T) -> T {
+        with_env_lock(|| {
+            let old = env::var_os(key);
             env::remove_var(key);
-        }
-        result
+            let result = f();
+            if let Some(old) = old {
+                env::set_var(key, old);
+            }
+            result
+        })
     }
 
     #[test]
@@ -24511,6 +24561,25 @@ version = "0.1.0"
         assert_eq!(
             parse_pip_compat_action(&args(&[
                 "config",
+                "--global",
+                "set",
+                "global.index-url",
+                "https://global.example.invalid/simple",
+            ]))
+            .unwrap(),
+            PipCompatAction::Config {
+                action: PipConfigAction::Set {
+                    assignments: vec![(
+                        "global.index-url".to_owned(),
+                        "https://global.example.invalid/simple".to_owned(),
+                    )],
+                    location: PipConfigLocation::Global,
+                },
+            }
+        );
+        assert_eq!(
+            parse_pip_compat_action(&args(&[
+                "config",
                 "--site",
                 "set",
                 "global.extra-index-url=https://extra.example.invalid/simple",
@@ -24540,56 +24609,98 @@ version = "0.1.0"
 
     #[test]
     fn writes_pip_config_set_and_unset() {
-        let dir = test_dir("pip-config-set-unset");
-        fs::write(
-            dir.join("pip.conf"),
-            "[global]\nindex-url = https://old.example.invalid/simple\n# keep this\n\n[install]\nno-index = false\n",
-        )
-        .unwrap();
+        without_env_var("PIP_CONFIG_FILE", || {
+            let dir = test_dir("pip-config-set-unset");
+            fs::write(
+                dir.join("pip.conf"),
+                "[global]\nindex-url = https://old.example.invalid/simple\n# keep this\n\n[install]\nno-index = false\n",
+            )
+            .unwrap();
 
-        print_pip_config(
-            &dir,
-            PipConfigAction::Set {
-                assignments: vec![
-                    (
+            print_pip_config(
+                &dir,
+                PipConfigAction::Set {
+                    assignments: vec![
+                        (
+                            "global.index-url".to_owned(),
+                            "https://new.example.invalid/simple".to_owned(),
+                        ),
+                        (
+                            "global.extra-index-url".to_owned(),
+                            "https://extra.example.invalid/simple".to_owned(),
+                        ),
+                    ],
+                    location: PipConfigLocation::Auto,
+                },
+            )
+            .unwrap();
+
+            let config = fs::read_to_string(dir.join("pip.conf")).unwrap();
+            assert!(config.contains("index-url = https://new.example.invalid/simple\n"));
+            assert!(config.contains("extra-index-url = https://extra.example.invalid/simple\n"));
+            assert!(config.contains("# keep this\n"));
+            let values = pip_config_values(&dir).unwrap();
+            assert_eq!(
+                values.get("global.index-url").map(String::as_str),
+                Some("https://new.example.invalid/simple/")
+            );
+            assert_eq!(
+                values.get("global.extra-index-url").map(String::as_str),
+                Some("https://extra.example.invalid/simple/")
+            );
+
+            print_pip_config(
+                &dir,
+                PipConfigAction::Unset {
+                    keys: vec!["global.index-url".to_owned()],
+                    location: PipConfigLocation::Auto,
+                },
+            )
+            .unwrap();
+            let config = fs::read_to_string(dir.join("pip.conf")).unwrap();
+            assert!(!config.contains("index-url = https://new.example.invalid/simple\n"));
+            assert!(config.contains("extra-index-url = https://extra.example.invalid/simple\n"));
+        });
+    }
+
+    #[test]
+    fn writes_pip_global_config_set_and_unset() {
+        let dir = test_dir("pip-global-config-set-unset");
+        let global_config = dir.join("global").join("pip.conf");
+
+        with_env_var("OMC_TEST_PIP_GLOBAL_CONFIG_FILE", &global_config, || {
+            assert_eq!(
+                pip_config_write_path(&dir, PipConfigLocation::Global).unwrap(),
+                global_config
+            );
+
+            print_pip_config(
+                &dir,
+                PipConfigAction::Set {
+                    assignments: vec![(
                         "global.index-url".to_owned(),
-                        "https://new.example.invalid/simple".to_owned(),
-                    ),
-                    (
-                        "global.extra-index-url".to_owned(),
-                        "https://extra.example.invalid/simple".to_owned(),
-                    ),
-                ],
-                location: PipConfigLocation::Auto,
-            },
-        )
-        .unwrap();
+                        "https://global.example.invalid/simple".to_owned(),
+                    )],
+                    location: PipConfigLocation::Global,
+                },
+            )
+            .unwrap();
 
-        let config = fs::read_to_string(dir.join("pip.conf")).unwrap();
-        assert!(config.contains("index-url = https://new.example.invalid/simple\n"));
-        assert!(config.contains("extra-index-url = https://extra.example.invalid/simple\n"));
-        assert!(config.contains("# keep this\n"));
-        let values = pip_config_values(&dir).unwrap();
-        assert_eq!(
-            values.get("global.index-url").map(String::as_str),
-            Some("https://new.example.invalid/simple/")
-        );
-        assert_eq!(
-            values.get("global.extra-index-url").map(String::as_str),
-            Some("https://extra.example.invalid/simple/")
-        );
+            let config = fs::read_to_string(&global_config).unwrap();
+            assert!(config.contains("index-url = https://global.example.invalid/simple\n"));
 
-        print_pip_config(
-            &dir,
-            PipConfigAction::Unset {
-                keys: vec!["global.index-url".to_owned()],
-                location: PipConfigLocation::Auto,
-            },
-        )
-        .unwrap();
-        let config = fs::read_to_string(dir.join("pip.conf")).unwrap();
-        assert!(!config.contains("index-url = https://new.example.invalid/simple\n"));
-        assert!(config.contains("extra-index-url = https://extra.example.invalid/simple\n"));
+            print_pip_config(
+                &dir,
+                PipConfigAction::Unset {
+                    keys: vec!["global.index-url".to_owned()],
+                    location: PipConfigLocation::Global,
+                },
+            )
+            .unwrap();
+
+            let config = fs::read_to_string(&global_config).unwrap();
+            assert!(!config.contains("index-url = https://global.example.invalid/simple\n"));
+        });
     }
 
     #[test]

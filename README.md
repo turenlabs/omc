@@ -350,7 +350,7 @@ pypi-extra-index-urls = ["https://packages.example/simple"]
 ```
 
 If the project does not set a PyPI index, OMC also honors pip-style
-project/user `pip.conf`, `PIP_CONFIG_FILE`, `PIP_INDEX_URL`, and
+global/project/user `pip.conf`, `PIP_CONFIG_FILE`, `PIP_INDEX_URL`, and
 `PIP_EXTRA_INDEX_URL` settings. Wheelhouse settings such as `find-links`,
 `no-index`, `PIP_FIND_LINKS`, and `PIP_NO_INDEX` feed the same offline resolver.
 
@@ -380,7 +380,7 @@ Supported now:
   `npm_config_userconfig` user `.npmrc` path selection
 - project `omc.toml` PyPI simple-index support for `pypi-index-url` and
   `pypi-extra-index-urls`
-- project/user `pip.conf` and `PIP_CONFIG_FILE` PyPI support for `index-url`,
+- global/project/user `pip.conf` and `PIP_CONFIG_FILE` PyPI support for `index-url`,
   `extra-index-url`, `find-links`, `no-index`, `no-binary`, and `only-binary`
 - pip-style `PIP_INDEX_URL`, `PIP_EXTRA_INDEX_URL`, `PIP_FIND_LINKS`,
   `PIP_NO_INDEX`, `PIP_NO_BINARY`, and `PIP_ONLY_BINARY` support when no

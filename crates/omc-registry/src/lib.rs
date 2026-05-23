@@ -2750,6 +2750,7 @@ fn apply_pip_config_files(project_dir: &Path, options: &mut LinkOptions) -> Resu
 
 fn read_pip_config(project_dir: &Path) -> Result<PipConfig> {
     let mut config = PipConfig::default();
+    read_pip_config_into(&pip_global_config_path(), &mut config)?;
     if let Some(home) = env::var_os("HOME") {
         let home = PathBuf::from(home);
         read_pip_config_into(&home.join(".pip").join("pip.conf"), &mut config)?;
@@ -2763,6 +2764,25 @@ fn read_pip_config(project_dir: &Path) -> Result<PipConfig> {
         read_pip_config_into(&PathBuf::from(path), &mut config)?;
     }
     Ok(config)
+}
+
+#[cfg(target_os = "macos")]
+fn pip_global_config_path() -> PathBuf {
+    PathBuf::from("/Library/Application Support/pip/pip.conf")
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn pip_global_config_path() -> PathBuf {
+    PathBuf::from("/etc/pip.conf")
+}
+
+#[cfg(windows)]
+fn pip_global_config_path() -> PathBuf {
+    env::var_os("PROGRAMDATA")
+        .map(PathBuf::from)
+        .filter(|path| !path.as_os_str().is_empty())
+        .map(|path| path.join("pip").join("pip.ini"))
+        .unwrap_or_else(|| PathBuf::from("pip.ini"))
 }
 
 pub fn read_pip_config_snapshot(project_dir: &Path) -> Result<PipConfigSnapshot> {
