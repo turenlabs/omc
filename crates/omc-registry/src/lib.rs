@@ -978,6 +978,21 @@ fn discover_project_requirements_with_options(
             .extend(requirements.python_local_paths);
     }
 
+    let pipfile = project_dir.join("Pipfile");
+    if pipfile.exists() && !pipfile_lock.exists() {
+        let requirements = read_pipfile_requirements(&pipfile, include_dev_dependencies)?;
+        project.specs.extend(requirements.specs);
+        if requirements.pypi_index_url.is_some() {
+            project.pypi_index_url = requirements.pypi_index_url;
+        }
+        project
+            .pypi_extra_index_urls
+            .extend(requirements.pypi_extra_index_urls);
+        project
+            .python_local_paths
+            .extend(requirements.python_local_paths);
+    }
+
     let uv_lock = project_dir.join("uv.lock");
     if uv_lock.exists() {
         let requirements = read_uv_lock_requirements(&uv_lock, include_dev_dependencies)?;
@@ -2548,11 +2563,25 @@ fn read_pipfile_lock_requirements(
     Ok(requirements)
 }
 
-fn collect_pipfile_lock_sources(
-    metadata: &PipfileLockMetadata,
-    requirements: &mut ProjectRequirements,
-) {
-    for source in &metadata.sources {
+fn read_pipfile_requirements(
+    path: &Path,
+    include_dev_dependencies: bool,
+) -> Result<ProjectRequirements> {
+    let pipfile = toml::from_str::<Pipfile>(&fs::read_to_string(path)?)?;
+    let base_dir = path.parent().unwrap_or_else(|| Path::new("."));
+    let mut requirements = ProjectRequirements::default();
+
+    collect_pipfile_sources(&pipfile.source, &mut requirements);
+    collect_pipfile_packages(pipfile.packages, base_dir, &mut requirements)?;
+    if include_dev_dependencies {
+        collect_pipfile_packages(pipfile.dev_packages, base_dir, &mut requirements)?;
+    }
+
+    Ok(requirements)
+}
+
+fn collect_pipfile_sources(sources: &[PipfileSource], requirements: &mut ProjectRequirements) {
+    for source in sources {
         let Some(index_url) = source
             .url
             .as_deref()
@@ -2563,6 +2592,198 @@ fn collect_pipfile_lock_sources(
 
         push_project_pypi_index_url(requirements, index_url);
     }
+}
+
+fn collect_pipfile_packages(
+    packages: BTreeMap<String, PipfilePackage>,
+    base_dir: &Path,
+    requirements: &mut ProjectRequirements,
+) -> Result<()> {
+    for (name, package) in packages {
+        if let Some(requirement) = pipfile_package_requirement(&name, package, base_dir)? {
+            match requirement {
+                PypiProjectRequirement::Spec(spec, hashes) => {
+                    if !hashes.is_empty() {
+                        requirements
+                            .hashes
+                            .entry(spec.constraint_key())
+                            .or_default()
+                            .extend(hashes);
+                    }
+                    requirements.specs.push(spec);
+                }
+                PypiProjectRequirement::LocalPath(path) => {
+                    requirements.python_local_paths.push(path);
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn pipfile_package_requirement(
+    name: &str,
+    package: PipfilePackage,
+    base_dir: &Path,
+) -> Result<Option<PypiProjectRequirement>> {
+    match package {
+        PipfilePackage::Version(version) => pipfile_version_requirement(name, &version),
+        PipfilePackage::Table(table) => pipfile_table_requirement(name, table, base_dir),
+    }
+}
+
+fn pipfile_version_requirement(
+    name: &str,
+    version: &str,
+) -> Result<Option<PypiProjectRequirement>> {
+    let requirement = pipfile_named_requirement(name, version, &[], None);
+    Ok(
+        parse_pypi_requirement_with_extras(&requirement, &BTreeSet::new())
+            .map(|spec| PypiProjectRequirement::Spec(spec, BTreeSet::new())),
+    )
+}
+
+fn pipfile_table_requirement(
+    name: &str,
+    table: PipfilePackageTable,
+    base_dir: &Path,
+) -> Result<Option<PypiProjectRequirement>> {
+    if table.git.is_some() {
+        return Err(OmcRegistryError::UnsupportedRequirement(format!(
+            "Pipfile git dependency `{name}` is not supported"
+        )));
+    }
+
+    if table
+        .markers
+        .as_deref()
+        .map(|marker| !pypi_marker_applies(marker, &BTreeSet::new()))
+        .unwrap_or(false)
+    {
+        return Ok(None);
+    }
+
+    if let Some(path) = table.path.as_deref() {
+        let path = resolved_local_path(path, base_dir);
+        if path.is_dir() {
+            return Ok(Some(PypiProjectRequirement::LocalPath(path)));
+        }
+        if path.extension().and_then(|ext| ext.to_str()) == Some("whl") {
+            let url = reqwest::Url::from_file_path(&path)
+                .map_err(|_| OmcRegistryError::UnsupportedRequirement(name.to_owned()))?;
+            return Ok(Some(PypiProjectRequirement::Spec(
+                PackageSpec::with_direct_url(
+                    Ecosystem::Pypi,
+                    normalize_pypi_name(name),
+                    url.to_string(),
+                    normalized_pypi_extras(table.extras),
+                ),
+                BTreeSet::new(),
+            )));
+        }
+        return Err(OmcRegistryError::UnsupportedRequirement(format!(
+            "Pipfile local path `{}` must point to an existing directory or wheel",
+            path.display()
+        )));
+    }
+
+    if let Some(file) = table.file.as_deref() {
+        return pipfile_file_requirement(name, file, table.extras, base_dir);
+    }
+
+    let version = table.version.as_deref().unwrap_or("*");
+    let requirement = pipfile_named_requirement(name, version, &table.extras, None);
+    Ok(
+        parse_pypi_requirement_with_extras(&requirement, &BTreeSet::new())
+            .map(|spec| PypiProjectRequirement::Spec(spec, BTreeSet::new())),
+    )
+}
+
+fn pipfile_file_requirement(
+    name: &str,
+    file: &str,
+    extras: Vec<String>,
+    base_dir: &Path,
+) -> Result<Option<PypiProjectRequirement>> {
+    let extras = normalized_pypi_extras(extras);
+    if file.contains("://") {
+        if !file.to_ascii_lowercase().contains(".whl") {
+            return Err(OmcRegistryError::UnsupportedRequirement(format!(
+                "Pipfile file dependency `{file}` must be a wheel"
+            )));
+        }
+        return Ok(Some(PypiProjectRequirement::Spec(
+            PackageSpec::with_direct_url(
+                Ecosystem::Pypi,
+                normalize_pypi_name(name),
+                file.to_owned(),
+                extras,
+            ),
+            BTreeSet::new(),
+        )));
+    }
+
+    let path = resolved_local_path(file, base_dir);
+    if path.extension().and_then(|ext| ext.to_str()) != Some("whl") {
+        return Err(OmcRegistryError::UnsupportedRequirement(format!(
+            "Pipfile file dependency `{}` must be a wheel",
+            path.display()
+        )));
+    }
+    let url = reqwest::Url::from_file_path(&path)
+        .map_err(|_| OmcRegistryError::UnsupportedRequirement(file.to_owned()))?;
+    Ok(Some(PypiProjectRequirement::Spec(
+        PackageSpec::with_direct_url(
+            Ecosystem::Pypi,
+            normalize_pypi_name(name),
+            url.to_string(),
+            extras,
+        ),
+        BTreeSet::new(),
+    )))
+}
+
+fn pipfile_named_requirement(
+    name: &str,
+    version: &str,
+    extras: &[String],
+    markers: Option<&str>,
+) -> String {
+    let extras = normalized_pypi_extras(extras.to_vec());
+    let extras = if extras.is_empty() {
+        String::new()
+    } else {
+        format!("[{}]", extras.into_iter().collect::<Vec<_>>().join(","))
+    };
+    let version = version.trim();
+    let version = if version != "*" { version } else { "" };
+    let marker = markers
+        .map(str::trim)
+        .filter(|marker| !marker.is_empty())
+        .map(|marker| format!("; {marker}"))
+        .unwrap_or_default();
+    format!(
+        "{}{}{}{}",
+        normalize_pypi_name(name),
+        extras,
+        version,
+        marker
+    )
+}
+
+fn normalized_pypi_extras(extras: Vec<String>) -> BTreeSet<String> {
+    extras
+        .into_iter()
+        .map(|extra| normalize_pypi_extra(&extra))
+        .filter(|extra| !extra.is_empty())
+        .collect()
+}
+
+fn collect_pipfile_lock_sources(
+    metadata: &PipfileLockMetadata,
+    requirements: &mut ProjectRequirements,
+) {
+    collect_pipfile_sources(&metadata.sources, requirements);
 }
 
 fn push_project_pypi_index_url(requirements: &mut ProjectRequirements, index_url: String) {
@@ -8319,6 +8540,34 @@ enum NpmBinField {
 }
 
 #[derive(Debug, Default, Deserialize)]
+struct Pipfile {
+    #[serde(default)]
+    source: Vec<PipfileSource>,
+    #[serde(default)]
+    packages: BTreeMap<String, PipfilePackage>,
+    #[serde(default, rename = "dev-packages")]
+    dev_packages: BTreeMap<String, PipfilePackage>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum PipfilePackage {
+    Version(String),
+    Table(PipfilePackageTable),
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct PipfilePackageTable {
+    version: Option<String>,
+    path: Option<String>,
+    file: Option<String>,
+    git: Option<String>,
+    markers: Option<String>,
+    #[serde(default)]
+    extras: Vec<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
 struct PipfileLock {
     #[serde(default, rename = "_meta")]
     metadata: PipfileLockMetadata,
@@ -8331,11 +8580,11 @@ struct PipfileLock {
 #[derive(Debug, Default, Deserialize)]
 struct PipfileLockMetadata {
     #[serde(default)]
-    sources: Vec<PipfileLockSource>,
+    sources: Vec<PipfileSource>,
 }
 
 #[derive(Debug, Default, Deserialize)]
-struct PipfileLockSource {
+struct PipfileSource {
     url: Option<String>,
 }
 
@@ -10149,6 +10398,198 @@ packages:
             String::from_utf8_lossy(&output.stdout).trim(),
             "poetry-table-cli-ok"
         );
+    }
+
+    #[test]
+    fn reads_pipfile_specs_sources_paths_and_dev_packages() {
+        let dir = tempfile::tempdir().unwrap();
+        let pipfile = dir.path().join("Pipfile");
+        let local_pkg = dir.path().join("localpkg");
+        let dev_local = dir.path().join("devlocal");
+        let wheel = dir
+            .path()
+            .join("wheels")
+            .join("local_idna-3.7-py3-none-any.whl");
+        fs::create_dir_all(&local_pkg).unwrap();
+        fs::create_dir_all(&dev_local).unwrap();
+        fs::create_dir_all(wheel.parent().unwrap()).unwrap();
+        fs::write(&wheel, b"not a real wheel").unwrap();
+        fs::write(
+            &pipfile,
+            r#"
+            [[source]]
+            name = "pypi"
+            url = "https://pypi.org/simple"
+            verify_ssl = true
+
+            [[source]]
+            name = "private"
+            url = "https://packages.example/simple"
+            verify_ssl = true
+
+            [[source]]
+            name = "duplicate"
+            url = "https://packages.example/simple/"
+            verify_ssl = true
+
+            [packages]
+            requests = { version = "==2.32.3", extras = ["socks"], markers = "python_version >= '3'", index = "private" }
+            old-python-only = { version = "==0.1.0", markers = "python_version < '2'" }
+            localpkg = { path = "localpkg", editable = true }
+            local-idna = { file = "wheels/local_idna-3.7-py3-none-any.whl" }
+            any-version = "*"
+
+            [dev-packages]
+            pytest = "==8.2.0"
+            devlocal = { path = "devlocal" }
+            "#,
+        )
+        .unwrap();
+
+        let production = read_pipfile_requirements(&pipfile, false).unwrap();
+        let requests = production
+            .specs
+            .iter()
+            .find(|spec| spec.name == "requests")
+            .unwrap();
+        assert_eq!(requests.version.as_deref(), Some("==2.32.3"));
+        assert!(requests.extras.contains("socks"));
+        let any_version = production
+            .specs
+            .iter()
+            .find(|spec| spec.name == "any-version")
+            .unwrap();
+        assert_eq!(any_version.version.as_deref(), None);
+        let local = production
+            .specs
+            .iter()
+            .find(|spec| spec.name == "local-idna")
+            .unwrap();
+        assert!(local.direct_url.as_deref().unwrap().starts_with("file://"));
+        assert!(local
+            .direct_url
+            .as_deref()
+            .unwrap()
+            .ends_with("local_idna-3.7-py3-none-any.whl"));
+        assert_eq!(
+            production.pypi_index_url.as_deref(),
+            Some("https://pypi.org/simple/")
+        );
+        assert_eq!(
+            production.pypi_extra_index_urls,
+            vec!["https://packages.example/simple/".to_owned()]
+        );
+        assert_eq!(production.python_local_paths, vec![local_pkg.clone()]);
+        assert!(!production.specs.iter().any(|spec| spec.name == "pytest"));
+        assert!(!production
+            .specs
+            .iter()
+            .any(|spec| spec.name == "old-python-only"));
+
+        let dev = read_pipfile_requirements(&pipfile, true).unwrap();
+        assert!(dev
+            .specs
+            .iter()
+            .any(|spec| spec.name == "pytest" && spec.version.as_deref() == Some("==8.2.0")));
+        assert_eq!(dev.python_local_paths, vec![local_pkg, dev_local]);
+    }
+
+    #[test]
+    fn discovers_pipfile_requirements_without_lock() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir_all(dir.path().join("localpkg")).unwrap();
+        fs::write(
+            dir.path().join("Pipfile"),
+            r#"
+            [[source]]
+            name = "pypi"
+            url = "https://pypi.org/simple"
+            verify_ssl = true
+
+            [packages]
+            idna = "==3.7"
+            localpkg = { path = "localpkg" }
+
+            [dev-packages]
+            pytest = "==8.2.0"
+            "#,
+        )
+        .unwrap();
+
+        let production =
+            discover_project_requirements_with_options(dir.path(), &BTreeSet::new(), false)
+                .unwrap();
+        assert!(production
+            .specs
+            .iter()
+            .any(|spec| spec.name == "idna" && spec.version.as_deref() == Some("==3.7")));
+        assert_eq!(
+            production.python_local_paths,
+            vec![dir.path().join("localpkg")]
+        );
+        assert!(!production.specs.iter().any(|spec| spec.name == "pytest"));
+
+        let dev = discover_project_requirements(dir.path()).unwrap();
+        assert!(dev
+            .specs
+            .iter()
+            .any(|spec| spec.name == "pytest" && spec.version.as_deref() == Some("==8.2.0")));
+    }
+
+    #[test]
+    fn pipfile_lock_takes_precedence_over_pipfile() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(
+            dir.path().join("Pipfile"),
+            r#"
+            [packages]
+            flask = "==3.0.0"
+            "#,
+        )
+        .unwrap();
+        fs::write(
+            dir.path().join("Pipfile.lock"),
+            r#"{
+                "_meta": {},
+                "default": {
+                    "idna": { "version": "==3.7" }
+                }
+            }"#,
+        )
+        .unwrap();
+
+        let discovered = discover_project_requirements(dir.path()).unwrap();
+        assert!(discovered
+            .specs
+            .iter()
+            .any(|spec| spec.name == "idna" && spec.version.as_deref() == Some("3.7")));
+        assert!(!discovered.specs.iter().any(|spec| spec.name == "flask"));
+    }
+
+    #[test]
+    fn rejects_unsupported_pipfile_dependencies() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(
+            dir.path().join("Pipfile"),
+            r#"
+            [packages]
+            git-package = { git = "https://example.invalid/pkg.git" }
+            "#,
+        )
+        .unwrap();
+        let error = discover_project_requirements(dir.path()).unwrap_err();
+        assert!(error.to_string().contains("Pipfile git dependency"));
+
+        fs::write(
+            dir.path().join("Pipfile"),
+            r#"
+            [packages]
+            local-package = { path = "missing" }
+            "#,
+        )
+        .unwrap();
+        let error = discover_project_requirements(dir.path()).unwrap_err();
+        assert!(error.to_string().contains("Pipfile local path"));
     }
 
     #[test]
