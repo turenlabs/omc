@@ -200,6 +200,8 @@ Supported now:
 - npm alias dependencies such as `name: npm:other-name@range`
 - `.omc/python/site-packages` installation for PyPI wheels
 - platform-compatible PyPI wheel selection for native wheels
+- fail-closed rejection for PyPI source distributions until build isolation and
+  native-extension policy exist
 - npm bin links and Python console script shims
 - `omc node`, `omc python`, `omc script`, and `omc run` wrappers
 - runtime source profiling into capability findings
@@ -216,7 +218,8 @@ Not implemented yet:
 - full npm bundled dependency and peer placement semantics
 - advanced requirements-file semantics such as editable installs, direct URLs,
   and index configuration beyond fail-closed rejection
-- Python sdist build isolation and native extension policy
+- Python sdist build isolation and native extension policy beyond fail-closed
+  rejection
 - execution of package code inside OMC cells for real applications
 
 ## Useful Commands

@@ -37,6 +37,10 @@ pub enum OmcRegistryError {
     BlockedPackage { spec: String },
     #[error("registry response did not include a downloadable artifact for {0}")]
     MissingArtifact(String),
+    #[error(
+        "registry response did not include a compatible PyPI wheel for {0}; source distributions are not built by this prototype"
+    )]
+    MissingCompatibleWheel(String),
     #[error("could not resolve a version for {name} matching `{requirement}`")]
     UnsatisfiedRequirement { name: String, requirement: String },
     #[error("install requires an accepted lockfile; blocked package remains: {0}")]
@@ -1713,7 +1717,7 @@ fn resolve_pypi(
     }
     let doc = response.error_for_status()?.json::<PypiResponse>()?;
     let file = choose_pypi_file(&doc, target_python.as_deref())
-        .ok_or_else(|| OmcRegistryError::MissingArtifact(spec.requested()))?;
+        .ok_or_else(|| OmcRegistryError::MissingCompatibleWheel(spec.requested()))?;
     let source_url = file.url.clone();
     let filename = file.filename.clone();
     let expected_sha256 = file.digests.sha256.clone();
@@ -1789,17 +1793,6 @@ fn choose_pypi_file<'a>(
                 .iter()
                 .filter(|file| pypi_file_python_compatible(file, target_python))
                 .find(|file| file.packagetype == "bdist_wheel")
-        })
-        .or_else(|| {
-            doc.urls
-                .iter()
-                .filter(|file| pypi_file_python_compatible(file, target_python))
-                .find(|file| file.packagetype == "sdist")
-        })
-        .or_else(|| {
-            doc.urls
-                .iter()
-                .find(|file| pypi_file_python_compatible(file, target_python))
         })
 }
 
@@ -3527,6 +3520,28 @@ mod tests {
         };
         assert!(!pypi_file_python_compatible(&file, Some("3.9.6")));
         assert!(pypi_file_python_compatible(&file, Some("3.11.0")));
+    }
+
+    #[test]
+    fn skips_pypi_source_distributions() {
+        let doc = PypiResponse {
+            info: PypiInfo {
+                name: "source-only".to_owned(),
+                version: "1.0.0".to_owned(),
+                requires_dist: None,
+            },
+            urls: vec![PypiFile {
+                filename: "source-only-1.0.0.tar.gz".to_owned(),
+                packagetype: "sdist".to_owned(),
+                url: "https://example.invalid/source-only-1.0.0.tar.gz".to_owned(),
+                digests: PypiDigests {
+                    sha256: "abc".to_owned(),
+                },
+                requires_python: None,
+            }],
+        };
+
+        assert!(choose_pypi_file(&doc, Some("3.11.0")).is_none());
     }
 
     #[test]
