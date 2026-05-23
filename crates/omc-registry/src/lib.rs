@@ -951,9 +951,9 @@ fn discover_project_requirements_with_options(
         project.npm_resolved.extend(lock_requirements.npm_resolved);
     }
 
-    let requirements_txt = project_dir.join("requirements.txt");
-    if requirements_txt.exists() {
-        let requirements = read_requirements_file(&requirements_txt)?;
+    let requirements_files = project_requirements_files(project_dir, include_dev_dependencies);
+    if !requirements_files.is_empty() {
+        let requirements = read_requirements_files(&requirements_files)?;
         project.specs.extend(requirements.specs);
         project.constraints.extend(requirements.constraints);
         project.hashes.extend(requirements.hashes);
@@ -1058,6 +1058,25 @@ fn discover_project_requirements_with_options(
     }
 
     Ok(project)
+}
+
+fn project_requirements_files(project_dir: &Path, include_dev_dependencies: bool) -> Vec<PathBuf> {
+    let mut files = Vec::new();
+    let requirements_txt = project_dir.join("requirements.txt");
+    if requirements_txt.exists() {
+        files.push(requirements_txt);
+    }
+
+    if include_dev_dependencies {
+        for name in ["requirements-dev.txt", "dev-requirements.txt"] {
+            let path = project_dir.join(name);
+            if path.exists() {
+                files.push(path);
+            }
+        }
+    }
+
+    files
 }
 
 fn add_package_graph_inner(
@@ -2545,14 +2564,17 @@ fn npm_package_name_from_lock_path(path: &str) -> Option<String> {
     name
 }
 
+#[cfg(test)]
 fn read_requirements_file(path: &Path) -> Result<ProjectRequirements> {
+    read_requirements_files(&[path.to_path_buf()])
+}
+
+fn read_requirements_files(paths: &[PathBuf]) -> Result<ProjectRequirements> {
     let mut discovered = ProjectRequirements::default();
-    read_requirements_file_inner(
-        path,
-        RequirementsMode::Install,
-        &mut BTreeSet::new(),
-        &mut discovered,
-    )?;
+    let mut seen = BTreeSet::new();
+    for path in paths {
+        read_requirements_file_inner(path, RequirementsMode::Install, &mut seen, &mut discovered)?;
+    }
     if discovered.pypi_require_hashes {
         enforce_requirements_hashes(&discovered)?;
     }
@@ -10393,6 +10415,34 @@ packages:
                 .and_then(|hashes| hashes.iter().next())
                 .map(String::as_str),
             Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+        );
+    }
+
+    #[test]
+    fn discovers_dev_requirements_files_respecting_omit_dev() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("requirements.txt"), "idna==3.7\n").unwrap();
+        fs::write(
+            dir.path().join("requirements-dev.txt"),
+            "-r requirements.txt\npytest==8.2.0\n",
+        )
+        .unwrap();
+        fs::write(dir.path().join("dev-requirements.txt"), "ruff==0.5.0\n").unwrap();
+
+        let production =
+            discover_project_requirements_with_options(dir.path(), &BTreeSet::new(), false)
+                .unwrap();
+        assert!(has_spec(&production.specs, "idna", "==3.7"));
+        assert!(!production.specs.iter().any(|spec| spec.name == "pytest"));
+        assert!(!production.specs.iter().any(|spec| spec.name == "ruff"));
+
+        let dev = discover_project_requirements(dir.path()).unwrap();
+        assert!(has_spec(&dev.specs, "idna", "==3.7"));
+        assert!(has_spec(&dev.specs, "pytest", "==8.2.0"));
+        assert!(has_spec(&dev.specs, "ruff", "==0.5.0"));
+        assert_eq!(
+            dev.specs.iter().filter(|spec| spec.name == "idna").count(),
+            1
         );
     }
 

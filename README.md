@@ -126,6 +126,7 @@ yarn.lock          Yarn Classic exact versions, resolved tarball URLs, and integ
 pnpm-lock.yaml     pnpm importer dependencies, exact versions, resolved tarball URLs, and integrity hashes
 pip.conf           PyPI index-url, extra-index-url, find-links, and no-index configuration
 requirements.txt  PyPI requirements, direct wheel URLs/paths, hashes, extras, local editable/direct/bare directory paths, -r includes, -c constraints, markers, simple indexes, find-links wheelhouses
+requirements-dev.txt / dev-requirements.txt  dev requirements read unless --omit-dev is set
 Pipfile           Pipenv packages/dev-packages, source indexes, extras, markers, local paths, wheel file dependencies, and scripts
 Pipfile.lock      Pipenv default/develop package pins, local paths, extras, markers, sources, and sha256 hashes
 uv.lock           uv project requirements, dev requirements, local path sources, exact package pins, and hashes
@@ -259,7 +260,8 @@ Supported now:
 - `pnpm-lock.yaml` importer dependency ingestion plus exact-version
   constraints, resolved tarball URLs, and integrity verification for uniquely
   locked npm packages
-- `requirements.txt` ingestion with hashes, line continuations, extras,
+- `requirements.txt`, `requirements-dev.txt`, and `dev-requirements.txt`
+  ingestion with hashes, line continuations, extras,
   direct wheel URLs/paths, recursive `-r` includes, `-c` constraints,
   `--index-url` / `--extra-index-url` simple indexes, `--find-links` / `-f`
   local wheelhouses or HTML pages, `--no-index`, `--trusted-host`,
