@@ -548,6 +548,7 @@ struct PipInstallAction {
     requirements: Vec<PathBuf>,
     constraints: Vec<PathBuf>,
     report: Option<PathBuf>,
+    dry_run: bool,
     archive_references: Vec<String>,
     local_paths: Vec<PythonLocalRequirement>,
     index_url: Option<String>,
@@ -948,15 +949,24 @@ fn write_pip_install_report(
     report_path: Option<&Path>,
     install: &InstallReport,
 ) -> Result<(), OmcRegistryError> {
+    write_pip_install_report_from(project_dir, project_dir, report_path, install)
+}
+
+fn write_pip_install_report_from(
+    lock_project_dir: &Path,
+    output_project_dir: &Path,
+    report_path: Option<&Path>,
+    install: &InstallReport,
+) -> Result<(), OmcRegistryError> {
     let Some(report_path) = report_path else {
         return Ok(());
     };
-    let report = pip_install_report_json(project_dir, install)?;
+    let report = pip_install_report_json(lock_project_dir, install)?;
     let report = serde_json::to_string_pretty(&report)?;
     if report_path == Path::new("-") {
         println!("{report}");
     } else {
-        let report_path = absolutize_path(project_dir, report_path.to_path_buf());
+        let report_path = absolutize_path(output_project_dir, report_path.to_path_buf());
         if let Some(parent) = report_path.parent() {
             fs::create_dir_all(parent)?;
         }
@@ -1015,6 +1025,37 @@ fn pip_install_report_entry(package: LockedPackage) -> serde_json::Value {
             "version": package.version,
         },
     })
+}
+
+struct TempOmcProject {
+    path: PathBuf,
+}
+
+impl TempOmcProject {
+    fn new(prefix: &str, source_project_dir: &Path) -> Result<Self, OmcRegistryError> {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|error| OmcRegistryError::UnsupportedSpec(error.to_string()))?
+            .as_nanos();
+        let path = env::temp_dir().join(format!("omc-{prefix}-{}-{nonce}", std::process::id()));
+        let _ = fs::remove_dir_all(&path);
+        fs::create_dir_all(&path)?;
+        let source_manifest = source_project_dir.join("omc.toml");
+        if source_manifest.exists() {
+            fs::copy(source_manifest, path.join("omc.toml"))?;
+        }
+        Ok(Self { path })
+    }
+
+    fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl Drop for TempOmcProject {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.path);
+    }
 }
 
 fn run_node(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRegistryError> {
@@ -1692,11 +1733,16 @@ fn run_pip_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
         PipCompatAction::Help { topic } => print_pip_help(topic.as_deref()),
         PipCompatAction::Version => println!("pip {} from OMC", env!("CARGO_PKG_VERSION")),
         PipCompatAction::Install(action) => {
+            let action = *action;
+            if action.dry_run {
+                return run_pip_install_dry_run(project_dir, action);
+            }
             let PipInstallAction {
                 specs,
                 requirements,
                 constraints,
                 report,
+                dry_run: _,
                 archive_references,
                 local_paths,
                 index_url,
@@ -1711,7 +1757,7 @@ fn run_pip_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
                 vcs_requirements,
                 allow,
                 allow_all_host,
-            } = *action;
+            } = action;
             let allowed_capabilities = parse_grants(&allow, allow_all_host)?;
             if specs.is_empty() && archive_references.is_empty() {
                 let mut options = LinkOptions::new(project_dir);
@@ -1870,6 +1916,119 @@ fn run_pip_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
         PipCompatAction::Config { action } => print_pip_config(project_dir, action)?,
     }
 
+    Ok(ExitCode::SUCCESS)
+}
+
+fn run_pip_install_dry_run(
+    project_dir: &Path,
+    action: PipInstallAction,
+) -> Result<ExitCode, OmcRegistryError> {
+    let PipInstallAction {
+        specs,
+        requirements,
+        constraints,
+        report,
+        dry_run: _,
+        archive_references,
+        local_paths,
+        index_url,
+        extra_index_urls,
+        find_links,
+        no_index,
+        binary_all,
+        binary_packages,
+        require_hashes,
+        no_deps,
+        target,
+        vcs_requirements,
+        allow,
+        allow_all_host,
+    } = action;
+
+    if !local_paths.is_empty() || !vcs_requirements.is_empty() {
+        return Err(OmcRegistryError::UnsupportedSpec(
+            "pip install --dry-run currently supports registry requirements and direct wheel/sdist archives; editable, local directory, and VCS requirements need a real OMC install".to_owned(),
+        ));
+    }
+
+    let dry_run_project = TempOmcProject::new("pip-dry-run", project_dir)?;
+    let mut options = LinkOptions::new(dry_run_project.path());
+    options.save_manifest_dependency = false;
+    options.discover_project_requirements = false;
+    options.allowed_capabilities = parse_grants(&allow, allow_all_host)?;
+    apply_pip_compat_index_options(
+        &mut options,
+        index_url,
+        extra_index_urls,
+        find_links,
+        no_index,
+    );
+    options.pypi_require_hashes = require_hashes;
+    options.pypi_include_dependencies = !no_deps;
+    options.pypi_binary_all = binary_all;
+    options.pypi_binary_packages = binary_packages;
+
+    let mut resolved_specs = parse_package_specs(&specs, Some(Ecosystem::Pypi))?;
+    resolved_specs.extend(parse_pip_archive_references(
+        project_dir,
+        &archive_references,
+        &mut options,
+    )?);
+    if !requirements.is_empty() {
+        let requirements = read_requirements_files(&absolutize_paths(project_dir, requirements))?;
+        apply_pypi_download_requirements(&mut options, &mut resolved_specs, requirements)?;
+    }
+    if !constraints.is_empty() {
+        let constraints = read_constraint_files(&absolutize_paths(project_dir, constraints))?;
+        apply_pypi_download_requirements(&mut options, &mut resolved_specs, constraints)?;
+    }
+    if resolved_specs.is_empty() {
+        return Err(OmcRegistryError::UnsupportedSpec(
+            "pip install --dry-run needs at least one package, archive, or requirement file"
+                .to_owned(),
+        ));
+    }
+
+    let mut reports = Vec::new();
+    for spec in &resolved_specs {
+        reports.extend(add_package_graph(spec, &options)?);
+    }
+    print_link_reports(&reports);
+
+    let pypi_packages = reports
+        .iter()
+        .filter(|report| report.locked.ecosystem == Ecosystem::Pypi)
+        .count();
+    let python_site_packages = target
+        .map(|path| absolutize_path(project_dir, path))
+        .unwrap_or_else(|| {
+            project_dir
+                .join(".omc")
+                .join("python")
+                .join("site-packages")
+        });
+    let install = InstallReport {
+        npm_packages: 0,
+        pypi_packages,
+        npm_bins: 0,
+        python_scripts: 0,
+        node_modules: project_dir.join("node_modules"),
+        npm_bin_dir: project_dir.join("node_modules").join(".bin"),
+        python_bin_dir: python_site_packages.join("bin"),
+        python_site_packages,
+    };
+    println!();
+    println!(
+        "dry-run: would install pypi={} python_site_packages={}",
+        install.pypi_packages,
+        install.python_site_packages.display()
+    );
+    write_pip_install_report_from(
+        dry_run_project.path(),
+        project_dir,
+        report.as_deref(),
+        &install,
+    )?;
     Ok(ExitCode::SUCCESS)
 }
 
@@ -2100,7 +2259,7 @@ fn pip_help_text(topic: Option<&str>) -> String {
             "pip install [<requirement>...]",
             &[
                 "Resolve, verify, lock, and install PyPI packages with OMC.",
-                "Supports requirements/constraints, indexes, find-links, no-index, hashes, no-deps, install reports, binary policy, target dirs, local archives, local directories, editable paths, and editable VCS requirements.",
+                "Supports requirements/constraints, indexes, find-links, no-index, hashes, no-deps, install reports, registry/archive dry-runs, binary policy, target dirs, local archives, local directories, editable paths, and editable VCS requirements.",
             ],
         ),
         Some("download") => pip_command_help(
@@ -3031,7 +3190,7 @@ fn apply_pypi_download_requirements(
         || !requirements.python_vcs_requirements.is_empty()
     {
         return Err(OmcRegistryError::UnsupportedSpec(
-            "pip download supports registry requirements and direct wheel/sdist archives; local directories and VCS requirements need pip install"
+            "this OMC compatibility path supports registry requirements and direct wheel/sdist archives; local directories and VCS requirements need a real install"
                 .to_owned(),
         ));
     }
@@ -8564,6 +8723,7 @@ fn parse_pip_install_args(args: &[String]) -> Result<PipCompatAction, OmcRegistr
     let mut requirements = Vec::new();
     let mut constraints = Vec::new();
     let mut report = None;
+    let mut dry_run = false;
     let mut index_url = None;
     let mut extra_index_urls = Vec::new();
     let mut find_links = Vec::new();
@@ -8610,6 +8770,8 @@ fn parse_pip_install_args(args: &[String]) -> Result<PipCompatAction, OmcRegistr
             report = Some(PathBuf::from(path));
         } else if let Some(path) = arg.strip_prefix("--report=") {
             report = Some(PathBuf::from(path));
+        } else if arg == "--dry-run" {
+            dry_run = true;
         } else if arg == "-i" || arg == "--index-url" {
             index += 1;
             let Some(url) = args.get(index) else {
@@ -8760,6 +8922,7 @@ fn parse_pip_install_args(args: &[String]) -> Result<PipCompatAction, OmcRegistr
         requirements,
         constraints,
         report,
+        dry_run,
         archive_references,
         local_paths,
         index_url,
@@ -11281,6 +11444,7 @@ mod tests {
             "--no-compile",
             "--report",
             "install-report.json",
+            "--dry-run",
             "--allow-all-host",
             "requests==2.32.3",
         ]))
@@ -11293,6 +11457,7 @@ mod tests {
                 requirements: vec![PathBuf::from("requirements.txt")],
                 constraints: vec![PathBuf::from("constraints.txt")],
                 report: Some(PathBuf::from("install-report.json")),
+                dry_run: true,
                 archive_references: Vec::new(),
                 local_paths: Vec::new(),
                 index_url: Some("https://mirror.example/simple".to_owned()),
@@ -11414,6 +11579,7 @@ mod tests {
                 requirements: Vec::new(),
                 constraints: Vec::new(),
                 report: None,
+                dry_run: false,
                 archive_references: Vec::new(),
                 local_paths: vec![
                     PythonLocalRequirement::new(
@@ -11451,6 +11617,7 @@ mod tests {
                 requirements: Vec::new(),
                 constraints: Vec::new(),
                 report: None,
+                dry_run: false,
                 archive_references: Vec::new(),
                 local_paths: Vec::new(),
                 index_url: None,
@@ -11498,6 +11665,7 @@ mod tests {
                 requirements: Vec::new(),
                 constraints: Vec::new(),
                 report: None,
+                dry_run: false,
                 archive_references: vec![
                     "./wheelhouse/demo_pkg-1.0.0-py3-none-any.whl".to_owned(),
                     "https://files.example/source_pkg-2.0.0.tar.gz#sha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_owned(),
