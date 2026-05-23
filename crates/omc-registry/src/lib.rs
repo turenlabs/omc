@@ -491,9 +491,7 @@ pub fn add_package_graph(spec: &PackageSpec, options: &LinkOptions) -> Result<Ve
     let options = options_with_manifest_policy(options)?;
 
     let client = Client::builder().user_agent("omc-prototype/0.1").build()?;
-    let mut reports = Vec::new();
-    let mut seen = BTreeSet::new();
-    add_package_graph_inner(&client, spec, &options, &mut seen, &mut reports)?;
+    let reports = resolve_package_graph(&client, spec, &options)?;
 
     if let Some(root) = reports.first() {
         write_manifest_dependency(&options.project_dir, spec, &root.locked.version)?;
@@ -505,7 +503,7 @@ pub fn add_package_graph(spec: &PackageSpec, options: &LinkOptions) -> Result<Ve
 pub fn install_project(options: &LinkOptions) -> Result<InstallReport> {
     init_project(&options.project_dir, None)?;
 
-    let mut options = options_with_manifest_policy(options)?;
+    let mut options = options.clone();
     let manifest = read_manifest(options.project_dir.join(MANIFEST))?;
     let mut specs = Vec::new();
     for (key, version) in manifest.dependencies {
@@ -520,14 +518,19 @@ pub fn install_project(options: &LinkOptions) -> Result<InstallReport> {
     options.constraints.extend(discovered.constraints);
     options.hashes.extend(discovered.hashes);
 
+    let client = Client::builder().user_agent("omc-prototype/0.1").build()?;
     let mut seen_roots = BTreeSet::new();
+    let mut retained = BTreeSet::new();
     for spec in specs {
         if !seen_roots.insert(spec.requested()) {
             continue;
         }
-        add_package_graph(&spec, &options)?;
+        for report in resolve_package_graph(&client, &spec, &options)? {
+            retained.insert(locked_package_key(&report.locked));
+        }
     }
 
+    prune_lockfile(&options.project_dir, &retained)?;
     install_locked_packages(&options.project_dir)
 }
 
@@ -554,6 +557,17 @@ pub fn discover_project_requirements_with_extras(
     project_extras: &BTreeSet<String>,
 ) -> Result<ProjectRequirements> {
     discover_project_requirements_with_options(project_dir, project_extras, true)
+}
+
+fn resolve_package_graph(
+    client: &Client,
+    spec: &PackageSpec,
+    options: &LinkOptions,
+) -> Result<Vec<LinkReport>> {
+    let mut reports = Vec::new();
+    let mut seen = BTreeSet::new();
+    add_package_graph_inner(client, spec, options, &mut seen, &mut reports)?;
+    Ok(reports)
 }
 
 fn discover_project_requirements_with_options(
@@ -789,6 +803,23 @@ fn options_with_manifest_policy(options: &LinkOptions) -> Result<LinkOptions> {
             .push(parse_capability_grant(&grant)?);
     }
     Ok(options)
+}
+
+fn prune_lockfile(project_dir: &Path, retained: &BTreeSet<String>) -> Result<usize> {
+    let lockfile = project_dir.join(LOCKFILE);
+    let mut lock = read_lockfile(&lockfile)?;
+    let before = lock.packages.len();
+    lock.packages
+        .retain(|package| retained.contains(&locked_package_key(package)));
+    let removed = before.saturating_sub(lock.packages.len());
+    if removed > 0 || before == 0 {
+        fs::write(lockfile, toml::to_string_pretty(&lock)?)?;
+    }
+    Ok(removed)
+}
+
+fn locked_package_key(package: &LockedPackage) -> String {
+    format!("{}:{}@{}", package.ecosystem, package.name, package.version)
 }
 
 fn read_package_json_specs(
@@ -1162,6 +1193,11 @@ pub fn install_locked_packages(project_dir: impl AsRef<Path>) -> Result<InstallR
         .join("python")
         .join("site-packages");
     let python_bin_dir = project_dir.join(".omc").join("python").join("bin");
+
+    remove_path_if_exists(&node_modules)?;
+    remove_path_if_exists(&python_site_packages)?;
+    remove_path_if_exists(&python_bin_dir)?;
+
     fs::create_dir_all(&node_modules)?;
     fs::create_dir_all(&npm_bin_dir)?;
     fs::create_dir_all(&python_site_packages)?;
@@ -3295,6 +3331,30 @@ mod tests {
     }
 
     #[test]
+    fn prunes_lockfile_to_retained_packages() {
+        let dir = tempfile::tempdir().unwrap();
+        let keep = locked_package_for_test(Ecosystem::Npm, "left-pad", "1.3.0");
+        let stale = locked_package_for_test(Ecosystem::Npm, "is-odd", "3.0.1");
+        fs::write(
+            dir.path().join("omc.lock"),
+            toml::to_string_pretty(&OmcLock {
+                version: 1,
+                packages: vec![keep.clone(), stale],
+            })
+            .unwrap(),
+        )
+        .unwrap();
+
+        let removed =
+            prune_lockfile(dir.path(), &BTreeSet::from([locked_package_key(&keep)])).unwrap();
+
+        let lock = read_lockfile(dir.path().join("omc.lock")).unwrap();
+        assert_eq!(removed, 1);
+        assert_eq!(lock.packages.len(), 1);
+        assert_eq!(lock.packages[0].name, "left-pad");
+    }
+
+    #[test]
     fn discovers_package_lock_constraints() {
         let dir = tempfile::tempdir().unwrap();
         fs::write(
@@ -3716,5 +3776,23 @@ mod tests {
             .findings
             .iter()
             .any(|finding| finding.message.contains("env.read:NPM_TOKEN not granted")));
+    }
+
+    fn locked_package_for_test(ecosystem: Ecosystem, name: &str, version: &str) -> LockedPackage {
+        LockedPackage {
+            ecosystem,
+            name: name.to_owned(),
+            version: version.to_owned(),
+            source_url: format!("https://example.invalid/{name}-{version}.tgz"),
+            archive: format!(".omc/cache/{name}-{version}.tgz"),
+            artifact: format!(".omc/artifacts/{name}-{version}/omc.json"),
+            sha256: "0".repeat(64),
+            behavior: Behavior::Pure,
+            verdict: Verdict::Accepted,
+            dependencies: Vec::new(),
+            grants: Vec::new(),
+            capabilities: Vec::new(),
+            verifier_findings: Vec::new(),
+        }
     }
 }

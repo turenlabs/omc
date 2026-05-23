@@ -134,6 +134,7 @@ install npm packages into node_modules
 install PyPI wheels into .omc/python/site-packages
 install npm package bins into node_modules/.bin
 install Python console_scripts into .omc/python/bin
+prune stale lockfile entries and installed packages during install
 ```
 
 Default policy denies host authority. A package such as `esbuild`, which has a
@@ -204,6 +205,8 @@ Supported now:
 - source artifact download and cache
 - `omc.toml` and `omc.lock`
 - persistent `[policy].allow` grants in `omc.toml`
+- install-time pruning so `omc.lock`, `node_modules`, and Python site-packages
+  converge to current project manifests
 - text and JSON audit output for locked package verdicts
 - `node_modules` installation for npm tarballs
 - nested `node_modules` installation for conflicting npm dependency versions
