@@ -272,6 +272,9 @@ enum NpmCompatAction {
     Audit {
         json: bool,
     },
+    Cache {
+        action: NpmCacheAction,
+    },
     Config {
         action: NpmConfigAction,
         npm_registry: Option<String>,
@@ -296,6 +299,14 @@ enum NpmPathKind {
     Bin,
     Root,
     Prefix,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum NpmCacheAction {
+    Verify,
+    List { pattern: Option<String> },
+    Remove { pattern: String },
+    Clean,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -1033,6 +1044,7 @@ fn run_npm_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
             npm_registry,
         } => return print_npm_outdated(project_dir, json, parseable, npm_registry.as_deref()),
         NpmCompatAction::Audit { json } => return print_audit_report(project_dir, json),
+        NpmCompatAction::Cache { action } => print_npm_cache(project_dir, action)?,
         NpmCompatAction::Config {
             action,
             npm_registry,
@@ -1648,36 +1660,109 @@ fn pip_hash_digest(algorithm: PipHashAlgorithm, bytes: &[u8]) -> String {
         .collect::<String>()
 }
 
+fn print_npm_cache(project_dir: &Path, action: NpmCacheAction) -> Result<(), OmcRegistryError> {
+    let cache_dir = npm_cache_dir(project_dir);
+    match action {
+        NpmCacheAction::Verify => {
+            let files = compat_cache_files(&cache_dir)?;
+            let bytes = cache_files_size(&files)?;
+            let locked_verified = verify_npm_locked_cache(project_dir)?;
+            println!("Cache verified and compressed ({})", cache_dir.display());
+            println!("Content verified: {} ({bytes} bytes)", files.len());
+            println!("Index entries: {}", files.len());
+            if locked_verified > 0 {
+                println!("OMC lock entries verified: {locked_verified}");
+            }
+        }
+        NpmCacheAction::List { pattern } => {
+            let mut files = compat_cache_files(&cache_dir)?;
+            if let Some(pattern) = pattern {
+                files.retain(|path| compat_cache_pattern_matches(path, &cache_dir, &pattern));
+            }
+            files.sort();
+            for path in files {
+                println!("{}", compat_cache_display_path(&path, &cache_dir));
+            }
+        }
+        NpmCacheAction::Remove { pattern } => {
+            let mut files = compat_cache_files(&cache_dir)?;
+            files.retain(|path| compat_cache_pattern_matches(path, &cache_dir, &pattern));
+            let count = remove_cache_files(&files)?;
+            prune_empty_cache_dirs(&cache_dir)?;
+            println!("Files removed: {count}");
+        }
+        NpmCacheAction::Clean => {
+            let count = compat_cache_files(&cache_dir)?.len();
+            if cache_dir.exists() {
+                fs::remove_dir_all(&cache_dir)?;
+            }
+            println!("Files removed: {count}");
+        }
+    }
+    Ok(())
+}
+
+fn npm_cache_dir(project_dir: &Path) -> PathBuf {
+    project_dir.join(".omc").join("cache").join("npm")
+}
+
+fn verify_npm_locked_cache(project_dir: &Path) -> Result<usize, OmcRegistryError> {
+    let lockfile = project_dir.join("omc.lock");
+    if !lockfile.exists() {
+        return Ok(0);
+    }
+    let lock = read_lockfile(&lockfile)?;
+    let mut verified = 0;
+    for package in lock
+        .packages
+        .iter()
+        .filter(|package| package.ecosystem == Ecosystem::Npm)
+    {
+        let archive_path = absolutize_path(project_dir, PathBuf::from(&package.archive));
+        let bytes = fs::read(&archive_path)?;
+        let actual = pip_hash_digest(PipHashAlgorithm::Sha256, &bytes);
+        if !package.sha256.eq_ignore_ascii_case(&actual) {
+            return Err(OmcRegistryError::DigestMismatch {
+                name: package.name.clone(),
+                expected: format!("sha256:{}", package.sha256),
+                actual: format!("sha256:{actual}"),
+            });
+        }
+        verified += 1;
+    }
+    Ok(verified)
+}
+
 fn print_pip_cache(project_dir: &Path, action: PipCacheAction) -> Result<(), OmcRegistryError> {
     let cache_dir = pip_cache_dir(project_dir);
     match action {
         PipCacheAction::Dir => println!("{}", cache_dir.display()),
         PipCacheAction::Info => {
-            let files = pip_cache_files(&cache_dir)?;
+            let files = compat_cache_files(&cache_dir)?;
             let bytes = cache_files_size(&files)?;
             println!("Package index page cache location: {}", cache_dir.display());
             println!("Number of files: {}", files.len());
             println!("Size: {bytes} bytes");
         }
         PipCacheAction::List { pattern } => {
-            let mut files = pip_cache_files(&cache_dir)?;
+            let mut files = compat_cache_files(&cache_dir)?;
             if let Some(pattern) = pattern {
-                files.retain(|path| pip_cache_pattern_matches(path, &cache_dir, &pattern));
+                files.retain(|path| compat_cache_pattern_matches(path, &cache_dir, &pattern));
             }
             files.sort();
             for path in files {
-                println!("{}", pip_cache_display_path(&path, &cache_dir));
+                println!("{}", compat_cache_display_path(&path, &cache_dir));
             }
         }
         PipCacheAction::Remove { pattern } => {
-            let mut files = pip_cache_files(&cache_dir)?;
-            files.retain(|path| pip_cache_pattern_matches(path, &cache_dir, &pattern));
+            let mut files = compat_cache_files(&cache_dir)?;
+            files.retain(|path| compat_cache_pattern_matches(path, &cache_dir, &pattern));
             let count = remove_cache_files(&files)?;
             prune_empty_cache_dirs(&cache_dir)?;
             println!("Files removed: {count}");
         }
         PipCacheAction::Purge => {
-            let count = pip_cache_files(&cache_dir)?.len();
+            let count = compat_cache_files(&cache_dir)?.len();
             if cache_dir.exists() {
                 fs::remove_dir_all(&cache_dir)?;
             }
@@ -1691,7 +1776,7 @@ fn pip_cache_dir(project_dir: &Path) -> PathBuf {
     project_dir.join(".omc").join("cache").join("pypi")
 }
 
-fn pip_cache_files(cache_dir: &Path) -> Result<Vec<PathBuf>, OmcRegistryError> {
+fn compat_cache_files(cache_dir: &Path) -> Result<Vec<PathBuf>, OmcRegistryError> {
     let mut files = Vec::new();
     collect_cache_files(cache_dir, &mut files)?;
     Ok(files)
@@ -1745,8 +1830,8 @@ fn prune_empty_cache_dirs(root: &Path) -> Result<(), OmcRegistryError> {
     Ok(())
 }
 
-fn pip_cache_pattern_matches(path: &Path, cache_dir: &Path, pattern: &str) -> bool {
-    let display = pip_cache_display_path(path, cache_dir);
+fn compat_cache_pattern_matches(path: &Path, cache_dir: &Path, pattern: &str) -> bool {
+    let display = compat_cache_display_path(path, cache_dir);
     wildcard_match(&display, pattern)
         || path
             .file_name()
@@ -1755,7 +1840,7 @@ fn pip_cache_pattern_matches(path: &Path, cache_dir: &Path, pattern: &str) -> bo
             .unwrap_or(false)
 }
 
-fn pip_cache_display_path(path: &Path, cache_dir: &Path) -> String {
+fn compat_cache_display_path(path: &Path, cache_dir: &Path) -> String {
     path.strip_prefix(cache_dir)
         .unwrap_or(path)
         .to_string_lossy()
@@ -2860,6 +2945,7 @@ fn parse_npm_compat_action(args: &[String]) -> Result<NpmCompatAction, OmcRegist
         }),
         "outdated" => parse_npm_outdated_args(&args[1..]),
         "audit" => parse_npm_audit_args(&args[1..]),
+        "cache" => parse_npm_cache_args(&args[1..]),
         "view" | "info" | "show" | "v" => parse_npm_view_args(&args[1..]),
         "config" | "c" => parse_npm_config_args(&args[1..]),
         "get" => parse_npm_config_get_args(&args[1..]),
@@ -3008,6 +3094,99 @@ fn parse_npm_audit_args(args: &[String]) -> Result<NpmCompatAction, OmcRegistryE
     }
 
     Ok(NpmCompatAction::Audit { json })
+}
+
+fn parse_npm_cache_args(args: &[String]) -> Result<NpmCompatAction, OmcRegistryError> {
+    let mut force = false;
+    let mut filtered = Vec::new();
+    let mut index = 0;
+    while index < args.len() {
+        let arg = &args[index];
+        if matches!(arg.as_str(), "--force" | "-f") {
+            force = true;
+        } else if matches!(
+            arg.as_str(),
+            "--json"
+                | "--parseable"
+                | "-p"
+                | "--long"
+                | "--silent"
+                | "-s"
+                | "--prefer-offline"
+                | "--prefer-online"
+                | "--offline"
+        ) {
+        } else if matches!(arg.as_str(), "--cache" | "--loglevel") {
+            index += 1;
+            if args.get(index).is_none() {
+                return Err(OmcRegistryError::UnsupportedSpec(format!(
+                    "{arg} needs a value"
+                )));
+            }
+        } else if npm_cache_equals_value_flag(arg) {
+        } else if arg.starts_with('-') {
+            return Err(unsupported_compat_arg("npm cache", arg));
+        } else {
+            filtered.push(arg.clone());
+        }
+        index += 1;
+    }
+
+    let Some(command) = filtered.first().map(String::as_str) else {
+        return Err(OmcRegistryError::UnsupportedSpec(
+            "npm cache needs a command such as verify, ls, rm, or clean".to_owned(),
+        ));
+    };
+    let rest = &filtered[1..];
+    let action = match command {
+        "verify" => {
+            if !rest.is_empty() {
+                return Err(unsupported_compat_arg("npm cache verify", &rest[0]));
+            }
+            NpmCacheAction::Verify
+        }
+        "ls" | "list" => {
+            if rest.len() > 1 {
+                return Err(unsupported_compat_arg("npm cache ls", &rest[1]));
+            }
+            NpmCacheAction::List {
+                pattern: rest.first().cloned(),
+            }
+        }
+        "rm" | "remove" | "delete" => {
+            if rest.len() != 1 {
+                return Err(OmcRegistryError::UnsupportedSpec(
+                    "npm cache rm needs exactly one pattern".to_owned(),
+                ));
+            }
+            NpmCacheAction::Remove {
+                pattern: rest[0].clone(),
+            }
+        }
+        "clean" | "clear" => {
+            if !rest.is_empty() {
+                return Err(unsupported_compat_arg("npm cache clean", &rest[0]));
+            }
+            if !force {
+                return Err(OmcRegistryError::UnsupportedSpec(
+                    "npm cache clean needs --force".to_owned(),
+                ));
+            }
+            NpmCacheAction::Clean
+        }
+        other => {
+            return Err(OmcRegistryError::UnsupportedSpec(format!(
+                "unsupported npm cache command `{other}`"
+            )))
+        }
+    };
+    Ok(NpmCompatAction::Cache { action })
+}
+
+fn npm_cache_equals_value_flag(arg: &str) -> bool {
+    ["--cache=", "--loglevel="]
+        .iter()
+        .any(|prefix| arg.starts_with(prefix))
 }
 
 fn parse_npm_outdated_args(args: &[String]) -> Result<NpmCompatAction, OmcRegistryError> {
@@ -5038,6 +5217,35 @@ mod tests {
             NpmCompatAction::Audit { json: true }
         );
         assert!(parse_npm_compat_action(&args(&["audit", "fix"])).is_err());
+        assert_eq!(
+            parse_npm_compat_action(&args(&["cache", "verify", "--cache=/tmp/npm-cache"])).unwrap(),
+            NpmCompatAction::Cache {
+                action: NpmCacheAction::Verify,
+            }
+        );
+        assert_eq!(
+            parse_npm_compat_action(&args(&["cache", "ls", "left-pad"])).unwrap(),
+            NpmCompatAction::Cache {
+                action: NpmCacheAction::List {
+                    pattern: Some("left-pad".to_owned()),
+                },
+            }
+        );
+        assert_eq!(
+            parse_npm_compat_action(&args(&["cache", "rm", "left-pad"])).unwrap(),
+            NpmCompatAction::Cache {
+                action: NpmCacheAction::Remove {
+                    pattern: "left-pad".to_owned(),
+                },
+            }
+        );
+        assert_eq!(
+            parse_npm_compat_action(&args(&["cache", "clean", "--force"])).unwrap(),
+            NpmCompatAction::Cache {
+                action: NpmCacheAction::Clean,
+            }
+        );
+        assert!(parse_npm_compat_action(&args(&["cache", "clean"])).is_err());
         assert_eq!(
             parse_npm_compat_action(&args(&[
                 "outdated",
