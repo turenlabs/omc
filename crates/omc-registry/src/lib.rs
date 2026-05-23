@@ -3657,6 +3657,7 @@ fn install_lock(project_dir: &Path, lock: &OmcLock) -> Result<InstallReport> {
     }
 
     install_nested_npm_dependencies(project_dir, lock, &report.node_modules)?;
+    install_npm_workspace_links(project_dir, &report.node_modules)?;
 
     Ok(report)
 }
@@ -3795,6 +3796,37 @@ fn install_nested_npm_dependencies(
     }
 
     Ok(())
+}
+
+fn install_npm_workspace_links(project_dir: &Path, node_modules: &Path) -> Result<usize> {
+    let package_json = project_dir.join("package.json");
+    if !package_json.exists() {
+        return Ok(0);
+    }
+
+    let root = serde_json::from_str::<ProjectPackageJson>(&fs::read_to_string(&package_json)?)?;
+    let Some(workspaces) = root.workspaces else {
+        return Ok(0);
+    };
+
+    let mut count = 0;
+    for package_json in workspace_package_json_paths(project_dir, &workspaces) {
+        let workspace_dir = package_json.parent().unwrap_or(project_dir);
+        let workspace =
+            serde_json::from_str::<ProjectPackageJson>(&fs::read_to_string(&package_json)?)?;
+        let Some(name) = workspace.name.as_deref().filter(|name| !name.is_empty()) else {
+            continue;
+        };
+        let target = npm_install_target(node_modules, name);
+        remove_path_if_exists(&target)?;
+        if let Some(parent) = target.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        create_directory_link(workspace_dir, &target)?;
+        count += 1;
+    }
+
+    Ok(count)
 }
 
 fn install_nested_npm_dependencies_for_package(
@@ -4159,6 +4191,33 @@ fn create_command_link(source: &Path, target: &Path) -> Result<()> {
         target,
         format!("@echo off\r\nnode \"{}\" %*\r\n", source.display()),
     )?;
+    Ok(())
+}
+
+#[cfg(unix)]
+fn create_directory_link(source: &Path, target: &Path) -> Result<()> {
+    std::os::unix::fs::symlink(source, target)?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn create_directory_link(source: &Path, target: &Path) -> Result<()> {
+    copy_dir_all(source, target)
+}
+
+#[cfg(not(unix))]
+fn copy_dir_all(source: &Path, target: &Path) -> Result<()> {
+    fs::create_dir_all(target)?;
+    for entry in fs::read_dir(source)? {
+        let entry = entry?;
+        let source_path = entry.path();
+        let target_path = target.join(entry.file_name());
+        if entry.file_type()?.is_dir() {
+            copy_dir_all(&source_path, &target_path)?;
+        } else {
+            fs::copy(&source_path, &target_path)?;
+        }
+    }
     Ok(())
 }
 
@@ -6779,6 +6838,8 @@ fn relative_path(base: &Path, path: &Path) -> String {
 #[derive(Debug, Deserialize)]
 struct ProjectPackageJson {
     #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
     scripts: BTreeMap<String, String>,
     #[serde(default)]
     workspaces: Option<ProjectWorkspaces>,
@@ -7467,6 +7528,38 @@ mod tests {
         assert!(!production_specs
             .iter()
             .any(|spec| spec.name == "workspace-dev"));
+    }
+
+    #[test]
+    fn installs_npm_workspace_links() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir_all(dir.path().join("packages/lib")).unwrap();
+        fs::write(
+            dir.path().join("package.json"),
+            r#"{
+                "name": "workspace-root",
+                "workspaces": ["packages/*"],
+                "dependencies": { "@demo/lib": "workspace:*" }
+            }"#,
+        )
+        .unwrap();
+        fs::write(
+            dir.path().join("packages/lib/package.json"),
+            r#"{ "name": "@demo/lib", "main": "index.js" }"#,
+        )
+        .unwrap();
+        fs::write(
+            dir.path().join("packages/lib/index.js"),
+            "module.exports = 41;\n",
+        )
+        .unwrap();
+
+        let report = install_project(&LinkOptions::new(dir.path())).unwrap();
+        assert_eq!(report.npm_packages, 0);
+        assert_eq!(
+            fs::read_to_string(dir.path().join("node_modules/@demo/lib/index.js")).unwrap(),
+            "module.exports = 41;\n"
+        );
     }
 
     #[test]

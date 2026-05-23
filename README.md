@@ -158,6 +158,7 @@ install npm packages into node_modules
 install PyPI wheels into .omc/python/site-packages
 verify cached archive sha256 from omc.lock before extracting locked installs
 install npm package bins into node_modules/.bin
+link npm workspace packages into node_modules
 install Python console_scripts into .omc/python/bin
 prune stale lockfile entries and installed packages during install
 ```
@@ -240,6 +241,7 @@ Supported now:
 - recursive runtime dependency locking
 - root and npm workspace `package.json` dependency/devDependency ingestion,
   including HTTPS and local `file:` `.tgz` / `.tar.gz` tarball dependencies
+- npm workspace package linking into `node_modules`
 - production-style `omc install --omit-dev` installs
 - npm `optionalDependencies` and required `peerDependencies` ingestion
 - npm registry `optionalDependencies` and required `peerDependencies` resolution
