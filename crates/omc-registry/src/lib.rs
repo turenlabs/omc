@@ -1668,10 +1668,12 @@ fn read_pyproject_requirements(
     }
 
     if let Some(poetry) = pyproject.tool.and_then(|tool| tool.poetry) {
+        let base_dir = path.parent().unwrap_or_else(|| Path::new("."));
         discovered.specs.extend(read_poetry_dependencies(
             &poetry.dependencies,
             &poetry.extras,
             project_extras,
+            base_dir,
         )?);
 
         if include_dev_dependencies {
@@ -1679,6 +1681,7 @@ fn read_pyproject_requirements(
                 &poetry.dev_dependencies,
                 &BTreeMap::new(),
                 &BTreeSet::new(),
+                base_dir,
             )?);
         }
 
@@ -1697,6 +1700,7 @@ fn read_pyproject_requirements(
                     &group.dependencies,
                     &BTreeMap::new(),
                     &BTreeSet::new(),
+                    base_dir,
                 )?);
             }
         }
@@ -1709,6 +1713,7 @@ fn read_poetry_dependencies(
     dependencies: &BTreeMap<String, PoetryDependency>,
     extras: &BTreeMap<String, Vec<String>>,
     project_extras: &BTreeSet<String>,
+    base_dir: &Path,
 ) -> Result<Vec<PackageSpec>> {
     let selected_optional_names = extras
         .iter()
@@ -1725,7 +1730,7 @@ fn read_poetry_dependencies(
         if poetry_dependency_optional(dependency) && !selected_optional_names.contains(&name) {
             continue;
         }
-        if let Some(spec) = poetry_dependency_spec(&name, dependency)? {
+        if let Some(spec) = poetry_dependency_spec(&name, dependency, base_dir)? {
             specs.push(spec);
         }
     }
@@ -1780,18 +1785,26 @@ fn poetry_dependency_optional(dependency: &PoetryDependency) -> bool {
 fn poetry_dependency_spec(
     name: &str,
     dependency: &PoetryDependency,
+    base_dir: &Path,
 ) -> Result<Option<PackageSpec>> {
     let version = match dependency {
         PoetryDependency::Version(version) => version.as_str(),
         PoetryDependency::Table(table) => {
-            if table.path.is_some()
-                || table.git.is_some()
-                || table.url.is_some()
-                || table.file.is_some()
-            {
+            if table.git.is_some() {
                 return Err(OmcRegistryError::UnsupportedSpec(format!(
                     "unsupported Poetry dependency source for `{name}`"
                 )));
+            }
+            if let Some(url) = &table.url {
+                return Ok(Some(PackageSpec::with_direct_url(
+                    Ecosystem::Pypi,
+                    name.to_owned(),
+                    url.to_owned(),
+                    BTreeSet::new(),
+                )));
+            }
+            if let Some(path) = table.file.as_deref().or(table.path.as_deref()) {
+                return poetry_local_wheel_dependency_spec(name, path, base_dir).map(Some);
             }
             table.version.as_deref().unwrap_or("*")
         }
@@ -1803,6 +1816,35 @@ fn poetry_dependency_spec(
             (!version.is_empty()).then_some(version),
         )
     }))
+}
+
+fn poetry_local_wheel_dependency_spec(
+    name: &str,
+    path: &str,
+    base_dir: &Path,
+) -> Result<PackageSpec> {
+    let path = Path::new(path);
+    let path = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        base_dir.join(path)
+    };
+    if path.extension().and_then(|ext| ext.to_str()) != Some("whl") {
+        return Err(OmcRegistryError::UnsupportedSpec(format!(
+            "unsupported Poetry dependency source for `{name}`"
+        )));
+    }
+    let url = reqwest::Url::from_file_path(&path).map_err(|_| {
+        OmcRegistryError::UnsupportedSpec(format!(
+            "unsupported Poetry dependency source for `{name}`"
+        ))
+    })?;
+    Ok(PackageSpec::with_direct_url(
+        Ecosystem::Pypi,
+        name.to_owned(),
+        url.to_string(),
+        BTreeSet::new(),
+    ))
 }
 
 fn poetry_version_requirement(_name: &str, version: &str) -> Option<String> {
@@ -3716,12 +3758,21 @@ fn resolve_pypi_direct_wheel(spec: &PackageSpec) -> Result<ResolvedPackage> {
         .ok_or_else(|| OmcRegistryError::UnsupportedSpec(spec.requested()))?;
     let url = reqwest::Url::parse(&source_url)
         .map_err(|_| OmcRegistryError::UnsupportedSpec(spec.requested()))?;
-    if url.scheme() != "https" {
-        return Err(OmcRegistryError::UnsupportedSpec(format!(
-            "direct PyPI wheel URL for `{}` must use https",
-            spec.name
-        )));
-    }
+    let local_path = match url.scheme() {
+        "https" => None,
+        "file" => Some(url.to_file_path().map_err(|_| {
+            OmcRegistryError::UnsupportedSpec(format!(
+                "direct PyPI wheel URL for `{}` must use a valid file URL",
+                spec.name
+            ))
+        })?),
+        _ => {
+            return Err(OmcRegistryError::UnsupportedSpec(format!(
+                "direct PyPI wheel URL for `{}` must use https or file",
+                spec.name
+            )));
+        }
+    };
     let filename = url
         .path_segments()
         .and_then(|mut segments| segments.next_back())
@@ -3750,7 +3801,7 @@ fn resolve_pypi_direct_wheel(spec: &PackageSpec) -> Result<ResolvedPackage> {
         version,
         source_url,
         download_url: None,
-        local_path: None,
+        local_path,
         filename,
         expected_sha256: None,
         expected_sha1: None,
@@ -6364,7 +6415,7 @@ mod tests {
 
         let spec = PackageSpec::parse("pypi:pkg @ git+https://example.invalid/pkg.git").unwrap();
         let error = resolve_pypi_direct_wheel(&spec).unwrap_err();
-        assert!(error.to_string().contains("must use https"));
+        assert!(error.to_string().contains("must use https or file"));
     }
 
     #[test]
@@ -6483,7 +6534,51 @@ mod tests {
     }
 
     #[test]
-    fn rejects_poetry_direct_sources() {
+    fn reads_poetry_direct_wheel_sources() {
+        let dir = tempfile::tempdir().unwrap();
+        let pyproject = dir.path().join("pyproject.toml");
+        let wheel = dir
+            .path()
+            .join("wheels")
+            .join("local_idna-3.7-py3-none-any.whl");
+        fs::create_dir_all(wheel.parent().unwrap()).unwrap();
+        fs::write(&wheel, b"not a real wheel").unwrap();
+        fs::write(
+            &pyproject,
+            r#"
+            [tool.poetry.dependencies]
+            idna = { url = "https://example.invalid/idna-3.7-py3-none-any.whl" }
+            local-idna = { path = "wheels/local_idna-3.7-py3-none-any.whl" }
+            "#,
+        )
+        .unwrap();
+
+        let requirements = read_pyproject_requirements(&pyproject, &BTreeSet::new(), true).unwrap();
+        let idna = requirements
+            .specs
+            .iter()
+            .find(|spec| spec.name == "idna")
+            .unwrap();
+        assert_eq!(
+            idna.direct_url.as_deref(),
+            Some("https://example.invalid/idna-3.7-py3-none-any.whl")
+        );
+
+        let local = requirements
+            .specs
+            .iter()
+            .find(|spec| spec.name == "local-idna")
+            .unwrap();
+        assert!(local.direct_url.as_deref().unwrap().starts_with("file://"));
+        assert!(local
+            .direct_url
+            .as_deref()
+            .unwrap()
+            .ends_with("local_idna-3.7-py3-none-any.whl"));
+    }
+
+    #[test]
+    fn rejects_poetry_unsupported_direct_sources() {
         let dir = tempfile::tempdir().unwrap();
         let pyproject = dir.path().join("pyproject.toml");
         fs::write(
@@ -6491,6 +6586,7 @@ mod tests {
             r#"
             [tool.poetry.dependencies]
             local-package = { path = "../local-package" }
+            git-package = { git = "https://example.invalid/pkg.git" }
             "#,
         )
         .unwrap();

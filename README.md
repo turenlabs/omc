@@ -124,7 +124,7 @@ package-lock.json  exact versions, resolved tarball URLs, and integrity hashes f
 pip.conf           PyPI index-url, extra-index-url, find-links, and no-index configuration
 requirements.txt  PyPI requirements, direct wheel URLs, hashes, extras, -r includes, -c constraints, markers, simple indexes, find-links wheelhouses
 pyproject.toml    PEP 621 project dependencies, selected optional groups
-pyproject.toml    Poetry dependencies, dev groups, optional groups, and extras
+pyproject.toml    Poetry dependencies, dev groups, optional groups, extras, and wheel URL/path dependencies
 poetry.lock       exact PyPI versions and file hashes for locked Poetry packages
 ```
 
@@ -251,7 +251,8 @@ Supported now:
   for selected optional dependency groups
 - Poetry `pyproject.toml` dependency ingestion, including
   `[tool.poetry.dependencies]`, old `[tool.poetry.dev-dependencies]`,
-  dependency groups, selected optional groups, and selected extras
+  dependency groups, selected optional groups, selected extras, direct HTTPS
+  wheel URLs, and local wheel paths
 - `poetry.lock` exact-version constraints and sha256 file hash verification for
   locked PyPI packages
 - PyPI extras resolution for dependencies gated by `extra == "..."`
@@ -295,7 +296,8 @@ Not implemented yet:
 - full npm peer placement semantics beyond current required-peer handling
 - advanced requirements-file semantics such as editable installs, VCS URLs,
   non-wheel direct URLs, and finder/link options beyond fail-closed rejection
-- Poetry direct path/git/url/file dependencies beyond fail-closed rejection
+- Poetry git/path/url/file dependencies beyond direct wheel URLs and local
+  wheel files
 - Python sdist build isolation and native extension policy beyond fail-closed
   rejection
 - execution of package code inside OMC cells for real applications
