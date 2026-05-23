@@ -99,34 +99,35 @@ The `omc` CLI is the first working slice of a PyPI/npm replacement:
 ```bash
 cargo install --path crates/omc-cli --bins
 
-cargo run -p omc-cli -- --project-dir /tmp/omc-demo init --name demo
-cargo run -p omc-cli -- --project-dir /tmp/omc-demo allow http:api.example.com env:API_TOKEN
-cargo run -p omc-cli -- --project-dir /tmp/omc-demo add --npm is-odd@3.0.1 left-pad@1.3.0
-cargo run -p omc-cli -- --project-dir /tmp/omc-demo add --npm is-number@7.0.0 --dev
-cargo run -p omc-cli -- --project-dir /tmp/omc-demo node -e "console.log(require('is-odd')(3))"
-cargo run -p omc-cli -- --project-dir /tmp/omc-demo script test
-cargo run -p omc-cli -- --project-dir /tmp/omc-demo add pypi:requests==2.32.3 --allow-all-host
-cargo run -p omc-cli -- --project-dir /tmp/omc-demo python -c "import requests; print(requests.__version__)"
-cargo run -p omc-cli -- --project-dir /tmp/omc-demo install --omit-dev
-cargo run -p omc-cli -- --project-dir /tmp/omc-demo install -r requirements/prod.txt
-cargo run -p omc-cli -- --project-dir /tmp/omc-demo install --locked
-cargo run -p omc-cli -- --project-dir /tmp/omc-demo ci
-cargo run -p omc-cli -- --project-dir /tmp/omc-demo run normalizer --version
-cargo run -p omc-cli -- --project-dir /tmp/omc-demo npm install left-pad@1.3.0
-cargo run -p omc-cli -- --project-dir /tmp/omc-demo npm ci --omit=dev
-cargo run -p omc-cli -- --project-dir /tmp/omc-demo npm run test -- --watch
-cargo run -p omc-cli -- --project-dir /tmp/omc-demo npm root
-cargo run -p omc-cli -- --project-dir /tmp/omc-demo npm bin
-cargo run -p omc-cli -- --project-dir /tmp/omc-demo pip install -r requirements.txt -c constraints.txt
-cargo run -p omc-cli -- --project-dir /tmp/omc-demo pip install requests==2.32.3 --allow-all-host
-cargo run -p omc-cli -- --project-dir /tmp/omc-demo pip freeze
-cargo run -p omc-cli -- --project-dir /tmp/omc-demo pip show requests
-cargo run -p omc-cli -- --project-dir /tmp/omc-demo pip list --format=json
-cargo run -p omc-cli -- --project-dir /tmp/omc-demo list
-cargo run -p omc-cli -- --project-dir /tmp/omc-demo list --json
-cargo run -p omc-cli -- --project-dir /tmp/omc-demo audit
-cargo run -p omc-cli -- --project-dir /tmp/omc-demo audit --json
-cargo run -p omc-cli -- --project-dir /tmp/omc-demo remove --npm is-odd left-pad
+cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo init --name demo
+cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo allow http:api.example.com env:API_TOKEN
+cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo add --npm is-odd@3.0.1 left-pad@1.3.0
+cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo add --npm is-number@7.0.0 --dev
+cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo node -e "console.log(require('is-odd')(3))"
+cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo script test
+cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo add pypi:requests==2.32.3 --allow-all-host
+cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo python -c "import requests; print(requests.__version__)"
+cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo install --omit-dev
+cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo install -r requirements/prod.txt
+cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo install --locked
+cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo ci
+cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo run normalizer --version
+cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm install left-pad@1.3.0
+cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm ci --omit=dev
+cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm run test -- --watch
+cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm root
+cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm bin
+cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip install -r requirements.txt -c constraints.txt
+cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip install requests==2.32.3 --allow-all-host
+cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip install -e ../local-package
+cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip freeze
+cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip show requests
+cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip list --format=json
+cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo list
+cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo list --json
+cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo audit
+cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo audit --json
+cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo remove --npm is-odd left-pad
 ```
 
 Installing with `--bins` also provides `npm` and `pip` compatibility binaries.
@@ -195,20 +196,20 @@ Default policy denies host authority. A package such as `esbuild`, which has a
 postinstall script and host access, is blocked:
 
 ```bash
-cargo run -p omc-cli -- --project-dir /tmp/omc-demo add npm:esbuild@0.19.12
+cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo add npm:esbuild@0.19.12
 ```
 
 Intentional grants are explicit and recorded in the generated artifact and
 lockfile:
 
 ```bash
-cargo run -p omc-cli -- --project-dir /tmp/omc-demo add npm:esbuild@0.19.12 --allow-all-host
+cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo add npm:esbuild@0.19.12 --allow-all-host
 ```
 
 Fine-grained grants are supported too:
 
 ```bash
-cargo run -p omc-cli -- --project-dir /tmp/omc-demo add npm:some-client@1.0.0 \
+cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo add npm:some-client@1.0.0 \
   --allow http:api.example.com \
   --allow env:API_TOKEN
 ```
@@ -371,7 +372,8 @@ Supported now:
 - `omc pip` compatibility commands for common `install`, `uninstall`, `freeze`,
   `show`, and `list --format=columns|freeze|json` flows, including `-r`, index
   URL, constraints, extra-index, find-links, and no-index install flags without
-  delegating to pip, plus a direct `pip` compatibility binary
+  delegating to pip; direct `pip install -e PATH` and `pip install ./path`
+  local directory installs; and a direct `pip` compatibility binary
 - isolated `omc python` execution that uses OMC site-packages without ambient
   user/global Python site-packages or startup/hook environment variables
 - isolated Node execution wrappers that remove ambient `NODE_PATH` module
@@ -400,5 +402,5 @@ Not implemented yet:
 ```bash
 cargo test
 cargo run -p omc-demo
-cargo run -p omc-cli -- --help
+cargo run -p omc-cli --bin omc -- --help
 ```

@@ -261,6 +261,7 @@ enum PipCompatAction {
         specs: Vec<String>,
         requirements: Vec<PathBuf>,
         constraints: Vec<PathBuf>,
+        local_paths: Vec<PathBuf>,
         index_url: Option<String>,
         extra_index_urls: Vec<String>,
         find_links: Vec<String>,
@@ -752,6 +753,7 @@ fn run_pip_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
             specs,
             requirements,
             constraints,
+            local_paths,
             index_url,
             extra_index_urls,
             find_links,
@@ -765,6 +767,7 @@ fn run_pip_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
                 options.allowed_capabilities = allowed_capabilities;
                 options.requirement_files = absolutize_paths(project_dir, requirements);
                 options.constraint_files = absolutize_paths(project_dir, constraints);
+                options.python_local_paths = absolutize_paths(project_dir, local_paths);
                 apply_pip_compat_index_options(
                     &mut options,
                     index_url,
@@ -780,6 +783,7 @@ fn run_pip_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
                 options.allowed_capabilities = allowed_capabilities;
                 options.requirement_files = absolutize_paths(project_dir, requirements);
                 options.constraint_files = absolutize_paths(project_dir, constraints);
+                options.python_local_paths = absolutize_paths(project_dir, local_paths);
                 apply_pip_compat_index_options(
                     &mut options,
                     index_url,
@@ -794,6 +798,7 @@ fn run_pip_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
                 print_link_reports(&all_reports);
                 let install = if options.requirement_files.is_empty()
                     && options.constraint_files.is_empty()
+                    && options.python_local_paths.is_empty()
                 {
                     install_locked_packages(project_dir)?
                 } else {
@@ -1473,6 +1478,7 @@ fn parse_pip_install_args(args: &[String]) -> Result<PipCompatAction, OmcRegistr
     let mut extra_index_urls = Vec::new();
     let mut find_links = Vec::new();
     let mut no_index = false;
+    let mut local_paths = Vec::new();
     let mut filtered = Vec::new();
     let mut index = 0;
     while index < args.len() {
@@ -1536,11 +1542,9 @@ fn parse_pip_install_args(args: &[String]) -> Result<PipCompatAction, OmcRegistr
                     "{arg} needs a path"
                 )));
             };
-            if path != "." {
-                return Err(OmcRegistryError::UnsupportedSpec(format!(
-                    "pip editable path `{path}` is only supported for the project root"
-                )));
-            }
+            local_paths.push(pip_local_path_arg(path)?);
+        } else if let Some(path) = arg.strip_prefix("--editable=") {
+            local_paths.push(pip_local_path_arg(path)?);
         } else if matches!(
             arg.as_str(),
             "--upgrade"
@@ -1551,6 +1555,8 @@ fn parse_pip_install_args(args: &[String]) -> Result<PipCompatAction, OmcRegistr
                 | "--no-cache-dir"
                 | "--progress-bar=off"
         ) {
+        } else if is_pip_local_directory_arg(arg) {
+            local_paths.push(pip_local_path_arg(arg)?);
         } else {
             filtered.push(arg.clone());
         }
@@ -1568,6 +1574,7 @@ fn parse_pip_install_args(args: &[String]) -> Result<PipCompatAction, OmcRegistr
         specs: positionals.into_iter().filter(|spec| spec != ".").collect(),
         requirements,
         constraints,
+        local_paths,
         index_url,
         extra_index_urls,
         find_links,
@@ -1575,6 +1582,46 @@ fn parse_pip_install_args(args: &[String]) -> Result<PipCompatAction, OmcRegistr
         allow,
         allow_all_host,
     })
+}
+
+fn pip_local_path_arg(value: &str) -> Result<PathBuf, OmcRegistryError> {
+    if value.contains("://") || value.starts_with("git+") {
+        return Err(OmcRegistryError::UnsupportedSpec(format!(
+            "pip editable path `{value}` must be a local directory"
+        )));
+    }
+    let path = value.split_once('[').map(|(path, _)| path).unwrap_or(value);
+    if path.trim().is_empty() {
+        return Err(OmcRegistryError::UnsupportedSpec(
+            "pip editable path cannot be empty".to_owned(),
+        ));
+    }
+    Ok(PathBuf::from(path))
+}
+
+fn is_pip_local_directory_arg(value: &str) -> bool {
+    if value.contains("://") || value.starts_with("git+") || is_pip_archive_arg(value) {
+        return false;
+    }
+    value == "."
+        || value.starts_with("./")
+        || value.starts_with("../")
+        || value.starts_with('/')
+        || value.starts_with("~/")
+        || value.contains('/')
+        || value.contains('\\')
+}
+
+fn is_pip_archive_arg(value: &str) -> bool {
+    let value = value.split_once('#').map(|(path, _)| path).unwrap_or(value);
+    let filename = value
+        .rsplit_once('/')
+        .map(|(_, filename)| filename)
+        .unwrap_or(value);
+    filename.ends_with(".whl")
+        || filename.ends_with(".zip")
+        || filename.ends_with(".tgz")
+        || filename.ends_with(".tar.gz")
 }
 
 #[derive(Debug, Default)]
@@ -1970,12 +2017,44 @@ mod tests {
                 specs: vec!["requests==2.32.3".to_owned()],
                 requirements: vec![PathBuf::from("requirements.txt")],
                 constraints: vec![PathBuf::from("constraints.txt")],
+                local_paths: Vec::new(),
                 index_url: Some("https://mirror.example/simple".to_owned()),
                 extra_index_urls: vec!["https://extra.example/simple".to_owned()],
                 find_links: vec!["wheelhouse".to_owned()],
                 no_index: true,
                 allow: Vec::new(),
                 allow_all_host: true,
+            }
+        );
+    }
+
+    #[test]
+    fn parses_pip_install_local_paths() {
+        assert_eq!(
+            parse_pip_compat_action(&args(&[
+                "install",
+                "-e",
+                "../editable_pkg[dev]",
+                "--editable=./another_pkg",
+                "./local_pkg",
+                "requests==2.32.3",
+            ]))
+            .unwrap(),
+            PipCompatAction::Install {
+                specs: vec!["requests==2.32.3".to_owned()],
+                requirements: Vec::new(),
+                constraints: Vec::new(),
+                local_paths: vec![
+                    PathBuf::from("../editable_pkg"),
+                    PathBuf::from("./another_pkg"),
+                    PathBuf::from("./local_pkg"),
+                ],
+                index_url: None,
+                extra_index_urls: Vec::new(),
+                find_links: Vec::new(),
+                no_index: false,
+                allow: Vec::new(),
+                allow_all_host: false,
             }
         );
     }
