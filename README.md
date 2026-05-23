@@ -160,6 +160,9 @@ cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm owner rm alice
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm access get status @company/pkg
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm access set status=public @company/pkg --otp 123456
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm access grant read-write @company:publishers @company/pkg --otp 123456
+cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm org set @company alice admin --otp 123456
+cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm org ls @company
+cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm org rm @company alice --otp 123456
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm team create @company:publishers --otp 123456
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm team add @company:publishers alice --otp 123456
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm team ls @company:publishers
@@ -469,7 +472,7 @@ Supported now:
   `upgrade`, `install-test` / `it`, `ci`, `install-ci-test` / `cit`, `prune`, `dedupe`, `rebuild`, `test`, `start`, `stop`, `restart`,
   `run`, `exec`, `init`, `remove`, `bin`, `root`, `prefix`, `audit` / `audit --json`,
   `help`, `fund` / `fund --json`, `cache verify/ls/rm/clean --force`, `pkg get/set/delete`, `version`,
-  `pack`, `publish`, `unpublish`, `deprecate`, `undeprecate`, `search` / `find`, `ping`, `whoami`, `login` / `adduser`, `logout`, `token list/create/revoke`, `owner ls/add/rm`, `access list/get/set/grant/revoke`, `team create/destroy/add/rm/ls`, `dist-tag ls/add/rm`, `sbom --sbom-format=cyclonedx|spdx`, `config get/set/delete/list`, `get`,
+  `pack`, `publish`, `unpublish`, `deprecate`, `undeprecate`, `search` / `find`, `ping`, `whoami`, `login` / `adduser`, `logout`, `token list/create/revoke`, `owner ls/add/rm`, `access list/get/set/grant/revoke`, `org set/rm/ls`, `team create/destroy/add/rm/ls`, `dist-tag ls/add/rm`, `sbom --sbom-format=cyclonedx|spdx`, `config get/set/delete/list`, `get`,
   `view` / `info` / `show`, `docs`, `repo`, `bugs`, `home`,
   `list` / `ls` / `ll` / `la`, including `--json`, common depth/omit/workspace
   flags, and package-name filters; `explain` / `why`,

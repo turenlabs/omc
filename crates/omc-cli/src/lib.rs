@@ -19,16 +19,17 @@ use omc_registry::{
     parse_capability_grant, parse_npm_direct_archive_reference,
     parse_pypi_direct_archive_reference, parse_pypi_vcs_requirement, publish_npm_package,
     read_constraint_files, read_lockfile, read_manifest, read_npm_access_collaborators,
-    read_npm_access_packages, read_npm_access_status, read_npm_config_snapshot,
+    read_npm_access_packages, read_npm_access_status, read_npm_config_snapshot, read_npm_org_users,
     read_npm_package_metadata, read_npm_package_metadata_with_userconfig, read_npm_package_owners,
     read_npm_ping_with_userconfig, read_npm_search, read_npm_team_users, read_npm_teams,
     read_npm_token_list, read_npm_whoami, read_npm_workspace_packages, read_package_scripts,
     read_pip_config_snapshot, read_pypi_available_versions, read_requirements_files,
-    remove_manifest_dependency, remove_npm_dist_tag, remove_npm_team_user, revoke_npm_access,
-    revoke_npm_token, set_npm_access_mfa, set_npm_access_status, unpublish_npm_package,
-    upload_pypi_distribution, Behavior, Ecosystem, InstallReport, LinkOptions, LockedPackage,
-    LockedPythonVcsDependency, NpmAccessMapResult, NpmAccessMutationResult, NpmAccessStatusResult,
-    NpmAccessToken, NpmDeprecateResult, NpmDistTagMutationResult, NpmOwnerListResult,
+    remove_manifest_dependency, remove_npm_dist_tag, remove_npm_org_user, remove_npm_team_user,
+    revoke_npm_access, revoke_npm_token, set_npm_access_mfa, set_npm_access_status,
+    set_npm_org_user, unpublish_npm_package, upload_pypi_distribution, Behavior, Ecosystem,
+    InstallReport, LinkOptions, LockedPackage, LockedPythonVcsDependency, NpmAccessMapResult,
+    NpmAccessMutationResult, NpmAccessStatusResult, NpmAccessToken, NpmDeprecateResult,
+    NpmDistTagMutationResult, NpmOrgListResult, NpmOrgMutationResult, NpmOwnerListResult,
     NpmOwnerMutationResult, NpmPingResult, NpmPublishPackage, NpmPublishResult, NpmSearchPackage,
     NpmTeamListResult, NpmTeamMutationResult, NpmTokenCreateOptions, NpmTokenCreateResult,
     NpmTokenListResult, NpmTokenRevokeResult, NpmUnpublishResult, NpmWhoamiResult,
@@ -383,6 +384,9 @@ enum NpmCompatAction {
     Access {
         action: NpmAccessAction,
     },
+    Org {
+        action: NpmOrgAction,
+    },
     Team {
         action: NpmTeamAction,
     },
@@ -577,6 +581,37 @@ enum NpmAccessAction {
         npm_registry: Option<String>,
         userconfig: Option<PathBuf>,
         otp: Option<String>,
+    },
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum NpmOrgAction {
+    Set {
+        org: String,
+        user: String,
+        role: Option<String>,
+        json: bool,
+        parseable: bool,
+        npm_registry: Option<String>,
+        userconfig: Option<PathBuf>,
+        otp: Option<String>,
+    },
+    Remove {
+        org: String,
+        user: String,
+        json: bool,
+        parseable: bool,
+        npm_registry: Option<String>,
+        userconfig: Option<PathBuf>,
+        otp: Option<String>,
+    },
+    List {
+        org: String,
+        user: Option<String>,
+        json: bool,
+        parseable: bool,
+        npm_registry: Option<String>,
+        userconfig: Option<PathBuf>,
     },
 }
 
@@ -2235,6 +2270,7 @@ fn run_npm_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
         NpmCompatAction::Token { action } => print_npm_token(project_dir, action)?,
         NpmCompatAction::Owner { action } => print_npm_owner(project_dir, action)?,
         NpmCompatAction::Access { action } => print_npm_access(project_dir, action)?,
+        NpmCompatAction::Org { action } => print_npm_org(project_dir, action)?,
         NpmCompatAction::Team { action } => print_npm_team(project_dir, action)?,
         NpmCompatAction::DistTag { action } => print_npm_dist_tag(project_dir, action)?,
         NpmCompatAction::Sbom { action } => print_npm_sbom(project_dir, action)?,
@@ -3028,6 +3064,14 @@ fn npm_help_text(topic: Option<&str>) -> String {
                 "Supports --json, --registry, --userconfig, and --otp for mutations.",
             ],
         ),
+        Some("org") => npm_command_help(
+            "npm org <set|rm|ls> ...",
+            &[
+                "Manage npm organization membership through the configured registry.",
+                "Supports set <org> <user> [developer|admin|owner], rm <org> <user>, and ls <org> [user].",
+                "Alias: add for set. Supports --json, --parseable, --registry, --userconfig, and --otp for mutations.",
+            ],
+        ),
         Some("team") => npm_command_help(
             "npm team <create|destroy|add|rm|ls> ...",
             &[
@@ -3101,7 +3145,7 @@ fn npm_general_help_text() -> String {
         "npm <command>",
         &[
             "OMC npm compatibility runs supported npm workflows through OMC's verifier, lockfile, cache, and project-local runtime paths.",
-            "Supported commands: install, install-test, ci, install-ci-test, remove, run, test, start, stop, restart, exec, list, explain, audit, outdated, fund, prune, dedupe, rebuild, cache, pkg, version, pack, publish, unpublish, deprecate, undeprecate, search, ping, whoami, login, adduser, logout, token, owner, access, team, dist-tag, sbom, view, docs, repo, bugs, home, config, init, bin, root, prefix.",
+            "Supported commands: install, install-test, ci, install-ci-test, remove, run, test, start, stop, restart, exec, list, explain, audit, outdated, fund, prune, dedupe, rebuild, cache, pkg, version, pack, publish, unpublish, deprecate, undeprecate, search, ping, whoami, login, adduser, logout, token, owner, access, org, team, dist-tag, sbom, view, docs, repo, bugs, home, config, init, bin, root, prefix.",
             "Use `npm help <command>` for focused OMC compatibility notes.",
         ],
     )
@@ -3148,6 +3192,7 @@ fn npm_help_topic(topic: &str) -> Option<&'static str> {
         "token" => Some("token"),
         "owner" => Some("owner"),
         "access" => Some("access"),
+        "org" => Some("org"),
         "team" => Some("team"),
         "dist-tag" | "dist-tags" => Some("dist-tag"),
         "sbom" => Some("sbom"),
@@ -4341,6 +4386,167 @@ fn npm_access_package_arg(
     }
     let package = read_npm_pkg_json(&project_dir.join("package.json"))?;
     npm_package_json_name(&package)
+}
+
+fn print_npm_org(project_dir: &Path, action: NpmOrgAction) -> Result<(), OmcRegistryError> {
+    match action {
+        NpmOrgAction::Set {
+            org,
+            user,
+            role,
+            json,
+            parseable,
+            npm_registry,
+            userconfig,
+            otp,
+        } => {
+            let result = set_npm_org_user(
+                project_dir,
+                &org,
+                &user,
+                role.as_deref(),
+                npm_registry.as_deref(),
+                userconfig.as_deref(),
+                otp.as_deref(),
+            )?;
+            print_npm_org_mutation(result, json, parseable)?;
+        }
+        NpmOrgAction::Remove {
+            org,
+            user,
+            json,
+            parseable,
+            npm_registry,
+            userconfig,
+            otp,
+        } => {
+            let result = remove_npm_org_user(
+                project_dir,
+                &org,
+                &user,
+                npm_registry.as_deref(),
+                userconfig.as_deref(),
+                otp.as_deref(),
+            )?;
+            print_npm_org_mutation(result, json, parseable)?;
+        }
+        NpmOrgAction::List {
+            org,
+            user,
+            json,
+            parseable,
+            npm_registry,
+            userconfig,
+        } => {
+            let result = read_npm_org_users(
+                project_dir,
+                &org,
+                user.as_deref(),
+                npm_registry.as_deref(),
+                userconfig.as_deref(),
+            )?;
+            print_npm_org_list(result, json, parseable)?;
+        }
+    }
+    Ok(())
+}
+
+fn print_npm_org_list(
+    result: NpmOrgListResult,
+    json: bool,
+    parseable: bool,
+) -> Result<(), OmcRegistryError> {
+    if json {
+        println!("{}", serde_json::to_string_pretty(&result.users)?);
+    } else if parseable {
+        println!("user\trole");
+        for (user, role) in result.users {
+            println!("{user}\t{role}");
+        }
+    } else {
+        for (user, role) in result.users {
+            println!("{user} - {role}");
+        }
+    }
+    Ok(())
+}
+
+fn print_npm_org_mutation(
+    result: NpmOrgMutationResult,
+    json: bool,
+    parseable: bool,
+) -> Result<(), OmcRegistryError> {
+    if json {
+        let value = match result.action.as_str() {
+            "set" => serde_json::json!({
+                "org": {
+                    "name": result.org,
+                    "size": result.user_count,
+                },
+                "user": result.user,
+                "role": result.role.as_deref().unwrap_or("developer"),
+            }),
+            "rm" => serde_json::json!({
+                "user": result.user,
+                "org": result.org,
+                "userCount": result.user_count.unwrap_or_default(),
+                "deleted": true,
+            }),
+            _ => serde_json::to_value(&result)?,
+        };
+        println!("{}", serde_json::to_string_pretty(&value)?);
+    } else if parseable {
+        match result.action.as_str() {
+            "set" => {
+                println!("org\torgsize\tuser\trole");
+                println!(
+                    "{}\t{}\t{}\t{}",
+                    result.org,
+                    result.user_count.unwrap_or_default(),
+                    result.user,
+                    result.role.as_deref().unwrap_or("developer")
+                );
+            }
+            "rm" => {
+                println!("user\torg\tuserCount\tdeleted");
+                println!(
+                    "{}\t{}\t{}\ttrue",
+                    result.user,
+                    result.org,
+                    result.user_count.unwrap_or_default()
+                );
+            }
+            action => println!("{}\t{}", result.user, action),
+        }
+    } else {
+        match result.action.as_str() {
+            "set" => println!(
+                "Added {} as {} to {}.\nYou now have {} member{} in this org.",
+                result.user,
+                result.role.as_deref().unwrap_or("developer"),
+                result.org,
+                result.user_count.unwrap_or_default(),
+                if result.user_count == Some(1) {
+                    ""
+                } else {
+                    "s"
+                }
+            ),
+            "rm" => println!(
+                "Successfully removed {} from {}.\nYou now have {} member{} in this org.",
+                result.user,
+                result.org,
+                result.user_count.unwrap_or_default(),
+                if result.user_count == Some(1) {
+                    ""
+                } else {
+                    "s"
+                }
+            ),
+            action => println!("{action} {} in {}", result.user, result.org),
+        }
+    }
+    Ok(())
 }
 
 fn print_npm_team(project_dir: &Path, action: NpmTeamAction) -> Result<(), OmcRegistryError> {
@@ -9409,6 +9615,7 @@ fn parse_npm_compat_action(args: &[String]) -> Result<NpmCompatAction, OmcRegist
         "token" => parse_npm_token_args(&args[1..]),
         "owner" => parse_npm_owner_args(&args[1..]),
         "access" => parse_npm_access_args(&args[1..]),
+        "org" => parse_npm_org_args(&args[1..]),
         "team" => parse_npm_team_args(&args[1..]),
         "dist-tag" | "dist-tags" => parse_npm_dist_tag_args(&args[1..]),
         "sbom" => parse_npm_sbom_args(&args[1..]),
@@ -9572,6 +9779,7 @@ fn npm_global_arg_supported_by_command(command: &str, arg: &str) -> bool {
                 | "token"
                 | "owner"
                 | "access"
+                | "org"
                 | "team"
                 | "dist-tag"
                 | "dist-tags"
@@ -9598,6 +9806,7 @@ fn npm_global_arg_supported_by_command(command: &str, arg: &str) -> bool {
                 | "token"
                 | "owner"
                 | "access"
+                | "org"
                 | "team"
                 | "dist-tag"
                 | "dist-tags"
@@ -9701,6 +9910,7 @@ fn npm_global_arg_supported_by_command(command: &str, arg: &str) -> bool {
                 | "token"
                 | "owner"
                 | "access"
+                | "org"
                 | "team"
                 | "dist-tag"
                 | "dist-tags"
@@ -9781,6 +9991,7 @@ fn npm_global_arg_supported_by_command(command: &str, arg: &str) -> bool {
                 | "token"
                 | "owner"
                 | "access"
+                | "org"
                 | "team"
                 | "dist-tag"
                 | "dist-tags"
@@ -12376,6 +12587,163 @@ fn npm_access_ignored_equals_flag(arg: &str) -> bool {
 }
 
 fn npm_access_flag_value(
+    args: &[String],
+    index: usize,
+    flag: &str,
+) -> Result<String, OmcRegistryError> {
+    args.get(index)
+        .cloned()
+        .ok_or_else(|| OmcRegistryError::UnsupportedSpec(format!("{flag} needs a value")))
+}
+
+fn parse_npm_org_args(args: &[String]) -> Result<NpmCompatAction, OmcRegistryError> {
+    let mut positionals = Vec::new();
+    let mut json = false;
+    let mut parseable = false;
+    let mut npm_registry = None;
+    let mut userconfig = None;
+    let mut otp = None;
+    let mut index = 0;
+    while index < args.len() {
+        let arg = &args[index];
+        if arg == "--json" || arg == "--json=true" {
+            json = true;
+        } else if arg == "--json=false" {
+            json = false;
+        } else if matches!(arg.as_str(), "--parseable" | "-p" | "--parseable=true") {
+            parseable = true;
+        } else if matches!(arg.as_str(), "--parseable=false" | "--no-parseable") {
+            parseable = false;
+        } else if arg == "--registry" {
+            index += 1;
+            npm_registry = Some(npm_org_flag_value(args, index, arg)?);
+        } else if let Some(value) = arg.strip_prefix("--registry=") {
+            npm_registry = Some(value.to_owned());
+        } else if arg == "--userconfig" {
+            index += 1;
+            userconfig = Some(PathBuf::from(npm_org_flag_value(args, index, arg)?));
+        } else if let Some(value) = arg.strip_prefix("--userconfig=") {
+            userconfig = Some(PathBuf::from(value));
+        } else if arg == "--otp" {
+            index += 1;
+            otp = Some(npm_org_flag_value(args, index, arg)?);
+        } else if let Some(value) = arg.strip_prefix("--otp=") {
+            otp = Some(value.to_owned());
+        } else if matches!(
+            arg.as_str(),
+            "--silent" | "-s" | "--workspaces" | "--include-workspace-root"
+        ) || npm_org_ignored_equals_flag(arg)
+        {
+        } else if matches!(
+            arg.as_str(),
+            "--loglevel" | "--cache" | "--workspace" | "-w"
+        ) {
+            index += 1;
+            let _ = npm_org_flag_value(args, index, arg)?;
+        } else if arg.starts_with('-') {
+            return Err(unsupported_compat_arg("npm org", arg));
+        } else {
+            positionals.push(arg.clone());
+        }
+        index += 1;
+    }
+
+    let Some(command) = positionals.first().map(String::as_str) else {
+        return Err(OmcRegistryError::UnsupportedSpec(
+            "npm org needs a command".to_owned(),
+        ));
+    };
+    match command {
+        "set" | "add" => {
+            if positionals.len() < 3 || positionals.len() > 4 {
+                return Err(OmcRegistryError::UnsupportedSpec(
+                    "npm org set needs an org, username, and optional role".to_owned(),
+                ));
+            }
+            let role = positionals.get(3).cloned();
+            if let Some(role) = role.as_deref() {
+                npm_org_role_arg(role)?;
+            }
+            Ok(NpmCompatAction::Org {
+                action: NpmOrgAction::Set {
+                    org: positionals[1].clone(),
+                    user: positionals[2].clone(),
+                    role,
+                    json,
+                    parseable,
+                    npm_registry,
+                    userconfig,
+                    otp,
+                },
+            })
+        }
+        "rm" | "remove" | "delete" | "del" => {
+            if positionals.len() != 3 {
+                return Err(OmcRegistryError::UnsupportedSpec(
+                    "npm org rm needs an org and username".to_owned(),
+                ));
+            }
+            Ok(NpmCompatAction::Org {
+                action: NpmOrgAction::Remove {
+                    org: positionals[1].clone(),
+                    user: positionals[2].clone(),
+                    json,
+                    parseable,
+                    npm_registry,
+                    userconfig,
+                    otp,
+                },
+            })
+        }
+        "ls" | "list" => {
+            if positionals.len() < 2 || positionals.len() > 3 {
+                return Err(OmcRegistryError::UnsupportedSpec(
+                    "npm org ls needs an org and optional username".to_owned(),
+                ));
+            }
+            Ok(NpmCompatAction::Org {
+                action: NpmOrgAction::List {
+                    org: positionals[1].clone(),
+                    user: positionals.get(2).cloned(),
+                    json,
+                    parseable,
+                    npm_registry,
+                    userconfig,
+                },
+            })
+        }
+        other => Err(OmcRegistryError::UnsupportedSpec(format!(
+            "unsupported npm org command `{other}`"
+        ))),
+    }
+}
+
+fn npm_org_role_arg(value: &str) -> Result<(), OmcRegistryError> {
+    if matches!(value, "owner" | "admin" | "developer") {
+        Ok(())
+    } else {
+        Err(OmcRegistryError::UnsupportedSpec(
+            "npm org role must be owner, admin, or developer".to_owned(),
+        ))
+    }
+}
+
+fn npm_org_ignored_equals_flag(arg: &str) -> bool {
+    [
+        "--json=",
+        "--loglevel=",
+        "--cache=",
+        "--parseable=",
+        "--workspace=",
+        "-w=",
+        "--workspaces=",
+        "--include-workspace-root=",
+    ]
+    .iter()
+    .any(|prefix| arg.starts_with(prefix))
+}
+
+fn npm_org_flag_value(
     args: &[String],
     index: usize,
     flag: &str,
@@ -17033,6 +17401,78 @@ mod tests {
             }
         );
         assert!(parse_npm_compat_action(&args(&["access", "grant", "write"])).is_err());
+        assert_eq!(
+            parse_npm_compat_action(&args(&[
+                "--json",
+                "--registry=https://registry.example.invalid/npm",
+                "--userconfig=ci.npmrc",
+                "--otp",
+                "123456",
+                "org",
+                "set",
+                "@demo",
+                "alice",
+                "admin",
+            ]))
+            .unwrap(),
+            NpmCompatAction::Org {
+                action: NpmOrgAction::Set {
+                    org: "@demo".to_owned(),
+                    user: "alice".to_owned(),
+                    role: Some("admin".to_owned()),
+                    json: true,
+                    parseable: false,
+                    npm_registry: Some("https://registry.example.invalid/npm".to_owned()),
+                    userconfig: Some(PathBuf::from("ci.npmrc")),
+                    otp: Some("123456".to_owned()),
+                },
+            }
+        );
+        assert_eq!(
+            parse_npm_compat_action(&args(&["org", "add", "demo", "bob", "--parseable",])).unwrap(),
+            NpmCompatAction::Org {
+                action: NpmOrgAction::Set {
+                    org: "demo".to_owned(),
+                    user: "bob".to_owned(),
+                    role: None,
+                    json: false,
+                    parseable: true,
+                    npm_registry: None,
+                    userconfig: None,
+                    otp: None,
+                },
+            }
+        );
+        assert_eq!(
+            parse_npm_compat_action(&args(&["org", "rm", "demo", "alice"])).unwrap(),
+            NpmCompatAction::Org {
+                action: NpmOrgAction::Remove {
+                    org: "demo".to_owned(),
+                    user: "alice".to_owned(),
+                    json: false,
+                    parseable: false,
+                    npm_registry: None,
+                    userconfig: None,
+                    otp: None,
+                },
+            }
+        );
+        assert_eq!(
+            parse_npm_compat_action(&args(&["org", "ls", "demo", "alice"])).unwrap(),
+            NpmCompatAction::Org {
+                action: NpmOrgAction::List {
+                    org: "demo".to_owned(),
+                    user: Some("alice".to_owned()),
+                    json: false,
+                    parseable: false,
+                    npm_registry: None,
+                    userconfig: None,
+                },
+            }
+        );
+        assert!(
+            parse_npm_compat_action(&args(&["org", "set", "demo", "alice", "writer"])).is_err()
+        );
         assert_eq!(
             parse_npm_compat_action(&args(&[
                 "--json",

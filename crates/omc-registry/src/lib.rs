@@ -7515,6 +7515,27 @@ pub struct NpmAccessMutationResult {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct NpmOrgListResult {
+    pub registry: String,
+    pub org: String,
+    pub users: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct NpmOrgMutationResult {
+    pub registry: String,
+    pub action: String,
+    pub org: String,
+    pub user: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user_count: Option<usize>,
+    pub status: u16,
+    pub response: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct NpmTeamListResult {
     pub registry: String,
     pub scope: String,
@@ -9099,6 +9120,217 @@ fn npm_access_permission_text(value: &str) -> String {
         "write" => "read-write".to_owned(),
         other => other.to_owned(),
     }
+}
+
+pub fn set_npm_org_user(
+    project_dir: &Path,
+    org: &str,
+    user: &str,
+    role: Option<&str>,
+    registry_override: Option<&str>,
+    userconfig_override: Option<&Path>,
+    otp: Option<&str>,
+) -> Result<NpmOrgMutationResult> {
+    let org = npm_org_name(org)?;
+    let user = npm_org_user(user)?;
+    let role = npm_org_role(role.unwrap_or("developer"))?;
+    let body = serde_json::json!({ "user": user, "role": role });
+    let (registry, status, response) = npm_org_request(
+        project_dir,
+        &org,
+        "PUT",
+        body,
+        registry_override,
+        userconfig_override,
+        otp,
+    )?;
+    let org_name = response
+        .get("org")
+        .and_then(|org| org.get("name"))
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or(&org)
+        .to_owned();
+    let user = response
+        .get("user")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or(&user)
+        .to_owned();
+    let role = response
+        .get("role")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or(&role)
+        .to_owned();
+    let user_count = response
+        .get("org")
+        .and_then(|org| org.get("size"))
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|size| usize::try_from(size).ok());
+    Ok(NpmOrgMutationResult {
+        registry,
+        action: "set".to_owned(),
+        org: org_name,
+        user,
+        role: Some(role),
+        user_count,
+        status,
+        response,
+    })
+}
+
+pub fn remove_npm_org_user(
+    project_dir: &Path,
+    org: &str,
+    user: &str,
+    registry_override: Option<&str>,
+    userconfig_override: Option<&Path>,
+    otp: Option<&str>,
+) -> Result<NpmOrgMutationResult> {
+    let org = npm_org_name(org)?;
+    let user = npm_org_user(user)?;
+    let body = serde_json::json!({ "user": user });
+    let (registry, status, response) = npm_org_request(
+        project_dir,
+        &org,
+        "DELETE",
+        body,
+        registry_override,
+        userconfig_override,
+        otp,
+    )?;
+    let roster = read_npm_org_users(
+        project_dir,
+        &org,
+        None,
+        registry_override,
+        userconfig_override,
+    )?;
+    Ok(NpmOrgMutationResult {
+        registry,
+        action: "rm".to_owned(),
+        org,
+        user,
+        role: None,
+        user_count: Some(roster.users.len()),
+        status,
+        response,
+    })
+}
+
+pub fn read_npm_org_users(
+    project_dir: &Path,
+    org: &str,
+    user: Option<&str>,
+    registry_override: Option<&str>,
+    userconfig_override: Option<&Path>,
+) -> Result<NpmOrgListResult> {
+    let org = npm_org_name(org)?;
+    let user = user.map(npm_org_user).transpose()?;
+    let client = Client::new();
+    let npm_config =
+        read_npm_config_with_overrides(project_dir, registry_override, userconfig_override)?;
+    let registry = ensure_trailing_slash(&npm_config.registry);
+    let url = format!("{}-/org/{}/user", registry, urlencoding::encode(&org));
+    let value = npm_get(&client, &url, &npm_config)
+        .send()?
+        .error_for_status()?
+        .json::<serde_json::Value>()?;
+    let mut users = npm_org_user_map(&value)?;
+    if let Some(user) = user {
+        users.retain(|name, _| name == &user);
+    }
+    Ok(NpmOrgListResult {
+        registry,
+        org,
+        users,
+    })
+}
+
+fn npm_org_request(
+    project_dir: &Path,
+    org: &str,
+    method: &str,
+    body: serde_json::Value,
+    registry_override: Option<&str>,
+    userconfig_override: Option<&Path>,
+    otp: Option<&str>,
+) -> Result<(String, u16, serde_json::Value)> {
+    let client = Client::new();
+    let npm_config =
+        read_npm_config_with_overrides(project_dir, registry_override, userconfig_override)?;
+    let registry = ensure_trailing_slash(&npm_config.registry);
+    let url = format!("{}-/org/{}/user", registry, urlencoding::encode(org));
+    if npm_config.auth_token_for_url(&url).is_none() {
+        return Err(OmcRegistryError::UnsupportedSpec(
+            "npm org needs authentication; run npm login or configure a registry _authToken"
+                .to_owned(),
+        ));
+    }
+    let mut request = match method {
+        "DELETE" => npm_delete(&client, &url, &npm_config).json(&body),
+        "PUT" => npm_put(&client, &url, &npm_config).json(&body),
+        other => {
+            return Err(OmcRegistryError::UnsupportedSpec(format!(
+                "unsupported npm org HTTP method `{other}`"
+            )))
+        }
+    };
+    if let Some(otp) = otp.map(str::trim).filter(|otp| !otp.is_empty()) {
+        request = request.header("npm-otp", otp);
+    }
+    let response = request.send()?;
+    response.error_for_status_ref()?;
+    let status = response.status().as_u16();
+    let response = npm_optional_json_response(response)?;
+    Ok((registry, status, response))
+}
+
+fn npm_org_name(value: &str) -> Result<String> {
+    let org = value.trim().trim_start_matches('@');
+    if org.is_empty() || org.contains('/') || org.contains(':') {
+        return Err(OmcRegistryError::UnsupportedSpec(format!(
+            "invalid npm org `{value}`"
+        )));
+    }
+    Ok(org.to_owned())
+}
+
+fn npm_org_user(value: &str) -> Result<String> {
+    let user = value.trim().trim_start_matches(['@', '~']);
+    if user.is_empty() {
+        return Err(OmcRegistryError::UnsupportedSpec(
+            "npm org user cannot be empty".to_owned(),
+        ));
+    }
+    Ok(user.to_owned())
+}
+
+fn npm_org_role(value: &str) -> Result<String> {
+    let role = value.trim();
+    if !matches!(role, "owner" | "admin" | "developer") {
+        return Err(OmcRegistryError::UnsupportedSpec(
+            "npm org role must be owner, admin, or developer".to_owned(),
+        ));
+    }
+    Ok(role.to_owned())
+}
+
+fn npm_org_user_map(value: &serde_json::Value) -> Result<BTreeMap<String, String>> {
+    let object = value.as_object().ok_or_else(|| {
+        OmcRegistryError::UnsupportedSpec("npm org response was not an object".to_owned())
+    })?;
+    let mut users = BTreeMap::new();
+    for (user, role) in object {
+        if let Some(role) = role.as_str() {
+            users.insert(user.clone(), role.to_owned());
+        } else if let Some(role) = role
+            .get("role")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned)
+        {
+            users.insert(user.clone(), role);
+        }
+    }
+    Ok(users)
 }
 
 pub fn create_npm_team(
@@ -19660,6 +19892,131 @@ wheels = [
         .unwrap();
         assert_eq!(revoke.action, "revoke");
         assert_eq!(revoke.status, 204);
+        handle.join().unwrap();
+    }
+
+    #[test]
+    fn manages_npm_org_members_with_userconfig_auth_and_otp() {
+        use std::io::Write as _;
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let handle = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let buffer = read_http_request_bytes(&mut stream);
+            let body_start = http_body_start(&buffer).unwrap();
+            let headers = String::from_utf8_lossy(&buffer[..body_start]);
+            assert!(headers.starts_with("PUT /-/org/demo/user "));
+            let lower = headers.to_ascii_lowercase();
+            assert!(lower.contains("authorization: bearer registry-token"));
+            assert!(lower.contains("npm-otp: 123456"));
+            let body: serde_json::Value = serde_json::from_slice(&buffer[body_start..]).unwrap();
+            assert_eq!(body, serde_json::json!({"user": "alice", "role": "admin"}));
+            let response_body = r#"{"org":{"name":"demo","size":2},"user":"alice","role":"admin"}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                response_body.len(),
+                response_body
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+
+            let (mut stream, _) = listener.accept().unwrap();
+            let buffer = read_http_request_bytes(&mut stream);
+            let body_start = http_body_start(&buffer).unwrap();
+            let headers = String::from_utf8_lossy(&buffer[..body_start]);
+            assert!(headers.starts_with("GET /-/org/demo/user "));
+            assert!(headers
+                .to_ascii_lowercase()
+                .contains("authorization: bearer registry-token"));
+            let body = r#"{"alice":"admin","bob":"developer"}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+
+            let (mut stream, _) = listener.accept().unwrap();
+            let buffer = read_http_request_bytes(&mut stream);
+            let body_start = http_body_start(&buffer).unwrap();
+            let headers = String::from_utf8_lossy(&buffer[..body_start]);
+            assert!(headers.starts_with("DELETE /-/org/demo/user "));
+            let lower = headers.to_ascii_lowercase();
+            assert!(lower.contains("authorization: bearer registry-token"));
+            assert!(lower.contains("npm-otp: 123456"));
+            let body: serde_json::Value = serde_json::from_slice(&buffer[body_start..]).unwrap();
+            assert_eq!(body, serde_json::json!({"user": "bob"}));
+            let response =
+                "HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+            stream.write_all(response.as_bytes()).unwrap();
+
+            let (mut stream, _) = listener.accept().unwrap();
+            let buffer = read_http_request_bytes(&mut stream);
+            let body_start = http_body_start(&buffer).unwrap();
+            let headers = String::from_utf8_lossy(&buffer[..body_start]);
+            assert!(headers.starts_with("GET /-/org/demo/user "));
+            assert!(headers
+                .to_ascii_lowercase()
+                .contains("authorization: bearer registry-token"));
+            let body = r#"{"alice":"admin"}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+        });
+
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(
+            dir.path().join("ci.npmrc"),
+            format!("registry=http://{addr}/\n//{addr}/:_authToken=registry-token\n"),
+        )
+        .unwrap();
+
+        let set = set_npm_org_user(
+            dir.path(),
+            "@demo",
+            "@alice",
+            Some("admin"),
+            None,
+            Some(Path::new("ci.npmrc")),
+            Some("123456"),
+        )
+        .unwrap();
+        assert_eq!(set.registry, format!("http://{addr}/"));
+        assert_eq!(set.action, "set");
+        assert_eq!(set.org, "demo");
+        assert_eq!(set.user, "alice");
+        assert_eq!(set.role.as_deref(), Some("admin"));
+        assert_eq!(set.user_count, Some(2));
+        assert_eq!(set.status, 200);
+
+        let users = read_npm_org_users(
+            dir.path(),
+            "demo",
+            Some("alice"),
+            None,
+            Some(Path::new("ci.npmrc")),
+        )
+        .unwrap();
+        assert_eq!(users.org, "demo");
+        assert_eq!(users.users.len(), 1);
+        assert_eq!(users.users.get("alice").map(String::as_str), Some("admin"));
+
+        let removed = remove_npm_org_user(
+            dir.path(),
+            "demo",
+            "~bob",
+            None,
+            Some(Path::new("ci.npmrc")),
+            Some("123456"),
+        )
+        .unwrap();
+        assert_eq!(removed.action, "rm");
+        assert_eq!(removed.user, "bob");
+        assert_eq!(removed.user_count, Some(1));
+        assert_eq!(removed.status, 204);
         handle.join().unwrap();
     }
 
