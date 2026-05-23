@@ -921,6 +921,14 @@ fn discover_project_requirements_with_options(
         project.hashes.extend(requirements.hashes);
     }
 
+    let uv_lock = project_dir.join("uv.lock");
+    if uv_lock.exists() {
+        let requirements = read_uv_lock_requirements(&uv_lock, include_dev_dependencies)?;
+        project.specs.extend(requirements.specs);
+        project.constraints.extend(requirements.constraints);
+        project.hashes.extend(requirements.hashes);
+    }
+
     let pyproject_toml = project_dir.join("pyproject.toml");
     if pyproject_toml.exists() {
         let requirements =
@@ -2214,6 +2222,112 @@ fn pipfile_locked_version(version: &str) -> Option<String> {
         .or_else(|| version.strip_prefix("=="))
         .map(str::to_owned)
         .or_else(|| is_exact_pypi_version(version).then_some(version.to_owned()))
+}
+
+fn read_uv_lock_requirements(
+    path: &Path,
+    include_dev_dependencies: bool,
+) -> Result<ProjectRequirements> {
+    let lock = toml::from_str::<UvLock>(&fs::read_to_string(path)?)?;
+    let mut requirements = ProjectRequirements::default();
+    let mut direct_specs = Vec::new();
+
+    for package in lock.package {
+        let name = normalize_pypi_name(&package.name);
+        let is_registry_package = package
+            .source
+            .as_ref()
+            .and_then(|source| source.registry.as_deref())
+            .is_some();
+
+        if is_registry_package {
+            let key = format!("pypi:{name}");
+            requirements
+                .constraints
+                .insert(key.clone(), package.version.clone());
+            collect_uv_dist_hash(package.sdist.as_ref(), &key, &mut requirements);
+            for wheel in &package.wheels {
+                collect_uv_dist_hash(Some(wheel), &key, &mut requirements);
+            }
+        } else if let Some(metadata) = package.metadata {
+            for requirement in metadata.requires_dist {
+                if let Some(spec) = uv_requirement_spec(requirement) {
+                    direct_specs.push(spec);
+                }
+            }
+
+            if include_dev_dependencies {
+                for requirements_for_group in metadata.requires_dev.into_values() {
+                    for requirement in requirements_for_group {
+                        if let Some(spec) = uv_requirement_spec(requirement) {
+                            direct_specs.push(spec);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if direct_specs.is_empty() {
+        requirements.specs.extend(
+            requirements
+                .constraints
+                .iter()
+                .map(|(key, version)| PackageSpec::parse(&format!("{key}@{version}")))
+                .collect::<Result<Vec<_>>>()?,
+        );
+    } else {
+        requirements.specs = direct_specs;
+    }
+
+    Ok(requirements)
+}
+
+fn collect_uv_dist_hash(
+    dist: Option<&UvDistribution>,
+    key: &str,
+    requirements: &mut ProjectRequirements,
+) {
+    let Some(hash) = dist
+        .and_then(|dist| dist.hash.as_deref())
+        .and_then(normalize_sha256_hash)
+    else {
+        return;
+    };
+
+    requirements
+        .hashes
+        .entry(key.to_owned())
+        .or_default()
+        .insert(hash);
+}
+
+fn uv_requirement_spec(requirement: UvRequirement) -> Option<PackageSpec> {
+    if requirement
+        .marker
+        .as_deref()
+        .map(|marker| !pypi_marker_applies(marker, &BTreeSet::new()))
+        .unwrap_or(false)
+    {
+        return None;
+    }
+
+    let mut extras = requirement.extras.into_iter().collect::<BTreeSet<_>>();
+    extras.extend(requirement.extra);
+    let extras = extras
+        .into_iter()
+        .map(|extra| normalize_pypi_extra(&extra))
+        .filter(|extra| !extra.is_empty())
+        .collect::<BTreeSet<_>>();
+
+    Some(PackageSpec::with_extras(
+        Ecosystem::Pypi,
+        normalize_pypi_name(&requirement.name),
+        requirement
+            .specifier
+            .filter(|specifier| !specifier.trim().is_empty()),
+        extras,
+    ))
 }
 
 fn read_pyproject_requirements(
@@ -5664,6 +5778,10 @@ fn is_source_like(path: &str) -> bool {
         "package.json"
             | "package-lock.json"
             | "npm-shrinkwrap.json"
+            | "pnpm-lock.yaml"
+            | "yarn.lock"
+            | "Pipfile.lock"
+            | "uv.lock"
             | "setup.py"
             | "conftest.py"
             | "tox.ini"
@@ -6022,6 +6140,52 @@ struct PipfileLockedPackage {
     #[serde(default)]
     extras: Vec<String>,
     markers: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct UvLock {
+    #[serde(default)]
+    package: Vec<UvLockedPackage>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct UvLockedPackage {
+    name: String,
+    version: String,
+    source: Option<UvPackageSource>,
+    sdist: Option<UvDistribution>,
+    #[serde(default)]
+    wheels: Vec<UvDistribution>,
+    metadata: Option<UvPackageMetadata>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct UvPackageSource {
+    registry: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct UvDistribution {
+    hash: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct UvPackageMetadata {
+    #[serde(default, rename = "requires-dist")]
+    requires_dist: Vec<UvRequirement>,
+    #[serde(default, rename = "requires-dev")]
+    requires_dev: BTreeMap<String, Vec<UvRequirement>>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct UvRequirement {
+    name: String,
+    specifier: Option<String>,
+    marker: Option<String>,
+    #[serde(default)]
+    extras: Vec<String>,
+    #[serde(default)]
+    extra: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -7405,6 +7569,148 @@ packages:
             .specs
             .iter()
             .any(|spec| spec.name == "pytest" && spec.version.as_deref() == Some("8.2.0")));
+    }
+
+    #[test]
+    fn reads_uv_lock_specs_constraints_and_hashes() {
+        let dir = tempfile::tempdir().unwrap();
+        let uv_lock = dir.path().join("uv.lock");
+        let idna_sdist = "a".repeat(64);
+        let idna_wheel = "b".repeat(64);
+        let requests_wheel = "c".repeat(64);
+        fs::write(
+            &uv_lock,
+            format!(
+                r#"version = 1
+revision = 3
+requires-python = ">=3.11"
+
+[[package]]
+name = "idna"
+version = "3.7"
+source = {{ registry = "https://pypi.org/simple" }}
+sdist = {{ url = "https://files.example/idna-3.7.tar.gz", hash = "sha256:{idna_sdist}" }}
+wheels = [
+  {{ url = "https://files.example/idna-3.7-py3-none-any.whl", hash = "sha256:{idna_wheel}" }},
+]
+
+[[package]]
+name = "requests"
+version = "2.32.3"
+source = {{ registry = "https://pypi.org/simple" }}
+wheels = [
+  {{ url = "https://files.example/requests-2.32.3-py3-none-any.whl", hash = "sha256:{requests_wheel}" }},
+]
+
+[[package]]
+name = "omc-uv-demo"
+version = "0.1.0"
+source = {{ virtual = "." }}
+
+[package.metadata]
+requires-dist = [
+  {{ name = "requests", extras = ["socks"], specifier = "==2.32.3" }},
+  {{ name = "old-python-only", specifier = "==0.1.0", marker = "python_version < '2'" }},
+]
+
+[package.metadata.requires-dev]
+dev = [
+  {{ name = "pytest", specifier = "==8.2.0" }},
+]
+"#
+            ),
+        )
+        .unwrap();
+
+        let production = read_uv_lock_requirements(&uv_lock, false).unwrap();
+        let requests = production
+            .specs
+            .iter()
+            .find(|spec| spec.name == "requests")
+            .unwrap();
+        assert_eq!(requests.version.as_deref(), Some("==2.32.3"));
+        assert!(requests.extras.contains("socks"));
+        assert!(!production.specs.iter().any(|spec| spec.name == "pytest"));
+        assert!(!production
+            .specs
+            .iter()
+            .any(|spec| spec.name == "old-python-only"));
+        assert_eq!(
+            production.constraints.get("pypi:idna").map(String::as_str),
+            Some("3.7")
+        );
+        assert_eq!(
+            production
+                .constraints
+                .get("pypi:requests")
+                .map(String::as_str),
+            Some("2.32.3")
+        );
+        assert_eq!(
+            production.hashes.get("pypi:idna").cloned().unwrap(),
+            BTreeSet::from([idna_sdist, idna_wheel])
+        );
+        assert_eq!(
+            production
+                .hashes
+                .get("pypi:requests")
+                .and_then(|hashes| hashes.iter().next())
+                .map(String::as_str),
+            Some(requests_wheel.as_str())
+        );
+
+        let dev = read_uv_lock_requirements(&uv_lock, true).unwrap();
+        assert!(dev
+            .specs
+            .iter()
+            .any(|spec| spec.name == "pytest" && spec.version.as_deref() == Some("==8.2.0")));
+    }
+
+    #[test]
+    fn discovers_uv_lock_requirements() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(
+            dir.path().join("uv.lock"),
+            r#"version = 1
+revision = 3
+requires-python = ">=3.11"
+
+[[package]]
+name = "idna"
+version = "3.7"
+source = { registry = "https://pypi.org/simple" }
+wheels = [
+  { url = "https://files.example/idna-3.7-py3-none-any.whl", hash = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" },
+]
+
+[[package]]
+name = "omc-uv-demo"
+version = "0.1.0"
+source = { virtual = "." }
+
+[package.metadata]
+requires-dist = [{ name = "idna", specifier = "==3.7" }]
+"#,
+        )
+        .unwrap();
+
+        let discovered = discover_project_requirements(dir.path()).unwrap();
+        assert!(discovered
+            .specs
+            .iter()
+            .any(|spec| spec.name == "idna" && spec.version.as_deref() == Some("==3.7")));
+        assert_eq!(
+            discovered.constraints.get("pypi:idna").map(String::as_str),
+            Some("3.7")
+        );
+        assert_eq!(
+            discovered
+                .hashes
+                .get("pypi:idna")
+                .and_then(|hashes| hashes.iter().next())
+                .map(String::as_str),
+            Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+        );
     }
 
     #[test]
