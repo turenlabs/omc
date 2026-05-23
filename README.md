@@ -127,15 +127,15 @@ npm-shrinkwrap.json exact versions, resolved tarball URLs, and integrity hashes 
 yarn.lock          Yarn Classic exact versions, resolved tarball URLs, and integrity hashes for uniquely locked npm packages
 pnpm-lock.yaml     pnpm importer dependencies, exact versions, resolved tarball URLs, and integrity hashes
 pip.conf           PyPI index-url, extra-index-url, find-links, and no-index configuration
-requirements.txt  PyPI requirements, direct wheel/sdist URLs and paths, hashes, extras, local editable/direct/bare directory paths, -r includes, -c constraints, markers, simple indexes, find-links wheel/sdist archives
+requirements.txt  PyPI requirements, direct wheel/sdist URLs and paths, VCS git dependencies, hashes, extras, local editable/direct/bare directory paths, -r includes, -c constraints, markers, simple indexes, find-links wheel/sdist archives
 requirements-dev.txt / dev-requirements.txt  dev requirements read unless --omit-dev is set
 requirements/base.txt / requirements/dev.txt  common requirements directory layout; dev is read unless --omit-dev is set
-Pipfile           Pipenv packages/dev-packages, source indexes, extras, markers, local paths, wheel/sdist file dependencies, and scripts
-Pipfile.lock      Pipenv default/develop package pins, local paths, extras, markers, sources, and sha256 hashes
+Pipfile           Pipenv packages/dev-packages, source indexes, extras, markers, git dependencies, local paths, wheel/sdist file dependencies, and scripts
+Pipfile.lock      Pipenv default/develop package pins, git dependencies, local paths, extras, markers, sources, and sha256 hashes
 uv.lock           uv project requirements, dev requirements, local path sources, exact package pins, and hashes
 pylock.toml       standardized Python lock package pins, markers, and hashes
-pyproject.toml    PEP 621 project dependencies, selected optional groups, dependency-groups, uv local/workspace sources, direct wheel/sdist URL/path dependencies, local path deps
-pyproject.toml    Poetry dependencies, dev groups, optional groups, extras, source indexes, wheel/sdist URL/path dependencies, local path deps
+pyproject.toml    PEP 621 project dependencies, selected optional groups, dependency-groups, uv local/workspace sources, direct wheel/sdist URL/path dependencies, git dependencies, local path deps
+pyproject.toml    Poetry dependencies, dev groups, optional groups, extras, source indexes, wheel/sdist URL/path dependencies, git dependencies, local path deps
 poetry.lock       exact PyPI versions and file hashes for locked Poetry packages
 setup.cfg         legacy setuptools install_requires and selected extras_require
 setup.py          static setuptools install_requires and selected extras_require
@@ -164,6 +164,7 @@ install PyPI wheels and pure Python sdists into .omc/python/site-packages
 verify cached archive sha256 from omc.lock before extracting locked installs
 install npm package bins, including root project bins, into node_modules/.bin
 link npm workspace/local directory packages into node_modules and node_modules/.bin
+clone Python git/VCS dependencies into .omc/python/vcs and install them as isolated local imports
 install Python console_scripts/gui_scripts from wheels, the root Python project, and pyproject/setup.cfg/setup.py local path packages into .omc/python/bin
 prune stale lockfile entries and installed packages during install
 ```
@@ -267,19 +268,21 @@ Supported now:
 - `requirements.txt`, `requirements/base.txt`, `requirements-dev.txt`,
   `dev-requirements.txt`, and `requirements/dev.txt` ingestion with hashes,
   line continuations, extras,
-  direct wheel/sdist URLs and paths, recursive `-r` includes, `-c` constraints,
-  `--index-url` / `--extra-index-url` simple indexes, `--find-links` / `-f`
-  local wheel/sdist archives or HTML pages, `--no-index`, `--trusted-host`,
-  `--only-binary`, `--prefer-binary`, enforced `--require-hashes`, local
-  editable/direct/bare directory paths, and common Python environment markers
-- unsupported requirements entries such as VCS URLs and unsupported direct
-  archive formats fail closed instead of being silently ignored
+  direct wheel/sdist URLs and paths, git VCS dependencies with refs and
+  subdirectories, recursive `-r` includes, `-c` constraints, `--index-url` /
+  `--extra-index-url` simple indexes, `--find-links` / `-f` local wheel/sdist
+  archives or HTML pages, `--no-index`, `--trusted-host`, `--only-binary`,
+  `--prefer-binary`, enforced `--require-hashes`, local editable/direct/bare
+  directory paths, and common Python environment markers
+- unsupported requirements entries and unsupported direct archive formats fail
+  closed instead of being silently ignored
 - `Pipfile` ingestion for Pipenv packages/dev-packages, source indexes, extras,
-  markers, local path dependencies, and wheel/sdist file dependencies when
-  `Pipfile.lock` is absent
+  markers, git dependencies, local path dependencies, and wheel/sdist file
+  dependencies when `Pipfile.lock` is absent
 - Pipfile `[scripts]` support through `omc script`
-- `Pipfile.lock` ingestion for Pipenv default/develop package pins, local paths,
-  extras, markers, `_meta.sources` simple indexes, and sha256 hashes
+- `Pipfile.lock` ingestion for Pipenv default/develop package pins, git
+  dependencies, local paths, extras, markers, `_meta.sources` simple indexes,
+  and sha256 hashes
 - `uv.lock` ingestion for uv project requirements, dev requirements, local path
   sources, exact-version constraints, and sdist/wheel sha256 hashes
 - `pylock.omc.toml` / `pylock.toml` ingestion for standardized Python lock
@@ -287,18 +290,19 @@ Supported now:
 - `pyproject.toml` PEP 621 dependency ingestion with `omc install --extra`
   for selected optional dependency groups, standardized `[dependency-groups]`
   with nested `include-group` support, `[tool.uv.sources]` local/workspace path
-  sources, direct wheel/sdist URLs/paths, and local path dependencies
+  sources, direct wheel/sdist URLs/paths, git dependencies, and local path
+  dependencies
 - Poetry `pyproject.toml` dependency ingestion, including
   `[tool.poetry.dependencies]`, old `[tool.poetry.dev-dependencies]`,
   dependency groups, selected optional groups, selected extras,
-  `[[tool.poetry.source]]` simple indexes, direct HTTPS wheel/sdist URLs, local
-  wheel/sdist paths, and local path dependencies
+  `[[tool.poetry.source]]` simple indexes, direct HTTPS wheel/sdist URLs, git
+  dependencies, local wheel/sdist paths, and local path dependencies
 - `poetry.lock` exact-version constraints and sha256 file hash verification for
   locked PyPI packages
 - `setup.cfg` `install_requires` ingestion plus selected
-  `[options.extras_require]` extras
+  `[options.extras_require]` extras, including git dependencies
 - static `setup.py` `install_requires` ingestion plus selected
-  `extras_require` extras
+  `extras_require` extras, including git dependencies
 - PyPI extras resolution for dependencies gated by `extra == "..."`
 - source artifact download and cache
 - `omc.toml` and `omc.lock`
@@ -347,10 +351,10 @@ Not implemented yet:
 - imports/linking across package cells
 - native/Wasm/Cranelift backend
 - full npm peer placement semantics beyond current required-peer handling
-- advanced requirements-file semantics such as VCS URLs, unsupported direct
-  archive formats, and finder/link options beyond fail-closed rejection
-- Poetry git/file dependencies beyond direct wheel/sdist URLs, local wheel/sdist
-  files, and local path directories
+- advanced requirements-file semantics beyond supported git, direct archive,
+  hash, marker, include, constraint, index, and find-links handling
+- Poetry dependency forms beyond direct wheel/sdist URLs, git dependencies,
+  local wheel/sdist files, and local path directories
 - Python sdist build isolation and native extension policy beyond pure source
   extraction
 - execution of package code inside OMC cells for real applications

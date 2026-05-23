@@ -468,6 +468,7 @@ pub struct LinkOptions {
     pub pypi_find_links: Vec<String>,
     pub pypi_no_index: bool,
     pub python_local_paths: Vec<PathBuf>,
+    pub python_vcs_requirements: Vec<PythonVcsRequirement>,
     pub requirement_files: Vec<PathBuf>,
     pub project_extras: BTreeSet<String>,
     pub include_dev_dependencies: bool,
@@ -489,6 +490,7 @@ impl LinkOptions {
             pypi_find_links: Vec::new(),
             pypi_no_index: false,
             python_local_paths: Vec::new(),
+            python_vcs_requirements: Vec::new(),
             requirement_files: Vec::new(),
             project_extras: BTreeSet::new(),
             include_dev_dependencies: true,
@@ -530,6 +532,68 @@ pub struct ProjectRequirements {
     pub pypi_no_index: bool,
     pub pypi_require_hashes: bool,
     pub python_local_paths: Vec<PathBuf>,
+    pub python_vcs_requirements: Vec<PythonVcsRequirement>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct PythonVcsRequirement {
+    pub name: String,
+    pub url: String,
+    pub reference: Option<String>,
+    pub subdirectory: Option<PathBuf>,
+    pub extras: BTreeSet<String>,
+}
+
+fn extend_project_requirements(
+    target: &mut ProjectRequirements,
+    requirements: ProjectRequirements,
+) {
+    target.specs.extend(requirements.specs);
+    target.constraints.extend(requirements.constraints);
+    target.hashes.extend(requirements.hashes);
+    target.npm_integrities.extend(requirements.npm_integrities);
+    target.npm_resolved.extend(requirements.npm_resolved);
+    if requirements.pypi_index_url.is_some() {
+        target.pypi_index_url = requirements.pypi_index_url;
+    }
+    target
+        .pypi_extra_index_urls
+        .extend(requirements.pypi_extra_index_urls);
+    target.pypi_find_links.extend(requirements.pypi_find_links);
+    target.pypi_no_index |= requirements.pypi_no_index;
+    target.pypi_require_hashes |= requirements.pypi_require_hashes;
+    target
+        .python_local_paths
+        .extend(requirements.python_local_paths);
+    target
+        .python_vcs_requirements
+        .extend(requirements.python_vcs_requirements);
+}
+
+fn apply_project_requirements_to_options(
+    options: &mut LinkOptions,
+    specs: &mut Vec<PackageSpec>,
+    requirements: ProjectRequirements,
+) {
+    specs.extend(requirements.specs);
+    options.constraints.extend(requirements.constraints);
+    options.hashes.extend(requirements.hashes);
+    options.npm_integrities.extend(requirements.npm_integrities);
+    options.npm_resolved.extend(requirements.npm_resolved);
+    if requirements.pypi_index_url.is_some() {
+        options.pypi_index_url = requirements.pypi_index_url;
+    }
+    options
+        .pypi_extra_index_urls
+        .extend(requirements.pypi_extra_index_urls);
+    options.pypi_find_links.extend(requirements.pypi_find_links);
+    options.pypi_no_index |= requirements.pypi_no_index;
+    options
+        .python_local_paths
+        .extend(requirements.python_local_paths);
+    options
+        .python_vcs_requirements
+        .extend(requirements.python_vcs_requirements);
 }
 
 #[derive(Debug, Clone)]
@@ -735,44 +799,170 @@ fn project_requested_specs(options: &mut LinkOptions) -> Result<Vec<PackageSpec>
         &options.project_extras,
         options.include_dev_dependencies,
     )?;
-    specs.extend(discovered.specs);
-    options.constraints.extend(discovered.constraints);
-    options.hashes.extend(discovered.hashes);
-    options.npm_integrities.extend(discovered.npm_integrities);
-    options.npm_resolved.extend(discovered.npm_resolved);
-    if discovered.pypi_index_url.is_some() {
-        options.pypi_index_url = discovered.pypi_index_url;
-    }
-    options
-        .pypi_extra_index_urls
-        .extend(discovered.pypi_extra_index_urls);
-    options.pypi_find_links.extend(discovered.pypi_find_links);
-    options.pypi_no_index |= discovered.pypi_no_index;
-    options
-        .python_local_paths
-        .extend(discovered.python_local_paths);
+    apply_project_requirements_to_options(options, &mut specs, discovered);
 
     if !options.requirement_files.is_empty() {
         let requirements = read_requirements_files(&options.requirement_files)?;
-        specs.extend(requirements.specs);
-        options.constraints.extend(requirements.constraints);
-        options.hashes.extend(requirements.hashes);
-        if requirements.pypi_index_url.is_some() {
-            options.pypi_index_url = requirements.pypi_index_url;
-        }
-        options
-            .pypi_extra_index_urls
-            .extend(requirements.pypi_extra_index_urls);
-        options.pypi_find_links.extend(requirements.pypi_find_links);
-        options.pypi_no_index |= requirements.pypi_no_index;
-        options
-            .python_local_paths
-            .extend(requirements.python_local_paths);
+        apply_project_requirements_to_options(options, &mut specs, requirements);
+    }
+
+    if !options.python_vcs_requirements.is_empty() {
+        let requirements = resolve_python_vcs_requirements(
+            &options.project_dir,
+            &options.python_vcs_requirements,
+        )?;
+        apply_project_requirements_to_options(options, &mut specs, requirements);
     }
 
     let mut seen = BTreeSet::new();
     specs.retain(|spec| seen.insert(spec.requested()));
     Ok(specs)
+}
+
+fn resolve_python_vcs_requirements(
+    project_dir: &Path,
+    requirements: &[PythonVcsRequirement],
+) -> Result<ProjectRequirements> {
+    let mut resolved = ProjectRequirements::default();
+    let mut queue = requirements.to_vec();
+    let mut seen = BTreeSet::new();
+
+    while let Some(requirement) = queue.pop() {
+        if !seen.insert(requirement.clone()) {
+            continue;
+        }
+        let source_requirements = resolve_python_vcs_requirement(project_dir, &requirement)?;
+        queue.extend(source_requirements.python_vcs_requirements.clone());
+        extend_project_requirements(&mut resolved, source_requirements);
+    }
+
+    Ok(resolved)
+}
+
+fn resolve_python_vcs_requirement(
+    project_dir: &Path,
+    requirement: &PythonVcsRequirement,
+) -> Result<ProjectRequirements> {
+    let checkout_dir = python_vcs_checkout_dir(project_dir, requirement);
+    remove_path_if_exists(&checkout_dir)?;
+    fs::create_dir_all(checkout_dir.parent().ok_or_else(|| {
+        OmcRegistryError::UnsupportedRequirement(format!(
+            "VCS checkout path `{}` has no parent",
+            checkout_dir.display()
+        ))
+    })?)?;
+
+    let mut clone = Command::new("git");
+    clone
+        .arg("clone")
+        .arg("--quiet")
+        .arg(&requirement.url)
+        .arg(&checkout_dir);
+    run_git_command(&mut clone, &format!("clone `{}`", requirement.url))?;
+
+    if let Some(reference) = requirement.reference.as_deref() {
+        let mut checkout = Command::new("git");
+        checkout
+            .arg("-C")
+            .arg(&checkout_dir)
+            .arg("checkout")
+            .arg("--quiet")
+            .arg(reference);
+        run_git_command(
+            &mut checkout,
+            &format!("checkout `{reference}` for `{}`", requirement.name),
+        )?;
+    }
+
+    let package_dir = if let Some(subdirectory) = requirement.subdirectory.as_deref() {
+        checked_join(&checkout_dir, subdirectory)?
+    } else {
+        checkout_dir
+    };
+    if !package_dir.is_dir() {
+        return Err(OmcRegistryError::UnsupportedRequirement(format!(
+            "VCS dependency `{}` did not contain package directory `{}`",
+            requirement.name,
+            package_dir.display()
+        )));
+    }
+
+    let mut resolved = read_python_source_requirements(&package_dir, &requirement.extras)?;
+    push_python_local_path(&mut resolved, package_dir);
+    Ok(resolved)
+}
+
+fn python_vcs_checkout_dir(project_dir: &Path, requirement: &PythonVcsRequirement) -> PathBuf {
+    let extras = requirement
+        .extras
+        .iter()
+        .cloned()
+        .collect::<Vec<_>>()
+        .join(",");
+    let source = format!(
+        "{}\0{}\0{}\0{}\0{}",
+        requirement.name,
+        requirement.url,
+        requirement.reference.as_deref().unwrap_or_default(),
+        requirement
+            .subdirectory
+            .as_deref()
+            .map(|path| path.to_string_lossy())
+            .unwrap_or_default(),
+        extras
+    );
+    let digest = sha256_hex(source.as_bytes());
+    project_dir
+        .join(".omc")
+        .join("python")
+        .join("vcs")
+        .join(safe_name(&requirement.name))
+        .join(&digest[..16])
+}
+
+fn run_git_command(command: &mut Command, description: &str) -> Result<String> {
+    let output = command.output()?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(OmcRegistryError::UnsupportedRequirement(format!(
+            "git {description} failed: {}",
+            stderr.trim()
+        )));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
+}
+
+fn read_python_source_requirements(
+    package_dir: &Path,
+    extras: &BTreeSet<String>,
+) -> Result<ProjectRequirements> {
+    let mut requirements = ProjectRequirements::default();
+
+    let pyproject = package_dir.join("pyproject.toml");
+    if pyproject.exists() {
+        extend_project_requirements(
+            &mut requirements,
+            read_pyproject_requirements(&pyproject, extras, false)?,
+        );
+    }
+
+    let setup_cfg = package_dir.join("setup.cfg");
+    if setup_cfg.exists() {
+        extend_project_requirements(
+            &mut requirements,
+            read_setup_cfg_requirements(&setup_cfg, extras)?,
+        );
+    }
+
+    let setup_py = package_dir.join("setup.py");
+    if setup_py.exists() {
+        extend_project_requirements(
+            &mut requirements,
+            read_setup_py_requirements(&setup_py, extras)?,
+        );
+    }
+
+    Ok(requirements)
 }
 
 fn locked_reachable_package_keys(
@@ -932,112 +1122,58 @@ fn discover_project_requirements_with_options(
     let package_json = project_dir.join("package.json");
     if package_json.exists() {
         let requirements = read_package_json_requirements(&package_json, include_dev_dependencies)?;
-        project.specs.extend(requirements.specs);
-        project.constraints.extend(requirements.constraints);
+        extend_project_requirements(&mut project, requirements);
     }
 
     for lockfile_name in ["package-lock.json", "npm-shrinkwrap.json"] {
         let lockfile = project_dir.join(lockfile_name);
         if lockfile.exists() {
             let lock_requirements = read_package_lock_requirements(&lockfile)?;
-            project.constraints.extend(lock_requirements.constraints);
-            project
-                .npm_integrities
-                .extend(lock_requirements.npm_integrities);
-            project.npm_resolved.extend(lock_requirements.npm_resolved);
+            extend_project_requirements(&mut project, lock_requirements);
         }
     }
 
     let yarn_lock = project_dir.join("yarn.lock");
     if yarn_lock.exists() {
         let lock_requirements = read_yarn_lock_requirements(&yarn_lock)?;
-        project.constraints.extend(lock_requirements.constraints);
-        project
-            .npm_integrities
-            .extend(lock_requirements.npm_integrities);
-        project.npm_resolved.extend(lock_requirements.npm_resolved);
+        extend_project_requirements(&mut project, lock_requirements);
     }
 
     let pnpm_lock = project_dir.join("pnpm-lock.yaml");
     if pnpm_lock.exists() {
         let lock_requirements = read_pnpm_lock_requirements(&pnpm_lock, include_dev_dependencies)?;
-        project.specs.extend(lock_requirements.specs);
-        project.constraints.extend(lock_requirements.constraints);
-        project
-            .npm_integrities
-            .extend(lock_requirements.npm_integrities);
-        project.npm_resolved.extend(lock_requirements.npm_resolved);
+        extend_project_requirements(&mut project, lock_requirements);
     }
 
     let requirements_files = project_requirements_files(project_dir, include_dev_dependencies);
     if !requirements_files.is_empty() {
         let requirements = read_requirements_files(&requirements_files)?;
-        project.specs.extend(requirements.specs);
-        project.constraints.extend(requirements.constraints);
-        project.hashes.extend(requirements.hashes);
-        if requirements.pypi_index_url.is_some() {
-            project.pypi_index_url = requirements.pypi_index_url;
-        }
-        project
-            .pypi_extra_index_urls
-            .extend(requirements.pypi_extra_index_urls);
-        project.pypi_find_links.extend(requirements.pypi_find_links);
-        project.pypi_no_index |= requirements.pypi_no_index;
-        project
-            .python_local_paths
-            .extend(requirements.python_local_paths);
+        extend_project_requirements(&mut project, requirements);
     }
 
     let pipfile_lock = project_dir.join("Pipfile.lock");
     if pipfile_lock.exists() {
         let requirements = read_pipfile_lock_requirements(&pipfile_lock, include_dev_dependencies)?;
-        project.specs.extend(requirements.specs);
-        project.constraints.extend(requirements.constraints);
-        project.hashes.extend(requirements.hashes);
-        if requirements.pypi_index_url.is_some() {
-            project.pypi_index_url = requirements.pypi_index_url;
-        }
-        project
-            .pypi_extra_index_urls
-            .extend(requirements.pypi_extra_index_urls);
-        project
-            .python_local_paths
-            .extend(requirements.python_local_paths);
+        extend_project_requirements(&mut project, requirements);
     }
 
     let pipfile = project_dir.join("Pipfile");
     if pipfile.exists() && !pipfile_lock.exists() {
         let requirements = read_pipfile_requirements(&pipfile, include_dev_dependencies)?;
-        project.specs.extend(requirements.specs);
-        if requirements.pypi_index_url.is_some() {
-            project.pypi_index_url = requirements.pypi_index_url;
-        }
-        project
-            .pypi_extra_index_urls
-            .extend(requirements.pypi_extra_index_urls);
-        project
-            .python_local_paths
-            .extend(requirements.python_local_paths);
+        extend_project_requirements(&mut project, requirements);
     }
 
     let uv_lock = project_dir.join("uv.lock");
     if uv_lock.exists() {
         let requirements = read_uv_lock_requirements(&uv_lock, include_dev_dependencies)?;
-        project.specs.extend(requirements.specs);
-        project.constraints.extend(requirements.constraints);
-        project.hashes.extend(requirements.hashes);
-        project
-            .python_local_paths
-            .extend(requirements.python_local_paths);
+        extend_project_requirements(&mut project, requirements);
     }
 
     for pylock_name in ["pylock.omc.toml", "pylock.toml"] {
         let pylock = project_dir.join(pylock_name);
         if pylock.exists() {
             let requirements = read_pylock_requirements(&pylock)?;
-            project.specs.extend(requirements.specs);
-            project.constraints.extend(requirements.constraints);
-            project.hashes.extend(requirements.hashes);
+            extend_project_requirements(&mut project, requirements);
             break;
         }
     }
@@ -1046,22 +1182,19 @@ fn discover_project_requirements_with_options(
     if pyproject_toml.exists() {
         let requirements =
             read_pyproject_requirements(&pyproject_toml, project_extras, include_dev_dependencies)?;
-        project.specs.extend(requirements.specs);
-        project
-            .python_local_paths
-            .extend(requirements.python_local_paths);
+        extend_project_requirements(&mut project, requirements);
     }
 
     let setup_cfg = project_dir.join("setup.cfg");
     if setup_cfg.exists() {
         let requirements = read_setup_cfg_requirements(&setup_cfg, project_extras)?;
-        project.specs.extend(requirements.specs);
+        extend_project_requirements(&mut project, requirements);
     }
 
     let setup_py = project_dir.join("setup.py");
     if setup_py.exists() {
         let requirements = read_setup_py_requirements(&setup_py, project_extras)?;
-        project.specs.extend(requirements.specs);
+        extend_project_requirements(&mut project, requirements);
     }
 
     if root_python_project_has_metadata(project_dir)? {
@@ -1071,8 +1204,7 @@ fn discover_project_requirements_with_options(
     let poetry_lock = project_dir.join("poetry.lock");
     if poetry_lock.exists() {
         let requirements = read_poetry_lock_requirements(&poetry_lock)?;
-        project.constraints.extend(requirements.constraints);
-        project.hashes.extend(requirements.hashes);
+        extend_project_requirements(&mut project, requirements);
     }
 
     Ok(project)
@@ -2540,6 +2672,7 @@ fn npm_requirements_from_lock_maps(
         pypi_no_index: false,
         pypi_require_hashes: false,
         python_local_paths: Vec::new(),
+        python_vcs_requirements: Vec::new(),
     }
 }
 
@@ -2681,6 +2814,9 @@ fn collect_pipfile_packages(
                 PypiProjectRequirement::LocalPath(path) => {
                     requirements.python_local_paths.push(path);
                 }
+                PypiProjectRequirement::Vcs(vcs) => {
+                    requirements.python_vcs_requirements.push(vcs);
+                }
             }
         }
     }
@@ -2694,7 +2830,7 @@ fn pipfile_package_requirement(
 ) -> Result<Option<PypiProjectRequirement>> {
     match package {
         PipfilePackage::Version(version) => pipfile_version_requirement(name, &version),
-        PipfilePackage::Table(table) => pipfile_table_requirement(name, table, base_dir),
+        PipfilePackage::Table(table) => pipfile_table_requirement(name, *table, base_dir),
     }
 }
 
@@ -2714,12 +2850,6 @@ fn pipfile_table_requirement(
     table: PipfilePackageTable,
     base_dir: &Path,
 ) -> Result<Option<PypiProjectRequirement>> {
-    if table.git.is_some() {
-        return Err(OmcRegistryError::UnsupportedRequirement(format!(
-            "Pipfile git dependency `{name}` is not supported"
-        )));
-    }
-
     if table
         .markers
         .as_deref()
@@ -2727,6 +2857,31 @@ fn pipfile_table_requirement(
         .unwrap_or(false)
     {
         return Ok(None);
+    }
+
+    if let Some(git) = table.git.as_deref() {
+        let reference = python_vcs_table_reference(
+            table.reference.clone(),
+            table.rev.clone(),
+            table.branch.clone(),
+            table.tag.clone(),
+        );
+        let subdirectory = table.subdirectory.as_deref().map(PathBuf::from);
+        let mut vcs = parse_python_vcs_requirement(
+            Some((
+                normalize_pypi_name(name),
+                normalized_pypi_extras(table.extras),
+            )),
+            git,
+            reference,
+            true,
+        )?;
+        if let Some(vcs) = vcs.as_mut() {
+            if vcs.subdirectory.is_none() {
+                vcs.subdirectory = subdirectory;
+            }
+        }
+        return Ok(vcs.map(PypiProjectRequirement::Vcs));
     }
 
     if let Some(path) = table.path.as_deref() {
@@ -2904,6 +3059,31 @@ fn collect_pipfile_locked_packages(
                 )));
             }
             push_python_local_path(requirements, path);
+            continue;
+        }
+
+        if let Some(git) = package.git.as_deref() {
+            let reference = python_vcs_table_reference(
+                package.reference.clone(),
+                package.rev.clone(),
+                package.branch.clone(),
+                package.tag.clone(),
+            );
+            let subdirectory = package.subdirectory.as_deref().map(PathBuf::from);
+            let mut vcs = parse_python_vcs_requirement(
+                Some((
+                    normalize_pypi_name(&name),
+                    normalized_pypi_extras(package.extras),
+                )),
+                git,
+                reference,
+                true,
+            )?
+            .ok_or_else(|| OmcRegistryError::UnsupportedRequirement(name.clone()))?;
+            if vcs.subdirectory.is_none() {
+                vcs.subdirectory = subdirectory;
+            }
+            requirements.python_vcs_requirements.push(vcs);
             continue;
         }
 
@@ -3301,13 +3481,19 @@ fn read_setup_cfg_requirements(
     project_extras: &BTreeSet<String>,
 ) -> Result<ProjectRequirements> {
     let sections = parse_setup_cfg_sections(&fs::read_to_string(path)?);
+    let base_dir = path.parent().unwrap_or_else(|| Path::new("."));
+    let local_sources = BTreeMap::new();
     let mut requirements = ProjectRequirements::default();
 
     if let Some(options) = sections.get("options") {
         for requirement in options.get("install_requires").into_iter().flatten() {
-            if let Some(spec) = parse_pypi_requirement_with_extras(requirement, project_extras) {
-                requirements.specs.push(spec);
-            }
+            collect_pypi_project_requirement(
+                &mut requirements,
+                requirement,
+                project_extras,
+                base_dir,
+                &local_sources,
+            )?;
         }
     }
 
@@ -3315,11 +3501,13 @@ fn read_setup_cfg_requirements(
         for extra in project_extras {
             if let Some(requirements_for_extra) = extras_require.get(extra) {
                 for requirement in requirements_for_extra {
-                    if let Some(spec) =
-                        parse_pypi_requirement_with_extras(requirement, project_extras)
-                    {
-                        requirements.specs.push(spec);
-                    }
+                    collect_pypi_project_requirement(
+                        &mut requirements,
+                        requirement,
+                        project_extras,
+                        base_dir,
+                        &local_sources,
+                    )?;
                 }
             }
         }
@@ -3415,21 +3603,31 @@ fn read_setup_py_requirements(
     project_extras: &BTreeSet<String>,
 ) -> Result<ProjectRequirements> {
     let content = fs::read_to_string(path)?;
+    let base_dir = path.parent().unwrap_or_else(|| Path::new("."));
+    let local_sources = BTreeMap::new();
     let mut requirements = ProjectRequirements::default();
 
     for value in python_keyword_assignment_values(&content, "install_requires") {
         for requirement in python_string_literals(value) {
-            if let Some(spec) = parse_pypi_requirement_with_extras(&requirement, project_extras) {
-                requirements.specs.push(spec);
-            }
+            collect_pypi_project_requirement(
+                &mut requirements,
+                &requirement,
+                project_extras,
+                base_dir,
+                &local_sources,
+            )?;
         }
     }
 
     for value in python_keyword_assignment_values(&content, "extras_require") {
         for requirement in python_string_dict_values(value, project_extras) {
-            if let Some(spec) = parse_pypi_requirement_with_extras(&requirement, project_extras) {
-                requirements.specs.push(spec);
-            }
+            collect_pypi_project_requirement(
+                &mut requirements,
+                &requirement,
+                project_extras,
+                base_dir,
+                &local_sources,
+            )?;
         }
     }
 
@@ -3831,13 +4029,7 @@ fn read_pyproject_requirements(
         base_dir,
         &uv_sources,
     )?;
-    discovered.specs.extend(group_requirements.specs);
-    for (key, hashes) in group_requirements.hashes {
-        discovered.hashes.entry(key).or_default().extend(hashes);
-    }
-    discovered
-        .python_local_paths
-        .extend(group_requirements.python_local_paths);
+    extend_project_requirements(&mut discovered, group_requirements);
 
     if let Some(poetry) = pyproject.tool.and_then(|tool| tool.poetry) {
         collect_poetry_sources(&poetry.source, &mut discovered);
@@ -3848,10 +4040,7 @@ fn read_pyproject_requirements(
             project_extras,
             base_dir,
         )?;
-        discovered.specs.extend(poetry_requirements.specs);
-        discovered
-            .python_local_paths
-            .extend(poetry_requirements.python_local_paths);
+        extend_project_requirements(&mut discovered, poetry_requirements);
 
         if include_dev_dependencies {
             let poetry_requirements = read_poetry_dependencies(
@@ -3860,10 +4049,7 @@ fn read_pyproject_requirements(
                 &BTreeSet::new(),
                 base_dir,
             )?;
-            discovered.specs.extend(poetry_requirements.specs);
-            discovered
-                .python_local_paths
-                .extend(poetry_requirements.python_local_paths);
+            extend_project_requirements(&mut discovered, poetry_requirements);
         }
 
         for (group_name, group) in poetry.group {
@@ -3883,10 +4069,7 @@ fn read_pyproject_requirements(
                     &BTreeSet::new(),
                     base_dir,
                 )?;
-                discovered.specs.extend(poetry_requirements.specs);
-                discovered
-                    .python_local_paths
-                    .extend(poetry_requirements.python_local_paths);
+                extend_project_requirements(&mut discovered, poetry_requirements);
             }
         }
     }
@@ -4002,6 +4185,9 @@ fn read_poetry_dependencies(
                 PoetryDependencyRequirement::LocalPath(path) => {
                     requirements.python_local_paths.push(path)
                 }
+                PoetryDependencyRequirement::Vcs(vcs) => {
+                    requirements.python_vcs_requirements.push(vcs)
+                }
             }
         }
     }
@@ -4069,6 +4255,7 @@ fn poetry_dependency_optional(dependency: &PoetryDependency) -> bool {
 enum PoetryDependencyRequirement {
     Spec(PackageSpec),
     LocalPath(PathBuf),
+    Vcs(PythonVcsRequirement),
 }
 
 fn poetry_dependency_requirement(
@@ -4079,10 +4266,32 @@ fn poetry_dependency_requirement(
     let version = match dependency {
         PoetryDependency::Version(version) => version.as_str(),
         PoetryDependency::Table(table) => {
-            if table.git.is_some() {
-                return Err(OmcRegistryError::UnsupportedSpec(format!(
-                    "unsupported Poetry dependency source for `{name}`"
-                )));
+            if let Some(git) = table.git.as_deref() {
+                let reference = python_vcs_table_reference(
+                    table.reference.clone(),
+                    table.rev.clone(),
+                    table.branch.clone(),
+                    table.tag.clone(),
+                );
+                let subdirectory = table.subdirectory.as_deref().map(PathBuf::from);
+                let mut vcs = parse_python_vcs_requirement(
+                    Some((
+                        name.to_owned(),
+                        normalized_pypi_extras(table.extras.clone()),
+                    )),
+                    git,
+                    reference,
+                    true,
+                )?
+                .ok_or_else(|| {
+                    OmcRegistryError::UnsupportedSpec(format!(
+                        "unsupported Poetry dependency source for `{name}`"
+                    ))
+                })?;
+                if vcs.subdirectory.is_none() {
+                    vcs.subdirectory = subdirectory;
+                }
+                return Ok(Some(PoetryDependencyRequirement::Vcs(vcs)));
             }
             if let Some(url) = &table.url {
                 return Ok(Some(PoetryDependencyRequirement::Spec(
@@ -4332,6 +4541,10 @@ fn read_requirements_file_inner(
             if mode == RequirementsMode::Constraint {
                 return Err(OmcRegistryError::UnsupportedRequirement(line.to_owned()));
             }
+            if let Some(vcs) = parse_requirements_editable_vcs_requirement(&editable)? {
+                discovered.python_vcs_requirements.push(vcs);
+                continue;
+            }
             discovered
                 .python_local_paths
                 .push(normalize_requirements_editable_path(&editable, base_dir)?);
@@ -4343,6 +4556,15 @@ fn read_requirements_file_inner(
         }
 
         let parsed = parse_requirement_line(line);
+        if let Some(vcs) = parse_pypi_vcs_direct_requirement(&parsed.requirement, &BTreeSet::new())?
+        {
+            if mode == RequirementsMode::Constraint || !parsed.hashes.is_empty() {
+                return Err(OmcRegistryError::UnsupportedRequirement(line.to_owned()));
+            }
+            discovered.python_vcs_requirements.push(vcs);
+            continue;
+        }
+
         let direct_requirement =
             parse_pypi_direct_requirement(&parsed.requirement, &BTreeSet::new()).or(
                 parse_pypi_local_direct_requirement(
@@ -4643,7 +4865,13 @@ pub fn install_locked_packages(project_dir: impl AsRef<Path>) -> Result<InstallR
     let mut report = install_lock(project_dir, &lock)?;
     report.npm_bins +=
         install_npm_project_links(project_dir, &report.node_modules, &report.npm_bin_dir, true)?;
-    let project = discover_project_requirements_with_options(project_dir, &BTreeSet::new(), true)?;
+    let mut project =
+        discover_project_requirements_with_options(project_dir, &BTreeSet::new(), true)?;
+    if !project.python_vcs_requirements.is_empty() {
+        let vcs_requirements =
+            resolve_python_vcs_requirements(project_dir, &project.python_vcs_requirements)?;
+        extend_project_requirements(&mut project, vcs_requirements);
+    }
     report.python_scripts += install_python_local_paths(
         &project.python_local_paths,
         &report.python_site_packages,
@@ -7620,6 +7848,7 @@ fn parse_pypi_local_direct_requirement(
 enum PypiProjectRequirement {
     Spec(PackageSpec, BTreeSet<String>),
     LocalPath(PathBuf),
+    Vcs(PythonVcsRequirement),
 }
 
 fn collect_pypi_project_requirement(
@@ -7649,6 +7878,9 @@ fn collect_pypi_project_requirement(
         PypiProjectRequirement::LocalPath(path) => {
             requirements.python_local_paths.push(path);
         }
+        PypiProjectRequirement::Vcs(vcs) => {
+            requirements.python_vcs_requirements.push(vcs);
+        }
     }
 
     Ok(())
@@ -7660,6 +7892,10 @@ fn parse_pypi_project_requirement(
     base_dir: &Path,
     local_sources: &BTreeMap<String, PathBuf>,
 ) -> Result<Option<PypiProjectRequirement>> {
+    if let Some(vcs) = parse_pypi_vcs_direct_requirement(requirement, active_extras)? {
+        return Ok(Some(PypiProjectRequirement::Vcs(vcs)));
+    }
+
     let direct_requirement = parse_pypi_direct_requirement(requirement, active_extras).or(
         parse_pypi_local_direct_requirement(requirement, active_extras, base_dir)?,
     );
@@ -7712,6 +7948,132 @@ fn pypi_direct_file_url_local_directory(direct_url: Option<&str>) -> Result<Opti
         .to_file_path()
         .map_err(|_| OmcRegistryError::UnsupportedRequirement(direct_url.to_owned()))?;
     Ok(path.is_dir().then_some(path))
+}
+
+fn parse_pypi_vcs_direct_requirement(
+    requirement: &str,
+    active_extras: &BTreeSet<String>,
+) -> Result<Option<PythonVcsRequirement>> {
+    let mut parts = requirement.splitn(2, ';');
+    let requirement = parts.next().unwrap_or_default().trim();
+    if let Some(marker) = parts.next() {
+        if !pypi_marker_applies(marker, active_extras) {
+            return Ok(None);
+        }
+    }
+
+    let Some((name, url)) = requirement.split_once(" @ ") else {
+        return Ok(None);
+    };
+    let (name, extras) = parse_pypi_name_and_extras(name.trim());
+    if name.is_empty() {
+        return Ok(None);
+    }
+    parse_python_vcs_requirement(Some((name, extras)), url.trim(), None, false)
+}
+
+fn parse_requirements_editable_vcs_requirement(
+    value: &str,
+) -> Result<Option<PythonVcsRequirement>> {
+    parse_python_vcs_requirement(None, value, None, false)
+}
+
+fn parse_python_vcs_requirement(
+    name_and_extras: Option<(String, BTreeSet<String>)>,
+    value: &str,
+    reference_override: Option<String>,
+    allow_plain_git_url: bool,
+) -> Result<Option<PythonVcsRequirement>> {
+    let (raw_url, fragment) = value.split_once('#').unwrap_or((value, ""));
+    let raw_url = raw_url.trim();
+    let Some(url) = normalize_python_vcs_url(raw_url, allow_plain_git_url) else {
+        return Ok(None);
+    };
+    let (url, reference_from_url) = split_python_vcs_url_reference(&url);
+    let reference = reference_override
+        .filter(|reference| !reference.trim().is_empty())
+        .or(reference_from_url);
+    let subdirectory = python_vcs_fragment_value(fragment, "subdirectory")
+        .filter(|subdirectory| !subdirectory.trim().is_empty())
+        .map(PathBuf::from);
+
+    let (name, extras) = if let Some((name, extras)) = name_and_extras {
+        (name, extras)
+    } else {
+        let Some(egg) = python_vcs_fragment_value(fragment, "egg") else {
+            return Err(OmcRegistryError::UnsupportedRequirement(format!(
+                "VCS requirement `{value}` must include #egg=name or use `name @ git+...`"
+            )));
+        };
+        parse_pypi_name_and_extras(egg.trim())
+    };
+    if name.is_empty() {
+        return Err(OmcRegistryError::UnsupportedRequirement(value.to_owned()));
+    }
+
+    Ok(Some(PythonVcsRequirement {
+        name,
+        url,
+        reference,
+        subdirectory,
+        extras,
+    }))
+}
+
+fn normalize_python_vcs_url(value: &str, allow_plain_git_url: bool) -> Option<String> {
+    if let Some(url) = value.strip_prefix("git+") {
+        let url = url.trim();
+        return (!url.is_empty()).then(|| url.to_owned());
+    }
+    if allow_plain_git_url && looks_like_git_url(value) {
+        return Some(value.to_owned());
+    }
+    None
+}
+
+fn looks_like_git_url(value: &str) -> bool {
+    value.contains("://") || value.ends_with(".git") || value.starts_with("git@")
+}
+
+fn python_vcs_table_reference(
+    reference: Option<String>,
+    rev: Option<String>,
+    branch: Option<String>,
+    tag: Option<String>,
+) -> Option<String> {
+    reference
+        .or(rev)
+        .or(branch)
+        .or(tag)
+        .filter(|reference| !reference.trim().is_empty())
+}
+
+fn split_python_vcs_url_reference(url: &str) -> (String, Option<String>) {
+    let Some(index) = url.rfind('@') else {
+        return (url.to_owned(), None);
+    };
+    let last_slash = url.rfind('/').unwrap_or(0);
+    if index <= last_slash {
+        return (url.to_owned(), None);
+    }
+    let reference = url[index + 1..].trim();
+    if reference.is_empty() {
+        return (url.to_owned(), None);
+    }
+    (url[..index].to_owned(), Some(reference.to_owned()))
+}
+
+fn python_vcs_fragment_value(fragment: &str, key: &str) -> Option<String> {
+    fragment.split('&').find_map(|part| {
+        let (raw_key, raw_value) = part.split_once('=')?;
+        let decoded_key = urlencoding::decode(raw_key).ok()?;
+        if decoded_key != key {
+            return None;
+        }
+        urlencoding::decode(raw_value)
+            .ok()
+            .map(|value| value.into_owned())
+    })
 }
 
 fn parse_pypi_local_direct_path_requirement(
@@ -9004,7 +9366,7 @@ struct PoetryGroup {
 #[serde(untagged)]
 enum PoetryDependency {
     Version(String),
-    Table(PoetryDependencyTable),
+    Table(Box<PoetryDependencyTable>),
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -9014,8 +9376,16 @@ struct PoetryDependencyTable {
     optional: bool,
     path: Option<String>,
     git: Option<String>,
+    #[serde(rename = "ref")]
+    reference: Option<String>,
+    rev: Option<String>,
+    branch: Option<String>,
+    tag: Option<String>,
+    subdirectory: Option<String>,
     url: Option<String>,
     file: Option<String>,
+    #[serde(default)]
+    extras: Vec<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -9080,7 +9450,7 @@ struct PipfileScripts {
 #[serde(untagged)]
 enum PipfilePackage {
     Version(String),
-    Table(PipfilePackageTable),
+    Table(Box<PipfilePackageTable>),
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -9089,6 +9459,12 @@ struct PipfilePackageTable {
     path: Option<String>,
     file: Option<String>,
     git: Option<String>,
+    #[serde(rename = "ref")]
+    reference: Option<String>,
+    rev: Option<String>,
+    branch: Option<String>,
+    tag: Option<String>,
+    subdirectory: Option<String>,
     markers: Option<String>,
     #[serde(default)]
     extras: Vec<String>,
@@ -9119,6 +9495,13 @@ struct PipfileSource {
 struct PipfileLockedPackage {
     version: Option<String>,
     path: Option<String>,
+    git: Option<String>,
+    #[serde(rename = "ref")]
+    reference: Option<String>,
+    rev: Option<String>,
+    branch: Option<String>,
+    tag: Option<String>,
+    subdirectory: Option<String>,
     #[serde(default)]
     hashes: Vec<String>,
     #[serde(default)]
@@ -9354,6 +9737,38 @@ mod tests {
         specs
             .iter()
             .any(|spec| spec.name == name && spec.version.as_deref() == Some(requirement))
+    }
+
+    fn commit_git_repo(path: &Path) {
+        assert!(Command::new("git")
+            .arg("init")
+            .arg("--quiet")
+            .arg(path)
+            .status()
+            .unwrap()
+            .success());
+        assert!(Command::new("git")
+            .arg("-C")
+            .arg(path)
+            .arg("add")
+            .arg(".")
+            .status()
+            .unwrap()
+            .success());
+        assert!(Command::new("git")
+            .arg("-C")
+            .arg(path)
+            .arg("-c")
+            .arg("user.email=omc@example.invalid")
+            .arg("-c")
+            .arg("user.name=omc test")
+            .arg("commit")
+            .arg("--quiet")
+            .arg("-m")
+            .arg("initial")
+            .status()
+            .unwrap()
+            .success());
     }
 
     #[test]
@@ -11047,18 +11462,116 @@ packages:
     }
 
     #[test]
-    fn rejects_editable_vcs_requirements() {
+    fn reads_requirements_vcs_dependencies() {
         let dir = tempfile::tempdir().unwrap();
         let requirements = dir.path().join("requirements.txt");
+        let repo_url = reqwest::Url::from_directory_path(dir.path().join("repo"))
+            .unwrap()
+            .to_string();
         fs::write(
             &requirements,
-            "-e git+https://example.invalid/repo.git#egg=demo\n",
+            format!(
+                "-e git+{repo_url}@v1#egg=demo[cli]&subdirectory=src\nother[http] @ git+{repo_url}@main#subdirectory=package\n"
+            ),
         )
         .unwrap();
-        let error = read_requirements_file(&requirements).unwrap_err();
-        assert!(error
-            .to_string()
-            .contains("editable requirement `git+https://example.invalid/repo.git#egg=demo`"));
+        let discovered = read_requirements_file(&requirements).unwrap();
+        assert!(discovered.specs.is_empty());
+        assert!(discovered.python_local_paths.is_empty());
+        assert_eq!(discovered.python_vcs_requirements.len(), 2);
+
+        let editable = &discovered.python_vcs_requirements[0];
+        assert_eq!(editable.name, "demo");
+        assert_eq!(editable.url, repo_url);
+        assert_eq!(editable.reference.as_deref(), Some("v1"));
+        assert_eq!(editable.subdirectory.as_deref(), Some(Path::new("src")));
+        assert_eq!(editable.extras, BTreeSet::from(["cli".to_owned()]));
+
+        let direct = &discovered.python_vcs_requirements[1];
+        assert_eq!(direct.name, "other");
+        assert_eq!(direct.reference.as_deref(), Some("main"));
+        assert_eq!(direct.subdirectory.as_deref(), Some(Path::new("package")));
+        assert_eq!(direct.extras, BTreeSet::from(["http".to_owned()]));
+    }
+
+    #[test]
+    fn installs_python_vcs_requirement_as_local_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("gitpkg-repo");
+        let src = repo.join("src").join("gitpkg");
+        fs::create_dir_all(&src).unwrap();
+        fs::write(src.join("__init__.py"), "").unwrap();
+        fs::write(src.join("cli.py"), "def main():\n    print('git-vcs-ok')\n").unwrap();
+        fs::write(
+            repo.join("pyproject.toml"),
+            r#"
+            [project]
+            name = "gitpkg"
+
+            [project.scripts]
+            git-vcs-cli = "gitpkg.cli:main"
+            "#,
+        )
+        .unwrap();
+        commit_git_repo(&repo);
+
+        let project = dir.path().join("project");
+        fs::create_dir_all(&project).unwrap();
+        let repo_url = reqwest::Url::from_directory_path(&repo)
+            .unwrap()
+            .to_string();
+        fs::write(
+            project.join("requirements.txt"),
+            format!("gitpkg @ git+{repo_url}@HEAD\n"),
+        )
+        .unwrap();
+
+        let requirements =
+            discover_project_requirements_with_options(&project, &BTreeSet::new(), false).unwrap();
+        assert_eq!(requirements.python_vcs_requirements.len(), 1);
+
+        let report = install_project(&LinkOptions::new(&project)).unwrap();
+        assert_eq!(report.python_scripts, 1);
+        let local_paths = fs::read_to_string(project.join(".omc/python/local-paths")).unwrap();
+        assert!(local_paths.contains(".omc/python/vcs/gitpkg/"));
+
+        let output = Command::new(project.join(".omc/python/bin/git-vcs-cli"))
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "git-vcs-ok");
+    }
+
+    #[test]
+    fn reads_python_vcs_static_dependencies() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("gitpkg-repo");
+        fs::create_dir_all(repo.join("gitpkg")).unwrap();
+        fs::write(repo.join("gitpkg").join("__init__.py"), "").unwrap();
+        fs::write(
+            repo.join("pyproject.toml"),
+            r#"
+            [project]
+            name = "gitpkg"
+            dependencies = ["idna==3.7"]
+            "#,
+        )
+        .unwrap();
+        commit_git_repo(&repo);
+
+        let repo_url = reqwest::Url::from_directory_path(&repo)
+            .unwrap()
+            .to_string();
+        let vcs = PythonVcsRequirement {
+            name: "gitpkg".to_owned(),
+            url: repo_url,
+            reference: Some("HEAD".to_owned()),
+            subdirectory: None,
+            extras: BTreeSet::new(),
+        };
+        let requirements = resolve_python_vcs_requirements(dir.path(), &[vcs]).unwrap();
+        assert!(has_spec(&requirements.specs, "idna", "==3.7"));
+        assert_eq!(requirements.python_local_paths.len(), 1);
     }
 
     #[test]
@@ -11618,18 +12131,24 @@ setup(name="setup-py-root")
     }
 
     #[test]
-    fn rejects_unsupported_pipfile_dependencies() {
+    fn reads_pipfile_vcs_dependencies_and_rejects_missing_paths() {
         let dir = tempfile::tempdir().unwrap();
         fs::write(
             dir.path().join("Pipfile"),
             r#"
             [packages]
-            git-package = { git = "https://example.invalid/pkg.git" }
+            git-package = { git = "https://example.invalid/pkg.git", ref = "abc123", extras = ["cli"], subdirectory = "pkg" }
             "#,
         )
         .unwrap();
-        let error = discover_project_requirements(dir.path()).unwrap_err();
-        assert!(error.to_string().contains("Pipfile git dependency"));
+        let discovered = discover_project_requirements(dir.path()).unwrap();
+        assert_eq!(discovered.python_vcs_requirements.len(), 1);
+        let vcs = &discovered.python_vcs_requirements[0];
+        assert_eq!(vcs.name, "git-package");
+        assert_eq!(vcs.url, "https://example.invalid/pkg.git");
+        assert_eq!(vcs.reference.as_deref(), Some("abc123"));
+        assert_eq!(vcs.subdirectory.as_deref(), Some(Path::new("pkg")));
+        assert_eq!(vcs.extras, BTreeSet::from(["cli".to_owned()]));
 
         fs::write(
             dir.path().join("Pipfile"),
@@ -11691,6 +12210,12 @@ setup(name="setup-py-root")
                         }},
                         "local-dir": {{
                             "path": "editable-local"
+                        }},
+                        "git-locked": {{
+                            "git": "https://example.invalid/git-locked.git",
+                            "ref": "def456",
+                            "extras": ["cli"],
+                            "subdirectory": "pkg"
                         }}
                     }},
                     "develop": {{
@@ -11750,6 +12275,13 @@ setup(name="setup-py-root")
             production.python_local_paths,
             vec![dir.path().join("."), editable_local.clone()]
         );
+        assert_eq!(production.python_vcs_requirements.len(), 1);
+        let vcs = &production.python_vcs_requirements[0];
+        assert_eq!(vcs.name, "git-locked");
+        assert_eq!(vcs.url, "https://example.invalid/git-locked.git");
+        assert_eq!(vcs.reference.as_deref(), Some("def456"));
+        assert_eq!(vcs.subdirectory.as_deref(), Some(Path::new("pkg")));
+        assert_eq!(vcs.extras, BTreeSet::from(["cli".to_owned()]));
 
         let dev = read_pipfile_lock_requirements(&pipfile_lock, true).unwrap();
         assert!(dev
@@ -12840,6 +13372,7 @@ wheels = [
             local-idna = { path = "wheels/local_idna-3.7-py3-none-any.whl" }
             local-source = { path = "wheels/local_source-1.0.0.tar.gz" }
             local-package = { path = "vendor/local-package", develop = true }
+            git-package = { git = "https://example.invalid/pkg.git", rev = "abc123", extras = ["cli"], subdirectory = "pkg" }
             "#,
         )
         .unwrap();
@@ -12880,11 +13413,22 @@ wheels = [
             requirements.python_local_paths,
             vec![dir.path().join("vendor/local-package")]
         );
+        assert_eq!(requirements.python_vcs_requirements.len(), 1);
+        let vcs = &requirements.python_vcs_requirements[0];
+        assert_eq!(vcs.name, "git-package");
+        assert_eq!(vcs.url, "https://example.invalid/pkg.git");
+        assert_eq!(vcs.reference.as_deref(), Some("abc123"));
+        assert_eq!(vcs.subdirectory.as_deref(), Some(Path::new("pkg")));
+        assert_eq!(vcs.extras, BTreeSet::from(["cli".to_owned()]));
 
         let discovered = discover_project_requirements(dir.path()).unwrap();
         assert_eq!(
             discovered.python_local_paths,
             requirements.python_local_paths
+        );
+        assert_eq!(
+            discovered.python_vcs_requirements,
+            requirements.python_vcs_requirements
         );
     }
 
