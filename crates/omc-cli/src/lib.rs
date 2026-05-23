@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::process::{Command as ProcessCommand, ExitCode};
+use std::time::{SystemTime, UNIX_EPOCH};
 use std::{env, ffi::OsString, fs};
 
 use clap::{Parser, Subcommand};
@@ -347,6 +348,9 @@ enum NpmCompatAction {
     DistTag {
         action: NpmDistTagAction,
     },
+    Sbom {
+        action: NpmSbomAction,
+    },
     Config {
         action: NpmConfigAction,
         npm_registry: Option<String>,
@@ -435,6 +439,25 @@ enum NpmDistTagAction {
         spec: Option<String>,
         npm_registry: Option<String>,
     },
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct NpmSbomAction {
+    format: NpmSbomFormat,
+    sbom_type: NpmSbomType,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NpmSbomFormat {
+    CycloneDx,
+    Spdx,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NpmSbomType {
+    Library,
+    Application,
+    Framework,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1902,6 +1925,7 @@ fn run_npm_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
         )?,
         NpmCompatAction::Token { action } => print_npm_token(project_dir, action)?,
         NpmCompatAction::DistTag { action } => print_npm_dist_tag(project_dir, action)?,
+        NpmCompatAction::Sbom { action } => print_npm_sbom(project_dir, action)?,
         NpmCompatAction::Config {
             action,
             npm_registry,
@@ -2393,6 +2417,13 @@ fn npm_help_text(topic: Option<&str>) -> String {
                 "Adding and removing dist-tags is not implemented yet.",
             ],
         ),
+        Some("sbom") => npm_command_help(
+            "npm sbom --sbom-format <cyclonedx|spdx>",
+            &[
+                "Generate a Software Bill of Materials from the verified OMC npm lockfile.",
+                "Supports --sbom-format, --sbom-type, --package-lock-only, omit flags, and workspace flags.",
+            ],
+        ),
         Some("view") => npm_command_help(
             "npm view <package-spec> [field...]",
             &["Read package metadata from the configured npm registry. Aliases: info, show, v. Supports --json."],
@@ -2443,7 +2474,7 @@ fn npm_general_help_text() -> String {
         "npm <command>",
         &[
             "OMC npm compatibility runs supported npm workflows through OMC's verifier, lockfile, cache, and project-local runtime paths.",
-            "Supported commands: install, install-test, ci, install-ci-test, remove, run, test, start, stop, restart, exec, list, explain, audit, outdated, fund, prune, dedupe, rebuild, cache, pkg, version, pack, search, ping, whoami, token, dist-tag, view, docs, repo, bugs, home, config, init, bin, root, prefix.",
+            "Supported commands: install, install-test, ci, install-ci-test, remove, run, test, start, stop, restart, exec, list, explain, audit, outdated, fund, prune, dedupe, rebuild, cache, pkg, version, pack, search, ping, whoami, token, dist-tag, sbom, view, docs, repo, bugs, home, config, init, bin, root, prefix.",
             "Use `npm help <command>` for focused OMC compatibility notes.",
         ],
     )
@@ -2484,6 +2515,7 @@ fn npm_help_topic(topic: &str) -> Option<&'static str> {
         "whoami" => Some("whoami"),
         "token" => Some("token"),
         "dist-tag" | "dist-tags" => Some("dist-tag"),
+        "sbom" => Some("sbom"),
         "view" | "info" | "show" | "v" => Some("view"),
         "docs" | "doc" | "repo" | "repository" | "bugs" | "home" | "homepage" => {
             Some("metadata-url")
@@ -3234,6 +3266,528 @@ fn npm_dist_tag_package_spec(
         ));
     };
     Ok(name.to_owned())
+}
+
+#[derive(Debug)]
+struct NpmSbomContext {
+    root: NpmSbomRoot,
+    packages: Vec<LockedPackage>,
+    root_dependencies: BTreeSet<String>,
+    timestamp: String,
+    serial_uuid: String,
+    sbom_type: NpmSbomType,
+}
+
+#[derive(Debug)]
+struct NpmSbomRoot {
+    name: String,
+    version: String,
+    license: Option<String>,
+    homepage: Option<String>,
+    description: Option<String>,
+}
+
+fn print_npm_sbom(project_dir: &Path, action: NpmSbomAction) -> Result<(), OmcRegistryError> {
+    let context = npm_sbom_context(project_dir, action.sbom_type)?;
+    let value = match action.format {
+        NpmSbomFormat::CycloneDx => npm_cyclonedx_sbom(&context),
+        NpmSbomFormat::Spdx => npm_spdx_sbom(&context),
+    };
+    println!("{}", serde_json::to_string_pretty(&value)?);
+    Ok(())
+}
+
+fn npm_sbom_context(
+    project_dir: &Path,
+    sbom_type: NpmSbomType,
+) -> Result<NpmSbomContext, OmcRegistryError> {
+    let lock = read_lockfile(project_dir.join("omc.lock"))?;
+    let mut packages = lock
+        .packages
+        .into_iter()
+        .filter(|package| package.ecosystem == Ecosystem::Npm)
+        .collect::<Vec<_>>();
+    packages.sort_by(|left, right| {
+        (left.name.as_str(), left.version.as_str())
+            .cmp(&(right.name.as_str(), right.version.as_str()))
+    });
+    let root = npm_sbom_root(project_dir)?;
+    let serial_uuid = npm_sbom_uuid(&root, &packages);
+    Ok(NpmSbomContext {
+        root,
+        packages,
+        root_dependencies: npm_root_dependency_names(project_dir)?,
+        timestamp: current_utc_timestamp(),
+        serial_uuid,
+        sbom_type,
+    })
+}
+
+fn npm_sbom_root(project_dir: &Path) -> Result<NpmSbomRoot, OmcRegistryError> {
+    let package_json = project_dir.join("package.json");
+    let package = if package_json.exists() {
+        read_npm_pkg_json(&package_json)?
+    } else {
+        serde_json::json!({})
+    };
+    let name = package
+        .get("name")
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .map(str::to_owned)
+        .unwrap_or_else(|| npm_outdated_dependent(project_dir));
+    let version = package
+        .get("version")
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .map(str::to_owned)
+        .unwrap_or_else(|| "0.0.0".to_owned());
+    Ok(NpmSbomRoot {
+        name,
+        version,
+        license: package
+            .get("license")
+            .and_then(serde_json::Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+            .map(str::to_owned),
+        homepage: package
+            .get("homepage")
+            .and_then(serde_json::Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+            .map(str::to_owned),
+        description: package
+            .get("description")
+            .and_then(serde_json::Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+            .map(str::to_owned),
+    })
+}
+
+fn npm_cyclonedx_sbom(context: &NpmSbomContext) -> serde_json::Value {
+    let root_ref = npm_root_bom_ref(&context.root);
+    serde_json::json!({
+        "$schema": "http://cyclonedx.org/schema/bom-1.5.schema.json",
+        "bomFormat": "CycloneDX",
+        "specVersion": "1.5",
+        "serialNumber": format!("urn:uuid:{}", context.serial_uuid),
+        "version": 1,
+        "metadata": {
+            "timestamp": context.timestamp,
+            "lifecycles": [{ "phase": "build" }],
+            "tools": [{
+                "vendor": "turenio",
+                "name": "omc",
+                "version": env!("CARGO_PKG_VERSION"),
+            }],
+            "component": npm_cyclonedx_root_component(context, &root_ref),
+        },
+        "components": context.packages.iter().map(npm_cyclonedx_component).collect::<Vec<_>>(),
+        "dependencies": npm_cyclonedx_dependencies(context, &root_ref),
+    })
+}
+
+fn npm_cyclonedx_root_component(context: &NpmSbomContext, root_ref: &str) -> serde_json::Value {
+    let mut component = serde_json::json!({
+        "bom-ref": root_ref,
+        "type": context.sbom_type.cyclonedx_type(),
+        "name": context.root.name,
+        "version": context.root.version,
+        "scope": "required",
+        "purl": npm_purl(&context.root.name, &context.root.version),
+        "properties": [{
+            "name": "cdx:npm:package:path",
+            "value": "",
+        }],
+        "externalReferences": [],
+    });
+    if let Some(description) = &context.root.description {
+        component["description"] = serde_json::Value::String(description.clone());
+    }
+    if let Some(homepage) = &context.root.homepage {
+        component["externalReferences"] = serde_json::json!([{
+            "type": "website",
+            "url": homepage,
+        }]);
+    }
+    if let Some(license) = &context.root.license {
+        component["licenses"] = serde_json::json!([npm_cyclonedx_license(license)]);
+    }
+    component
+}
+
+fn npm_cyclonedx_component(package: &LockedPackage) -> serde_json::Value {
+    let mut component = serde_json::json!({
+        "bom-ref": npm_package_bom_ref(package),
+        "type": "library",
+        "name": package.name,
+        "version": package.version,
+        "scope": "required",
+        "purl": npm_purl(&package.name, &package.version),
+        "properties": [
+            {
+                "name": "cdx:npm:package:path",
+                "value": npm_node_modules_path(&package.name),
+            },
+            {
+                "name": "omc:behavior",
+                "value": behavior_label(package.behavior),
+            },
+            {
+                "name": "omc:verdict",
+                "value": verdict_label(package.verdict),
+            },
+        ],
+        "externalReferences": [{
+            "type": "distribution",
+            "url": npm_package_download_location(package),
+        }],
+    });
+    if !package.sha256.is_empty() {
+        component["hashes"] = serde_json::json!([{
+            "alg": "SHA-256",
+            "content": package.sha256,
+        }]);
+    }
+    component
+}
+
+fn npm_cyclonedx_license(license: &str) -> serde_json::Value {
+    if npm_license_id_like(license) {
+        serde_json::json!({ "license": { "id": license } })
+    } else {
+        serde_json::json!({ "license": { "name": license } })
+    }
+}
+
+fn npm_cyclonedx_dependencies(context: &NpmSbomContext, root_ref: &str) -> Vec<serde_json::Value> {
+    let refs_by_name = npm_package_refs_by_name(&context.packages);
+    let mut dependencies = Vec::new();
+    dependencies.push(serde_json::json!({
+        "ref": root_ref,
+        "dependsOn": npm_dependency_refs(&context.root_dependencies, &refs_by_name),
+    }));
+    for package in &context.packages {
+        let names = package
+            .dependencies
+            .iter()
+            .chain(package.optional_dependencies.iter())
+            .filter_map(|dependency| npm_dependency_name(dependency))
+            .collect::<BTreeSet<_>>();
+        dependencies.push(serde_json::json!({
+            "ref": npm_package_bom_ref(package),
+            "dependsOn": npm_dependency_refs(&names, &refs_by_name),
+        }));
+    }
+    dependencies
+}
+
+fn npm_spdx_sbom(context: &NpmSbomContext) -> serde_json::Value {
+    let root_id = npm_root_spdx_id(&context.root);
+    let package_ids = npm_package_spdx_ids(&context.packages);
+    let mut packages = Vec::new();
+    packages.push(npm_spdx_root_package(context, &root_id));
+    packages.extend(
+        context
+            .packages
+            .iter()
+            .map(|package| npm_spdx_package(package, &package_ids[&npm_package_key(package)])),
+    );
+    serde_json::json!({
+        "spdxVersion": "SPDX-2.3",
+        "dataLicense": "CC0-1.0",
+        "SPDXID": "SPDXRef-DOCUMENT",
+        "name": format!("{}@{}", context.root.name, context.root.version),
+        "documentNamespace": format!(
+            "http://spdx.org/spdxdocs/{}-{}",
+            npm_sbom_id_segment(&context.root.name),
+            context.serial_uuid
+        ),
+        "creationInfo": {
+            "created": context.timestamp,
+            "creators": [format!("Tool: omc/{}", env!("CARGO_PKG_VERSION"))],
+        },
+        "documentDescribes": [root_id],
+        "packages": packages,
+        "relationships": npm_spdx_relationships(context, &root_id, &package_ids),
+    })
+}
+
+fn npm_spdx_root_package(context: &NpmSbomContext, spdx_id: &str) -> serde_json::Value {
+    let mut package = serde_json::json!({
+        "name": context.root.name,
+        "SPDXID": spdx_id,
+        "versionInfo": context.root.version,
+        "packageFileName": "",
+        "primaryPackagePurpose": context.sbom_type.spdx_purpose(),
+        "downloadLocation": "NOASSERTION",
+        "filesAnalyzed": false,
+        "homepage": context.root.homepage.as_deref().unwrap_or("NOASSERTION"),
+        "licenseDeclared": context.root.license.as_deref().unwrap_or("NOASSERTION"),
+        "externalRefs": [npm_spdx_purl_ref(&context.root.name, &context.root.version)],
+    });
+    if let Some(description) = &context.root.description {
+        package["description"] = serde_json::Value::String(description.clone());
+    }
+    package
+}
+
+fn npm_spdx_package(package: &LockedPackage, spdx_id: &str) -> serde_json::Value {
+    let mut value = serde_json::json!({
+        "name": package.name,
+        "SPDXID": spdx_id,
+        "versionInfo": package.version,
+        "packageFileName": npm_node_modules_path(&package.name),
+        "downloadLocation": npm_package_download_location(package),
+        "filesAnalyzed": false,
+        "homepage": "NOASSERTION",
+        "licenseDeclared": "NOASSERTION",
+        "externalRefs": [npm_spdx_purl_ref(&package.name, &package.version)],
+    });
+    if !package.sha256.is_empty() {
+        value["checksums"] = serde_json::json!([{
+            "algorithm": "SHA256",
+            "checksumValue": package.sha256,
+        }]);
+    }
+    value
+}
+
+fn npm_spdx_purl_ref(name: &str, version: &str) -> serde_json::Value {
+    serde_json::json!({
+        "referenceCategory": "PACKAGE-MANAGER",
+        "referenceType": "purl",
+        "referenceLocator": npm_purl(name, version),
+    })
+}
+
+fn npm_spdx_relationships(
+    context: &NpmSbomContext,
+    root_id: &str,
+    package_ids: &BTreeMap<String, String>,
+) -> Vec<serde_json::Value> {
+    let refs_by_name = npm_spdx_refs_by_name(&context.packages, package_ids);
+    let mut relationships = Vec::new();
+    relationships.push(serde_json::json!({
+        "spdxElementId": "SPDXRef-DOCUMENT",
+        "relatedSpdxElement": root_id,
+        "relationshipType": "DESCRIBES",
+    }));
+    for dependency_id in npm_dependency_refs(&context.root_dependencies, &refs_by_name) {
+        relationships.push(serde_json::json!({
+            "spdxElementId": root_id,
+            "relatedSpdxElement": dependency_id,
+            "relationshipType": "DEPENDS_ON",
+        }));
+    }
+    for package in &context.packages {
+        let package_id = &package_ids[&npm_package_key(package)];
+        let names = package
+            .dependencies
+            .iter()
+            .chain(package.optional_dependencies.iter())
+            .filter_map(|dependency| npm_dependency_name(dependency))
+            .collect::<BTreeSet<_>>();
+        for dependency_id in npm_dependency_refs(&names, &refs_by_name) {
+            relationships.push(serde_json::json!({
+                "spdxElementId": package_id,
+                "relatedSpdxElement": dependency_id,
+                "relationshipType": "DEPENDS_ON",
+            }));
+        }
+    }
+    relationships
+}
+
+fn npm_package_refs_by_name(packages: &[LockedPackage]) -> BTreeMap<String, Vec<String>> {
+    let mut refs = BTreeMap::<String, Vec<String>>::new();
+    for package in packages {
+        refs.entry(package.name.clone())
+            .or_default()
+            .push(npm_package_bom_ref(package));
+    }
+    refs
+}
+
+fn npm_spdx_refs_by_name(
+    packages: &[LockedPackage],
+    package_ids: &BTreeMap<String, String>,
+) -> BTreeMap<String, Vec<String>> {
+    let mut refs = BTreeMap::<String, Vec<String>>::new();
+    for package in packages {
+        refs.entry(package.name.clone())
+            .or_default()
+            .push(package_ids[&npm_package_key(package)].clone());
+    }
+    refs
+}
+
+fn npm_dependency_refs(
+    names: &BTreeSet<String>,
+    refs_by_name: &BTreeMap<String, Vec<String>>,
+) -> Vec<String> {
+    names
+        .iter()
+        .flat_map(|name| refs_by_name.get(name).into_iter().flatten().cloned())
+        .collect()
+}
+
+fn npm_package_spdx_ids(packages: &[LockedPackage]) -> BTreeMap<String, String> {
+    packages
+        .iter()
+        .map(|package| (npm_package_key(package), npm_package_spdx_id(package)))
+        .collect()
+}
+
+fn npm_package_key(package: &LockedPackage) -> String {
+    format!("{}@{}", package.name, package.version)
+}
+
+fn npm_root_bom_ref(root: &NpmSbomRoot) -> String {
+    format!("{}@{}", root.name, root.version)
+}
+
+fn npm_package_bom_ref(package: &LockedPackage) -> String {
+    format!("{}@{}", package.name, package.version)
+}
+
+fn npm_root_spdx_id(root: &NpmSbomRoot) -> String {
+    format!(
+        "SPDXRef-Package-{}-{}",
+        npm_sbom_id_segment(&root.name),
+        npm_sbom_id_segment(&root.version)
+    )
+}
+
+fn npm_package_spdx_id(package: &LockedPackage) -> String {
+    format!(
+        "SPDXRef-Package-{}-{}",
+        npm_sbom_id_segment(&package.name),
+        npm_sbom_id_segment(&package.version)
+    )
+}
+
+fn npm_sbom_id_segment(value: &str) -> String {
+    let segment = value
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || matches!(ch, '.' | '-') {
+                ch
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>();
+    segment.trim_matches('-').to_owned()
+}
+
+fn npm_node_modules_path(name: &str) -> String {
+    format!("node_modules/{name}")
+}
+
+fn npm_package_download_location(package: &LockedPackage) -> String {
+    if package.source_url.is_empty() {
+        "NOASSERTION".to_owned()
+    } else {
+        package.source_url.clone()
+    }
+}
+
+fn npm_purl(name: &str, version: &str) -> String {
+    format!("pkg:npm/{name}@{version}")
+}
+
+fn npm_license_id_like(value: &str) -> bool {
+    value
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '-' | '+'))
+}
+
+impl NpmSbomType {
+    fn cyclonedx_type(self) -> &'static str {
+        match self {
+            Self::Library => "library",
+            Self::Application => "application",
+            Self::Framework => "framework",
+        }
+    }
+
+    fn spdx_purpose(self) -> &'static str {
+        match self {
+            Self::Library => "LIBRARY",
+            Self::Application => "APPLICATION",
+            Self::Framework => "FRAMEWORK",
+        }
+    }
+}
+
+fn npm_sbom_uuid(root: &NpmSbomRoot, packages: &[LockedPackage]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(root.name.as_bytes());
+    hasher.update([0]);
+    hasher.update(root.version.as_bytes());
+    for package in packages {
+        hasher.update([0]);
+        hasher.update(package.name.as_bytes());
+        hasher.update([0]);
+        hasher.update(package.version.as_bytes());
+        hasher.update([0]);
+        hasher.update(package.sha256.as_bytes());
+    }
+    let digest = hasher.finalize();
+    let mut bytes = [0u8; 16];
+    bytes.copy_from_slice(&digest[..16]);
+    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    format!(
+        "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+        bytes[0],
+        bytes[1],
+        bytes[2],
+        bytes[3],
+        bytes[4],
+        bytes[5],
+        bytes[6],
+        bytes[7],
+        bytes[8],
+        bytes[9],
+        bytes[10],
+        bytes[11],
+        bytes[12],
+        bytes[13],
+        bytes[14],
+        bytes[15],
+    )
+}
+
+fn current_utc_timestamp() -> String {
+    let duration = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default();
+    let seconds = duration.as_secs() as i64;
+    let millis = duration.subsec_millis();
+    let days = seconds.div_euclid(86_400);
+    let seconds_of_day = seconds.rem_euclid(86_400);
+    let (year, month, day) = civil_from_days(days);
+    let hour = seconds_of_day / 3_600;
+    let minute = (seconds_of_day % 3_600) / 60;
+    let second = seconds_of_day % 60;
+    format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}.{millis:03}Z")
+}
+
+fn civil_from_days(days: i64) -> (i64, i64, i64) {
+    let z = days + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let mut year = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = mp + if mp < 10 { 3 } else { -9 };
+    if month <= 2 {
+        year += 1;
+    }
+    (year, month, day)
 }
 
 fn npm_token_list_json(list: &NpmTokenListResult) -> serde_json::Value {
@@ -6771,6 +7325,7 @@ fn parse_npm_compat_action(args: &[String]) -> Result<NpmCompatAction, OmcRegist
         "whoami" => parse_npm_whoami_args(&args[1..]),
         "token" => parse_npm_token_args(&args[1..]),
         "dist-tag" | "dist-tags" => parse_npm_dist_tag_args(&args[1..]),
+        "sbom" => parse_npm_sbom_args(&args[1..]),
         "view" | "info" | "show" | "v" => parse_npm_view_args(&args[1..]),
         "docs" | "doc" => {
             parse_npm_metadata_url_args(command, NpmMetadataUrlKind::Docs, &args[1..])
@@ -6923,6 +7478,7 @@ fn npm_global_arg_supported_by_command(command: &str, arg: &str) -> bool {
                 | "token"
                 | "dist-tag"
                 | "dist-tags"
+                | "sbom"
                 | "view"
                 | "info"
                 | "show"
@@ -6934,6 +7490,15 @@ fn npm_global_arg_supported_by_command(command: &str, arg: &str) -> bool {
     }
     if matches!(arg, "--otp") || arg.starts_with("--otp=") {
         return matches!(command, "token");
+    }
+    if matches!(arg, "--sbom-format" | "--sbom-type")
+        || arg.starts_with("--sbom-format=")
+        || arg.starts_with("--sbom-type=")
+    {
+        return matches!(command, "sbom");
+    }
+    if matches!(arg, "--package-lock-only") || arg.starts_with("--package-lock-only=") {
+        return matches!(command, "sbom");
     }
     if matches!(arg, "--userconfig") || arg.starts_with("--userconfig=") {
         return matches!(
@@ -6956,6 +7521,7 @@ fn npm_global_arg_supported_by_command(command: &str, arg: &str) -> bool {
                 | "fund"
                 | "dist-tag"
                 | "dist-tags"
+                | "sbom"
         );
     }
     if matches!(arg, "--workspaces" | "--include-workspace-root")
@@ -6972,6 +7538,7 @@ fn npm_global_arg_supported_by_command(command: &str, arg: &str) -> bool {
                 | "fund"
                 | "dist-tag"
                 | "dist-tags"
+                | "sbom"
         );
     }
     if arg == "--json" {
@@ -6999,6 +7566,7 @@ fn npm_global_arg_supported_by_command(command: &str, arg: &str) -> bool {
                 | "whoami"
                 | "token"
                 | "view"
+                | "sbom"
                 | "info"
                 | "show"
                 | "v"
@@ -7044,6 +7612,7 @@ fn npm_global_arg_supported_by_command(command: &str, arg: &str) -> bool {
                 | "ll"
                 | "la"
                 | "outdated"
+                | "sbom"
         );
     }
     false
@@ -7052,7 +7621,12 @@ fn npm_global_arg_supported_by_command(command: &str, arg: &str) -> bool {
 fn npm_global_preserved_bool_flag(arg: &str) -> bool {
     matches!(
         arg,
-        "--json" | "--global" | "-g" | "--workspaces" | "--include-workspace-root"
+        "--json"
+            | "--global"
+            | "-g"
+            | "--workspaces"
+            | "--include-workspace-root"
+            | "--package-lock-only"
     )
 }
 
@@ -7069,6 +7643,8 @@ fn npm_global_preserved_value_flag(arg: &str) -> bool {
             | "--workspace"
             | "-w"
             | "--otp"
+            | "--sbom-format"
+            | "--sbom-type"
     )
 }
 
@@ -7085,6 +7661,9 @@ fn npm_global_preserved_equals_flag(arg: &str) -> bool {
         "-w=",
         "--include-workspace-root=",
         "--otp=",
+        "--sbom-format=",
+        "--sbom-type=",
+        "--package-lock-only=",
     ]
     .iter()
     .any(|prefix| arg.starts_with(prefix))
@@ -8269,6 +8848,107 @@ fn npm_dist_tag_ignored_equals_flag(arg: &str) -> bool {
         "-w=",
         "--workspaces=",
         "--include-workspace-root=",
+    ]
+    .iter()
+    .any(|prefix| arg.starts_with(prefix))
+}
+
+fn parse_npm_sbom_args(args: &[String]) -> Result<NpmCompatAction, OmcRegistryError> {
+    let mut format = None;
+    let mut sbom_type = NpmSbomType::Library;
+    let mut positionals = Vec::new();
+    let mut index = 0;
+    while index < args.len() {
+        let arg = &args[index];
+        if arg == "--sbom-format" {
+            index += 1;
+            let value = args.get(index).ok_or_else(|| {
+                OmcRegistryError::UnsupportedSpec("--sbom-format needs a value".to_owned())
+            })?;
+            format = Some(parse_npm_sbom_format(value)?);
+        } else if let Some(value) = arg.strip_prefix("--sbom-format=") {
+            format = Some(parse_npm_sbom_format(value)?);
+        } else if arg == "--sbom-type" {
+            index += 1;
+            let value = args.get(index).ok_or_else(|| {
+                OmcRegistryError::UnsupportedSpec("--sbom-type needs a value".to_owned())
+            })?;
+            sbom_type = parse_npm_sbom_type(value)?;
+        } else if let Some(value) = arg.strip_prefix("--sbom-type=") {
+            sbom_type = parse_npm_sbom_type(value)?;
+        } else if matches!(
+            arg.as_str(),
+            "--json"
+                | "--package-lock-only"
+                | "--silent"
+                | "-s"
+                | "--workspaces"
+                | "--include-workspace-root"
+        ) || npm_sbom_ignored_equals_flag(arg)
+        {
+        } else if matches!(
+            arg.as_str(),
+            "--omit" | "--include" | "--workspace" | "-w" | "--loglevel"
+        ) {
+            index += 1;
+            if args.get(index).is_none() {
+                return Err(OmcRegistryError::UnsupportedSpec(format!(
+                    "{arg} needs a value"
+                )));
+            }
+        } else if arg.starts_with('-') {
+            return Err(unsupported_compat_arg("npm sbom", arg));
+        } else {
+            positionals.push(arg.clone());
+        }
+        index += 1;
+    }
+
+    if !positionals.is_empty() {
+        return Err(unsupported_compat_arg("npm sbom", &positionals[0]));
+    }
+    let Some(format) = format else {
+        return Err(OmcRegistryError::UnsupportedSpec(
+            "npm sbom needs --sbom-format with one of: cyclonedx, spdx".to_owned(),
+        ));
+    };
+    Ok(NpmCompatAction::Sbom {
+        action: NpmSbomAction { format, sbom_type },
+    })
+}
+
+fn parse_npm_sbom_format(value: &str) -> Result<NpmSbomFormat, OmcRegistryError> {
+    match value {
+        "cyclonedx" => Ok(NpmSbomFormat::CycloneDx),
+        "spdx" => Ok(NpmSbomFormat::Spdx),
+        other => Err(OmcRegistryError::UnsupportedSpec(format!(
+            "unsupported npm sbom format `{other}`"
+        ))),
+    }
+}
+
+fn parse_npm_sbom_type(value: &str) -> Result<NpmSbomType, OmcRegistryError> {
+    match value {
+        "library" => Ok(NpmSbomType::Library),
+        "application" => Ok(NpmSbomType::Application),
+        "framework" => Ok(NpmSbomType::Framework),
+        other => Err(OmcRegistryError::UnsupportedSpec(format!(
+            "unsupported npm sbom type `{other}`"
+        ))),
+    }
+}
+
+fn npm_sbom_ignored_equals_flag(arg: &str) -> bool {
+    [
+        "--json=",
+        "--package-lock-only=",
+        "--omit=",
+        "--include=",
+        "--workspace=",
+        "-w=",
+        "--workspaces=",
+        "--include-workspace-root=",
+        "--loglevel=",
     ]
     .iter()
     .any(|prefix| arg.starts_with(prefix))
@@ -11842,6 +12522,50 @@ mod tests {
         assert!(parse_npm_compat_action(&args(&["dist-tag", "add", "left-pad@1.3.0"])).is_err());
         assert_eq!(
             parse_npm_compat_action(&args(&[
+                "sbom",
+                "--sbom-format=cyclonedx",
+                "--sbom-type",
+                "application",
+                "--package-lock-only",
+                "--omit=dev",
+                "--workspace",
+                "@demo/app",
+            ]))
+            .unwrap(),
+            NpmCompatAction::Sbom {
+                action: NpmSbomAction {
+                    format: NpmSbomFormat::CycloneDx,
+                    sbom_type: NpmSbomType::Application,
+                },
+            }
+        );
+        assert_eq!(
+            parse_npm_compat_action(&args(&["--json", "sbom", "--sbom-format", "spdx"])).unwrap(),
+            NpmCompatAction::Sbom {
+                action: NpmSbomAction {
+                    format: NpmSbomFormat::Spdx,
+                    sbom_type: NpmSbomType::Library,
+                },
+            }
+        );
+        assert_eq!(
+            parse_npm_compat_action(&args(&[
+                "--sbom-format",
+                "spdx",
+                "--sbom-type=framework",
+                "sbom",
+            ]))
+            .unwrap(),
+            NpmCompatAction::Sbom {
+                action: NpmSbomAction {
+                    format: NpmSbomFormat::Spdx,
+                    sbom_type: NpmSbomType::Framework,
+                },
+            }
+        );
+        assert!(parse_npm_compat_action(&args(&["sbom"])).is_err());
+        assert_eq!(
+            parse_npm_compat_action(&args(&[
                 "view",
                 "left-pad@1.3.0",
                 "version",
@@ -12050,6 +12774,56 @@ mod tests {
             fs::read_to_string(dir.join("ci.npmrc")).unwrap(),
             "registry=https://ci.example.invalid\n"
         );
+    }
+
+    #[test]
+    fn builds_npm_sbom_documents_from_locked_packages() {
+        let context = NpmSbomContext {
+            root: NpmSbomRoot {
+                name: "demo".to_owned(),
+                version: "1.0.0".to_owned(),
+                license: Some("MIT".to_owned()),
+                homepage: Some("https://example.invalid/demo".to_owned()),
+                description: Some("demo app".to_owned()),
+            },
+            packages: vec![
+                locked_npm_package("chalk", "5.0.0", vec!["npm:left-pad@1.3.0".to_owned()]),
+                locked_npm_package("left-pad", "1.3.0", Vec::new()),
+            ],
+            root_dependencies: BTreeSet::from(["chalk".to_owned()]),
+            timestamp: "2026-05-23T00:00:00.000Z".to_owned(),
+            serial_uuid: "00000000-0000-4000-8000-000000000000".to_owned(),
+            sbom_type: NpmSbomType::Application,
+        };
+
+        let cyclonedx = npm_cyclonedx_sbom(&context);
+        assert_eq!(cyclonedx["bomFormat"], "CycloneDX");
+        assert_eq!(cyclonedx["metadata"]["component"]["type"], "application");
+        assert_eq!(cyclonedx["components"][0]["name"], "chalk");
+        assert_eq!(cyclonedx["components"][0]["hashes"][0]["alg"], "SHA-256");
+        assert_eq!(cyclonedx["dependencies"][0]["ref"], "demo@1.0.0");
+        assert_eq!(cyclonedx["dependencies"][0]["dependsOn"][0], "chalk@5.0.0");
+        assert_eq!(
+            cyclonedx["dependencies"][1]["dependsOn"][0],
+            "left-pad@1.3.0"
+        );
+
+        let spdx = npm_spdx_sbom(&context);
+        assert_eq!(spdx["spdxVersion"], "SPDX-2.3");
+        assert_eq!(spdx["packages"][0]["primaryPackagePurpose"], "APPLICATION");
+        assert_eq!(
+            spdx["packages"][1]["externalRefs"][0]["referenceLocator"],
+            "pkg:npm/chalk@5.0.0"
+        );
+        assert!(spdx["relationships"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| {
+                item["spdxElementId"] == "SPDXRef-Package-demo-1.0.0"
+                    && item["relatedSpdxElement"] == "SPDXRef-Package-chalk-5.0.0"
+                    && item["relationshipType"] == "DEPENDS_ON"
+            }));
     }
 
     #[test]
@@ -13316,6 +14090,25 @@ mod tests {
             archive: String::new(),
             artifact: String::new(),
             sha256: String::new(),
+            behavior: Behavior::Pure,
+            verdict: Verdict::Accepted,
+            dependencies,
+            optional_dependencies: Vec::new(),
+            grants: Vec::new(),
+            capabilities: Vec::new(),
+            verifier_findings: Vec::new(),
+        }
+    }
+
+    fn locked_npm_package(name: &str, version: &str, dependencies: Vec<String>) -> LockedPackage {
+        LockedPackage {
+            ecosystem: Ecosystem::Npm,
+            name: name.to_owned(),
+            version: version.to_owned(),
+            source_url: format!("https://registry.example/{name}/-/{name}-{version}.tgz"),
+            archive: String::new(),
+            artifact: String::new(),
+            sha256: "a".repeat(64),
             behavior: Behavior::Pure,
             verdict: Verdict::Accepted,
             dependencies,
