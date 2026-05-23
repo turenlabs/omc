@@ -120,15 +120,16 @@ fn verify_function_policy(
                 Some(label) => locals[*id as usize] = label,
                 None => findings.push(VerifyFinding::new(function, index, "stack underflow")),
             },
-            Op::Add | Op::Sub | Op::Eq | Op::Slice => {
+            Op::Add | Op::Sub | Op::Eq => {
                 pop_binary(function, index, &mut stack, findings);
             }
-            Op::Len => {
-                if stack.pop().is_none() {
-                    findings.push(VerifyFinding::new(function, index, "stack underflow"));
-                }
-                stack.push(Label::Public);
+            Op::Slice => {
+                pop_ternary(function, index, &mut stack, findings);
             }
+            Op::Len => match stack.pop() {
+                Some(label) => stack.push(label),
+                None => findings.push(VerifyFinding::new(function, index, "stack underflow")),
+            },
             Op::CallLocal(_) | Op::CallImport(_) => stack.push(Label::Public),
             Op::Cap(cap) => {
                 let observed = Capability::for_cap_op(cap);
@@ -227,6 +228,21 @@ fn pop_binary(
     }
 }
 
+fn pop_ternary(
+    function: &Function,
+    index: usize,
+    stack: &mut Vec<Label>,
+    findings: &mut Vec<VerifyFinding>,
+) {
+    let third = stack.pop();
+    let second = stack.pop();
+    let first = stack.pop();
+    match (first, second, third) {
+        (Some(first), Some(second), Some(third)) => stack.push(first.join(second).join(third)),
+        _ => findings.push(VerifyFinding::new(function, index, "stack underflow")),
+    }
+}
+
 fn pop_optional_body(
     function: &Function,
     index: usize,
@@ -312,6 +328,52 @@ mod tests {
     fn accepts_pure_module_without_capabilities() {
         let report = verify_module(&harmless_slugify_module(), &Policy::pure()).unwrap();
         assert!(report.observed_capabilities.is_empty());
+    }
+
+    #[test]
+    fn accepts_slice_with_three_stack_operands() {
+        let module = Module {
+            id: "test:slice".to_owned(),
+            package: "slice".to_owned(),
+            version: "0.0.0".to_owned(),
+            declared_behavior: BehaviorType::Pure,
+            functions: vec![Function::new(
+                0,
+                "slice",
+                1,
+                vec![
+                    Op::LoadArg(0),
+                    Op::Const(omc_format::Value::Int(0)),
+                    Op::Const(omc_format::Value::Int(3)),
+                    Op::Slice,
+                    Op::Return,
+                ],
+            )],
+        };
+
+        verify_module(&module, &Policy::pure()).unwrap();
+    }
+
+    #[test]
+    fn rejects_slice_with_missing_stack_operands() {
+        let module = Module {
+            id: "test:bad-slice".to_owned(),
+            package: "bad-slice".to_owned(),
+            version: "0.0.0".to_owned(),
+            declared_behavior: BehaviorType::Pure,
+            functions: vec![Function::new(
+                0,
+                "slice",
+                0,
+                vec![Op::Const(omc_format::Value::Int(0)), Op::Slice, Op::Return],
+            )],
+        };
+
+        let err = verify_module(&module, &Policy::pure()).unwrap_err();
+        assert!(err
+            .findings
+            .iter()
+            .any(|finding| finding.message == "stack underflow"));
     }
 
     #[test]

@@ -116,10 +116,10 @@ fn run_function(
                 stack.push(Labeled::new(Value::Int(len as i64), value.label));
             }
             Op::Slice => {
-                return Err(Trap::new(
-                    TrapCode::HostError,
-                    "slice is reserved but not implemented yet",
-                ));
+                let end = pop(&mut stack)?;
+                let start = pop(&mut stack)?;
+                let value = pop(&mut stack)?;
+                stack.push(slice(value, start, end)?);
             }
             Op::CallLocal(id) => {
                 let callee = cell
@@ -230,6 +230,63 @@ fn sub(left: Labeled<Value>, right: Labeled<Value>) -> Result<Labeled<Value>, Tr
     }
 }
 
+fn slice(
+    value: Labeled<Value>,
+    start: Labeled<Value>,
+    end: Labeled<Value>,
+) -> Result<Labeled<Value>, Trap> {
+    let label = value.label.join(start.label).join(end.label);
+    let start = expect_int("slice start", start.value)?;
+    let end = expect_int("slice end", end.value)?;
+    match value.value {
+        Value::String(value) => {
+            let chars = value.chars().collect::<Vec<_>>();
+            let (start, end) = slice_bounds(start, end, chars.len());
+            Ok(Labeled::new(
+                Value::String(chars[start..end].iter().collect()),
+                label,
+            ))
+        }
+        Value::Array(values) => {
+            let (start, end) = slice_bounds(start, end, values.len());
+            Ok(Labeled::new(
+                Value::Array(values[start..end].to_vec()),
+                label,
+            ))
+        }
+        other => Err(Trap::type_error(format!(
+            "slice expected string or array, got {}",
+            other.type_name()
+        ))),
+    }
+}
+
+fn expect_int(context: &str, value: Value) -> Result<i64, Trap> {
+    match value {
+        Value::Int(value) => Ok(value),
+        other => Err(Trap::type_error(format!(
+            "{context} expected int, got {}",
+            other.type_name()
+        ))),
+    }
+}
+
+fn slice_bounds(start: i64, end: i64, len: usize) -> (usize, usize) {
+    let start = slice_index(start, len);
+    let end = slice_index(end, len);
+    if end < start {
+        (start, start)
+    } else {
+        (start, end)
+    }
+}
+
+fn slice_index(index: i64, len: usize) -> usize {
+    let len = len as i64;
+    let index = if index < 0 { len + index } else { index };
+    index.clamp(0, len) as usize
+}
+
 #[cfg(test)]
 mod tests {
     use omc_cap::{Capability, MemoryBroker, Policy};
@@ -264,6 +321,77 @@ mod tests {
         .unwrap();
 
         assert_eq!(result.value, Value::Int(5));
+        assert_eq!(result.label, Label::Public);
+    }
+
+    #[test]
+    fn slice_runs_for_strings_and_arrays() {
+        let string_module = Module {
+            id: "test:slice-string".to_owned(),
+            package: "slice-string".to_owned(),
+            version: "0.0.0".to_owned(),
+            declared_behavior: BehaviorType::Pure,
+            functions: vec![Function::new(
+                0,
+                "slice",
+                1,
+                vec![
+                    Op::LoadArg(0),
+                    Op::Const(Value::Int(1)),
+                    Op::Const(Value::Int(-1)),
+                    Op::Slice,
+                    Op::Return,
+                ],
+            )],
+        };
+        let mut cell = Cell::new(1, string_module, Policy::pure());
+        let mut broker = MemoryBroker::new();
+        let result = run_cell(
+            &mut cell,
+            &mut broker,
+            vec![Labeled::new(
+                Value::String("microcode".to_owned()),
+                Label::Env("TOKEN".to_owned()),
+            )],
+        )
+        .unwrap();
+        assert_eq!(result.value, Value::String("icrocod".to_owned()));
+        assert_eq!(result.label, Label::Env("TOKEN".to_owned()));
+
+        let array_module = Module {
+            id: "test:slice-array".to_owned(),
+            package: "slice-array".to_owned(),
+            version: "0.0.0".to_owned(),
+            declared_behavior: BehaviorType::Pure,
+            functions: vec![Function::new(
+                0,
+                "slice",
+                1,
+                vec![
+                    Op::LoadArg(0),
+                    Op::Const(Value::Int(1)),
+                    Op::Const(Value::Int(3)),
+                    Op::Slice,
+                    Op::Return,
+                ],
+            )],
+        };
+        let mut cell = Cell::new(2, array_module, Policy::pure());
+        let result = run_cell(
+            &mut cell,
+            &mut broker,
+            vec![Labeled::public(Value::Array(vec![
+                Value::Int(1),
+                Value::Int(2),
+                Value::Int(3),
+                Value::Int(4),
+            ]))],
+        )
+        .unwrap();
+        assert_eq!(
+            result.value,
+            Value::Array(vec![Value::Int(2), Value::Int(3)])
+        );
         assert_eq!(result.label, Label::Public);
     }
 
