@@ -2529,6 +2529,12 @@ pub struct PipConfigSnapshot {
     pub no_index: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PypiVersionListing {
+    pub name: String,
+    pub versions: Vec<String>,
+}
+
 fn apply_pip_config_files(project_dir: &Path, options: &mut LinkOptions) -> Result<()> {
     let config = read_pip_config(project_dir)?;
     if options.pypi_index_url.is_none() {
@@ -2586,6 +2592,65 @@ pub fn read_pip_config_snapshot(project_dir: &Path) -> Result<PipConfigSnapshot>
         binary_all: options.pypi_binary_all,
         binary_packages: options.pypi_binary_packages,
         no_index: options.pypi_no_index,
+    })
+}
+
+pub fn read_pypi_available_versions(
+    project_dir: &Path,
+    package: &str,
+    index_url: Option<String>,
+    extra_index_urls: Vec<String>,
+    find_links: Vec<String>,
+    no_index: bool,
+) -> Result<PypiVersionListing> {
+    let mut options = LinkOptions::new(project_dir);
+    options.pypi_index_url = index_url.and_then(|url| normalize_pypi_simple_index_url(&url));
+    options.pypi_extra_index_urls = extra_index_urls
+        .into_iter()
+        .filter_map(|url| normalize_pypi_simple_index_url(&url))
+        .collect();
+    options.pypi_find_links = find_links
+        .into_iter()
+        .filter_map(|source| normalize_pypi_find_links_source(&source, project_dir))
+        .collect();
+    options.pypi_no_index = no_index;
+    let options = options_with_manifest_policy(&options)?;
+    let spec = PackageSpec::parse(&format!("pypi:{package}"))?;
+    let client = Client::builder().user_agent("omc-prototype/0.1").build()?;
+    let target_python = current_python_version();
+    let mut versions = BTreeSet::new();
+
+    for candidate in pypi_find_link_candidates(&client, &spec, &options, target_python.as_deref())?
+    {
+        versions.insert(candidate.version);
+    }
+
+    if !options.pypi_no_index {
+        let simple_indexes = pypi_simple_index_urls(&options);
+        let indexes = if simple_indexes.is_empty() {
+            vec!["https://pypi.org/simple/".to_owned()]
+        } else {
+            simple_indexes
+        };
+        for candidate in pypi_simple_index_candidates_from_indexes(
+            &client,
+            &spec,
+            &indexes,
+            target_python.as_deref(),
+        )? {
+            versions.insert(candidate.version);
+        }
+    }
+
+    if versions.is_empty() {
+        return Err(OmcRegistryError::PackageNotFound(spec.requested()));
+    }
+
+    let mut versions = versions.into_iter().collect::<Vec<_>>();
+    versions.sort_by(|left, right| compare_pypi_versions(right, left));
+    Ok(PypiVersionListing {
+        name: spec.name,
+        versions,
     })
 }
 

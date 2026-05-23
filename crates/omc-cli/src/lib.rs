@@ -11,9 +11,9 @@ use omc_registry::{
     install_locked_project, install_project, lock_project, parse_capability_grant,
     parse_npm_direct_archive_reference, parse_pypi_direct_archive_reference, read_lockfile,
     read_npm_config_snapshot, read_npm_package_metadata, read_package_scripts,
-    read_pip_config_snapshot, read_requirements_files, remove_manifest_dependency, Behavior,
-    Ecosystem, InstallReport, LinkOptions, LockedPackage, OmcRegistryError, PackageSpec,
-    PypiBinaryMode, PypiCheckIssue, PythonLocalRequirement, Verdict,
+    read_pip_config_snapshot, read_pypi_available_versions, read_requirements_files,
+    remove_manifest_dependency, Behavior, Ecosystem, InstallReport, LinkOptions, LockedPackage,
+    OmcRegistryError, PackageSpec, PypiBinaryMode, PypiCheckIssue, PythonLocalRequirement, Verdict,
 };
 
 #[derive(Debug, Parser)]
@@ -303,6 +303,14 @@ enum PipCompatAction {
     Freeze,
     List {
         format: PipListFormat,
+    },
+    IndexVersions {
+        package: String,
+        index_url: Option<String>,
+        extra_index_urls: Vec<String>,
+        find_links: Vec<String>,
+        no_index: bool,
+        json: bool,
     },
     Config {
         action: PipConfigAction,
@@ -1097,6 +1105,22 @@ fn run_pip_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
             PipListFormat::Freeze => print_locked_freeze(project_dir)?,
             PipListFormat::Json => print_locked_pip_json(project_dir)?,
         },
+        PipCompatAction::IndexVersions {
+            package,
+            index_url,
+            extra_index_urls,
+            find_links,
+            no_index,
+            json,
+        } => print_pip_index_versions(
+            project_dir,
+            &package,
+            index_url,
+            extra_index_urls,
+            find_links,
+            no_index,
+            json,
+        )?,
         PipCompatAction::Config { action } => print_pip_config(project_dir, action)?,
     }
 
@@ -1350,6 +1374,40 @@ fn npm_view_text_value(value: &serde_json::Value) -> String {
         serde_json::Value::Number(value) => value.to_string(),
         _ => serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string()),
     }
+}
+
+fn print_pip_index_versions(
+    project_dir: &Path,
+    package: &str,
+    index_url: Option<String>,
+    extra_index_urls: Vec<String>,
+    find_links: Vec<String>,
+    no_index: bool,
+    json: bool,
+) -> Result<(), OmcRegistryError> {
+    let listing = read_pypi_available_versions(
+        project_dir,
+        package,
+        index_url,
+        extra_index_urls,
+        find_links,
+        no_index,
+    )?;
+    let latest = listing.versions.first().cloned().unwrap_or_default();
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "name": listing.name,
+                "latest": latest,
+                "versions": listing.versions,
+            }))?
+        );
+    } else {
+        println!("{} ({latest})", listing.name);
+        println!("Available versions: {}", listing.versions.join(", "));
+    }
+    Ok(())
 }
 
 fn print_pip_config(project_dir: &Path, action: PipConfigAction) -> Result<(), OmcRegistryError> {
@@ -2695,11 +2753,172 @@ fn parse_pip_compat_action(args: &[String]) -> Result<PipCompatAction, OmcRegist
         "list" => Ok(PipCompatAction::List {
             format: parse_pip_list_format(&args[1..])?,
         }),
+        "index" => parse_pip_index_args(&args[1..]),
         "config" => parse_pip_config_args(&args[1..]),
         other => Err(OmcRegistryError::UnsupportedSpec(format!(
             "unsupported pip compatibility command `{other}`"
         ))),
     }
+}
+
+fn parse_pip_index_args(args: &[String]) -> Result<PipCompatAction, OmcRegistryError> {
+    let PipIndexArgs {
+        index_url,
+        extra_index_urls,
+        find_links,
+        no_index,
+        json,
+        mut positionals,
+    } = parse_pip_index_common_args(args)?;
+    if positionals.is_empty() {
+        return Err(OmcRegistryError::UnsupportedSpec(
+            "pip index needs a command such as versions".to_owned(),
+        ));
+    }
+    let command = positionals.remove(0);
+    match command.as_str() {
+        "versions" => {
+            if positionals.len() != 1 {
+                return Err(OmcRegistryError::UnsupportedSpec(
+                    "pip index versions needs exactly one package".to_owned(),
+                ));
+            }
+            Ok(PipCompatAction::IndexVersions {
+                package: positionals.remove(0),
+                index_url,
+                extra_index_urls,
+                find_links,
+                no_index,
+                json,
+            })
+        }
+        other => Err(OmcRegistryError::UnsupportedSpec(format!(
+            "unsupported pip index command `{other}`"
+        ))),
+    }
+}
+
+#[derive(Debug)]
+struct PipIndexArgs {
+    index_url: Option<String>,
+    extra_index_urls: Vec<String>,
+    find_links: Vec<String>,
+    no_index: bool,
+    json: bool,
+    positionals: Vec<String>,
+}
+
+fn parse_pip_index_common_args(args: &[String]) -> Result<PipIndexArgs, OmcRegistryError> {
+    let mut parsed = PipIndexArgs {
+        index_url: None,
+        extra_index_urls: Vec::new(),
+        find_links: Vec::new(),
+        no_index: false,
+        json: false,
+        positionals: Vec::new(),
+    };
+    let mut index = 0;
+    while index < args.len() {
+        let arg = &args[index];
+        if arg == "--json" {
+            parsed.json = true;
+        } else if arg == "-i" || arg == "--index-url" {
+            index += 1;
+            let Some(url) = args.get(index) else {
+                return Err(OmcRegistryError::UnsupportedSpec(format!(
+                    "{arg} needs a URL"
+                )));
+            };
+            parsed.index_url = Some(url.clone());
+        } else if let Some(url) = arg.strip_prefix("--index-url=") {
+            parsed.index_url = Some(url.to_owned());
+        } else if arg == "--extra-index-url" {
+            index += 1;
+            let Some(url) = args.get(index) else {
+                return Err(OmcRegistryError::UnsupportedSpec(format!(
+                    "{arg} needs a URL"
+                )));
+            };
+            parsed.extra_index_urls.push(url.clone());
+        } else if let Some(url) = arg.strip_prefix("--extra-index-url=") {
+            parsed.extra_index_urls.push(url.to_owned());
+        } else if arg == "-f" || arg == "--find-links" {
+            index += 1;
+            let Some(value) = args.get(index) else {
+                return Err(OmcRegistryError::UnsupportedSpec(format!(
+                    "{arg} needs a path or URL"
+                )));
+            };
+            parsed.find_links.push(value.clone());
+        } else if let Some(value) = arg.strip_prefix("--find-links=") {
+            parsed.find_links.push(value.to_owned());
+        } else if arg == "--no-index" {
+            parsed.no_index = true;
+        } else if matches!(
+            arg.as_str(),
+            "--pre"
+                | "--disable-pip-version-check"
+                | "--isolated"
+                | "--no-cache-dir"
+                | "--ignore-requires-python"
+                | "-v"
+                | "--verbose"
+                | "-q"
+                | "--quiet"
+        ) {
+        } else if pip_index_ignored_value_flag(arg) {
+            index += 1;
+            if args.get(index).is_none() {
+                return Err(OmcRegistryError::UnsupportedSpec(format!(
+                    "{arg} needs a value"
+                )));
+            }
+        } else if pip_index_ignored_equals_flag(arg) {
+        } else if arg.starts_with('-') {
+            return Err(unsupported_compat_arg("pip index", arg));
+        } else {
+            parsed.positionals.push(arg.clone());
+        }
+        index += 1;
+    }
+    Ok(parsed)
+}
+
+fn pip_index_ignored_value_flag(arg: &str) -> bool {
+    matches!(
+        arg,
+        "--trusted-host"
+            | "--timeout"
+            | "--retries"
+            | "--cert"
+            | "--client-cert"
+            | "--proxy"
+            | "--cache-dir"
+            | "--log"
+            | "--platform"
+            | "--python-version"
+            | "--implementation"
+            | "--abi"
+    )
+}
+
+fn pip_index_ignored_equals_flag(arg: &str) -> bool {
+    [
+        "--trusted-host=",
+        "--timeout=",
+        "--retries=",
+        "--cert=",
+        "--client-cert=",
+        "--proxy=",
+        "--cache-dir=",
+        "--log=",
+        "--platform=",
+        "--python-version=",
+        "--implementation=",
+        "--abi=",
+    ]
+    .iter()
+    .any(|prefix| arg.starts_with(prefix))
 }
 
 fn parse_pip_config_args(args: &[String]) -> Result<PipCompatAction, OmcRegistryError> {
@@ -4438,6 +4657,28 @@ mod tests {
                 format: PipListFormat::Json,
             }
         );
+        assert_eq!(
+            parse_pip_compat_action(&args(&[
+                "index",
+                "versions",
+                "idna",
+                "--json",
+                "--no-index",
+                "--find-links",
+                "wheelhouse",
+                "--disable-pip-version-check",
+            ]))
+            .unwrap(),
+            PipCompatAction::IndexVersions {
+                package: "idna".to_owned(),
+                index_url: None,
+                extra_index_urls: Vec::new(),
+                find_links: vec!["wheelhouse".to_owned()],
+                no_index: true,
+                json: true,
+            }
+        );
+        assert!(parse_pip_compat_action(&args(&["index", "foo", "requests"])).is_err());
         assert!(parse_pip_compat_action(&args(&["list", "--outdated"])).is_err());
         assert_eq!(
             parse_pip_compat_action(&args(&[
