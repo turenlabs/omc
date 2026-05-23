@@ -196,6 +196,20 @@ impl PackageSpec {
 }
 
 fn parse_npm_spec(raw: &str, rest: &str) -> Result<PackageSpec> {
+    if let Some((name, url)) = rest.split_once(" @ ") {
+        let name = name.trim();
+        let url = url.trim();
+        if name.is_empty() || url.is_empty() {
+            return Err(OmcRegistryError::UnsupportedSpec(raw.to_owned()));
+        }
+        return Ok(PackageSpec::with_direct_url(
+            Ecosystem::Npm,
+            name,
+            url,
+            BTreeSet::new(),
+        ));
+    }
+
     if rest.is_empty() {
         return Err(OmcRegistryError::UnsupportedSpec(raw.to_owned()));
     }
@@ -1512,18 +1526,20 @@ fn read_package_json_specs(
     include_dev_dependencies: bool,
 ) -> Result<Vec<PackageSpec>> {
     let package = serde_json::from_str::<ProjectPackageJson>(&fs::read_to_string(path)?)?;
+    let base_dir = path.parent().unwrap_or_else(|| Path::new("."));
     let workspaces = package.workspaces.clone();
-    let mut specs = package_json_dependency_specs(package, include_dev_dependencies);
+    let mut specs = package_json_dependency_specs(package, include_dev_dependencies, base_dir)?;
 
     if let Some(workspaces) = workspaces {
-        let root = path.parent().unwrap_or_else(|| Path::new("."));
-        for package_json in workspace_package_json_paths(root, &workspaces) {
+        for package_json in workspace_package_json_paths(base_dir, &workspaces) {
+            let workspace_base_dir = package_json.parent().unwrap_or(base_dir);
             let package =
-                serde_json::from_str::<ProjectPackageJson>(&fs::read_to_string(package_json)?)?;
+                serde_json::from_str::<ProjectPackageJson>(&fs::read_to_string(&package_json)?)?;
             specs.extend(package_json_dependency_specs(
                 package,
                 include_dev_dependencies,
-            ));
+                workspace_base_dir,
+            )?);
         }
     }
 
@@ -1533,7 +1549,8 @@ fn read_package_json_specs(
 fn package_json_dependency_specs(
     package: ProjectPackageJson,
     include_dev_dependencies: bool,
-) -> Vec<PackageSpec> {
+    base_dir: &Path,
+) -> Result<Vec<PackageSpec>> {
     let mut specs = Vec::new();
     let dev_dependencies = if include_dev_dependencies {
         package.dev_dependencies
@@ -1548,11 +1565,99 @@ fn package_json_dependency_specs(
         required_peer_dependencies(package.peer_dependencies, package.peer_dependencies_meta),
     ] {
         for (name, requirement) in dependencies {
-            specs.push(PackageSpec::new(Ecosystem::Npm, name, Some(requirement)));
+            if let Some(spec) = npm_package_json_dependency_spec(name, requirement, base_dir)? {
+                specs.push(spec);
+            }
         }
     }
 
-    specs
+    Ok(specs)
+}
+
+fn npm_package_json_dependency_spec(
+    name: String,
+    requirement: String,
+    base_dir: &Path,
+) -> Result<Option<PackageSpec>> {
+    let requirement = requirement.trim();
+    if requirement.starts_with("workspace:") || requirement.starts_with("link:") {
+        return Ok(None);
+    }
+
+    if let Some(url) = npm_direct_tarball_url(requirement, base_dir)? {
+        return Ok(Some(PackageSpec::with_direct_url(
+            Ecosystem::Npm,
+            name,
+            url,
+            BTreeSet::new(),
+        )));
+    }
+
+    Ok(Some(PackageSpec::new(
+        Ecosystem::Npm,
+        name,
+        Some(requirement.to_owned()),
+    )))
+}
+
+fn npm_direct_tarball_url(requirement: &str, base_dir: &Path) -> Result<Option<String>> {
+    if requirement.starts_with("https://") {
+        require_npm_tarball_path(requirement)?;
+        return Ok(Some(requirement.to_owned()));
+    }
+
+    if let Some(path) = requirement.strip_prefix("file:") {
+        let path = path.trim();
+        if path.starts_with("//") {
+            let url = reqwest::Url::parse(requirement)
+                .map_err(|_| OmcRegistryError::UnsupportedSpec(requirement.to_owned()))?;
+            let path = url.to_file_path().map_err(|_| {
+                OmcRegistryError::UnsupportedSpec(format!(
+                    "direct npm tarball URL `{requirement}` must use a valid file URL"
+                ))
+            })?;
+            require_npm_tarball_path(path.to_string_lossy().as_ref())?;
+            return Ok(Some(url.to_string()));
+        }
+
+        let path = Path::new(path);
+        let path = if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            base_dir.join(path)
+        };
+        require_npm_tarball_path(path.to_string_lossy().as_ref())?;
+        let url = reqwest::Url::from_file_path(&path).map_err(|_| {
+            OmcRegistryError::UnsupportedSpec(format!(
+                "direct npm tarball path `{}` could not be converted to a file URL",
+                path.display()
+            ))
+        })?;
+        return Ok(Some(url.to_string()));
+    }
+
+    if requirement.starts_with("http://") {
+        return Err(OmcRegistryError::UnsupportedSpec(format!(
+            "direct npm tarball URL `{requirement}` must use https"
+        )));
+    }
+
+    Ok(None)
+}
+
+fn require_npm_tarball_path(path: &str) -> Result<()> {
+    let lower = path
+        .split(['?', '#'])
+        .next()
+        .unwrap_or(path)
+        .to_ascii_lowercase();
+    if lower.ends_with(".tgz") || lower.ends_with(".tar.gz") {
+        return Ok(());
+    }
+
+    Err(OmcRegistryError::UnsupportedSpec(format!(
+        "direct npm dependency `{path}` must be a .tgz or .tar.gz archive"
+    )))
 }
 
 fn workspace_package_json_paths(root: &Path, workspaces: &ProjectWorkspaces) -> Vec<PathBuf> {
@@ -3136,8 +3241,12 @@ fn install_npm_package_to(
     for entry in archive.entries()? {
         let mut entry = entry?;
         let raw_path = entry.path()?.to_string_lossy().into_owned();
-        let stripped = strip_first_path_component(Path::new(&raw_path))
-            .ok_or_else(|| OmcRegistryError::UnsafeArchivePath(raw_path.clone()))?;
+        let Some(stripped) = strip_first_path_component(Path::new(&raw_path)) else {
+            if entry.header().entry_type().is_dir() {
+                continue;
+            }
+            return Err(OmcRegistryError::UnsafeArchivePath(raw_path));
+        };
         let output = checked_join(&target, &stripped)?;
 
         if entry.header().entry_type().is_dir() {
@@ -3788,6 +3897,10 @@ fn resolve_npm(
     spec: &PackageSpec,
     options: &LinkOptions,
 ) -> Result<ResolvedPackage> {
+    if spec.direct_url.is_some() {
+        return resolve_npm_direct_tarball(client, spec, options);
+    }
+
     let (registry_name, version_requirement) = npm_registry_name_and_requirement(spec)?;
     let install_name = spec.name.clone();
     if let Some(resolved) =
@@ -3853,6 +3966,86 @@ fn resolve_npm(
         platform_compatible,
         dependencies,
     })
+}
+
+fn resolve_npm_direct_tarball(
+    client: &Client,
+    spec: &PackageSpec,
+    options: &LinkOptions,
+) -> Result<ResolvedPackage> {
+    let source_url = spec
+        .direct_url
+        .clone()
+        .ok_or_else(|| OmcRegistryError::UnsupportedSpec(spec.requested()))?;
+    let (local_path, filename) = npm_direct_tarball_source(&source_url, &spec.name)?;
+    let preliminary = ResolvedPackage {
+        ecosystem: Ecosystem::Npm,
+        name: spec.name.clone(),
+        version: "0.0.0".to_owned(),
+        source_url: source_url.clone(),
+        download_url: None,
+        local_path: local_path.clone(),
+        filename: filename.clone(),
+        expected_sha256: None,
+        expected_sha1: None,
+        expected_integrity: None,
+        npm_direct_tarball: true,
+        pypi_direct_wheel: false,
+        npm_scripts: BTreeMap::new(),
+        platform_compatible: true,
+        dependencies: Vec::new(),
+    };
+    let bytes = download_artifact(client, &preliminary, &options.project_dir)?;
+    let manifest = npm_manifest_from_tgz(&bytes)?;
+    let platform_compatible = npm_manifest_platform_compatible(&manifest);
+    let dependencies = npm_manifest_runtime_dependencies(&manifest);
+
+    Ok(ResolvedPackage {
+        ecosystem: Ecosystem::Npm,
+        name: spec.name.clone(),
+        version: manifest.version,
+        source_url,
+        download_url: None,
+        local_path,
+        filename,
+        expected_sha256: None,
+        expected_sha1: None,
+        expected_integrity: None,
+        npm_direct_tarball: true,
+        pypi_direct_wheel: false,
+        npm_scripts: manifest.scripts.unwrap_or_default(),
+        platform_compatible,
+        dependencies,
+    })
+}
+
+fn npm_direct_tarball_source(
+    source_url: &str,
+    package_name: &str,
+) -> Result<(Option<PathBuf>, String)> {
+    let url = reqwest::Url::parse(source_url)
+        .map_err(|_| OmcRegistryError::UnsupportedSpec(source_url.to_owned()))?;
+    let local_path = match url.scheme() {
+        "https" => None,
+        "file" => Some(url.to_file_path().map_err(|_| {
+            OmcRegistryError::UnsupportedSpec(format!(
+                "direct npm tarball URL for `{package_name}` must use a valid file URL"
+            ))
+        })?),
+        _ => {
+            return Err(OmcRegistryError::UnsupportedSpec(format!(
+                "direct npm tarball URL for `{package_name}` must use https or file"
+            )));
+        }
+    };
+    let filename = url
+        .path_segments()
+        .and_then(|mut segments| segments.next_back())
+        .and_then(|filename| urlencoding::decode(filename).ok())
+        .map(|filename| filename.into_owned())
+        .ok_or_else(|| OmcRegistryError::UnsupportedSpec(source_url.to_owned()))?;
+    require_npm_tarball_path(&filename)?;
+    Ok((local_path, filename))
 }
 
 fn resolve_npm_lockfile_tarball(
@@ -6597,6 +6790,18 @@ mod tests {
     }
 
     #[test]
+    fn parses_npm_direct_tarball_specs() {
+        let spec =
+            PackageSpec::parse("npm:local-pkg @ https://example.invalid/local-pkg-1.0.0.tgz")
+                .unwrap();
+        assert_eq!(spec.name, "local-pkg");
+        assert_eq!(
+            spec.direct_url.as_deref(),
+            Some("https://example.invalid/local-pkg-1.0.0.tgz")
+        );
+    }
+
+    #[test]
     fn reads_project_package_json_specs() {
         let dir = tempfile::tempdir().unwrap();
         let package_json = dir.path().join("package.json");
@@ -6606,7 +6811,12 @@ mod tests {
                 "scripts": { "check": "node -e \"console.log('ok')\"" },
                 "dependencies": { "is-odd": "3.0.1" },
                 "devDependencies": { "which": "^2.0.2" },
-                "optionalDependencies": { "is-even": "1.0.0" },
+                "optionalDependencies": {
+                    "is-even": "1.0.0",
+                    "local-pkg": "file:vendor/local-pkg-1.0.0.tgz",
+                    "remote-pkg": "https://example.invalid/remote-pkg-2.0.0.tgz",
+                    "workspace-pkg": "workspace:*"
+                },
                 "peerDependencies": {
                     "left-pad": "1.3.0",
                     "optional-peer": "1.0.0"
@@ -6631,6 +6841,20 @@ mod tests {
             .iter()
             .any(|spec| spec.name == "left-pad" && spec.version.as_deref() == Some("1.3.0")));
         assert!(!specs.iter().any(|spec| spec.name == "optional-peer"));
+        let local_pkg = specs.iter().find(|spec| spec.name == "local-pkg").unwrap();
+        assert!(local_pkg
+            .direct_url
+            .as_deref()
+            .unwrap()
+            .starts_with("file://"));
+        assert!(local_pkg
+            .direct_url
+            .as_deref()
+            .unwrap()
+            .ends_with("/vendor/local-pkg-1.0.0.tgz"));
+        assert!(specs.iter().any(|spec| spec.name == "remote-pkg"
+            && spec.direct_url.as_deref() == Some("https://example.invalid/remote-pkg-2.0.0.tgz")));
+        assert!(!specs.iter().any(|spec| spec.name == "workspace-pkg"));
 
         let scripts = read_package_scripts(dir.path()).unwrap();
         assert_eq!(
@@ -6643,6 +6867,20 @@ mod tests {
             .iter()
             .any(|spec| spec.name == "is-odd" && spec.version.as_deref() == Some("3.0.1")));
         assert!(!production_specs.iter().any(|spec| spec.name == "which"));
+    }
+
+    #[test]
+    fn rejects_unsupported_npm_file_dependencies() {
+        let dir = tempfile::tempdir().unwrap();
+        let package_json = dir.path().join("package.json");
+        fs::write(
+            &package_json,
+            r#"{ "dependencies": { "local-pkg": "file:../local-pkg" } }"#,
+        )
+        .unwrap();
+
+        let error = read_package_json_specs(&package_json, true).unwrap_err();
+        assert!(error.to_string().contains("must be a .tgz"));
     }
 
     #[test]
@@ -7432,6 +7670,28 @@ packages:
             read_locked_archive(dir.path(), &package).unwrap(),
             b"tampered"
         );
+    }
+
+    #[test]
+    fn installs_npm_tarballs_with_root_directory_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        let bytes = npm_tgz_for_test(
+            r#"{
+                "name": "pkg",
+                "version": "1.0.0"
+            }"#,
+        );
+        let archive = dir.path().join(".omc/cache/npm/pkg.tgz");
+        fs::create_dir_all(archive.parent().unwrap()).unwrap();
+        fs::write(&archive, &bytes).unwrap();
+
+        let mut package = locked_package_for_test(Ecosystem::Npm, "pkg", "1.0.0");
+        package.archive = relative_path(dir.path(), &archive);
+        package.sha256 = sha256_hex(&bytes);
+
+        let node_modules = dir.path().join("node_modules");
+        let target = install_npm_package_to(dir.path(), &package, &node_modules).unwrap();
+        assert!(target.join("package.json").exists());
     }
 
     #[test]
@@ -8920,6 +9180,15 @@ wheels = [
         {
             let encoder = flate2::write::GzEncoder::new(&mut bytes, flate2::Compression::default());
             let mut archive = tar::Builder::new(encoder);
+            let mut root_header = tar::Header::new_gnu();
+            root_header.set_entry_type(tar::EntryType::Directory);
+            root_header.set_size(0);
+            root_header.set_mode(0o755);
+            root_header.set_cksum();
+            archive
+                .append_data(&mut root_header, "package/", std::io::empty())
+                .unwrap();
+
             let mut header = tar::Header::new_gnu();
             header.set_size(package_json.len() as u64);
             header.set_mode(0o644);
