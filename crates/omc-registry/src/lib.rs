@@ -7402,6 +7402,13 @@ pub struct NpmPingResult {
 }
 
 #[derive(Debug, Clone)]
+pub struct NpmWhoamiResult {
+    pub registry: String,
+    pub username: String,
+    pub response: serde_json::Value,
+}
+
+#[derive(Debug, Clone)]
 pub struct NpmPackageMetadata {
     pub name: String,
     pub version: String,
@@ -7478,19 +7485,14 @@ impl NpmConfig {
 }
 
 fn read_npm_config(project_dir: &Path) -> Result<NpmConfig> {
-    let mut config = NpmConfig::default();
-    let user_config = npm_userconfig_env_path();
-    read_npm_user_config(project_dir, user_config.as_deref(), &mut config)?;
-    read_npmrc_into(&project_dir.join(".npmrc"), &mut config)?;
-    apply_npm_environment_config(&mut config);
-    Ok(config)
+    read_npm_config_with_overrides(project_dir, None, None)
 }
 
-pub fn read_npm_config_snapshot(
+fn read_npm_config_with_overrides(
     project_dir: &Path,
     registry_override: Option<&str>,
     userconfig_override: Option<&Path>,
-) -> Result<NpmConfigSnapshot> {
+) -> Result<NpmConfig> {
     let mut config = NpmConfig::default();
     let user_config = userconfig_override
         .map(Path::to_path_buf)
@@ -7503,6 +7505,16 @@ pub fn read_npm_config_snapshot(
             OmcRegistryError::UnsupportedSpec(format!("invalid npm registry `{registry}`"))
         })?;
     }
+    Ok(config)
+}
+
+pub fn read_npm_config_snapshot(
+    project_dir: &Path,
+    registry_override: Option<&str>,
+    userconfig_override: Option<&Path>,
+) -> Result<NpmConfigSnapshot> {
+    let config =
+        read_npm_config_with_overrides(project_dir, registry_override, userconfig_override)?;
     Ok(NpmConfigSnapshot {
         registry: config.registry,
         scoped_registries: config.scoped_registries,
@@ -7510,13 +7522,7 @@ pub fn read_npm_config_snapshot(
 }
 
 fn read_npm_config_for_options(project_dir: &Path, options: &LinkOptions) -> Result<NpmConfig> {
-    let mut config = read_npm_config(project_dir)?;
-    if let Some(registry) = &options.npm_registry_url {
-        config.registry = normalize_npm_registry(registry).ok_or_else(|| {
-            OmcRegistryError::UnsupportedSpec(format!("invalid npm registry `{registry}`"))
-        })?;
-    }
-    Ok(config)
+    read_npm_config_with_overrides(project_dir, options.npm_registry_url.as_deref(), None)
 }
 
 fn apply_npm_environment_config(config: &mut NpmConfig) {
@@ -7822,10 +7828,17 @@ pub fn read_npm_package_metadata(
 }
 
 pub fn read_npm_ping(project_dir: &Path, registry_override: Option<&str>) -> Result<NpmPingResult> {
+    read_npm_ping_with_userconfig(project_dir, registry_override, None)
+}
+
+pub fn read_npm_ping_with_userconfig(
+    project_dir: &Path,
+    registry_override: Option<&str>,
+    userconfig_override: Option<&Path>,
+) -> Result<NpmPingResult> {
     let client = Client::new();
-    let mut options = LinkOptions::new(project_dir);
-    options.npm_registry_url = registry_override.map(str::to_owned);
-    let npm_config = read_npm_config_for_options(project_dir, &options)?;
+    let npm_config =
+        read_npm_config_with_overrides(project_dir, registry_override, userconfig_override)?;
     let registry = ensure_trailing_slash(&npm_config.registry);
     let url = format!("{registry}-/ping");
     let response = npm_get(&client, &url, &npm_config)
@@ -7834,6 +7847,36 @@ pub fn read_npm_ping(project_dir: &Path, registry_override: Option<&str>) -> Res
         .json::<serde_json::Value>()
         .unwrap_or_else(|_| serde_json::json!({ "ok": true }));
     Ok(NpmPingResult { registry, response })
+}
+
+pub fn read_npm_whoami(
+    project_dir: &Path,
+    registry_override: Option<&str>,
+    userconfig_override: Option<&Path>,
+) -> Result<NpmWhoamiResult> {
+    let client = Client::new();
+    let npm_config =
+        read_npm_config_with_overrides(project_dir, registry_override, userconfig_override)?;
+    let registry = ensure_trailing_slash(&npm_config.registry);
+    let url = format!("{registry}-/whoami");
+    let response = npm_get(&client, &url, &npm_config)
+        .send()?
+        .error_for_status()?
+        .json::<serde_json::Value>()?;
+    let username = response
+        .get("username")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| {
+            OmcRegistryError::UnsupportedSpec(
+                "npm whoami response did not include username".to_owned(),
+            )
+        })?
+        .to_owned();
+    Ok(NpmWhoamiResult {
+        registry,
+        username,
+        response,
+    })
 }
 
 pub fn read_npm_search(
@@ -16590,6 +16633,51 @@ wheels = [
             ),
             Some("port-token")
         );
+    }
+
+    #[test]
+    fn reads_npm_whoami_with_userconfig_auth() {
+        use std::io::{Read as _, Write as _};
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let handle = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buffer = [0_u8; 4096];
+            let len = stream.read(&mut buffer).unwrap();
+            let request = String::from_utf8_lossy(&buffer[..len]);
+            assert!(request.starts_with("GET /-/whoami "));
+            assert!(request
+                .to_ascii_lowercase()
+                .contains("authorization: bearer registry-token"));
+
+            let body = r#"{"username":"alice"}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+        });
+
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(
+            dir.path().join("ci.npmrc"),
+            format!("registry=http://{addr}/\n//{addr}/:_authToken=registry-token\n"),
+        )
+        .unwrap();
+
+        let whoami = read_npm_whoami(dir.path(), None, Some(Path::new("ci.npmrc"))).unwrap();
+        assert_eq!(whoami.registry, format!("http://{addr}/"));
+        assert_eq!(whoami.username, "alice");
+        assert_eq!(
+            whoami
+                .response
+                .get("username")
+                .and_then(serde_json::Value::as_str),
+            Some("alice")
+        );
+        handle.join().unwrap();
     }
 
     #[test]
