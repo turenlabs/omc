@@ -2430,6 +2430,12 @@ fn read_pyproject_requirements(
         }
     }
 
+    discovered.specs.extend(read_pyproject_dependency_groups(
+        pyproject.dependency_groups,
+        project_extras,
+        include_dev_dependencies,
+    )?);
+
     if let Some(poetry) = pyproject.tool.and_then(|tool| tool.poetry) {
         let base_dir = path.parent().unwrap_or_else(|| Path::new("."));
         discovered.specs.extend(read_poetry_dependencies(
@@ -2470,6 +2476,77 @@ fn read_pyproject_requirements(
     }
 
     Ok(discovered)
+}
+
+fn read_pyproject_dependency_groups(
+    dependency_groups: BTreeMap<String, Vec<PyProjectDependencyGroupItem>>,
+    project_extras: &BTreeSet<String>,
+    include_dev_dependencies: bool,
+) -> Result<Vec<PackageSpec>> {
+    let dependency_groups = dependency_groups
+        .into_iter()
+        .map(|(name, items)| (normalize_pypi_extra(&name), items))
+        .collect::<BTreeMap<_, _>>();
+    let mut selected_groups = project_extras.clone();
+    if include_dev_dependencies {
+        selected_groups.insert("dev".to_owned());
+    }
+
+    let mut specs = Vec::new();
+    for group in selected_groups {
+        if dependency_groups.contains_key(&group) {
+            collect_pyproject_dependency_group(
+                &group,
+                &dependency_groups,
+                &mut BTreeSet::new(),
+                &mut specs,
+            )?;
+        }
+    }
+    Ok(specs)
+}
+
+fn collect_pyproject_dependency_group(
+    group: &str,
+    dependency_groups: &BTreeMap<String, Vec<PyProjectDependencyGroupItem>>,
+    stack: &mut BTreeSet<String>,
+    specs: &mut Vec<PackageSpec>,
+) -> Result<()> {
+    if !stack.insert(group.to_owned()) {
+        return Err(OmcRegistryError::UnsupportedRequirement(format!(
+            "cyclic dependency group include `{group}`"
+        )));
+    }
+
+    let Some(items) = dependency_groups.get(group) else {
+        return Err(OmcRegistryError::UnsupportedRequirement(format!(
+            "unknown dependency group `{group}`"
+        )));
+    };
+
+    for item in items {
+        match item {
+            PyProjectDependencyGroupItem::Requirement(requirement) => {
+                if let Some(spec) =
+                    parse_pypi_requirement_with_extras(requirement, &BTreeSet::new())
+                {
+                    specs.push(spec);
+                }
+            }
+            PyProjectDependencyGroupItem::Include { include_group } => {
+                let include_group = normalize_pypi_extra(include_group);
+                collect_pyproject_dependency_group(
+                    &include_group,
+                    dependency_groups,
+                    stack,
+                    specs,
+                )?;
+            }
+        }
+    }
+
+    stack.remove(group);
+    Ok(())
 }
 
 fn read_poetry_dependencies(
@@ -6096,6 +6173,8 @@ struct PnpmResolution {
 #[derive(Debug, Deserialize)]
 struct PyProjectToml {
     project: Option<PyProjectProject>,
+    #[serde(default, rename = "dependency-groups")]
+    dependency_groups: BTreeMap<String, Vec<PyProjectDependencyGroupItem>>,
     tool: Option<PyProjectTool>,
 }
 
@@ -6105,6 +6184,16 @@ struct PyProjectProject {
     dependencies: Vec<String>,
     #[serde(default, rename = "optional-dependencies")]
     optional_dependencies: BTreeMap<String, Vec<String>>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum PyProjectDependencyGroupItem {
+    Requirement(String),
+    Include {
+        #[serde(rename = "include-group")]
+        include_group: String,
+    },
 }
 
 #[derive(Debug, Deserialize)]
@@ -8062,17 +8151,37 @@ wheels = [
                 "urllib3<3; python_version >= '3.0'"
             ]
             docs = ["markdown==3.6"]
+
+            [dependency-groups]
+            typing = ["typing-extensions==4.12.2"]
+            test = ["pytest==8.2.0", { include-group = "typing" }]
+            dev = ["ruff==0.5.0", { include-group = "test" }]
             "#,
         )
         .unwrap();
 
-        let base = read_pyproject_requirements(&pyproject, &BTreeSet::new(), true).unwrap();
+        let base = read_pyproject_requirements(&pyproject, &BTreeSet::new(), false).unwrap();
         assert!(base
             .specs
             .iter()
             .any(|spec| spec.name == "idna" && spec.version.as_deref() == Some("==3.7")));
         assert!(!base.specs.iter().any(|spec| spec.name == "colorama"));
         assert_eq!(base.specs.len(), 1);
+
+        let default_dev = read_pyproject_requirements(&pyproject, &BTreeSet::new(), true).unwrap();
+        assert!(default_dev
+            .specs
+            .iter()
+            .any(|spec| spec.name == "ruff" && spec.version.as_deref() == Some("==0.5.0")));
+        assert!(default_dev
+            .specs
+            .iter()
+            .any(|spec| spec.name == "pytest" && spec.version.as_deref() == Some("==8.2.0")));
+        assert!(default_dev
+            .specs
+            .iter()
+            .any(|spec| spec.name == "typing-extensions"
+                && spec.version.as_deref() == Some("==4.12.2")));
 
         let dev =
             read_pyproject_requirements(&pyproject, &BTreeSet::from(["dev".to_owned()]), true)
@@ -8087,7 +8196,29 @@ wheels = [
             .specs
             .iter()
             .any(|spec| spec.name == "urllib3" && spec.version.as_deref() == Some("<3")));
+        assert!(dev
+            .specs
+            .iter()
+            .any(|spec| spec.name == "ruff" && spec.version.as_deref() == Some("==0.5.0")));
         assert!(!dev.specs.iter().any(|spec| spec.name == "markdown"));
+    }
+
+    #[test]
+    fn rejects_cyclic_pyproject_dependency_groups() {
+        let dir = tempfile::tempdir().unwrap();
+        let pyproject = dir.path().join("pyproject.toml");
+        fs::write(
+            &pyproject,
+            r#"
+            [dependency-groups]
+            dev = [{ include-group = "test" }]
+            test = [{ include-group = "dev" }]
+            "#,
+        )
+        .unwrap();
+
+        let error = read_pyproject_requirements(&pyproject, &BTreeSet::new(), true).unwrap_err();
+        assert!(error.to_string().contains("cyclic dependency group"));
     }
 
     #[test]
