@@ -197,6 +197,7 @@ cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip install -r req
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip help install
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip completion --bash
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip install --dry-run --report install-report.json requests==2.32.3
+cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip install --dry-run -e ../local-package
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip install requests==2.32.3 --report install-report.json --allow-all-host
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip install requests==2.32.3 --allow-all-host
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip install -e ../local-package
@@ -550,8 +551,9 @@ Supported now:
   before the subcommand; `pip uninstall -r requirements.txt` removes named
   requirements from the OMC manifest and reinstalls the remaining graph; common
   `pip install --report path` JSON reports and registry/archive
-  `pip install --dry-run` resolution without writing the current OMC manifest,
-  lockfile, or site-packages; read-only `pip freeze` / `pip list` scope flags
+  `pip install --dry-run` resolution, including local editable paths and VCS
+  requirements, without writing the current OMC manifest, lockfile, or
+  site-packages; read-only `pip freeze` / `pip list` scope flags
   such as `--all`, `--local`,
   `--user`, `--path`, `--exclude`, and `--exclude-editable` are accepted;
   direct `pip install -e PATH` and `pip install ./path` local directory

@@ -3570,12 +3570,6 @@ fn run_pip_install_dry_run(
         allow_all_host,
     } = action;
 
-    if !local_paths.is_empty() || !vcs_requirements.is_empty() {
-        return Err(OmcRegistryError::UnsupportedSpec(
-            "pip install --dry-run currently supports registry requirements and direct wheel/sdist archives; editable, local directory, and VCS requirements need a real OMC install".to_owned(),
-        ));
-    }
-
     let dry_run_project = TempOmcProject::new("pip-dry-run", project_dir)?;
     let mut options = LinkOptions::new(dry_run_project.path());
     options.save_manifest_dependency = false;
@@ -3592,6 +3586,9 @@ fn run_pip_install_dry_run(
     options.pypi_include_dependencies = !no_deps;
     options.pypi_binary_all = binary_all;
     options.pypi_binary_packages = binary_packages;
+    options.python_local_requirements =
+        absolutize_python_local_requirements(project_dir, local_paths);
+    options.python_vcs_requirements = vcs_requirements;
 
     let mut resolved_specs = parse_package_specs(&specs, Some(Ecosystem::Pypi))?;
     resolved_specs.extend(parse_pip_archive_references(
@@ -3601,17 +3598,48 @@ fn run_pip_install_dry_run(
     )?);
     if !requirements.is_empty() {
         let requirements = read_requirements_files(&absolutize_paths(project_dir, requirements))?;
-        apply_pypi_download_requirements(&mut options, &mut resolved_specs, requirements)?;
+        apply_pypi_install_requirements(&mut options, &mut resolved_specs, requirements);
     }
     if !constraints.is_empty() {
         let constraints = read_constraint_files(&absolutize_paths(project_dir, constraints))?;
-        apply_pypi_download_requirements(&mut options, &mut resolved_specs, constraints)?;
+        apply_pypi_install_requirements(&mut options, &mut resolved_specs, constraints);
     }
-    if resolved_specs.is_empty() {
+    let local_path_count =
+        options.python_local_paths.len() + options.python_local_requirements.len();
+    let vcs_count = options.python_vcs_requirements.len();
+    if resolved_specs.is_empty() && local_path_count == 0 && vcs_count == 0 {
         return Err(OmcRegistryError::UnsupportedSpec(
-            "pip install --dry-run needs at least one package, archive, or requirement file"
+            "pip install --dry-run needs at least one package, archive, local path, VCS requirement, or requirement file"
                 .to_owned(),
         ));
+    }
+
+    if local_path_count > 0 || vcs_count > 0 {
+        let mut manifest_options = options.clone();
+        manifest_options.save_manifest_dependency = true;
+        let mut reports = Vec::new();
+        for spec in &resolved_specs {
+            reports.extend(add_package_graph(spec, &manifest_options)?);
+        }
+        print_link_reports(&reports);
+
+        let mut install = install_project(&options)?;
+        rewrite_pip_dry_run_install_paths(project_dir, target.as_deref(), &mut install);
+        println!();
+        println!(
+            "dry-run: would install pypi={} local_paths={} vcs={} python_site_packages={}",
+            install.pypi_packages,
+            local_path_count,
+            vcs_count,
+            install.python_site_packages.display()
+        );
+        write_pip_install_report_from(
+            dry_run_project.path(),
+            project_dir,
+            report.as_deref(),
+            &install,
+        )?;
+        return Ok(ExitCode::SUCCESS);
     }
 
     let mut reports = Vec::new();
@@ -3655,6 +3683,24 @@ fn run_pip_install_dry_run(
         &install,
     )?;
     Ok(ExitCode::SUCCESS)
+}
+
+fn rewrite_pip_dry_run_install_paths(
+    project_dir: &Path,
+    target: Option<&Path>,
+    install: &mut InstallReport,
+) {
+    install.node_modules = project_dir.join("node_modules");
+    install.npm_bin_dir = install.node_modules.join(".bin");
+    install.python_site_packages = target
+        .map(|path| absolutize_path(project_dir, path.to_path_buf()))
+        .unwrap_or_else(|| {
+            project_dir
+                .join(".omc")
+                .join("python")
+                .join("site-packages")
+        });
+    install.python_bin_dir = install.python_site_packages.join("bin");
 }
 
 fn print_npm_path(project_dir: &Path, kind: NpmPathKind) -> Result<(), OmcRegistryError> {
@@ -4321,7 +4367,7 @@ fn pip_help_text(topic: Option<&str>) -> String {
             "pip install [<requirement>...]",
             &[
                 "Resolve, verify, lock, and install PyPI packages with OMC.",
-                "Supports requirements/constraints, indexes, find-links, no-index, hashes, no-deps, install reports, registry/archive dry-runs, binary policy, target dirs, local archives, local directories, editable paths, and editable VCS requirements.",
+                "Supports requirements/constraints, indexes, find-links, no-index, hashes, no-deps, install reports, dry-runs, binary policy, target dirs, local archives, local directories, editable paths, and editable VCS requirements.",
             ],
         ),
         Some("download") => pip_command_help(
@@ -7680,6 +7726,43 @@ fn apply_pypi_download_requirements(
         options.pypi_include_dependencies = false;
     }
     Ok(())
+}
+
+fn apply_pypi_install_requirements(
+    options: &mut LinkOptions,
+    specs: &mut Vec<PackageSpec>,
+    requirements: ProjectRequirements,
+) {
+    specs.extend(requirements.specs);
+    options.constraints.extend(requirements.constraints);
+    options.hashes.extend(requirements.hashes);
+    if requirements.pypi_binary_all.is_some() {
+        options.pypi_binary_all = requirements.pypi_binary_all;
+    }
+    options
+        .pypi_binary_packages
+        .extend(requirements.pypi_binary_packages);
+    if requirements.pypi_index_url.is_some() {
+        options.pypi_index_url = requirements.pypi_index_url;
+    }
+    options
+        .pypi_extra_index_urls
+        .extend(requirements.pypi_extra_index_urls);
+    options.pypi_find_links.extend(requirements.pypi_find_links);
+    options.pypi_no_index |= requirements.pypi_no_index;
+    options.pypi_require_hashes |= requirements.pypi_require_hashes;
+    if requirements.pypi_no_deps {
+        options.pypi_include_dependencies = false;
+    }
+    options
+        .python_local_paths
+        .extend(requirements.python_local_paths);
+    options
+        .python_local_requirements
+        .extend(requirements.python_local_requirements);
+    options
+        .python_vcs_requirements
+        .extend(requirements.python_vcs_requirements);
 }
 
 fn copy_downloaded_pypi_archives(
@@ -23648,6 +23731,53 @@ verdict = "accepted"
                 allow_all_host: false,
             }))
         );
+    }
+
+    #[test]
+    fn pip_install_dry_run_accepts_local_paths_without_project_writes() {
+        let project = test_dir("pip-dry-run-local-project");
+        let local = test_dir("pip-dry-run-local-package");
+        fs::create_dir_all(local.join("src").join("localpkg")).unwrap();
+        fs::write(local.join("src").join("localpkg").join("__init__.py"), "").unwrap();
+        fs::write(
+            local.join("pyproject.toml"),
+            r#"
+[project]
+name = "localpkg"
+version = "0.1.0"
+"#,
+        )
+        .unwrap();
+
+        run_pip_install_dry_run(
+            &project,
+            PipInstallAction {
+                specs: Vec::new(),
+                requirements: Vec::new(),
+                constraints: Vec::new(),
+                report: None,
+                dry_run: true,
+                archive_references: Vec::new(),
+                local_paths: vec![PythonLocalRequirement::new(local, BTreeSet::new())],
+                index_url: None,
+                extra_index_urls: Vec::new(),
+                find_links: Vec::new(),
+                no_index: false,
+                binary_all: None,
+                binary_packages: BTreeMap::new(),
+                require_hashes: false,
+                no_deps: false,
+                target: None,
+                vcs_requirements: Vec::new(),
+                allow: Vec::new(),
+                allow_all_host: false,
+            },
+        )
+        .unwrap();
+
+        assert!(!project.join("omc.toml").exists());
+        assert!(!project.join("omc.lock").exists());
+        assert!(!project.join(".omc").exists());
     }
 
     #[test]
