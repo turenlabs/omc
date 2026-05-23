@@ -1,0 +1,15 @@
+[workspace]
+members = [
+    "crates/omc-cap",
+    "crates/omc-demo",
+    "crates/omc-format",
+    "crates/omc-taint",
+    "crates/omc-verify",
+    "crates/omc-vm",
+]
+resolver = "2"
+
+[workspace.package]
+edition = "2021"
+license = "Apache-2.0"
+version = "0.1.0"

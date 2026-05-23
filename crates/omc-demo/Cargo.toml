@@ -1,0 +1,10 @@
+[package]
+name = "omc-demo"
+description = "Runnable OMC verifier demo"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[dependencies]
+omc-cap = { path = "../omc-cap" }
+omc-verify = { path = "../omc-verify" }

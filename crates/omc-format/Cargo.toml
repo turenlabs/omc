@@ -1,0 +1,8 @@
+[package]
+name = "omc-format"
+description = "OSS Microcode bytecode data model"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[dependencies]

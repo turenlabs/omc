@@ -1,0 +1,11 @@
+[package]
+name = "omc-verify"
+description = "Verifier for OSS Microcode modules"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[dependencies]
+omc-cap = { path = "../omc-cap" }
+omc-format = { path = "../omc-format" }
+omc-taint = { path = "../omc-taint" }

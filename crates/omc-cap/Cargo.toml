@@ -1,0 +1,10 @@
+[package]
+name = "omc-cap"
+description = "Capability broker and policy model for OSS Microcode"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[dependencies]
+omc-format = { path = "../omc-format" }
+omc-taint = { path = "../omc-taint" }

@@ -1,0 +1,8 @@
+[package]
+name = "omc-taint"
+description = "Data-flow labels for OSS Microcode values"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[dependencies]

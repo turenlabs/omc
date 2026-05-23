@@ -1,0 +1,11 @@
+[package]
+name = "omc-vm"
+description = "Interpreter kernel for OSS Microcode"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[dependencies]
+omc-cap = { path = "../omc-cap" }
+omc-format = { path = "../omc-format" }
+omc-taint = { path = "../omc-taint" }
