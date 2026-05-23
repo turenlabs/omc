@@ -121,6 +121,14 @@ fn run_function(
                 let value = pop(&mut stack)?;
                 stack.push(slice(value, start, end)?);
             }
+            Op::JsonParse => {
+                let value = pop(&mut stack)?;
+                stack.push(json_parse(value)?);
+            }
+            Op::JsonStringify => {
+                let value = pop(&mut stack)?;
+                stack.push(json_stringify(value)?);
+            }
             Op::CallLocal(id) => {
                 let callee = cell
                     .module
@@ -287,6 +295,64 @@ fn slice_index(index: i64, len: usize) -> usize {
     index.clamp(0, len) as usize
 }
 
+fn json_parse(value: Labeled<Value>) -> Result<Labeled<Value>, Trap> {
+    let Value::String(source) = value.value else {
+        return Err(Trap::type_error("json_parse expected string"));
+    };
+    let parsed = serde_json::from_str::<serde_json::Value>(&source)
+        .map_err(|error| Trap::type_error(format!("json_parse failed: {error}")))?;
+    Ok(Labeled::new(json_to_omc_value(parsed)?, value.label))
+}
+
+fn json_stringify(value: Labeled<Value>) -> Result<Labeled<Value>, Trap> {
+    let label = value.label;
+    let json = omc_value_to_json(value.value);
+    let serialized = serde_json::to_string(&json)
+        .map_err(|error| Trap::type_error(format!("json_stringify failed: {error}")))?;
+    Ok(Labeled::new(Value::String(serialized), label))
+}
+
+fn json_to_omc_value(value: serde_json::Value) -> Result<Value, Trap> {
+    Ok(match value {
+        serde_json::Value::Null => Value::Unit,
+        serde_json::Value::Bool(value) => Value::Bool(value),
+        serde_json::Value::Number(value) => Value::Int(value.as_i64().ok_or_else(|| {
+            Trap::type_error(format!("json_parse unsupported non-integer number {value}"))
+        })?),
+        serde_json::Value::String(value) => Value::String(value),
+        serde_json::Value::Array(values) => Value::Array(
+            values
+                .into_iter()
+                .map(json_to_omc_value)
+                .collect::<Result<Vec<_>, _>>()?,
+        ),
+        serde_json::Value::Object(values) => Value::Map(
+            values
+                .into_iter()
+                .map(|(key, value)| json_to_omc_value(value).map(|value| (key, value)))
+                .collect::<Result<Vec<_>, _>>()?,
+        ),
+    })
+}
+
+fn omc_value_to_json(value: Value) -> serde_json::Value {
+    match value {
+        Value::Unit => serde_json::Value::Null,
+        Value::Bool(value) => serde_json::Value::Bool(value),
+        Value::Int(value) => serde_json::Value::Number(value.into()),
+        Value::String(value) => serde_json::Value::String(value),
+        Value::Array(values) => {
+            serde_json::Value::Array(values.into_iter().map(omc_value_to_json).collect())
+        }
+        Value::Map(values) => serde_json::Value::Object(
+            values
+                .into_iter()
+                .map(|(key, value)| (key, omc_value_to_json(value)))
+                .collect(),
+        ),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use omc_cap::{Capability, MemoryBroker, Policy};
@@ -393,6 +459,77 @@ mod tests {
             Value::Array(vec![Value::Int(2), Value::Int(3)])
         );
         assert_eq!(result.label, Label::Public);
+    }
+
+    #[test]
+    fn json_parse_and_stringify_preserve_labels() {
+        let parse_module = Module {
+            id: "test:json-parse".to_owned(),
+            package: "json-parse".to_owned(),
+            version: "0.0.0".to_owned(),
+            declared_behavior: BehaviorType::Pure,
+            functions: vec![Function::new(
+                0,
+                "parse",
+                1,
+                vec![Op::LoadArg(0), Op::JsonParse, Op::Return],
+            )],
+        };
+        let mut cell = Cell::new(1, parse_module, Policy::pure());
+        let mut broker = MemoryBroker::new();
+        let result = run_cell(
+            &mut cell,
+            &mut broker,
+            vec![Labeled::new(
+                Value::String(r#"[1,"two",null,true]"#.to_owned()),
+                Label::File("config.json".to_owned()),
+            )],
+        )
+        .unwrap();
+        assert_eq!(
+            result.value,
+            Value::Array(vec![
+                Value::Int(1),
+                Value::String("two".to_owned()),
+                Value::Unit,
+                Value::Bool(true)
+            ])
+        );
+        assert_eq!(result.label, Label::File("config.json".to_owned()));
+
+        let stringify_module = Module {
+            id: "test:json-stringify".to_owned(),
+            package: "json-stringify".to_owned(),
+            version: "0.0.0".to_owned(),
+            declared_behavior: BehaviorType::Pure,
+            functions: vec![Function::new(
+                0,
+                "stringify",
+                1,
+                vec![Op::LoadArg(0), Op::JsonStringify, Op::Return],
+            )],
+        };
+        let mut cell = Cell::new(2, stringify_module, Policy::pure());
+        let result = run_cell(
+            &mut cell,
+            &mut broker,
+            vec![Labeled::new(
+                Value::Map(vec![
+                    ("name".to_owned(), Value::String("omc".to_owned())),
+                    ("enabled".to_owned(), Value::Bool(true)),
+                ]),
+                Label::Env("CONFIG_JSON".to_owned()),
+            )],
+        )
+        .unwrap();
+        let Value::String(json) = result.value else {
+            panic!("json_stringify returned non-string value");
+        };
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&json).unwrap(),
+            serde_json::json!({"name": "omc", "enabled": true})
+        );
+        assert_eq!(result.label, Label::Env("CONFIG_JSON".to_owned()));
     }
 
     #[test]

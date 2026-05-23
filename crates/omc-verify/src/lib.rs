@@ -126,7 +126,7 @@ fn verify_function_policy(
             Op::Slice => {
                 pop_ternary(function, index, &mut stack, findings);
             }
-            Op::Len => match stack.pop() {
+            Op::Len | Op::JsonParse | Op::JsonStringify => match stack.pop() {
                 Some(label) => stack.push(label),
                 None => findings.push(VerifyFinding::new(function, index, "stack underflow")),
             },
@@ -374,6 +374,24 @@ mod tests {
             .findings
             .iter()
             .any(|finding| finding.message == "stack underflow"));
+    }
+
+    #[test]
+    fn accepts_json_ops_with_one_stack_operand() {
+        let module = Module {
+            id: "test:json".to_owned(),
+            package: "json".to_owned(),
+            version: "0.0.0".to_owned(),
+            declared_behavior: BehaviorType::Pure,
+            functions: vec![Function::new(
+                0,
+                "json",
+                1,
+                vec![Op::LoadArg(0), Op::JsonParse, Op::JsonStringify, Op::Return],
+            )],
+        };
+
+        verify_module(&module, &Policy::pure()).unwrap();
     }
 
     #[test]

@@ -172,6 +172,8 @@ pub enum Op {
     Eq,
     Len,
     Slice,
+    JsonParse,
+    JsonStringify,
     CallLocal(FunctionId),
     CallImport(ImportId),
     Cap(CapOp),
@@ -274,6 +276,7 @@ mod tests {
                             "cdn-update-service.example",
                         ),
                     }),
+                    Op::JsonStringify,
                     Op::Return,
                 ],
             )],
@@ -284,6 +287,7 @@ mod tests {
         assert!(json.contains("\"declared_behavior\": \"host_capability\""));
         assert!(json.contains("\"op\": \"cap\""));
         assert!(json.contains("\"cap\": \"env_read\""));
+        assert!(json.contains("\"op\": \"json_stringify\""));
 
         let decoded: Module = serde_json::from_str(&json).unwrap();
         assert_eq!(decoded, module);

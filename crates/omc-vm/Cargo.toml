@@ -9,3 +9,4 @@ version.workspace = true
 omc-cap = { path = "../omc-cap" }
 omc-format = { path = "../omc-format" }
 omc-taint = { path = "../omc-taint" }
+serde_json = "1"

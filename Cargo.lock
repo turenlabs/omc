@@ -930,6 +930,7 @@ dependencies = [
  "omc-cap",
  "omc-format",
  "omc-taint",
+ "serde_json",
 ]
 
 [[package]]

@@ -368,7 +368,8 @@ the complete npm/PyPI resolver surface, or build native Python packages.
 Supported now:
 
 - integers, strings, arrays, maps, booleans, and unit values
-- stack bytecode with simple locals and local calls
+- stack bytecode with simple locals, local calls, string/array slicing, and
+  JSON parse/stringify operations
 - explicit capability instructions
 - deny-by-default policy
 - labels for env, file, token, network, and mixed values
