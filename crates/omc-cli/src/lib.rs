@@ -13,21 +13,21 @@ use omc_cap::Capability;
 use omc_registry::{
     add_manifest_npm_local_paths, add_manifest_policy_grants, add_npm_dist_tag, add_package_graph,
     apply_pypi_binary_option, check_pypi_lock, compare_npm_versions, compare_pypi_versions,
-    create_npm_token, init_project, install_locked_packages, install_locked_project,
-    install_project, lock_project, parse_capability_grant, parse_npm_direct_archive_reference,
-    parse_pypi_direct_archive_reference, parse_pypi_vcs_requirement, publish_npm_package,
-    read_constraint_files, read_lockfile, read_manifest, read_npm_config_snapshot,
-    read_npm_package_metadata, read_npm_package_metadata_with_userconfig,
-    read_npm_ping_with_userconfig, read_npm_search, read_npm_token_list, read_npm_whoami,
-    read_npm_workspace_packages, read_package_scripts, read_pip_config_snapshot,
-    read_pypi_available_versions, read_requirements_files, remove_manifest_dependency,
-    remove_npm_dist_tag, revoke_npm_token, upload_pypi_distribution, Behavior, Ecosystem,
-    InstallReport, LinkOptions, LockedPackage, LockedPythonVcsDependency, NpmAccessToken,
-    NpmDistTagMutationResult, NpmPingResult, NpmPublishPackage, NpmPublishResult, NpmSearchPackage,
-    NpmTokenCreateOptions, NpmTokenCreateResult, NpmTokenListResult, NpmTokenRevokeResult,
-    NpmWhoamiResult, NpmWorkspacePackage, OmcRegistryError, PackageSpec, ProjectRequirements,
-    PypiBinaryMode, PypiCheckIssue, PypiUploadResult, PythonLocalRequirement, PythonVcsRequirement,
-    Verdict,
+    create_npm_token, deprecate_npm_package, init_project, install_locked_packages,
+    install_locked_project, install_project, lock_project, parse_capability_grant,
+    parse_npm_direct_archive_reference, parse_pypi_direct_archive_reference,
+    parse_pypi_vcs_requirement, publish_npm_package, read_constraint_files, read_lockfile,
+    read_manifest, read_npm_config_snapshot, read_npm_package_metadata,
+    read_npm_package_metadata_with_userconfig, read_npm_ping_with_userconfig, read_npm_search,
+    read_npm_token_list, read_npm_whoami, read_npm_workspace_packages, read_package_scripts,
+    read_pip_config_snapshot, read_pypi_available_versions, read_requirements_files,
+    remove_manifest_dependency, remove_npm_dist_tag, revoke_npm_token, upload_pypi_distribution,
+    Behavior, Ecosystem, InstallReport, LinkOptions, LockedPackage, LockedPythonVcsDependency,
+    NpmAccessToken, NpmDeprecateResult, NpmDistTagMutationResult, NpmPingResult, NpmPublishPackage,
+    NpmPublishResult, NpmSearchPackage, NpmTokenCreateOptions, NpmTokenCreateResult,
+    NpmTokenListResult, NpmTokenRevokeResult, NpmWhoamiResult, NpmWorkspacePackage,
+    OmcRegistryError, PackageSpec, ProjectRequirements, PypiBinaryMode, PypiCheckIssue,
+    PypiUploadResult, PythonLocalRequirement, PythonVcsRequirement, Verdict,
 };
 use sha2::{Digest, Sha256, Sha384, Sha512};
 
@@ -342,6 +342,9 @@ enum NpmCompatAction {
     Publish {
         action: NpmPublishAction,
     },
+    Deprecate {
+        action: NpmDeprecateAction,
+    },
     Search {
         action: NpmSearchAction,
     },
@@ -561,6 +564,18 @@ struct NpmPublishAction {
     workspaces: Vec<String>,
     all_workspaces: bool,
     include_workspace_root: bool,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct NpmDeprecateAction {
+    spec: String,
+    message: String,
+    dry_run: bool,
+    json: bool,
+    npm_registry: Option<String>,
+    userconfig: Option<PathBuf>,
+    otp: Option<String>,
+    undeprecate: bool,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -2027,6 +2042,7 @@ fn run_npm_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
         NpmCompatAction::Pkg { action } => print_npm_pkg(project_dir, action)?,
         NpmCompatAction::Pack { action } => print_npm_pack(project_dir, action)?,
         NpmCompatAction::Publish { action } => print_npm_publish(project_dir, action)?,
+        NpmCompatAction::Deprecate { action } => print_npm_deprecate(project_dir, action)?,
         NpmCompatAction::Search { action } => print_npm_search(project_dir, action)?,
         NpmCompatAction::Ping {
             json,
@@ -2721,6 +2737,14 @@ fn npm_help_text(topic: Option<&str>) -> String {
                 "Remote package specs, git URLs, and provenance bundles are not implemented yet.",
             ],
         ),
+        Some("deprecate") => npm_command_help(
+            "npm deprecate <package-spec> <message>",
+            &[
+                "Set deprecation warnings on all published versions matching a package semver range.",
+                "Supports --dry-run, --json, --registry, --userconfig, and --otp.",
+                "Use npm undeprecate <package-spec> to clear matching deprecation warnings.",
+            ],
+        ),
         Some("search") => npm_command_help(
             "npm search <terms...>",
             &["Search the configured npm registry. Aliases: s, se, find. Supports --json, --parseable, --searchlimit."],
@@ -2827,7 +2851,7 @@ fn npm_general_help_text() -> String {
         "npm <command>",
         &[
             "OMC npm compatibility runs supported npm workflows through OMC's verifier, lockfile, cache, and project-local runtime paths.",
-            "Supported commands: install, install-test, ci, install-ci-test, remove, run, test, start, stop, restart, exec, list, explain, audit, outdated, fund, prune, dedupe, rebuild, cache, pkg, version, pack, publish, search, ping, whoami, login, adduser, logout, token, dist-tag, sbom, view, docs, repo, bugs, home, config, init, bin, root, prefix.",
+            "Supported commands: install, install-test, ci, install-ci-test, remove, run, test, start, stop, restart, exec, list, explain, audit, outdated, fund, prune, dedupe, rebuild, cache, pkg, version, pack, publish, deprecate, undeprecate, search, ping, whoami, login, adduser, logout, token, dist-tag, sbom, view, docs, repo, bugs, home, config, init, bin, root, prefix.",
             "Use `npm help <command>` for focused OMC compatibility notes.",
         ],
     )
@@ -2864,6 +2888,7 @@ fn npm_help_topic(topic: &str) -> Option<&'static str> {
         "rebuild" | "rb" => Some("rebuild"),
         "pack" => Some("pack"),
         "publish" => Some("publish"),
+        "deprecate" | "undeprecate" => Some("deprecate"),
         "search" | "s" | "se" | "find" => Some("search"),
         "ping" => Some("ping"),
         "whoami" => Some("whoami"),
@@ -6052,6 +6077,60 @@ fn print_npm_publish(project_dir: &Path, action: NpmPublishAction) -> Result<(),
     Ok(())
 }
 
+fn print_npm_deprecate(
+    project_dir: &Path,
+    action: NpmDeprecateAction,
+) -> Result<(), OmcRegistryError> {
+    let spec = PackageSpec::parse(&format!("npm:{}", action.spec))?;
+    let result = deprecate_npm_package(
+        project_dir,
+        &spec,
+        &action.message,
+        action.dry_run,
+        action.npm_registry.as_deref(),
+        action.userconfig.as_deref(),
+        action.otp.as_deref(),
+    )?;
+    if action.json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&npm_deprecate_json(&result))?
+        );
+    } else if result.versions.is_empty() {
+        println!(
+            "No versions matched {}@{}",
+            result.package, result.requirement
+        );
+    } else {
+        let action_name = if action.undeprecate {
+            "Undeprecated"
+        } else {
+            "Deprecated"
+        };
+        let dry_run = if result.dry_run { " (dry-run)" } else { "" };
+        println!(
+            "{action_name} {}@{}: {}{dry_run}",
+            result.package,
+            result.requirement,
+            result.versions.join(", ")
+        );
+    }
+    Ok(())
+}
+
+fn npm_deprecate_json(result: &NpmDeprecateResult) -> serde_json::Value {
+    serde_json::json!({
+        "registry": result.registry,
+        "package": result.package,
+        "requirement": result.requirement,
+        "message": result.message,
+        "versions": result.versions,
+        "dryRun": result.dry_run,
+        "status": result.status,
+        "response": result.response,
+    })
+}
+
 fn npm_publish_sources(
     project_dir: &Path,
     action: &NpmPublishAction,
@@ -8434,6 +8513,8 @@ fn parse_npm_compat_action(args: &[String]) -> Result<NpmCompatAction, OmcRegist
         "pkg" => parse_npm_pkg_args(&args[1..]),
         "pack" => parse_npm_pack_args(&args[1..]),
         "publish" => parse_npm_publish_args(&args[1..]),
+        "deprecate" => parse_npm_deprecate_args(false, &args[1..]),
+        "undeprecate" => parse_npm_deprecate_args(true, &args[1..]),
         "search" | "s" | "se" | "find" => parse_npm_search_args(&args[1..]),
         "ping" => parse_npm_ping_args(&args[1..]),
         "whoami" => parse_npm_whoami_args(&args[1..]),
@@ -8586,6 +8667,8 @@ fn npm_global_arg_supported_by_command(command: &str, arg: &str) -> bool {
                 | "outdated"
                 | "pack"
                 | "publish"
+                | "deprecate"
+                | "undeprecate"
                 | "search"
                 | "s"
                 | "se"
@@ -8612,7 +8695,15 @@ fn npm_global_arg_supported_by_command(command: &str, arg: &str) -> bool {
     if matches!(arg, "--otp") || arg.starts_with("--otp=") {
         return matches!(
             command,
-            "login" | "adduser" | "add-user" | "publish" | "token" | "dist-tag" | "dist-tags"
+            "login"
+                | "adduser"
+                | "add-user"
+                | "publish"
+                | "deprecate"
+                | "undeprecate"
+                | "token"
+                | "dist-tag"
+                | "dist-tags"
         );
     }
     if matches!(
@@ -8677,7 +8768,7 @@ fn npm_global_arg_supported_by_command(command: &str, arg: &str) -> bool {
         || arg.starts_with("--dry-run=")
         || arg.starts_with("--provenance=")
     {
-        return matches!(command, "publish");
+        return matches!(command, "publish" | "deprecate" | "undeprecate");
     }
     if matches!(arg, "--sbom-format" | "--sbom-type")
         || arg.starts_with("--sbom-format=")
@@ -8700,6 +8791,8 @@ fn npm_global_arg_supported_by_command(command: &str, arg: &str) -> bool {
                 | "adduser"
                 | "add-user"
                 | "publish"
+                | "deprecate"
+                | "undeprecate"
                 | "logout"
                 | "token"
                 | "dist-tag"
@@ -8761,6 +8854,8 @@ fn npm_global_arg_supported_by_command(command: &str, arg: &str) -> bool {
                 | "pkg"
                 | "pack"
                 | "publish"
+                | "deprecate"
+                | "undeprecate"
                 | "search"
                 | "s"
                 | "se"
@@ -9932,6 +10027,110 @@ fn parse_npm_publish_access(value: &str) -> Result<String, OmcRegistryError> {
 }
 
 fn npm_publish_ignored_equals_flag(arg: &str) -> bool {
+    ["--loglevel=", "--cache="]
+        .iter()
+        .any(|prefix| arg.starts_with(prefix))
+}
+
+fn parse_npm_deprecate_args(
+    undeprecate: bool,
+    args: &[String],
+) -> Result<NpmCompatAction, OmcRegistryError> {
+    let mut dry_run = false;
+    let mut json = false;
+    let mut npm_registry = None;
+    let mut userconfig = None;
+    let mut otp = None;
+    let mut positionals = Vec::new();
+    let mut index = 0;
+    while index < args.len() {
+        let arg = &args[index];
+        if arg == "--json" || arg == "--json=true" {
+            json = true;
+        } else if arg == "--json=false" {
+            json = false;
+        } else if matches!(arg.as_str(), "--dry-run" | "--dry-run=true") {
+            dry_run = true;
+        } else if arg == "--dry-run=false" {
+            dry_run = false;
+        } else if arg == "--registry" {
+            index += 1;
+            npm_registry = Some(npm_publish_flag_value(args, index, arg)?);
+        } else if let Some(value) = arg.strip_prefix("--registry=") {
+            npm_registry = Some(value.to_owned());
+        } else if arg == "--userconfig" {
+            index += 1;
+            userconfig = Some(PathBuf::from(npm_publish_flag_value(args, index, arg)?));
+        } else if let Some(value) = arg.strip_prefix("--userconfig=") {
+            userconfig = Some(PathBuf::from(value));
+        } else if arg == "--otp" {
+            index += 1;
+            otp = Some(npm_publish_flag_value(args, index, arg)?);
+        } else if let Some(value) = arg.strip_prefix("--otp=") {
+            otp = Some(value.to_owned());
+        } else if matches!(
+            arg.as_str(),
+            "--silent" | "-s" | "--ignore-scripts" | "--foreground-scripts"
+        ) {
+        } else if matches!(arg.as_str(), "--loglevel" | "--cache") {
+            index += 1;
+            let _ = npm_publish_flag_value(args, index, arg)?;
+        } else if npm_deprecate_ignored_equals_flag(arg) {
+        } else if arg.starts_with('-') {
+            let command = if undeprecate {
+                "npm undeprecate"
+            } else {
+                "npm deprecate"
+            };
+            return Err(unsupported_compat_arg(command, arg));
+        } else {
+            positionals.push(arg.clone());
+        }
+        index += 1;
+    }
+
+    let spec = positionals.first().cloned().ok_or_else(|| {
+        OmcRegistryError::UnsupportedSpec(format!(
+            "{} needs a package spec",
+            if undeprecate {
+                "npm undeprecate"
+            } else {
+                "npm deprecate"
+            }
+        ))
+    })?;
+    let message = if undeprecate {
+        if positionals.len() > 1 {
+            return Err(unsupported_compat_arg("npm undeprecate", &positionals[1]));
+        }
+        String::new()
+    } else {
+        let Some(message) = positionals.get(1).cloned() else {
+            return Err(OmcRegistryError::UnsupportedSpec(
+                "npm deprecate needs a deprecation message".to_owned(),
+            ));
+        };
+        if positionals.len() > 2 {
+            return Err(unsupported_compat_arg("npm deprecate", &positionals[2]));
+        }
+        message
+    };
+
+    Ok(NpmCompatAction::Deprecate {
+        action: NpmDeprecateAction {
+            spec,
+            message,
+            dry_run,
+            json,
+            npm_registry,
+            userconfig,
+            otp,
+            undeprecate,
+        },
+    })
+}
+
+fn npm_deprecate_ignored_equals_flag(arg: &str) -> bool {
     ["--loglevel=", "--cache="]
         .iter()
         .any(|prefix| arg.starts_with(prefix))
@@ -14370,6 +14569,52 @@ mod tests {
                     include_workspace_root: false,
                 },
             }
+        );
+        assert_eq!(
+            parse_npm_compat_action(&args(&[
+                "--json",
+                "--registry",
+                "https://registry.example.invalid/npm",
+                "--userconfig=ci.npmrc",
+                "--otp",
+                "123456",
+                "deprecate",
+                "demo-pkg@1.x",
+                "old line",
+                "--dry-run",
+            ]))
+            .unwrap(),
+            NpmCompatAction::Deprecate {
+                action: NpmDeprecateAction {
+                    spec: "demo-pkg@1.x".to_owned(),
+                    message: "old line".to_owned(),
+                    dry_run: true,
+                    json: true,
+                    npm_registry: Some("https://registry.example.invalid/npm".to_owned()),
+                    userconfig: Some(PathBuf::from("ci.npmrc")),
+                    otp: Some("123456".to_owned()),
+                    undeprecate: false,
+                },
+            }
+        );
+        assert_eq!(
+            parse_npm_compat_action(&args(&["undeprecate", "demo-pkg@1.0.0"])).unwrap(),
+            NpmCompatAction::Deprecate {
+                action: NpmDeprecateAction {
+                    spec: "demo-pkg@1.0.0".to_owned(),
+                    message: String::new(),
+                    dry_run: false,
+                    json: false,
+                    npm_registry: None,
+                    userconfig: None,
+                    otp: None,
+                    undeprecate: true,
+                },
+            }
+        );
+        assert!(parse_npm_compat_action(&args(&["deprecate", "demo-pkg@1.0.0"])).is_err());
+        assert!(
+            parse_npm_compat_action(&args(&["undeprecate", "demo-pkg@1.0.0", "extra"])).is_err()
         );
         assert_eq!(
             parse_npm_compat_action(&args(&[

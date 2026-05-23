@@ -7464,6 +7464,19 @@ pub struct NpmDistTagMutationResult {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct NpmDeprecateResult {
+    pub registry: String,
+    pub package: String,
+    pub requirement: String,
+    pub message: String,
+    pub versions: Vec<String>,
+    pub dry_run: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<u16>,
+    pub response: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct NpmPublishPackage {
     pub name: String,
     pub version: String,
@@ -8360,6 +8373,177 @@ fn npm_dist_tag_url(registry: &str, package: &str, tag: &str) -> String {
         urlencoding::encode(package),
         urlencoding::encode(tag)
     )
+}
+
+pub fn deprecate_npm_package(
+    project_dir: &Path,
+    spec: &PackageSpec,
+    message: &str,
+    dry_run: bool,
+    registry_override: Option<&str>,
+    userconfig_override: Option<&Path>,
+    otp: Option<&str>,
+) -> Result<NpmDeprecateResult> {
+    if spec.ecosystem != Ecosystem::Npm || spec.direct_url.is_some() {
+        return Err(OmcRegistryError::UnsupportedSpec(spec.requested()));
+    }
+    let (package, requirement) = npm_registry_name_and_requirement(spec)?;
+    let requirement = requirement.unwrap_or_else(|| "*".to_owned());
+    if !npm_deprecate_valid_requirement(&requirement) {
+        return Err(OmcRegistryError::UnsupportedSpec(format!(
+            "npm deprecate got invalid version range `{requirement}`"
+        )));
+    }
+
+    let client = Client::new();
+    let npm_config =
+        read_npm_config_with_overrides(project_dir, registry_override, userconfig_override)?;
+    let registry = ensure_trailing_slash(npm_config.registry_for(&package));
+    let encoded = urlencoding::encode(&package);
+    let package_url = npm_registry_package_url(&registry, &encoded);
+    let read_url = format!("{package_url}?write=true");
+    let mut packument = npm_get(&client, &read_url, &npm_config)
+        .send()?
+        .error_for_status()?
+        .json::<serde_json::Value>()?;
+
+    let versions = npm_deprecate_matching_versions(&packument, &requirement)?;
+    if !versions.is_empty() {
+        let versions_map = packument
+            .get_mut("versions")
+            .and_then(serde_json::Value::as_object_mut)
+            .ok_or_else(|| {
+                OmcRegistryError::UnsupportedSpec(format!(
+                    "npm registry response for `{package}` did not include versions"
+                ))
+            })?;
+        for version in &versions {
+            let version_doc = versions_map
+                .get_mut(version)
+                .and_then(serde_json::Value::as_object_mut)
+                .ok_or_else(|| {
+                    OmcRegistryError::UnsupportedSpec(format!(
+                        "npm registry response for `{package}` had invalid version `{version}`"
+                    ))
+                })?;
+            version_doc.insert(
+                "deprecated".to_owned(),
+                serde_json::Value::String(message.to_owned()),
+            );
+        }
+    }
+
+    if dry_run || versions.is_empty() {
+        return Ok(NpmDeprecateResult {
+            registry,
+            package,
+            requirement,
+            message: message.to_owned(),
+            versions,
+            dry_run,
+            status: None,
+            response: serde_json::json!({ "dryRun": dry_run }),
+        });
+    }
+
+    if npm_config.auth_token_for_url(&package_url).is_none() {
+        return Err(OmcRegistryError::UnsupportedSpec(
+            "npm deprecate needs authentication; run npm login or configure a registry _authToken"
+                .to_owned(),
+        ));
+    }
+    let mut request = npm_put(&client, &package_url, &npm_config).json(&packument);
+    if let Some(otp) = otp.map(str::trim).filter(|otp| !otp.is_empty()) {
+        request = request.header("npm-otp", otp);
+    }
+    let response = request.send()?;
+    response.error_for_status_ref()?;
+    let status = response.status().as_u16();
+    let response = npm_optional_json_response(response)?;
+    Ok(NpmDeprecateResult {
+        registry,
+        package,
+        requirement,
+        message: message.to_owned(),
+        versions,
+        dry_run,
+        status: Some(status),
+        response,
+    })
+}
+
+fn npm_deprecate_valid_requirement(requirement: &str) -> bool {
+    let requirement = requirement.trim();
+    if requirement.is_empty() {
+        return false;
+    }
+    if requirement == "*" {
+        return true;
+    }
+    if Version::parse(requirement).is_ok() {
+        return true;
+    }
+    let parts = requirement
+        .replace(',', " ")
+        .split_whitespace()
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    if parts.len() > 1 {
+        return parts
+            .iter()
+            .all(|part| npm_deprecate_valid_requirement(part));
+    }
+    if requirement
+        .strip_prefix('^')
+        .and_then(parse_partial_npm_version)
+        .is_some()
+        || requirement
+            .strip_prefix('~')
+            .and_then(parse_partial_npm_version)
+            .is_some()
+    {
+        return true;
+    }
+    npm_deprecate_comparator_valid(requirement)
+}
+
+fn npm_deprecate_comparator_valid(comparator: &str) -> bool {
+    for op in [">=", "<=", ">", "<", "="] {
+        if let Some(raw) = comparator.strip_prefix(op) {
+            return parse_partial_npm_version(raw).is_some();
+        }
+    }
+    if comparator.eq_ignore_ascii_case("x") {
+        return true;
+    }
+    if let Some(prefix) = comparator
+        .strip_suffix(".x")
+        .or_else(|| comparator.strip_suffix(".*"))
+    {
+        return parse_partial_npm_version(prefix).is_some();
+    }
+    parse_partial_npm_version(comparator).is_some()
+}
+
+fn npm_deprecate_matching_versions(
+    packument: &serde_json::Value,
+    requirement: &str,
+) -> Result<Vec<String>> {
+    let versions = packument
+        .get("versions")
+        .and_then(serde_json::Value::as_object)
+        .ok_or_else(|| {
+            OmcRegistryError::UnsupportedSpec(
+                "npm registry response did not include versions".to_owned(),
+            )
+        })?;
+    let mut matching = versions
+        .keys()
+        .filter(|version| npm_version_satisfies(version, requirement))
+        .cloned()
+        .collect::<Vec<_>>();
+    matching.sort_by(|left, right| compare_npm_versions(left, right));
+    Ok(matching)
 }
 
 fn npm_optional_json_response(response: reqwest::blocking::Response) -> Result<serde_json::Value> {
@@ -17884,6 +18068,89 @@ wheels = [
         assert_eq!(removed.tag, "beta");
         assert_eq!(removed.status, 204);
         assert_eq!(removed.response, serde_json::Value::Null);
+        handle.join().unwrap();
+    }
+
+    #[test]
+    fn deprecates_npm_versions_with_userconfig_auth_and_otp() {
+        use std::io::Write as _;
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let handle = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let buffer = read_http_request_bytes(&mut stream);
+            let body_start = http_body_start(&buffer).unwrap();
+            let headers = String::from_utf8_lossy(&buffer[..body_start]);
+            assert!(headers.starts_with("GET /demo-pkg?write=true "));
+            assert!(headers
+                .to_ascii_lowercase()
+                .contains("authorization: bearer registry-token"));
+
+            let packument = r#"{
+              "name": "demo-pkg",
+              "versions": {
+                "1.0.0": {"name": "demo-pkg", "version": "1.0.0"},
+                "1.1.0": {"name": "demo-pkg", "version": "1.1.0"},
+                "2.0.0": {"name": "demo-pkg", "version": "2.0.0", "deprecated": "old"}
+              },
+              "dist-tags": {"latest": "2.0.0"}
+            }"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                packument.len(),
+                packument
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+
+            let (mut stream, _) = listener.accept().unwrap();
+            let buffer = read_http_request_bytes(&mut stream);
+            let body_start = http_body_start(&buffer).unwrap();
+            let headers = String::from_utf8_lossy(&buffer[..body_start]);
+            assert!(headers.starts_with("PUT /demo-pkg "));
+            let lower = headers.to_ascii_lowercase();
+            assert!(lower.contains("authorization: bearer registry-token"));
+            assert!(lower.contains("npm-otp: 123456"));
+
+            let body: serde_json::Value = serde_json::from_slice(&buffer[body_start..]).unwrap();
+            assert_eq!(body["versions"]["1.0.0"]["deprecated"], "old line");
+            assert_eq!(body["versions"]["1.1.0"]["deprecated"], "old line");
+            assert_eq!(body["versions"]["2.0.0"]["deprecated"], "old");
+
+            let response_body = r#"{"ok":true}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                response_body.len(),
+                response_body
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+        });
+
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(
+            dir.path().join("ci.npmrc"),
+            format!("registry=http://{addr}/\n//{addr}/:_authToken=registry-token\n"),
+        )
+        .unwrap();
+
+        let spec = PackageSpec::parse("npm:demo-pkg@1.x").unwrap();
+        let result = deprecate_npm_package(
+            dir.path(),
+            &spec,
+            "old line",
+            false,
+            None,
+            Some(Path::new("ci.npmrc")),
+            Some("123456"),
+        )
+        .unwrap();
+        assert_eq!(result.registry, format!("http://{addr}/"));
+        assert_eq!(result.package, "demo-pkg");
+        assert_eq!(result.requirement, "1.x");
+        assert_eq!(result.message, "old line");
+        assert_eq!(result.versions, vec!["1.0.0", "1.1.0"]);
+        assert_eq!(result.status, Some(200));
+        assert_eq!(result.response["ok"], true);
         handle.join().unwrap();
     }
 
