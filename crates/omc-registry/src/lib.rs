@@ -983,6 +983,9 @@ fn discover_project_requirements_with_options(
         let requirements =
             read_pyproject_requirements(&pyproject_toml, project_extras, include_dev_dependencies)?;
         project.specs.extend(requirements.specs);
+        project
+            .python_local_paths
+            .extend(requirements.python_local_paths);
     }
 
     let setup_cfg = project_dir.join("setup.cfg");
@@ -3205,20 +3208,28 @@ fn read_pyproject_requirements(
 
     if let Some(poetry) = pyproject.tool.and_then(|tool| tool.poetry) {
         let base_dir = path.parent().unwrap_or_else(|| Path::new("."));
-        discovered.specs.extend(read_poetry_dependencies(
+        let poetry_requirements = read_poetry_dependencies(
             &poetry.dependencies,
             &poetry.extras,
             project_extras,
             base_dir,
-        )?);
+        )?;
+        discovered.specs.extend(poetry_requirements.specs);
+        discovered
+            .python_local_paths
+            .extend(poetry_requirements.python_local_paths);
 
         if include_dev_dependencies {
-            discovered.specs.extend(read_poetry_dependencies(
+            let poetry_requirements = read_poetry_dependencies(
                 &poetry.dev_dependencies,
                 &BTreeMap::new(),
                 &BTreeSet::new(),
                 base_dir,
-            )?);
+            )?;
+            discovered.specs.extend(poetry_requirements.specs);
+            discovered
+                .python_local_paths
+                .extend(poetry_requirements.python_local_paths);
         }
 
         for (group_name, group) in poetry.group {
@@ -3232,12 +3243,16 @@ fn read_pyproject_requirements(
             };
 
             if include_group {
-                discovered.specs.extend(read_poetry_dependencies(
+                let poetry_requirements = read_poetry_dependencies(
                     &group.dependencies,
                     &BTreeMap::new(),
                     &BTreeSet::new(),
                     base_dir,
-                )?);
+                )?;
+                discovered.specs.extend(poetry_requirements.specs);
+                discovered
+                    .python_local_paths
+                    .extend(poetry_requirements.python_local_paths);
             }
         }
     }
@@ -3321,13 +3336,13 @@ fn read_poetry_dependencies(
     extras: &BTreeMap<String, Vec<String>>,
     project_extras: &BTreeSet<String>,
     base_dir: &Path,
-) -> Result<Vec<PackageSpec>> {
+) -> Result<ProjectRequirements> {
     let selected_optional_names = extras
         .iter()
         .filter(|(extra, _)| project_extras.contains(&normalize_pypi_extra(extra)))
         .flat_map(|(_, names)| names.iter().map(|name| normalize_pypi_name(name)))
         .collect::<BTreeSet<_>>();
-    let mut specs = Vec::new();
+    let mut requirements = ProjectRequirements::default();
 
     for (name, dependency) in dependencies {
         let name = normalize_pypi_name(name);
@@ -3337,12 +3352,17 @@ fn read_poetry_dependencies(
         if poetry_dependency_optional(dependency) && !selected_optional_names.contains(&name) {
             continue;
         }
-        if let Some(spec) = poetry_dependency_spec(&name, dependency, base_dir)? {
-            specs.push(spec);
+        if let Some(requirement) = poetry_dependency_requirement(&name, dependency, base_dir)? {
+            match requirement {
+                PoetryDependencyRequirement::Spec(spec) => requirements.specs.push(spec),
+                PoetryDependencyRequirement::LocalPath(path) => {
+                    requirements.python_local_paths.push(path)
+                }
+            }
         }
     }
 
-    Ok(specs)
+    Ok(requirements)
 }
 
 fn read_poetry_lock_requirements(path: &Path) -> Result<ProjectRequirements> {
@@ -3389,11 +3409,16 @@ fn poetry_dependency_optional(dependency: &PoetryDependency) -> bool {
     }
 }
 
-fn poetry_dependency_spec(
+enum PoetryDependencyRequirement {
+    Spec(PackageSpec),
+    LocalPath(PathBuf),
+}
+
+fn poetry_dependency_requirement(
     name: &str,
     dependency: &PoetryDependency,
     base_dir: &Path,
-) -> Result<Option<PackageSpec>> {
+) -> Result<Option<PoetryDependencyRequirement>> {
     let version = match dependency {
         PoetryDependency::Version(version) => version.as_str(),
         PoetryDependency::Table(table) => {
@@ -3403,26 +3428,72 @@ fn poetry_dependency_spec(
                 )));
             }
             if let Some(url) = &table.url {
-                return Ok(Some(PackageSpec::with_direct_url(
-                    Ecosystem::Pypi,
-                    name.to_owned(),
-                    url.to_owned(),
-                    BTreeSet::new(),
+                return Ok(Some(PoetryDependencyRequirement::Spec(
+                    PackageSpec::with_direct_url(
+                        Ecosystem::Pypi,
+                        name.to_owned(),
+                        url.to_owned(),
+                        BTreeSet::new(),
+                    ),
                 )));
             }
-            if let Some(path) = table.file.as_deref().or(table.path.as_deref()) {
-                return poetry_local_wheel_dependency_spec(name, path, base_dir).map(Some);
+            if let Some(path) = table.file.as_deref() {
+                return poetry_local_wheel_dependency_spec(name, path, base_dir)
+                    .map(PoetryDependencyRequirement::Spec)
+                    .map(Some);
+            }
+            if let Some(path) = table.path.as_deref() {
+                return poetry_local_path_dependency(name, path, base_dir).map(Some);
             }
             table.version.as_deref().unwrap_or("*")
         }
     };
     Ok(poetry_version_requirement(name, version).map(|version| {
-        PackageSpec::new(
+        PoetryDependencyRequirement::Spec(PackageSpec::new(
             Ecosystem::Pypi,
             name.to_owned(),
             (!version.is_empty()).then_some(version),
-        )
+        ))
     }))
+}
+
+fn poetry_local_path_dependency(
+    name: &str,
+    path: &str,
+    base_dir: &Path,
+) -> Result<PoetryDependencyRequirement> {
+    let path = resolved_local_path(path, base_dir);
+    if path.extension().and_then(|ext| ext.to_str()) == Some("whl") {
+        let url = reqwest::Url::from_file_path(&path).map_err(|_| {
+            OmcRegistryError::UnsupportedSpec(format!(
+                "unsupported Poetry dependency source for `{name}`"
+            ))
+        })?;
+        return Ok(PoetryDependencyRequirement::Spec(
+            PackageSpec::with_direct_url(
+                Ecosystem::Pypi,
+                name.to_owned(),
+                url.to_string(),
+                BTreeSet::new(),
+            ),
+        ));
+    }
+    if path.is_dir() {
+        return Ok(PoetryDependencyRequirement::LocalPath(path));
+    }
+
+    Err(OmcRegistryError::UnsupportedSpec(format!(
+        "unsupported Poetry dependency source for `{name}`"
+    )))
+}
+
+fn resolved_local_path(path: &str, base_dir: &Path) -> PathBuf {
+    let path = Path::new(path);
+    if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        base_dir.join(path)
+    }
 }
 
 fn poetry_local_wheel_dependency_spec(
@@ -3430,12 +3501,7 @@ fn poetry_local_wheel_dependency_spec(
     path: &str,
     base_dir: &Path,
 ) -> Result<PackageSpec> {
-    let path = Path::new(path);
-    let path = if path.is_absolute() {
-        path.to_path_buf()
-    } else {
-        base_dir.join(path)
-    };
+    let path = resolved_local_path(path, base_dir);
     if path.extension().and_then(|ext| ext.to_str()) != Some("whl") {
         return Err(OmcRegistryError::UnsupportedSpec(format!(
             "unsupported Poetry dependency source for `{name}`"
@@ -10026,6 +10092,7 @@ wheels = [
             .join("wheels")
             .join("local_idna-3.7-py3-none-any.whl");
         fs::create_dir_all(wheel.parent().unwrap()).unwrap();
+        fs::create_dir_all(dir.path().join("vendor/local-package")).unwrap();
         fs::write(&wheel, b"not a real wheel").unwrap();
         fs::write(
             &pyproject,
@@ -10033,6 +10100,7 @@ wheels = [
             [tool.poetry.dependencies]
             idna = { url = "https://example.invalid/idna-3.7-py3-none-any.whl" }
             local-idna = { path = "wheels/local_idna-3.7-py3-none-any.whl" }
+            local-package = { path = "vendor/local-package", develop = true }
             "#,
         )
         .unwrap();
@@ -10059,6 +10127,16 @@ wheels = [
             .as_deref()
             .unwrap()
             .ends_with("local_idna-3.7-py3-none-any.whl"));
+        assert_eq!(
+            requirements.python_local_paths,
+            vec![dir.path().join("vendor/local-package")]
+        );
+
+        let discovered = discover_project_requirements(dir.path()).unwrap();
+        assert_eq!(
+            discovered.python_local_paths,
+            requirements.python_local_paths
+        );
     }
 
     #[test]

@@ -130,7 +130,7 @@ Pipfile.lock      Pipenv default/develop package pins, extras, markers, and sha2
 uv.lock           uv project requirements, dev requirements, exact package pins, and hashes
 pylock.toml       standardized Python lock package pins, markers, and hashes
 pyproject.toml    PEP 621 project dependencies, selected optional groups, dependency-groups
-pyproject.toml    Poetry dependencies, dev groups, optional groups, extras, and wheel URL/path dependencies
+pyproject.toml    Poetry dependencies, dev groups, optional groups, extras, wheel URL/path dependencies, local path deps
 poetry.lock       exact PyPI versions and file hashes for locked Poetry packages
 setup.cfg         legacy setuptools install_requires and selected extras_require
 setup.py          static setuptools install_requires and selected extras_require
@@ -277,7 +277,7 @@ Supported now:
 - Poetry `pyproject.toml` dependency ingestion, including
   `[tool.poetry.dependencies]`, old `[tool.poetry.dev-dependencies]`,
   dependency groups, selected optional groups, selected extras, direct HTTPS
-  wheel URLs, and local wheel paths
+  wheel URLs, local wheel paths, and local path dependencies
 - `poetry.lock` exact-version constraints and sha256 file hash verification for
   locked PyPI packages
 - `setup.cfg` `install_requires` ingestion plus selected
@@ -325,8 +325,8 @@ Not implemented yet:
 - full npm peer placement semantics beyond current required-peer handling
 - advanced requirements-file semantics such as VCS URLs, non-wheel direct URLs,
   and finder/link options beyond fail-closed rejection
-- Poetry git/path/url/file dependencies beyond direct wheel URLs and local
-  wheel files
+- Poetry git/file dependencies beyond direct wheel URLs, local wheel files, and
+  local path directories
 - Python sdist build isolation and native extension policy beyond fail-closed
   rejection
 - execution of package code inside OMC cells for real applications
