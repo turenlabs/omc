@@ -460,6 +460,9 @@ enum PipCompatAction {
         action: PipCacheAction,
     },
     Check,
+    Debug {
+        action: PipDebugAction,
+    },
     Inspect,
     Freeze,
     List {
@@ -490,6 +493,15 @@ enum PipCacheAction {
     List { pattern: Option<String> },
     Remove { pattern: String },
     Purge,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct PipDebugAction {
+    verbose: bool,
+    platform: Option<String>,
+    python_version: Option<String>,
+    implementation: Option<String>,
+    abis: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1602,6 +1614,7 @@ fn run_pip_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
         }
         PipCompatAction::Cache { action } => print_pip_cache(project_dir, action)?,
         PipCompatAction::Check => return print_locked_pip_check(project_dir),
+        PipCompatAction::Debug { action } => print_pip_debug(project_dir, action)?,
         PipCompatAction::Inspect => print_locked_pip_inspect(project_dir)?,
         PipCompatAction::Freeze => print_locked_freeze(project_dir)?,
         PipCompatAction::List {
@@ -3822,6 +3835,140 @@ fn print_pip_cache(project_dir: &Path, action: PipCacheAction) -> Result<(), Omc
         }
     }
     Ok(())
+}
+
+fn print_pip_debug(project_dir: &Path, action: PipDebugAction) -> Result<(), OmcRegistryError> {
+    print!("{}", pip_debug_report(project_dir, &action)?);
+    Ok(())
+}
+
+fn pip_debug_report(
+    project_dir: &Path,
+    action: &PipDebugAction,
+) -> Result<String, OmcRegistryError> {
+    let project_dir = absolute_project_dir(project_dir);
+    let site_packages = project_dir
+        .join(".omc")
+        .join("python")
+        .join("site-packages");
+    let cache_dir = pip_cache_dir(&project_dir);
+    let executable = env::current_exe()?;
+    let values = pip_config_values(&project_dir)?;
+    let lockfile = project_dir.join("omc.lock");
+    let packages = if lockfile.exists() {
+        read_lockfile(&lockfile)?
+            .packages
+            .into_iter()
+            .filter(|package| package.ecosystem == Ecosystem::Pypi)
+            .collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
+
+    let mut lines = vec![
+        "WARNING: This command is only meant for OMC compatibility debugging.".to_owned(),
+        format!("pip version: omc-pip {}", env!("CARGO_PKG_VERSION")),
+        format!("omc executable: {}", executable.display()),
+        format!("omc project: {}", project_dir.display()),
+        format!("sys.platform: {}", env::consts::OS),
+        format!("architecture: {}", env::consts::ARCH),
+        format!("python site-packages: {}", site_packages.display()),
+        format!("pip cache dir: {}", cache_dir.display()),
+        format!(
+            "lockfile: {} ({})",
+            lockfile.display(),
+            if lockfile.exists() {
+                "present"
+            } else {
+                "missing"
+            }
+        ),
+        format!("installed pypi packages: {}", packages.len()),
+        format!(
+            "global.index-url: {}",
+            values
+                .get("global.index-url")
+                .map(String::as_str)
+                .unwrap_or("not configured")
+        ),
+        format!(
+            "global.no-index: {}",
+            values
+                .get("global.no-index")
+                .map(String::as_str)
+                .unwrap_or("false")
+        ),
+        format!(
+            "global.extra-index-url: {}",
+            values
+                .get("global.extra-index-url")
+                .map(String::as_str)
+                .unwrap_or("not configured")
+        ),
+        format!(
+            "global.find-links: {}",
+            values
+                .get("global.find-links")
+                .map(String::as_str)
+                .unwrap_or("not configured")
+        ),
+        format!(
+            "REQUESTS_CA_BUNDLE: {}",
+            env::var("REQUESTS_CA_BUNDLE").unwrap_or_else(|_| "None".to_owned())
+        ),
+        format!(
+            "CURL_CA_BUNDLE: {}",
+            env::var("CURL_CA_BUNDLE").unwrap_or_else(|_| "None".to_owned())
+        ),
+    ];
+
+    if action.platform.is_some()
+        || action.python_version.is_some()
+        || action.implementation.is_some()
+        || !action.abis.is_empty()
+    {
+        lines.push("requested compatibility target:".to_owned());
+        lines.push(format!(
+            "  platform: {}",
+            action.platform.as_deref().unwrap_or("current")
+        ));
+        lines.push(format!(
+            "  python-version: {}",
+            action.python_version.as_deref().unwrap_or("current")
+        ));
+        lines.push(format!(
+            "  implementation: {}",
+            action.implementation.as_deref().unwrap_or("current")
+        ));
+        lines.push(format!(
+            "  abi: {}",
+            if action.abis.is_empty() {
+                "current".to_owned()
+            } else {
+                action.abis.join(", ")
+            }
+        ));
+    }
+
+    lines.push("compatible tags: not computed by OMC compatibility mode".to_owned());
+
+    if action.verbose {
+        lines.push("locked pypi packages:".to_owned());
+        if packages.is_empty() {
+            lines.push("  (none)".to_owned());
+        } else {
+            for package in packages {
+                lines.push(format!(
+                    "  {}=={} ({})",
+                    package.name,
+                    package.version,
+                    pip_locked_package_filetype(&package)
+                ));
+            }
+        }
+    }
+
+    Ok(format!("{}\n", lines.join("\n")))
 }
 
 fn pip_cache_dir(project_dir: &Path) -> PathBuf {
@@ -6994,6 +7141,7 @@ fn parse_pip_compat_action(args: &[String]) -> Result<PipCompatAction, OmcRegist
             parse_pip_check_args(&args[1..])?;
             Ok(PipCompatAction::Check)
         }
+        "debug" => parse_pip_debug_args(&args[1..]),
         "inspect" => {
             parse_pip_inspect_args(&args[1..])?;
             Ok(PipCompatAction::Inspect)
@@ -7585,6 +7733,86 @@ fn parse_pip_check_args(args: &[String]) -> Result<(), OmcRegistryError> {
         return Err(unsupported_compat_arg("pip check", arg));
     }
     Ok(())
+}
+
+fn parse_pip_debug_args(args: &[String]) -> Result<PipCompatAction, OmcRegistryError> {
+    let mut action = PipDebugAction {
+        verbose: false,
+        platform: None,
+        python_version: None,
+        implementation: None,
+        abis: Vec::new(),
+    };
+    let mut index = 0;
+    while index < args.len() {
+        let arg = &args[index];
+        if matches!(
+            arg.as_str(),
+            "-v" | "--verbose" | "--debug" | "--disable-pip-version-check"
+        ) {
+            if matches!(arg.as_str(), "-v" | "--verbose") {
+                action.verbose = true;
+            }
+        } else if matches!(arg.as_str(), "-q" | "--quiet") {
+        } else if arg == "--platform" {
+            action.platform = Some(pip_debug_flag_value(args, &mut index, arg)?);
+        } else if let Some(value) = arg.strip_prefix("--platform=") {
+            action.platform = Some(value.to_owned());
+        } else if arg == "--python-version" {
+            action.python_version = Some(pip_debug_flag_value(args, &mut index, arg)?);
+        } else if let Some(value) = arg.strip_prefix("--python-version=") {
+            action.python_version = Some(value.to_owned());
+        } else if arg == "--implementation" {
+            action.implementation = Some(pip_debug_flag_value(args, &mut index, arg)?);
+        } else if let Some(value) = arg.strip_prefix("--implementation=") {
+            action.implementation = Some(value.to_owned());
+        } else if arg == "--abi" {
+            action
+                .abis
+                .push(pip_debug_flag_value(args, &mut index, arg)?);
+        } else if let Some(value) = arg.strip_prefix("--abi=") {
+            action.abis.push(value.to_owned());
+        } else if matches!(
+            arg.as_str(),
+            "--cert" | "--client-cert" | "--cache-dir" | "--log" | "--proxy" | "--timeout"
+        ) {
+            index += 1;
+            if args.get(index).is_none() {
+                return Err(OmcRegistryError::UnsupportedSpec(format!(
+                    "{arg} needs a value"
+                )));
+            }
+        } else if pip_debug_ignored_equals_flag(arg) {
+        } else {
+            return Err(unsupported_compat_arg("pip debug", arg));
+        }
+        index += 1;
+    }
+    Ok(PipCompatAction::Debug { action })
+}
+
+fn pip_debug_flag_value(
+    args: &[String],
+    index: &mut usize,
+    flag: &str,
+) -> Result<String, OmcRegistryError> {
+    *index += 1;
+    args.get(*index)
+        .cloned()
+        .ok_or_else(|| OmcRegistryError::UnsupportedSpec(format!("{flag} needs a value")))
+}
+
+fn pip_debug_ignored_equals_flag(arg: &str) -> bool {
+    [
+        "--cert=",
+        "--client-cert=",
+        "--cache-dir=",
+        "--log=",
+        "--proxy=",
+        "--timeout=",
+    ]
+    .iter()
+    .any(|prefix| arg.starts_with(prefix))
 }
 
 fn parse_pip_inspect_args(args: &[String]) -> Result<(), OmcRegistryError> {
@@ -10615,6 +10843,29 @@ mod tests {
         );
         assert_eq!(
             parse_pip_compat_action(&args(&[
+                "debug",
+                "--verbose",
+                "--platform",
+                "macosx_14_0_arm64",
+                "--python-version=3.12",
+                "--implementation",
+                "cp",
+                "--abi=cp312",
+                "--disable-pip-version-check",
+            ]))
+            .unwrap(),
+            PipCompatAction::Debug {
+                action: PipDebugAction {
+                    verbose: true,
+                    platform: Some("macosx_14_0_arm64".to_owned()),
+                    python_version: Some("3.12".to_owned()),
+                    implementation: Some("cp".to_owned()),
+                    abis: vec!["cp312".to_owned()],
+                },
+            }
+        );
+        assert_eq!(
+            parse_pip_compat_action(&args(&[
                 "inspect",
                 "--local",
                 "--path",
@@ -10932,6 +11183,43 @@ mod tests {
         let config = fs::read_to_string(dir.join("pip.conf")).unwrap();
         assert!(!config.contains("index-url = https://new.example.invalid/simple\n"));
         assert!(config.contains("extra-index-url = https://extra.example.invalid/simple\n"));
+    }
+
+    #[test]
+    fn reports_pip_debug_project_state() {
+        let dir = test_dir("pip-debug");
+        fs::write(
+            dir.join("pip.conf"),
+            "[global]\nindex-url = https://mirror.example.invalid/simple\nno-index = false\n",
+        )
+        .unwrap();
+
+        let report = pip_debug_report(
+            &dir,
+            &PipDebugAction {
+                verbose: true,
+                platform: Some("macosx_14_0_arm64".to_owned()),
+                python_version: Some("3.12".to_owned()),
+                implementation: Some("cp".to_owned()),
+                abis: vec!["cp312".to_owned()],
+            },
+        )
+        .unwrap();
+
+        assert!(report.contains("pip version: omc-pip "));
+        assert!(report.contains(&format!(
+            "omc project: {}",
+            absolute_project_dir(&dir).display()
+        )));
+        assert!(report.contains(".omc/python/site-packages"));
+        assert!(report.contains(".omc/cache/pypi"));
+        assert!(report.contains("lockfile: "));
+        assert!(report.contains("(missing)"));
+        assert!(report.contains("global.index-url: https://mirror.example.invalid/simple/"));
+        assert!(report.contains("requested compatibility target:"));
+        assert!(report.contains("  platform: macosx_14_0_arm64"));
+        assert!(report.contains("  abi: cp312"));
+        assert!(report.contains("locked pypi packages:\n  (none)"));
     }
 
     #[test]

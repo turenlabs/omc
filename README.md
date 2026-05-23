@@ -127,9 +127,11 @@ cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm explain left-p
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm ls --depth 0 left-pad --json
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm prune --omit=dev
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm dedupe
+cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm rebuild node-sass --ignore-scripts
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm config get registry
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm config set registry https://registry.npmjs.org/
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm cache verify
+cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm fund --json
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm pkg get name version
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm version patch --no-git-tag-version
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm pack --pack-destination dist
@@ -155,6 +157,7 @@ cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip freeze
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip show requests
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip list --format=json
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip inspect
+cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip debug --verbose
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip list --outdated --format=json
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip index versions requests
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip hash ./dist/local_pkg-1.0.0-py3-none-any.whl
@@ -422,9 +425,9 @@ Supported now:
 - `omc node`, `omc python`, `omc script`, and `omc run` wrappers, including
   package.json and Pipfile project scripts
 - `omc npm` compatibility commands for common `install`, `update` / `up` /
-  `upgrade`, `ci`, `prune`, `dedupe`, `test`, `start`, `stop`, `restart`,
+  `upgrade`, `ci`, `prune`, `dedupe`, `rebuild`, `test`, `start`, `stop`, `restart`,
   `run`, `exec`, `init`, `remove`, `bin`, `root`, `prefix`, `audit` / `audit --json`,
-  `cache verify/ls/rm/clean --force`, `pkg get/set/delete`, `version`,
+  `fund` / `fund --json`, `cache verify/ls/rm/clean --force`, `pkg get/set/delete`, `version`,
   `pack`, `search` / `find`, `config get/set/delete/list`, `get`, `view` / `info` / `show`,
   `list` / `ls` / `ll` / `la`, including `--json`, common depth/omit/workspace
   flags, and package-name filters; `explain` / `why`,
@@ -452,7 +455,7 @@ Supported now:
   `--include-workspace-root`, `--silent`, `-s`, and `--loglevel=silent` are
   understood
 - `omc pip` compatibility commands for common `install`, `uninstall`, `freeze`,
-  `download`, `check`, `inspect`, `show`, `hash`, `cache dir/list/remove/purge`,
+  `download`, `check`, `debug`, `inspect`, `show`, `hash`, `cache dir/list/remove/purge`,
   `wheel`, `index versions`, `config get/set/unset/list`, and
   `list --format=columns|freeze|json` flows, including `pip list --outdated`,
   `-r`, index URL,
