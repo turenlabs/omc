@@ -29,6 +29,8 @@ const MAX_FILE_BYTES: u64 = 2 * 1024 * 1024;
 pub enum OmcRegistryError {
     #[error("unsupported package spec `{0}`")]
     UnsupportedSpec(String),
+    #[error("unsupported requirements entry `{0}`")]
+    UnsupportedRequirement(String),
     #[error("package version was not found: {0}")]
     PackageNotFound(String),
     #[error("blocked package `{spec}`; use --record-blocked to keep the artifact and lock entry")]
@@ -950,7 +952,7 @@ fn read_requirements_file_inner(
         }
 
         if line.starts_with('-') || line.contains("://") {
-            continue;
+            return Err(OmcRegistryError::UnsupportedRequirement(line.to_owned()));
         }
 
         let parsed = parse_requirement_line(line);
@@ -3369,6 +3371,28 @@ mod tests {
                 .map(String::as_str),
             Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
         );
+    }
+
+    #[test]
+    fn rejects_unsupported_requirements_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        let requirements = dir.path().join("requirements.txt");
+        fs::write(
+            &requirements,
+            "idna==3.7\npkg @ https://example.invalid/pkg-1.0.0.whl\n",
+        )
+        .unwrap();
+
+        let error = read_requirements_file(&requirements).unwrap_err();
+        assert!(error.to_string().contains("unsupported requirements entry"));
+
+        fs::write(
+            &requirements,
+            "--index-url https://example.invalid/simple\n",
+        )
+        .unwrap();
+        let error = read_requirements_file(&requirements).unwrap_err();
+        assert!(error.to_string().contains("unsupported requirements entry"));
     }
 
     #[test]

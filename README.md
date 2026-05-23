@@ -188,6 +188,8 @@ Supported now:
 - `requirements.txt` ingestion with hashes, line continuations, extras,
   recursive `-r` includes, `-c` constraints, and common Python environment
   markers
+- unsupported requirements entries such as direct URLs, editable installs, and
+  index configuration fail closed instead of being silently ignored
 - `pyproject.toml` PEP 621 dependency ingestion with `omc install --extra`
   for selected optional dependency groups
 - PyPI extras resolution for dependencies gated by `extra == "..."`
@@ -213,7 +215,7 @@ Not implemented yet:
 - native/Wasm/Cranelift backend
 - full npm bundled dependency and peer placement semantics
 - advanced requirements-file semantics such as editable installs, direct URLs,
-  and index configuration
+  and index configuration beyond fail-closed rejection
 - Python sdist build isolation and native extension policy
 - execution of package code inside OMC cells for real applications
 
