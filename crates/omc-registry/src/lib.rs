@@ -1218,6 +1218,8 @@ fn link_package_inner(
         npm_manifest_runtime_dependencies(&manifest)
     } else if resolved.pypi_direct_wheel {
         pypi_wheel_dependencies(&archive_bytes, &spec.extras)?
+    } else if is_python_sdist_filename(&resolved.filename) && resolved.dependencies.is_empty() {
+        pypi_sdist_dependencies(&archive_bytes, &spec.extras)?
     } else {
         resolved.dependencies.clone()
     };
@@ -5275,22 +5277,56 @@ fn pypi_wheel_dependencies(
         }
         let mut metadata = String::new();
         file.read_to_string(&mut metadata)?;
-        for line in folded_metadata_lines(&metadata) {
-            let Some(requirement) = line.strip_prefix("Requires-Dist:") else {
-                continue;
-            };
-            if let Some(spec) =
-                parse_pypi_requirement_with_extras(requirement.trim(), active_extras)
-            {
-                dependencies.push(PackageDependency {
-                    spec,
-                    optional: false,
-                });
-            }
-        }
+        dependencies.extend(pypi_metadata_dependencies(&metadata, active_extras));
         break;
     }
     Ok(dependencies)
+}
+
+fn pypi_sdist_dependencies(
+    bytes: &[u8],
+    active_extras: &BTreeSet<String>,
+) -> Result<Vec<PackageDependency>> {
+    let decoder = GzDecoder::new(Cursor::new(bytes));
+    let mut archive = Archive::new(decoder);
+    let mut dependencies = Vec::new();
+    for entry in archive.entries()? {
+        let mut entry = entry?;
+        if !entry.header().entry_type().is_file() || entry.size() > MAX_FILE_BYTES {
+            continue;
+        }
+        let path = entry.path()?.to_string_lossy().into_owned();
+        if is_ignorable_archive_metadata_path(&path)
+            || !(path.ends_with("/PKG-INFO") || path.ends_with(".dist-info/METADATA"))
+        {
+            continue;
+        }
+        let mut metadata = String::new();
+        entry.read_to_string(&mut metadata)?;
+        dependencies.extend(pypi_metadata_dependencies(&metadata, active_extras));
+        if !dependencies.is_empty() {
+            break;
+        }
+    }
+    Ok(dependencies)
+}
+
+fn pypi_metadata_dependencies(
+    metadata: &str,
+    active_extras: &BTreeSet<String>,
+) -> Vec<PackageDependency> {
+    folded_metadata_lines(metadata)
+        .into_iter()
+        .filter_map(|line| {
+            let requirement = line.strip_prefix("Requires-Dist:")?;
+            parse_pypi_requirement_with_extras(requirement.trim(), active_extras).map(|spec| {
+                PackageDependency {
+                    spec,
+                    optional: false,
+                }
+            })
+        })
+        .collect()
 }
 
 fn folded_metadata_lines(metadata: &str) -> Vec<String> {
@@ -12759,6 +12795,25 @@ wheels = [
             .unwrap();
         assert_eq!(spec.name, "pysocks");
         assert_eq!(spec.version.as_deref(), Some(">=1.5.6"));
+    }
+
+    #[test]
+    fn reads_pypi_sdist_metadata_dependencies() {
+        let bytes = python_sdist_for_test(&[(
+            "PKG-INFO",
+            "Metadata-Version: 2.1\nName: pure-sdist\nVersion: 1.0.0\nRequires-Dist: idna>=3\nRequires-Dist: PySocks>=1.5.6; extra == 'socks'\n",
+        )]);
+
+        let dependencies =
+            pypi_sdist_dependencies(&bytes, &BTreeSet::from(["socks".to_owned()])).unwrap();
+        assert!(dependencies
+            .iter()
+            .any(|dependency| dependency.spec.name == "idna"
+                && dependency.spec.version.as_deref() == Some(">=3")));
+        assert!(dependencies
+            .iter()
+            .any(|dependency| dependency.spec.name == "pysocks"
+                && dependency.spec.version.as_deref() == Some(">=1.5.6")));
     }
 
     #[test]
