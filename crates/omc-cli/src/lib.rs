@@ -10,20 +10,22 @@ use flate2::write::GzEncoder;
 use flate2::Compression;
 use omc_cap::Capability;
 use omc_registry::{
-    add_manifest_npm_local_paths, add_manifest_policy_grants, add_package_graph,
+    add_manifest_npm_local_paths, add_manifest_policy_grants, add_npm_dist_tag, add_package_graph,
     apply_pypi_binary_option, check_pypi_lock, compare_npm_versions, compare_pypi_versions,
     init_project, install_locked_packages, install_locked_project, install_project, lock_project,
     parse_capability_grant, parse_npm_direct_archive_reference,
     parse_pypi_direct_archive_reference, parse_pypi_vcs_requirement, publish_npm_package,
     read_constraint_files, read_lockfile, read_manifest, read_npm_config_snapshot,
-    read_npm_package_metadata, read_npm_ping_with_userconfig, read_npm_search, read_npm_token_list,
-    read_npm_whoami, read_npm_workspace_packages, read_package_scripts, read_pip_config_snapshot,
+    read_npm_package_metadata, read_npm_package_metadata_with_userconfig,
+    read_npm_ping_with_userconfig, read_npm_search, read_npm_token_list, read_npm_whoami,
+    read_npm_workspace_packages, read_package_scripts, read_pip_config_snapshot,
     read_pypi_available_versions, read_requirements_files, remove_manifest_dependency,
-    revoke_npm_token, upload_pypi_distribution, Behavior, Ecosystem, InstallReport, LinkOptions,
-    LockedPackage, LockedPythonVcsDependency, NpmAccessToken, NpmPingResult, NpmPublishPackage,
-    NpmPublishResult, NpmSearchPackage, NpmTokenListResult, NpmTokenRevokeResult, NpmWhoamiResult,
-    NpmWorkspacePackage, OmcRegistryError, PackageSpec, ProjectRequirements, PypiBinaryMode,
-    PypiCheckIssue, PypiUploadResult, PythonLocalRequirement, PythonVcsRequirement, Verdict,
+    remove_npm_dist_tag, revoke_npm_token, upload_pypi_distribution, Behavior, Ecosystem,
+    InstallReport, LinkOptions, LockedPackage, LockedPythonVcsDependency, NpmAccessToken,
+    NpmDistTagMutationResult, NpmPingResult, NpmPublishPackage, NpmPublishResult, NpmSearchPackage,
+    NpmTokenListResult, NpmTokenRevokeResult, NpmWhoamiResult, NpmWorkspacePackage,
+    OmcRegistryError, PackageSpec, ProjectRequirements, PypiBinaryMode, PypiCheckIssue,
+    PypiUploadResult, PythonLocalRequirement, PythonVcsRequirement, Verdict,
 };
 use sha2::{Digest, Sha256, Sha384, Sha512};
 
@@ -453,6 +455,21 @@ enum NpmDistTagAction {
     List {
         spec: Option<String>,
         npm_registry: Option<String>,
+        userconfig: Option<PathBuf>,
+    },
+    Add {
+        spec: String,
+        tag: String,
+        npm_registry: Option<String>,
+        userconfig: Option<PathBuf>,
+        otp: Option<String>,
+    },
+    Remove {
+        spec: String,
+        tag: String,
+        npm_registry: Option<String>,
+        userconfig: Option<PathBuf>,
+        otp: Option<String>,
     },
 }
 
@@ -2735,12 +2752,11 @@ fn npm_help_text(topic: Option<&str>) -> String {
             ],
         ),
         Some("dist-tag") => npm_command_help(
-            "npm dist-tag ls [package-spec]",
+            "npm dist-tag <add|rm|ls> ...",
             &[
-                "List npm registry distribution tags for a package.",
-                "Defaults to the current package.json name when no package is provided.",
-                "Alias: dist-tags. Supports --registry.",
-                "Adding and removing dist-tags is not implemented yet.",
+                "Add, remove, or list npm registry distribution tags for a package.",
+                "Supports add <package-spec-with-version> [tag], rm <package-spec> <tag>, and ls [package-spec].",
+                "Alias: dist-tags. Supports --registry, --userconfig, --tag, and --otp.",
             ],
         ),
         Some("sbom") => npm_command_help(
@@ -3806,16 +3822,86 @@ fn print_npm_dist_tag(
     action: NpmDistTagAction,
 ) -> Result<(), OmcRegistryError> {
     match action {
-        NpmDistTagAction::List { spec, npm_registry } => {
+        NpmDistTagAction::List {
+            spec,
+            npm_registry,
+            userconfig,
+        } => {
             let spec = npm_dist_tag_package_spec(project_dir, spec.as_deref())?;
             let spec = parse_package_spec(&spec, Some(Ecosystem::Npm))?;
-            let metadata = read_npm_package_metadata(project_dir, &spec, npm_registry.as_deref())?;
+            let metadata = read_npm_package_metadata_with_userconfig(
+                project_dir,
+                &spec,
+                npm_registry.as_deref(),
+                userconfig.as_deref(),
+            )?;
             for (tag, version) in metadata.dist_tags {
                 println!("{tag}: {version}");
             }
         }
+        NpmDistTagAction::Add {
+            spec,
+            tag,
+            npm_registry,
+            userconfig,
+            otp,
+        } => {
+            let (package, version) = npm_dist_tag_add_package_version(&spec)?;
+            let result = add_npm_dist_tag(
+                project_dir,
+                &package,
+                &version,
+                &tag,
+                npm_registry.as_deref(),
+                userconfig.as_deref(),
+                otp.as_deref(),
+            )?;
+            print_npm_dist_tag_mutation(&result, true);
+        }
+        NpmDistTagAction::Remove {
+            spec,
+            tag,
+            npm_registry,
+            userconfig,
+            otp,
+        } => {
+            let package = npm_dist_tag_package_name(&spec)?;
+            let result = remove_npm_dist_tag(
+                project_dir,
+                &package,
+                &tag,
+                npm_registry.as_deref(),
+                userconfig.as_deref(),
+                otp.as_deref(),
+            )?;
+            print_npm_dist_tag_mutation(&result, false);
+        }
     }
     Ok(())
+}
+
+fn print_npm_dist_tag_mutation(result: &NpmDistTagMutationResult, added: bool) {
+    if added {
+        let version = result.version.as_deref().unwrap_or_default();
+        println!("+ {}: {}@{}", result.tag, result.package, version);
+    } else {
+        println!("- {}: {}", result.tag, result.package);
+    }
+}
+
+fn npm_dist_tag_add_package_version(spec: &str) -> Result<(String, String), OmcRegistryError> {
+    let spec = parse_package_spec(spec, Some(Ecosystem::Npm))?;
+    let version = spec.version.clone().ok_or_else(|| {
+        OmcRegistryError::UnsupportedSpec(
+            "npm dist-tag add needs a package spec with an exact version".to_owned(),
+        )
+    })?;
+    Ok((spec.name, version))
+}
+
+fn npm_dist_tag_package_name(spec: &str) -> Result<String, OmcRegistryError> {
+    let spec = parse_package_spec(spec, Some(Ecosystem::Npm))?;
+    Ok(spec.name)
 }
 
 fn npm_dist_tag_package_spec(
@@ -8441,7 +8527,7 @@ fn npm_global_arg_supported_by_command(command: &str, arg: &str) -> bool {
     if matches!(arg, "--otp") || arg.starts_with("--otp=") {
         return matches!(
             command,
-            "login" | "adduser" | "add-user" | "publish" | "token"
+            "login" | "adduser" | "add-user" | "publish" | "token" | "dist-tag" | "dist-tags"
         );
     }
     if matches!(arg, "--auth-type") || arg.starts_with("--auth-type=") {
@@ -8461,7 +8547,7 @@ fn npm_global_arg_supported_by_command(command: &str, arg: &str) -> bool {
         || arg.starts_with("--access=")
         || arg.starts_with("--provenance-file=")
     {
-        return matches!(command, "publish");
+        return matches!(command, "publish" | "dist-tag" | "dist-tags");
     }
     if matches!(arg, "--dry-run" | "--provenance" | "--no-provenance")
         || arg.starts_with("--dry-run=")
@@ -8492,6 +8578,8 @@ fn npm_global_arg_supported_by_command(command: &str, arg: &str) -> bool {
                 | "publish"
                 | "logout"
                 | "token"
+                | "dist-tag"
+                | "dist-tags"
         );
     }
     if matches!(arg, "--workspace" | "-w")
@@ -8560,6 +8648,8 @@ fn npm_global_arg_supported_by_command(command: &str, arg: &str) -> bool {
                 | "add-user"
                 | "logout"
                 | "token"
+                | "dist-tag"
+                | "dist-tags"
                 | "view"
                 | "sbom"
                 | "info"
@@ -10141,7 +10231,11 @@ fn parse_npm_token_revoke_args(
 }
 
 fn parse_npm_dist_tag_args(args: &[String]) -> Result<NpmCompatAction, OmcRegistryError> {
-    let mut filtered = Vec::new();
+    let mut positionals = Vec::new();
+    let mut npm_registry = None;
+    let mut userconfig = None;
+    let mut otp = None;
+    let mut tag_option = None;
     let mut index = 0;
     while index < args.len() {
         let arg = &args[index];
@@ -10156,10 +10250,27 @@ fn parse_npm_dist_tag_args(args: &[String]) -> Result<NpmCompatAction, OmcRegist
                 | "--include-workspace-root"
         ) || npm_dist_tag_ignored_equals_flag(arg)
         {
-        } else if matches!(
-            arg.as_str(),
-            "--userconfig" | "--loglevel" | "--workspace" | "-w"
-        ) {
+        } else if arg == "--registry" {
+            index += 1;
+            npm_registry = Some(npm_dist_tag_flag_value(args, index, arg)?);
+        } else if let Some(value) = arg.strip_prefix("--registry=") {
+            npm_registry = Some(value.to_owned());
+        } else if arg == "--userconfig" {
+            index += 1;
+            userconfig = Some(PathBuf::from(npm_dist_tag_flag_value(args, index, arg)?));
+        } else if let Some(value) = arg.strip_prefix("--userconfig=") {
+            userconfig = Some(PathBuf::from(value));
+        } else if arg == "--otp" {
+            index += 1;
+            otp = Some(npm_dist_tag_flag_value(args, index, arg)?);
+        } else if let Some(value) = arg.strip_prefix("--otp=") {
+            otp = Some(value.to_owned());
+        } else if arg == "--tag" {
+            index += 1;
+            tag_option = Some(npm_dist_tag_flag_value(args, index, arg)?);
+        } else if let Some(value) = arg.strip_prefix("--tag=") {
+            tag_option = Some(value.to_owned());
+        } else if matches!(arg.as_str(), "--loglevel" | "--workspace" | "-w") {
             index += 1;
             if args.get(index).is_none() {
                 return Err(OmcRegistryError::UnsupportedSpec(format!(
@@ -10167,43 +10278,93 @@ fn parse_npm_dist_tag_args(args: &[String]) -> Result<NpmCompatAction, OmcRegist
                 )));
             }
         } else {
-            filtered.push(arg.clone());
+            positionals.push(arg.clone());
         }
         index += 1;
     }
 
-    let CommonCompatFlags {
-        npm_registry,
-        mut positionals,
-        ..
-    } = parse_common_compat_flags(&filtered, true)?;
-    if matches!(
-        positionals.first().map(String::as_str),
-        Some("add" | "rm" | "remove" | "delete" | "del")
-    ) {
-        let command = positionals.first().expect("checked positional command");
-        return Err(OmcRegistryError::UnsupportedSpec(format!(
-            "npm dist-tag {command} is not supported by OMC compatibility yet"
-        )));
+    match positionals.first().map(String::as_str) {
+        Some("add") => {
+            positionals.remove(0);
+            let Some(spec) = positionals.first().cloned() else {
+                return Err(OmcRegistryError::UnsupportedSpec(
+                    "npm dist-tag add needs a package spec with version".to_owned(),
+                ));
+            };
+            let tag = positionals
+                .get(1)
+                .cloned()
+                .or(tag_option)
+                .unwrap_or_else(|| "latest".to_owned());
+            if positionals.len() > 2 {
+                return Err(unsupported_compat_arg("npm dist-tag add", &positionals[2]));
+            }
+            Ok(NpmCompatAction::DistTag {
+                action: NpmDistTagAction::Add {
+                    spec,
+                    tag,
+                    npm_registry,
+                    userconfig,
+                    otp,
+                },
+            })
+        }
+        Some("rm" | "remove" | "delete" | "del") => {
+            positionals.remove(0);
+            let Some(spec) = positionals.first().cloned() else {
+                return Err(OmcRegistryError::UnsupportedSpec(
+                    "npm dist-tag rm needs a package spec".to_owned(),
+                ));
+            };
+            let Some(tag) = positionals.get(1).cloned().or(tag_option) else {
+                return Err(OmcRegistryError::UnsupportedSpec(
+                    "npm dist-tag rm needs a tag".to_owned(),
+                ));
+            };
+            if positionals.len() > 2 {
+                return Err(unsupported_compat_arg("npm dist-tag rm", &positionals[2]));
+            }
+            Ok(NpmCompatAction::DistTag {
+                action: NpmDistTagAction::Remove {
+                    spec,
+                    tag,
+                    npm_registry,
+                    userconfig,
+                    otp,
+                },
+            })
+        }
+        Some("ls" | "list") => {
+            positionals.remove(0);
+            if positionals.len() > 1 {
+                return Err(unsupported_compat_arg("npm dist-tag ls", &positionals[1]));
+            }
+            Ok(NpmCompatAction::DistTag {
+                action: NpmDistTagAction::List {
+                    spec: positionals.pop(),
+                    npm_registry,
+                    userconfig,
+                },
+            })
+        }
+        _ => {
+            if positionals.len() > 1 {
+                return Err(unsupported_compat_arg("npm dist-tag ls", &positionals[1]));
+            }
+            Ok(NpmCompatAction::DistTag {
+                action: NpmDistTagAction::List {
+                    spec: positionals.pop(),
+                    npm_registry,
+                    userconfig,
+                },
+            })
+        }
     }
-    if matches!(positionals.first().map(String::as_str), Some("ls" | "list")) {
-        positionals.remove(0);
-    }
-    if positionals.len() > 1 {
-        return Err(unsupported_compat_arg("npm dist-tag ls", &positionals[1]));
-    }
-    Ok(NpmCompatAction::DistTag {
-        action: NpmDistTagAction::List {
-            spec: positionals.pop(),
-            npm_registry,
-        },
-    })
 }
 
 fn npm_dist_tag_ignored_equals_flag(arg: &str) -> bool {
     [
         "--json=",
-        "--userconfig=",
         "--loglevel=",
         "--parseable=",
         "--workspace=",
@@ -10213,6 +10374,16 @@ fn npm_dist_tag_ignored_equals_flag(arg: &str) -> bool {
     ]
     .iter()
     .any(|prefix| arg.starts_with(prefix))
+}
+
+fn npm_dist_tag_flag_value(
+    args: &[String],
+    index: usize,
+    flag: &str,
+) -> Result<String, OmcRegistryError> {
+    args.get(index)
+        .cloned()
+        .ok_or_else(|| OmcRegistryError::UnsupportedSpec(format!("{flag} needs a value")))
 }
 
 fn parse_npm_sbom_args(args: &[String]) -> Result<NpmCompatAction, OmcRegistryError> {
@@ -14177,6 +14348,7 @@ mod tests {
                 action: NpmDistTagAction::List {
                     spec: Some("left-pad".to_owned()),
                     npm_registry: Some("https://registry.example.invalid/npm".to_owned()),
+                    userconfig: Some(PathBuf::from("ci.npmrc")),
                 },
             }
         );
@@ -14186,6 +14358,7 @@ mod tests {
                 action: NpmDistTagAction::List {
                     spec: Some("react".to_owned()),
                     npm_registry: None,
+                    userconfig: None,
                 },
             }
         );
@@ -14195,10 +14368,66 @@ mod tests {
                 action: NpmDistTagAction::List {
                     spec: None,
                     npm_registry: None,
+                    userconfig: None,
                 },
             }
         );
-        assert!(parse_npm_compat_action(&args(&["dist-tag", "add", "left-pad@1.3.0"])).is_err());
+        assert_eq!(
+            parse_npm_compat_action(&args(&[
+                "--registry",
+                "https://registry.example.invalid/npm",
+                "--userconfig",
+                "ci.npmrc",
+                "--otp",
+                "123456",
+                "dist-tag",
+                "add",
+                "left-pad@1.3.0",
+                "beta",
+            ]))
+            .unwrap(),
+            NpmCompatAction::DistTag {
+                action: NpmDistTagAction::Add {
+                    spec: "left-pad@1.3.0".to_owned(),
+                    tag: "beta".to_owned(),
+                    npm_registry: Some("https://registry.example.invalid/npm".to_owned()),
+                    userconfig: Some(PathBuf::from("ci.npmrc")),
+                    otp: Some("123456".to_owned()),
+                },
+            }
+        );
+        assert_eq!(
+            parse_npm_compat_action(&args(&["dist-tag", "add", "left-pad@1.3.0", "--tag=next",]))
+                .unwrap(),
+            NpmCompatAction::DistTag {
+                action: NpmDistTagAction::Add {
+                    spec: "left-pad@1.3.0".to_owned(),
+                    tag: "next".to_owned(),
+                    npm_registry: None,
+                    userconfig: None,
+                    otp: None,
+                },
+            }
+        );
+        assert_eq!(
+            parse_npm_compat_action(&args(&[
+                "dist-tag",
+                "rm",
+                "left-pad",
+                "beta",
+                "--otp=123456",
+            ]))
+            .unwrap(),
+            NpmCompatAction::DistTag {
+                action: NpmDistTagAction::Remove {
+                    spec: "left-pad".to_owned(),
+                    tag: "beta".to_owned(),
+                    npm_registry: None,
+                    userconfig: None,
+                    otp: Some("123456".to_owned()),
+                },
+            }
+        );
         assert_eq!(
             parse_npm_compat_action(&args(&[
                 "sbom",

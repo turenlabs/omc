@@ -150,6 +150,8 @@ cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm logout --scope
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm token list --json
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm token revoke a1b2c3 --otp 123456
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm dist-tag ls left-pad
+cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm dist-tag add left-pad@1.3.0 beta --otp 123456
+cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm dist-tag rm left-pad beta --otp 123456
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm sbom --sbom-format=cyclonedx
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm view left-pad version
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm repo left-pad --browser=false

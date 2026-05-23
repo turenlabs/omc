@@ -7427,6 +7427,17 @@ pub struct NpmTokenRevokeResult {
     pub status: u16,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct NpmDistTagMutationResult {
+    pub registry: String,
+    pub package: String,
+    pub tag: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+    pub status: u16,
+    pub response: serde_json::Value,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct NpmPublishPackage {
     pub name: String,
@@ -7896,14 +7907,22 @@ pub fn read_npm_package_metadata(
     spec: &PackageSpec,
     registry_override: Option<&str>,
 ) -> Result<NpmPackageMetadata> {
+    read_npm_package_metadata_with_userconfig(project_dir, spec, registry_override, None)
+}
+
+pub fn read_npm_package_metadata_with_userconfig(
+    project_dir: &Path,
+    spec: &PackageSpec,
+    registry_override: Option<&str>,
+    userconfig_override: Option<&Path>,
+) -> Result<NpmPackageMetadata> {
     if spec.ecosystem != Ecosystem::Npm || spec.direct_url.is_some() {
         return Err(OmcRegistryError::UnsupportedSpec(spec.requested()));
     }
 
     let client = Client::new();
-    let mut options = LinkOptions::new(project_dir);
-    options.npm_registry_url = registry_override.map(str::to_owned);
-    let npm_config = read_npm_config_for_options(project_dir, &options)?;
+    let npm_config =
+        read_npm_config_with_overrides(project_dir, registry_override, userconfig_override)?;
     let (registry_name, version_requirement) = npm_registry_name_and_requirement(spec)?;
     let registry = npm_config.registry_for(&registry_name);
     let encoded = urlencoding::encode(&registry_name);
@@ -8078,6 +8097,125 @@ pub fn revoke_npm_token(
     })
 }
 
+pub fn add_npm_dist_tag(
+    project_dir: &Path,
+    package: &str,
+    version: &str,
+    tag: &str,
+    registry_override: Option<&str>,
+    userconfig_override: Option<&Path>,
+    otp: Option<&str>,
+) -> Result<NpmDistTagMutationResult> {
+    let package = package.trim();
+    let version = version.trim();
+    let tag = tag.trim();
+    if package.is_empty() || version.is_empty() || tag.is_empty() {
+        return Err(OmcRegistryError::UnsupportedSpec(
+            "npm dist-tag add needs package, version, and tag".to_owned(),
+        ));
+    }
+    if Version::parse(version).is_err() {
+        return Err(OmcRegistryError::UnsupportedSpec(format!(
+            "npm dist-tag add needs an exact semver version, got `{version}`"
+        )));
+    }
+
+    let client = Client::new();
+    let npm_config =
+        read_npm_config_with_overrides(project_dir, registry_override, userconfig_override)?;
+    let registry = ensure_trailing_slash(npm_config.registry_for(package));
+    let url = npm_dist_tag_url(&registry, package, tag);
+    if npm_config.auth_token_for_url(&url).is_none() {
+        return Err(OmcRegistryError::UnsupportedSpec(
+            "npm dist-tag add needs authentication; run npm login or configure a registry _authToken"
+                .to_owned(),
+        ));
+    }
+    let mut request = npm_put(&client, &url, &npm_config).json(version);
+    if let Some(otp) = otp.map(str::trim).filter(|otp| !otp.is_empty()) {
+        request = request.header("npm-otp", otp);
+    }
+    let response = request.send()?;
+    response.error_for_status_ref()?;
+    let status = response.status().as_u16();
+    let response = npm_optional_json_response(response)?;
+    Ok(NpmDistTagMutationResult {
+        registry,
+        package: package.to_owned(),
+        tag: tag.to_owned(),
+        version: Some(version.to_owned()),
+        status,
+        response,
+    })
+}
+
+pub fn remove_npm_dist_tag(
+    project_dir: &Path,
+    package: &str,
+    tag: &str,
+    registry_override: Option<&str>,
+    userconfig_override: Option<&Path>,
+    otp: Option<&str>,
+) -> Result<NpmDistTagMutationResult> {
+    let package = package.trim();
+    let tag = tag.trim();
+    if package.is_empty() || tag.is_empty() {
+        return Err(OmcRegistryError::UnsupportedSpec(
+            "npm dist-tag rm needs package and tag".to_owned(),
+        ));
+    }
+
+    let client = Client::new();
+    let npm_config =
+        read_npm_config_with_overrides(project_dir, registry_override, userconfig_override)?;
+    let registry = ensure_trailing_slash(npm_config.registry_for(package));
+    let url = npm_dist_tag_url(&registry, package, tag);
+    if npm_config.auth_token_for_url(&url).is_none() {
+        return Err(OmcRegistryError::UnsupportedSpec(
+            "npm dist-tag rm needs authentication; run npm login or configure a registry _authToken"
+                .to_owned(),
+        ));
+    }
+    let mut request = npm_delete(&client, &url, &npm_config);
+    if let Some(otp) = otp.map(str::trim).filter(|otp| !otp.is_empty()) {
+        request = request.header("npm-otp", otp);
+    }
+    let response = request.send()?;
+    response.error_for_status_ref()?;
+    let status = response.status().as_u16();
+    let response = npm_optional_json_response(response)?;
+    Ok(NpmDistTagMutationResult {
+        registry,
+        package: package.to_owned(),
+        tag: tag.to_owned(),
+        version: None,
+        status,
+        response,
+    })
+}
+
+fn npm_dist_tag_url(registry: &str, package: &str, tag: &str) -> String {
+    format!(
+        "{}-/package/{}/dist-tags/{}",
+        ensure_trailing_slash(registry),
+        urlencoding::encode(package),
+        urlencoding::encode(tag)
+    )
+}
+
+fn npm_optional_json_response(response: reqwest::blocking::Response) -> Result<serde_json::Value> {
+    let text = response.text()?;
+    if text.trim().is_empty() {
+        Ok(serde_json::Value::Null)
+    } else {
+        Ok(serde_json::from_str(&text).unwrap_or_else(|_| {
+            serde_json::json!({
+                "text": text,
+            })
+        }))
+    }
+}
+
 pub fn publish_npm_package(
     project_dir: &Path,
     package: NpmPublishPackage,
@@ -8119,16 +8257,7 @@ pub fn publish_npm_package(
     let response = request.send()?;
     response.error_for_status_ref()?;
     let status = response.status().as_u16();
-    let text = response.text()?;
-    let response = if text.trim().is_empty() {
-        serde_json::Value::Null
-    } else {
-        serde_json::from_str(&text).unwrap_or_else(|_| {
-            serde_json::json!({
-                "text": text,
-            })
-        })
-    };
+    let response = npm_optional_json_response(response)?;
 
     Ok(NpmPublishResult {
         registry,
@@ -17428,6 +17557,88 @@ wheels = [
     }
 
     #[test]
+    fn mutates_npm_dist_tags_with_userconfig_auth_and_otp() {
+        use std::io::Write as _;
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let handle = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let buffer = read_http_request_bytes(&mut stream);
+            let body_start = http_body_start(&buffer).unwrap();
+            let headers = String::from_utf8_lossy(&buffer[..body_start]);
+            assert!(headers.starts_with("PUT /-/package/demo-pkg/dist-tags/beta "));
+            let lower = headers.to_ascii_lowercase();
+            assert!(lower.contains("authorization: bearer registry-token"));
+            assert!(lower.contains("npm-otp: 123456"));
+            let body = String::from_utf8_lossy(&buffer[body_start..]);
+            assert_eq!(body, "\"1.0.0\"");
+
+            let response_body = r#"{"ok":true}"#;
+            let response = format!(
+                "HTTP/1.1 201 Created\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                response_body.len(),
+                response_body
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+
+            let (mut stream, _) = listener.accept().unwrap();
+            let buffer = read_http_request_bytes(&mut stream);
+            let body_start = http_body_start(&buffer).unwrap();
+            let headers = String::from_utf8_lossy(&buffer[..body_start]);
+            assert!(headers.starts_with("DELETE /-/package/demo-pkg/dist-tags/beta "));
+            let lower = headers.to_ascii_lowercase();
+            assert!(lower.contains("authorization: bearer registry-token"));
+            assert!(lower.contains("npm-otp: 123456"));
+
+            let response =
+                "HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+            stream.write_all(response.as_bytes()).unwrap();
+        });
+
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(
+            dir.path().join("ci.npmrc"),
+            format!("registry=http://{addr}/\n//{addr}/:_authToken=registry-token\n"),
+        )
+        .unwrap();
+
+        let added = add_npm_dist_tag(
+            dir.path(),
+            "demo-pkg",
+            "1.0.0",
+            "beta",
+            None,
+            Some(Path::new("ci.npmrc")),
+            Some("123456"),
+        )
+        .unwrap();
+        assert_eq!(added.registry, format!("http://{addr}/"));
+        assert_eq!(added.package, "demo-pkg");
+        assert_eq!(added.version.as_deref(), Some("1.0.0"));
+        assert_eq!(added.tag, "beta");
+        assert_eq!(added.status, 201);
+        assert_eq!(added.response["ok"], true);
+
+        let removed = remove_npm_dist_tag(
+            dir.path(),
+            "demo-pkg",
+            "beta",
+            None,
+            Some(Path::new("ci.npmrc")),
+            Some("123456"),
+        )
+        .unwrap();
+        assert_eq!(removed.registry, format!("http://{addr}/"));
+        assert_eq!(removed.package, "demo-pkg");
+        assert_eq!(removed.version, None);
+        assert_eq!(removed.tag, "beta");
+        assert_eq!(removed.status, 204);
+        assert_eq!(removed.response, serde_json::Value::Null);
+        handle.join().unwrap();
+    }
+
+    #[test]
     fn publishes_npm_package_with_userconfig_auth_and_otp() {
         use std::io::{Read as _, Write as _};
 
@@ -17626,6 +17837,31 @@ wheels = [
             "File already exists. See https://pypi.org/help/#file-name-reuse"
         ));
         assert!(!pypi_upload_response_is_existing(403, "Forbidden"));
+    }
+
+    fn read_http_request_bytes(stream: &mut std::net::TcpStream) -> Vec<u8> {
+        use std::io::Read as _;
+
+        stream
+            .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+            .unwrap();
+        let mut buffer = Vec::new();
+        let mut chunk = [0_u8; 4096];
+        loop {
+            let len = stream.read(&mut chunk).unwrap();
+            if len == 0 {
+                break;
+            }
+            buffer.extend_from_slice(&chunk[..len]);
+            if let Some(body_start) = http_body_start(&buffer) {
+                let headers = String::from_utf8_lossy(&buffer[..body_start]);
+                let content_length = http_content_length(&headers);
+                if buffer.len() >= body_start + content_length {
+                    break;
+                }
+            }
+        }
+        buffer
     }
 
     fn http_body_start(buffer: &[u8]) -> Option<usize> {
