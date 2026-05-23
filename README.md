@@ -307,7 +307,7 @@ Supported now:
   subdirectories, recursive `-r` includes, `-c` constraints, `--index-url` /
   `--extra-index-url` simple indexes, `--find-links` / `-f` local wheel/sdist
   archives or HTML pages, `--no-index`, `--trusted-host`, `--only-binary`,
-  `--prefer-binary`, enforced `--require-hashes`, local editable/direct/bare
+  `--no-binary`, `--prefer-binary`, enforced `--require-hashes`, local editable/direct/bare
   directory paths, and common Python environment markers
 - unsupported requirements entries and unsupported direct archive formats fail
   closed instead of being silently ignored

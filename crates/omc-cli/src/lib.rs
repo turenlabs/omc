@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::process::{Command as ProcessCommand, ExitCode};
 use std::{env, ffi::OsString, fs};
@@ -6,12 +6,13 @@ use std::{env, ffi::OsString, fs};
 use clap::{Parser, Subcommand};
 use omc_cap::Capability;
 use omc_registry::{
-    add_manifest_npm_local_paths, add_manifest_policy_grants, add_package_graph, check_pypi_lock,
-    init_project, install_locked_packages, install_locked_project, install_project, lock_project,
-    parse_capability_grant, parse_npm_direct_archive_reference,
-    parse_pypi_direct_archive_reference, read_lockfile, read_package_scripts,
-    remove_manifest_dependency, Behavior, Ecosystem, InstallReport, LinkOptions, LockedPackage,
-    OmcRegistryError, PackageSpec, PypiCheckIssue, Verdict,
+    add_manifest_npm_local_paths, add_manifest_policy_grants, add_package_graph,
+    apply_pypi_binary_option, check_pypi_lock, init_project, install_locked_packages,
+    install_locked_project, install_project, lock_project, parse_capability_grant,
+    parse_npm_direct_archive_reference, parse_pypi_direct_archive_reference, read_lockfile,
+    read_package_scripts, remove_manifest_dependency, Behavior, Ecosystem, InstallReport,
+    LinkOptions, LockedPackage, OmcRegistryError, PackageSpec, PypiBinaryMode, PypiCheckIssue,
+    Verdict,
 };
 
 #[derive(Debug, Parser)]
@@ -264,22 +265,7 @@ enum NpmPathKind {
 #[derive(Debug, PartialEq, Eq)]
 enum PipCompatAction {
     Version,
-    Install {
-        specs: Vec<String>,
-        requirements: Vec<PathBuf>,
-        constraints: Vec<PathBuf>,
-        archive_references: Vec<String>,
-        local_paths: Vec<PathBuf>,
-        index_url: Option<String>,
-        extra_index_urls: Vec<String>,
-        find_links: Vec<String>,
-        no_index: bool,
-        require_hashes: bool,
-        no_deps: bool,
-        target: Option<PathBuf>,
-        allow: Vec<String>,
-        allow_all_host: bool,
-    },
+    Install(Box<PipInstallAction>),
     Uninstall {
         specs: Vec<String>,
         allow: Vec<String>,
@@ -294,6 +280,26 @@ enum PipCompatAction {
     List {
         format: PipListFormat,
     },
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct PipInstallAction {
+    specs: Vec<String>,
+    requirements: Vec<PathBuf>,
+    constraints: Vec<PathBuf>,
+    archive_references: Vec<String>,
+    local_paths: Vec<PathBuf>,
+    index_url: Option<String>,
+    extra_index_urls: Vec<String>,
+    find_links: Vec<String>,
+    no_index: bool,
+    binary_all: Option<PypiBinaryMode>,
+    binary_packages: BTreeMap<String, PypiBinaryMode>,
+    require_hashes: bool,
+    no_deps: bool,
+    target: Option<PathBuf>,
+    allow: Vec<String>,
+    allow_all_host: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -796,22 +802,25 @@ fn run_npm_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
 fn run_pip_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRegistryError> {
     match parse_pip_compat_action(args)? {
         PipCompatAction::Version => println!("pip {} from OMC", env!("CARGO_PKG_VERSION")),
-        PipCompatAction::Install {
-            specs,
-            requirements,
-            constraints,
-            archive_references,
-            local_paths,
-            index_url,
-            extra_index_urls,
-            find_links,
-            no_index,
-            require_hashes,
-            no_deps,
-            target,
-            allow,
-            allow_all_host,
-        } => {
+        PipCompatAction::Install(action) => {
+            let PipInstallAction {
+                specs,
+                requirements,
+                constraints,
+                archive_references,
+                local_paths,
+                index_url,
+                extra_index_urls,
+                find_links,
+                no_index,
+                binary_all,
+                binary_packages,
+                require_hashes,
+                no_deps,
+                target,
+                allow,
+                allow_all_host,
+            } = *action;
             let allowed_capabilities = parse_grants(&allow, allow_all_host)?;
             if specs.is_empty() && archive_references.is_empty() {
                 let mut options = LinkOptions::new(project_dir);
@@ -828,6 +837,8 @@ fn run_pip_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
                 );
                 options.pypi_require_hashes = require_hashes;
                 options.pypi_include_dependencies = !no_deps;
+                options.pypi_binary_all = binary_all;
+                options.pypi_binary_packages = binary_packages;
                 options.python_target_dir = target.map(|path| absolutize_path(project_dir, path));
                 let install = install_project(&options)?;
                 print_install_report(&install);
@@ -846,6 +857,8 @@ fn run_pip_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
                 );
                 options.pypi_require_hashes = require_hashes;
                 options.pypi_include_dependencies = !no_deps;
+                options.pypi_binary_all = binary_all;
+                options.pypi_binary_packages = binary_packages;
                 options.python_target_dir = target.map(|path| absolutize_path(project_dir, path));
                 let mut specs = parse_package_specs(&specs, Some(Ecosystem::Pypi))?;
                 specs.extend(parse_pip_archive_references(
@@ -1681,6 +1694,8 @@ fn parse_pip_install_args(args: &[String]) -> Result<PipCompatAction, OmcRegistr
     let mut extra_index_urls = Vec::new();
     let mut find_links = Vec::new();
     let mut no_index = false;
+    let mut binary_all = None;
+    let mut binary_packages = BTreeMap::new();
     let mut require_hashes = false;
     let mut no_deps = false;
     let mut target = None;
@@ -1757,14 +1772,41 @@ fn parse_pip_install_args(args: &[String]) -> Result<PipCompatAction, OmcRegistr
         } else if let Some(path) = arg.strip_prefix("--target=") {
             target = Some(PathBuf::from(path));
         } else if arg == "--prefer-binary" {
-        } else if arg == "--only-binary" || arg == "--trusted-host" {
+        } else if arg == "--only-binary" || arg == "--no-binary" {
+            index += 1;
+            let Some(value) = args.get(index) else {
+                return Err(OmcRegistryError::UnsupportedSpec(format!(
+                    "{arg} needs a value"
+                )));
+            };
+            let mode = if arg == "--only-binary" {
+                PypiBinaryMode::Binary
+            } else {
+                PypiBinaryMode::Source
+            };
+            apply_pypi_binary_option(&mut binary_all, &mut binary_packages, mode, value);
+        } else if let Some(value) = arg.strip_prefix("--only-binary=") {
+            apply_pypi_binary_option(
+                &mut binary_all,
+                &mut binary_packages,
+                PypiBinaryMode::Binary,
+                value,
+            );
+        } else if let Some(value) = arg.strip_prefix("--no-binary=") {
+            apply_pypi_binary_option(
+                &mut binary_all,
+                &mut binary_packages,
+                PypiBinaryMode::Source,
+                value,
+            );
+        } else if arg == "--trusted-host" {
             index += 1;
             if args.get(index).is_none() {
                 return Err(OmcRegistryError::UnsupportedSpec(format!(
                     "{arg} needs a value"
                 )));
             }
-        } else if arg.starts_with("--only-binary=") || arg.starts_with("--trusted-host=") {
+        } else if arg.starts_with("--trusted-host=") {
         } else if arg == "-e" || arg == "--editable" {
             index += 1;
             let Some(path) = args.get(index) else {
@@ -1818,7 +1860,7 @@ fn parse_pip_install_args(args: &[String]) -> Result<PipCompatAction, OmcRegistr
         ..
     } = parse_common_compat_flags(&filtered, false)?;
 
-    Ok(PipCompatAction::Install {
+    Ok(PipCompatAction::Install(Box::new(PipInstallAction {
         specs: positionals.into_iter().filter(|spec| spec != ".").collect(),
         requirements,
         constraints,
@@ -1828,12 +1870,14 @@ fn parse_pip_install_args(args: &[String]) -> Result<PipCompatAction, OmcRegistr
         extra_index_urls,
         find_links,
         no_index,
+        binary_all,
+        binary_packages,
         require_hashes,
         no_deps,
         target,
         allow,
         allow_all_host,
-    })
+    })))
 }
 
 fn pip_ignored_install_value_flag(arg: &str) -> bool {
@@ -2526,7 +2570,9 @@ mod tests {
             "--no-deps",
             "--target",
             "vendor",
-            "--only-binary=:all:",
+            "--no-binary=:all:",
+            "--only-binary",
+            "idna",
             "--trusted-host",
             "mirror.example",
             "--prefer-binary",
@@ -2552,7 +2598,7 @@ mod tests {
 
         assert_eq!(
             action,
-            PipCompatAction::Install {
+            PipCompatAction::Install(Box::new(PipInstallAction {
                 specs: vec!["requests==2.32.3".to_owned()],
                 requirements: vec![PathBuf::from("requirements.txt")],
                 constraints: vec![PathBuf::from("constraints.txt")],
@@ -2562,12 +2608,14 @@ mod tests {
                 extra_index_urls: vec!["https://extra.example/simple".to_owned()],
                 find_links: vec!["wheelhouse".to_owned()],
                 no_index: true,
+                binary_all: Some(PypiBinaryMode::Source),
+                binary_packages: BTreeMap::from([("idna".to_owned(), PypiBinaryMode::Binary)]),
                 require_hashes: true,
                 no_deps: true,
                 target: Some(PathBuf::from("vendor")),
                 allow: Vec::new(),
                 allow_all_host: true,
-            }
+            }))
         );
     }
 
@@ -2583,7 +2631,7 @@ mod tests {
                 "requests==2.32.3",
             ]))
             .unwrap(),
-            PipCompatAction::Install {
+            PipCompatAction::Install(Box::new(PipInstallAction {
                 specs: vec!["requests==2.32.3".to_owned()],
                 requirements: Vec::new(),
                 constraints: Vec::new(),
@@ -2597,12 +2645,14 @@ mod tests {
                 extra_index_urls: Vec::new(),
                 find_links: Vec::new(),
                 no_index: false,
+                binary_all: None,
+                binary_packages: BTreeMap::new(),
                 require_hashes: false,
                 no_deps: false,
                 target: None,
                 allow: Vec::new(),
                 allow_all_host: false,
-            }
+            }))
         );
     }
 
@@ -2615,7 +2665,7 @@ mod tests {
                 "https://files.example/source_pkg-2.0.0.tar.gz#sha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             ]))
             .unwrap(),
-            PipCompatAction::Install {
+            PipCompatAction::Install(Box::new(PipInstallAction {
                 specs: Vec::new(),
                 requirements: Vec::new(),
                 constraints: Vec::new(),
@@ -2628,12 +2678,14 @@ mod tests {
                 extra_index_urls: Vec::new(),
                 find_links: Vec::new(),
                 no_index: false,
+                binary_all: None,
+                binary_packages: BTreeMap::new(),
                 require_hashes: false,
                 no_deps: false,
                 target: None,
                 allow: Vec::new(),
                 allow_all_host: false,
-            }
+            }))
         );
     }
 

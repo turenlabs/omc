@@ -552,6 +552,8 @@ pub struct LinkOptions {
     pub npm_integrities: BTreeMap<String, BTreeSet<String>>,
     pub npm_resolved: BTreeMap<String, String>,
     pub npm_registry_url: Option<String>,
+    pub pypi_binary_all: Option<PypiBinaryMode>,
+    pub pypi_binary_packages: BTreeMap<String, PypiBinaryMode>,
     pub pypi_index_url: Option<String>,
     pub pypi_extra_index_urls: Vec<String>,
     pub pypi_find_links: Vec<String>,
@@ -582,6 +584,8 @@ impl LinkOptions {
             npm_integrities: BTreeMap::new(),
             npm_resolved: BTreeMap::new(),
             npm_registry_url: None,
+            pypi_binary_all: None,
+            pypi_binary_packages: BTreeMap::new(),
             pypi_index_url: None,
             pypi_extra_index_urls: Vec::new(),
             pypi_find_links: Vec::new(),
@@ -599,6 +603,38 @@ impl LinkOptions {
             include_dev_dependencies: true,
             save_manifest_dependency: true,
             save_dev_dependency: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PypiBinaryMode {
+    Binary,
+    Source,
+}
+
+pub fn apply_pypi_binary_option(
+    all: &mut Option<PypiBinaryMode>,
+    packages: &mut BTreeMap<String, PypiBinaryMode>,
+    mode: PypiBinaryMode,
+    value: &str,
+) {
+    for raw in value.split(',') {
+        let value = raw.trim();
+        if value.is_empty() {
+            continue;
+        }
+        match value {
+            ":all:" => *all = Some(mode),
+            ":none:" => {
+                if *all == Some(mode) {
+                    *all = None;
+                }
+                packages.retain(|_, existing| *existing != mode);
+            }
+            package => {
+                packages.insert(normalize_pypi_name(package), mode);
+            }
         }
     }
 }
@@ -630,6 +666,8 @@ pub struct ProjectRequirements {
     pub hashes: BTreeMap<String, BTreeSet<String>>,
     pub npm_integrities: BTreeMap<String, BTreeSet<String>>,
     pub npm_resolved: BTreeMap<String, String>,
+    pub pypi_binary_all: Option<PypiBinaryMode>,
+    pub pypi_binary_packages: BTreeMap<String, PypiBinaryMode>,
     pub pypi_index_url: Option<String>,
     pub pypi_extra_index_urls: Vec<String>,
     pub pypi_find_links: Vec<String>,
@@ -664,6 +702,12 @@ fn extend_project_requirements(
     target.hashes.extend(requirements.hashes);
     target.npm_integrities.extend(requirements.npm_integrities);
     target.npm_resolved.extend(requirements.npm_resolved);
+    if requirements.pypi_binary_all.is_some() {
+        target.pypi_binary_all = requirements.pypi_binary_all;
+    }
+    target
+        .pypi_binary_packages
+        .extend(requirements.pypi_binary_packages);
     if requirements.pypi_index_url.is_some() {
         target.pypi_index_url = requirements.pypi_index_url;
     }
@@ -692,6 +736,12 @@ fn apply_project_requirements_to_options(
     options.hashes.extend(requirements.hashes);
     options.npm_integrities.extend(requirements.npm_integrities);
     options.npm_resolved.extend(requirements.npm_resolved);
+    if requirements.pypi_binary_all.is_some() {
+        options.pypi_binary_all = requirements.pypi_binary_all;
+    }
+    options
+        .pypi_binary_packages
+        .extend(requirements.pypi_binary_packages);
     if requirements.pypi_index_url.is_some() {
         options.pypi_index_url = requirements.pypi_index_url;
     }
@@ -3421,6 +3471,8 @@ fn npm_requirements_from_lock_maps(
         hashes: BTreeMap::new(),
         npm_integrities,
         npm_resolved,
+        pypi_binary_all: None,
+        pypi_binary_packages: BTreeMap::new(),
         pypi_index_url: None,
         pypi_extra_index_urls: Vec::new(),
         pypi_find_links: Vec::new(),
@@ -5306,6 +5358,30 @@ fn read_requirements_file_inner(
         if parse_requirements_no_deps(line) {
             if mode == RequirementsMode::Install {
                 discovered.pypi_no_deps = true;
+            }
+            continue;
+        }
+
+        if let Some(value) = parse_requirements_binary_option(line, PypiBinaryMode::Binary) {
+            if mode == RequirementsMode::Install {
+                apply_pypi_binary_option(
+                    &mut discovered.pypi_binary_all,
+                    &mut discovered.pypi_binary_packages,
+                    PypiBinaryMode::Binary,
+                    &value,
+                );
+            }
+            continue;
+        }
+
+        if let Some(value) = parse_requirements_binary_option(line, PypiBinaryMode::Source) {
+            if mode == RequirementsMode::Install {
+                apply_pypi_binary_option(
+                    &mut discovered.pypi_binary_all,
+                    &mut discovered.pypi_binary_packages,
+                    PypiBinaryMode::Source,
+                    &value,
+                );
             }
             continue;
         }
@@ -7638,6 +7714,7 @@ fn resolve_pypi(
         return resolve_pypi_direct_wheel(spec);
     }
     let target_python = current_python_version();
+    let binary_mode = pypi_binary_mode_for_spec(options, spec);
     let mut candidates =
         pypi_find_link_candidates(client, spec, options, target_python.as_deref())?;
     let simple_indexes = pypi_simple_index_urls(options);
@@ -7678,7 +7755,13 @@ fn resolve_pypi(
                 .send()?
                 .error_for_status()?
                 .json::<PypiRoot>()?;
-            choose_pypi_version(&spec.name, requirement, &root, target_python.as_deref())?
+            choose_pypi_version(
+                &spec.name,
+                requirement,
+                &root,
+                target_python.as_deref(),
+                binary_mode,
+            )?
         }
         None => {
             let url = format!("https://pypi.org/pypi/{encoded}/json");
@@ -7687,7 +7770,17 @@ fn resolve_pypi(
                 .send()?
                 .error_for_status()?
                 .json::<PypiRoot>()?;
-            root.info.version
+            if binary_mode.is_some() {
+                choose_pypi_version(
+                    &spec.name,
+                    "*",
+                    &root,
+                    target_python.as_deref(),
+                    binary_mode,
+                )?
+            } else {
+                root.info.version
+            }
         }
     };
     let url = format!("https://pypi.org/pypi/{encoded}/{version}/json");
@@ -7696,7 +7789,7 @@ fn resolve_pypi(
         return Err(OmcRegistryError::PackageNotFound(spec.requested()));
     }
     let doc = response.error_for_status()?.json::<PypiResponse>()?;
-    let file = choose_pypi_file(&doc, target_python.as_deref())
+    let file = choose_pypi_file(&doc, target_python.as_deref(), binary_mode)
         .ok_or_else(|| OmcRegistryError::MissingCompatibleWheel(spec.requested()))?;
     let source_url = file.url.clone();
     let filename = file.filename.clone();
@@ -7781,10 +7874,12 @@ fn pypi_candidate_to_resolved(
 ) -> Result<ResolvedPackage> {
     let requirement =
         constrained_pypi_requirement(spec, &options.constraints).unwrap_or_else(|| "*".to_owned());
+    let binary_mode = pypi_binary_mode_for_spec(options, spec);
 
     let candidate = candidates
         .into_iter()
         .filter(|candidate| pypi_version_satisfies(&candidate.version, &requirement))
+        .filter(|candidate| pypi_candidate_matches_binary_mode(candidate, binary_mode))
         .max_by(|left, right| {
             compare_pypi_versions(&left.version, &right.version)
                 .then_with(|| right.sdist.cmp(&left.sdist))
@@ -7811,6 +7906,25 @@ fn pypi_candidate_to_resolved(
         platform_compatible: true,
         dependencies: Vec::new(),
     })
+}
+
+fn pypi_binary_mode_for_spec(options: &LinkOptions, spec: &PackageSpec) -> Option<PypiBinaryMode> {
+    options
+        .pypi_binary_packages
+        .get(&normalize_pypi_name(&spec.name))
+        .copied()
+        .or(options.pypi_binary_all)
+}
+
+fn pypi_candidate_matches_binary_mode(
+    candidate: &PypiSimpleCandidate,
+    mode: Option<PypiBinaryMode>,
+) -> bool {
+    match mode {
+        None => true,
+        Some(PypiBinaryMode::Binary) => !candidate.sdist,
+        Some(PypiBinaryMode::Source) => candidate.sdist,
+    }
 }
 
 fn pypi_simple_package_url(index: &str, package: &str) -> Result<reqwest::Url> {
@@ -8265,25 +8379,60 @@ fn constrained_requirement(
 fn choose_pypi_file<'a>(
     doc: &'a PypiResponse,
     target_python: Option<&str>,
+    binary_mode: Option<PypiBinaryMode>,
 ) -> Option<&'a PypiFile> {
+    if binary_mode == Some(PypiBinaryMode::Source) {
+        return doc
+            .urls
+            .iter()
+            .filter(|file| pypi_file_compatible_for_binary_mode(file, target_python, binary_mode))
+            .find(|file| file.packagetype == "sdist" && is_python_sdist_filename(&file.filename));
+    }
+
     doc.urls
         .iter()
-        .filter(|file| pypi_file_python_compatible(file, target_python))
+        .filter(|file| pypi_file_compatible_for_binary_mode(file, target_python, binary_mode))
         .find(|file| file.packagetype == "bdist_wheel" && file.filename.contains("py3-none-any"))
         .or_else(|| {
             doc.urls
                 .iter()
-                .filter(|file| pypi_file_python_compatible(file, target_python))
+                .filter(|file| {
+                    pypi_file_compatible_for_binary_mode(file, target_python, binary_mode)
+                })
                 .find(|file| file.packagetype == "bdist_wheel")
         })
         .or_else(|| {
+            if binary_mode == Some(PypiBinaryMode::Binary) {
+                return None;
+            }
             doc.urls
                 .iter()
-                .filter(|file| pypi_file_python_compatible(file, target_python))
+                .filter(|file| {
+                    pypi_file_compatible_for_binary_mode(file, target_python, binary_mode)
+                })
                 .find(|file| {
                     file.packagetype == "sdist" && is_python_sdist_filename(&file.filename)
                 })
         })
+}
+
+fn pypi_file_compatible_for_binary_mode(
+    file: &PypiFile,
+    target_python: Option<&str>,
+    binary_mode: Option<PypiBinaryMode>,
+) -> bool {
+    pypi_file_python_compatible(file, target_python)
+        && pypi_file_matches_binary_mode(file, binary_mode)
+}
+
+fn pypi_file_matches_binary_mode(file: &PypiFile, binary_mode: Option<PypiBinaryMode>) -> bool {
+    match binary_mode {
+        None => true,
+        Some(PypiBinaryMode::Binary) => file.packagetype == "bdist_wheel",
+        Some(PypiBinaryMode::Source) => {
+            file.packagetype == "sdist" && is_python_sdist_filename(&file.filename)
+        }
+    }
 }
 
 fn is_python_sdist_filename(filename: &str) -> bool {
@@ -8410,13 +8559,14 @@ fn choose_pypi_version(
     requirement: &str,
     root: &PypiRoot,
     target_python: Option<&str>,
+    binary_mode: Option<PypiBinaryMode>,
 ) -> Result<String> {
     root.releases
         .iter()
         .filter(|(_, files)| {
             files
                 .iter()
-                .any(|file| pypi_file_python_compatible(file, target_python))
+                .any(|file| pypi_file_compatible_for_binary_mode(file, target_python, binary_mode))
         })
         .map(|(version, _)| version)
         .filter(|version| pypi_version_satisfies(version, requirement))
@@ -9317,10 +9467,20 @@ fn parse_requirements_no_deps(line: &str) -> bool {
     line == "--no-deps"
 }
 
+fn parse_requirements_binary_option(line: &str, mode: PypiBinaryMode) -> Option<String> {
+    match mode {
+        PypiBinaryMode::Binary => {
+            parse_requirements_option_value(line, &["--only-binary=", "--only-binary"])
+        }
+        PypiBinaryMode::Source => {
+            parse_requirements_option_value(line, &["--no-binary=", "--no-binary"])
+        }
+    }
+}
+
 fn parse_requirements_compatible_global_option(line: &str) -> bool {
     line == "--prefer-binary"
         || parse_requirements_option_value(line, &["--trusted-host=", "--trusted-host"]).is_some()
-        || parse_requirements_option_value(line, &["--only-binary=", "--only-binary"]).is_some()
 }
 
 fn parse_requirements_editable_value(line: &str) -> Option<String> {
@@ -10984,6 +11144,18 @@ mod tests {
         specs
             .iter()
             .any(|spec| spec.name == name && spec.version.as_deref() == Some(requirement))
+    }
+
+    fn test_pypi_file(filename: &str, packagetype: &str) -> PypiFile {
+        PypiFile {
+            filename: filename.to_owned(),
+            packagetype: packagetype.to_owned(),
+            url: format!("https://example.invalid/{filename}"),
+            digests: PypiDigests {
+                sha256: "abc".to_owned(),
+            },
+            requires_python: None,
+        }
     }
 
     fn commit_git_repo(path: &Path) {
@@ -14342,13 +14514,18 @@ wheels = [
         let requirements = dir.path().join("requirements.txt");
         fs::write(
             &requirements,
-            "--trusted-host example.invalid\n--only-binary=:all:\n--only-binary idna\n--prefer-binary\n--require-hashes\n--no-deps\nidna==3.7 --hash=sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n",
+            "--trusted-host example.invalid\n--no-binary=:all:\n--only-binary idna\n--prefer-binary\n--require-hashes\n--no-deps\nidna==3.7 --hash=sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n",
         )
         .unwrap();
 
         let discovered = read_requirements_file(&requirements).unwrap();
         assert!(discovered.pypi_require_hashes);
         assert!(discovered.pypi_no_deps);
+        assert_eq!(discovered.pypi_binary_all, Some(PypiBinaryMode::Source));
+        assert_eq!(
+            discovered.pypi_binary_packages.get("idna"),
+            Some(&PypiBinaryMode::Binary)
+        );
         assert!(has_spec(&discovered.specs, "idna", "==3.7"));
         assert_eq!(
             discovered
@@ -15439,8 +15616,87 @@ wheels = [
             }],
         };
 
-        let file = choose_pypi_file(&doc, Some("3.11.0")).unwrap();
+        let file = choose_pypi_file(&doc, Some("3.11.0"), None).unwrap();
         assert_eq!(file.filename, "source-only-1.0.0.zip");
+    }
+
+    #[test]
+    fn chooses_pypi_source_distributions_when_no_binary_requested() {
+        let doc = PypiResponse {
+            info: PypiInfo {
+                name: "dual-format".to_owned(),
+                version: "1.0.0".to_owned(),
+                requires_dist: None,
+            },
+            urls: vec![
+                test_pypi_file("dual_format-1.0.0-py3-none-any.whl", "bdist_wheel"),
+                test_pypi_file("dual-format-1.0.0.tar.gz", "sdist"),
+            ],
+        };
+
+        let file = choose_pypi_file(&doc, Some("3.11.0"), Some(PypiBinaryMode::Source)).unwrap();
+        assert_eq!(file.filename, "dual-format-1.0.0.tar.gz");
+    }
+
+    #[test]
+    fn rejects_pypi_source_fallback_when_binary_required() {
+        let doc = PypiResponse {
+            info: PypiInfo {
+                name: "source-only".to_owned(),
+                version: "1.0.0".to_owned(),
+                requires_dist: None,
+            },
+            urls: vec![test_pypi_file("source-only-1.0.0.tar.gz", "sdist")],
+        };
+
+        assert!(choose_pypi_file(&doc, Some("3.11.0"), Some(PypiBinaryMode::Binary)).is_none());
+    }
+
+    #[test]
+    fn chooses_pypi_version_with_requested_binary_format() {
+        let root = PypiRoot {
+            info: PypiInfo {
+                name: "dual-format".to_owned(),
+                version: "2.0.0".to_owned(),
+                requires_dist: None,
+            },
+            releases: BTreeMap::from([
+                (
+                    "1.0.0".to_owned(),
+                    vec![test_pypi_file("dual-format-1.0.0.tar.gz", "sdist")],
+                ),
+                (
+                    "2.0.0".to_owned(),
+                    vec![test_pypi_file(
+                        "dual_format-2.0.0-py3-none-any.whl",
+                        "bdist_wheel",
+                    )],
+                ),
+            ]),
+        };
+
+        assert_eq!(
+            choose_pypi_version(
+                "dual-format",
+                "*",
+                &root,
+                Some("3.11.0"),
+                Some(PypiBinaryMode::Source),
+            )
+            .unwrap(),
+            "1.0.0"
+        );
+        assert_eq!(
+            choose_pypi_version(
+                "dual-format",
+                "*",
+                &root,
+                Some("3.11.0"),
+                Some(PypiBinaryMode::Binary),
+            )
+            .unwrap(),
+            "2.0.0"
+        );
     }
 
     #[test]
