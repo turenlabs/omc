@@ -48,6 +48,11 @@ enum Command {
             help = "Grant a capability, e.g. http:api.example.com, env:API_TOKEN, fs-read:*, proc:*"
         )]
         allow: Vec<String>,
+        #[arg(
+            long = "extra",
+            help = "Install a pyproject.toml optional dependency group"
+        )]
+        extra: Vec<String>,
         #[arg(long, help = "Grant all host capabilities for compatibility testing")]
         allow_all_host: bool,
     },
@@ -126,10 +131,15 @@ fn run() -> Result<ExitCode, OmcRegistryError> {
         }
         Command::Install {
             allow,
+            extra,
             allow_all_host,
         } => {
             let mut options = LinkOptions::new(&cli.project_dir);
             options.allowed_capabilities = parse_grants(&allow, allow_all_host)?;
+            options.project_extras = extra
+                .into_iter()
+                .map(|extra| normalize_extra(&extra))
+                .collect();
             let install = install_project(&options)?;
             println!(
                 "installed npm={} pypi={} npm_bins={} python_scripts={} node_modules={} python_site_packages={}",
@@ -315,4 +325,8 @@ fn parse_grants(
     }
 
     Ok(grants)
+}
+
+fn normalize_extra(extra: &str) -> String {
+    extra.trim().replace('_', "-").to_ascii_lowercase()
 }

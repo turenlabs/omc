@@ -111,6 +111,7 @@ For existing projects, `install` reads normal project files:
 ```text
 package.json       dependencies, devDependencies, optionalDependencies, peers
 requirements.txt  PyPI requirements, extras, -r includes, -c constraints, markers
+pyproject.toml    PEP 621 project dependencies, selected optional groups
 ```
 
 What `add` does:
@@ -181,6 +182,8 @@ Supported now:
 - npm registry `optionalDependencies` and required `peerDependencies` resolution
 - `requirements.txt` ingestion with extras, recursive `-r` includes, `-c`
   constraints, and common Python environment markers
+- `pyproject.toml` PEP 621 dependency ingestion with `omc install --extra`
+  for selected optional dependency groups
 - PyPI extras resolution for dependencies gated by `extra == "..."`
 - source artifact download and cache
 - `omc.toml` and `omc.lock`

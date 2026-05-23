@@ -373,6 +373,7 @@ pub struct LinkOptions {
     pub record_blocked: bool,
     pub allowed_capabilities: Vec<Capability>,
     pub constraints: BTreeMap<String, String>,
+    pub project_extras: BTreeSet<String>,
 }
 
 impl LinkOptions {
@@ -382,6 +383,7 @@ impl LinkOptions {
             record_blocked: false,
             allowed_capabilities: Vec::new(),
             constraints: BTreeMap::new(),
+            project_extras: BTreeSet::new(),
         }
     }
 }
@@ -481,7 +483,8 @@ pub fn install_project(options: &LinkOptions) -> Result<InstallReport> {
     for (key, version) in manifest.dependencies {
         specs.push(PackageSpec::parse(&format!("{key}@{version}"))?);
     }
-    let discovered = discover_project_requirements(&options.project_dir)?;
+    let discovered =
+        discover_project_requirements_with_extras(&options.project_dir, &options.project_extras)?;
     specs.extend(discovered.specs);
     options.constraints.extend(discovered.constraints);
 
@@ -501,6 +504,13 @@ pub fn discover_project_specs(project_dir: impl AsRef<Path>) -> Result<Vec<Packa
 }
 
 pub fn discover_project_requirements(project_dir: impl AsRef<Path>) -> Result<ProjectRequirements> {
+    discover_project_requirements_with_extras(project_dir, &BTreeSet::new())
+}
+
+pub fn discover_project_requirements_with_extras(
+    project_dir: impl AsRef<Path>,
+    project_extras: &BTreeSet<String>,
+) -> Result<ProjectRequirements> {
     let project_dir = project_dir.as_ref();
     let mut project = ProjectRequirements::default();
 
@@ -516,6 +526,12 @@ pub fn discover_project_requirements(project_dir: impl AsRef<Path>) -> Result<Pr
         let requirements = read_requirements_file(&requirements_txt)?;
         project.specs.extend(requirements.specs);
         project.constraints.extend(requirements.constraints);
+    }
+
+    let pyproject_toml = project_dir.join("pyproject.toml");
+    if pyproject_toml.exists() {
+        let requirements = read_pyproject_requirements(&pyproject_toml, project_extras)?;
+        project.specs.extend(requirements.specs);
     }
 
     Ok(project)
@@ -737,6 +753,41 @@ fn read_requirements_file(path: &Path) -> Result<ProjectRequirements> {
         &mut BTreeSet::new(),
         &mut discovered,
     )?;
+    Ok(discovered)
+}
+
+fn read_pyproject_requirements(
+    path: &Path,
+    project_extras: &BTreeSet<String>,
+) -> Result<ProjectRequirements> {
+    let pyproject = toml::from_str::<PyProjectToml>(&fs::read_to_string(path)?)?;
+    let mut discovered = ProjectRequirements::default();
+    let Some(project) = pyproject.project else {
+        return Ok(discovered);
+    };
+
+    for dependency in project.dependencies {
+        if let Some(spec) = parse_pypi_requirement(&dependency) {
+            discovered.specs.push(spec);
+        }
+    }
+
+    let optional_dependencies = project
+        .optional_dependencies
+        .into_iter()
+        .map(|(extra, dependencies)| (normalize_pypi_extra(&extra), dependencies))
+        .collect::<BTreeMap<_, _>>();
+
+    for extra in project_extras {
+        if let Some(dependencies) = optional_dependencies.get(extra) {
+            for dependency in dependencies {
+                if let Some(spec) = parse_pypi_requirement_with_extras(dependency, project_extras) {
+                    discovered.specs.push(spec);
+                }
+            }
+        }
+    }
+
     Ok(discovered)
 }
 
@@ -1716,7 +1767,7 @@ fn parse_pypi_name_and_extras(name: &str) -> (String, BTreeSet<String>) {
     let extras = extras
         .trim_end_matches(']')
         .split(',')
-        .map(|extra| extra.trim().replace('_', "-").to_ascii_lowercase())
+        .map(normalize_pypi_extra)
         .filter(|extra| !extra.is_empty())
         .collect::<BTreeSet<_>>();
     (normalize_pypi_name(base), extras)
@@ -1724,6 +1775,10 @@ fn parse_pypi_name_and_extras(name: &str) -> (String, BTreeSet<String>) {
 
 fn normalize_pypi_name(name: &str) -> String {
     name.replace('_', "-").to_ascii_lowercase()
+}
+
+fn normalize_pypi_extra(extra: &str) -> String {
+    extra.trim().replace('_', "-").to_ascii_lowercase()
 }
 
 fn parse_requirements_include(line: &str) -> Option<RequirementsInclude> {
@@ -2410,6 +2465,19 @@ struct ProjectPackageJson {
 }
 
 #[derive(Debug, Deserialize)]
+struct PyProjectToml {
+    project: Option<PyProjectProject>,
+}
+
+#[derive(Debug, Deserialize)]
+struct PyProjectProject {
+    #[serde(default)]
+    dependencies: Vec<String>,
+    #[serde(default, rename = "optional-dependencies")]
+    optional_dependencies: BTreeMap<String, Vec<String>>,
+}
+
+#[derive(Debug, Deserialize)]
 struct NpmInstalledPackageJson {
     name: Option<String>,
     bin: Option<NpmBinField>,
@@ -2676,6 +2744,52 @@ mod tests {
                 .map(String::as_str),
             Some("==2.2.1")
         );
+    }
+
+    #[test]
+    fn reads_pyproject_dependencies_and_selected_extras() {
+        let dir = tempfile::tempdir().unwrap();
+        let pyproject = dir.path().join("pyproject.toml");
+        fs::write(
+            &pyproject,
+            r#"
+            [project]
+            dependencies = [
+                "idna==3.7",
+                "colorama; extra == 'windows'"
+            ]
+
+            [project.optional-dependencies]
+            dev = [
+                "charset-normalizer==3.4.0",
+                "urllib3<3; python_version >= '3.0'"
+            ]
+            docs = ["markdown==3.6"]
+            "#,
+        )
+        .unwrap();
+
+        let base = read_pyproject_requirements(&pyproject, &BTreeSet::new()).unwrap();
+        assert!(base
+            .specs
+            .iter()
+            .any(|spec| spec.name == "idna" && spec.version.as_deref() == Some("==3.7")));
+        assert!(!base.specs.iter().any(|spec| spec.name == "colorama"));
+        assert_eq!(base.specs.len(), 1);
+
+        let dev =
+            read_pyproject_requirements(&pyproject, &BTreeSet::from(["dev".to_owned()])).unwrap();
+        assert!(dev.specs.iter().any(|spec| spec.name == "idna"));
+        assert!(dev
+            .specs
+            .iter()
+            .any(|spec| spec.name == "charset-normalizer"
+                && spec.version.as_deref() == Some("==3.4.0")));
+        assert!(dev
+            .specs
+            .iter()
+            .any(|spec| spec.name == "urllib3" && spec.version.as_deref() == Some("<3")));
+        assert!(!dev.specs.iter().any(|spec| spec.name == "markdown"));
     }
 
     #[test]
