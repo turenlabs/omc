@@ -109,7 +109,7 @@ cargo run -p omc-cli -- --project-dir /tmp/omc-demo audit
 For existing projects, `install` reads normal project files:
 
 ```text
-package.json       dependencies and devDependencies
+package.json       dependencies, devDependencies, optionalDependencies, peers
 requirements.txt  PyPI requirements, extras, -r includes, -c constraints, markers
 ```
 
@@ -177,6 +177,8 @@ Supported now:
   filtering
 - recursive runtime dependency locking
 - `package.json` dependency/devDependency ingestion
+- npm `optionalDependencies` and required `peerDependencies` ingestion
+- npm registry `optionalDependencies` and required `peerDependencies` resolution
 - `requirements.txt` ingestion with extras, recursive `-r` includes, `-c`
   constraints, and common Python environment markers
 - PyPI extras resolution for dependencies gated by `extra == "..."`
@@ -199,7 +201,7 @@ Not implemented yet:
 - full control-flow graph verification
 - imports/linking across package cells
 - native/Wasm/Cranelift backend
-- full npm peer/optional/bundled dependency semantics
+- full npm bundled dependency and peer placement semantics
 - advanced requirements-file semantics such as hashes, editable installs, direct
   URLs, and index configuration
 - Python sdist build isolation and native wheel policy

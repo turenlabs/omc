@@ -700,13 +700,33 @@ fn read_package_json_specs(path: &Path) -> Result<Vec<PackageSpec>> {
     let package = serde_json::from_str::<ProjectPackageJson>(&fs::read_to_string(path)?)?;
     let mut specs = Vec::new();
 
-    for dependencies in [package.dependencies, package.dev_dependencies] {
+    for dependencies in [
+        package.dependencies,
+        package.dev_dependencies,
+        package.optional_dependencies,
+        required_peer_dependencies(package.peer_dependencies, package.peer_dependencies_meta),
+    ] {
         for (name, requirement) in dependencies {
             specs.push(PackageSpec::new(Ecosystem::Npm, name, Some(requirement)));
         }
     }
 
     Ok(specs)
+}
+
+fn required_peer_dependencies(
+    peer_dependencies: BTreeMap<String, String>,
+    peer_dependencies_meta: BTreeMap<String, NpmPeerDependencyMeta>,
+) -> BTreeMap<String, String> {
+    peer_dependencies
+        .into_iter()
+        .filter(|(name, _)| {
+            !peer_dependencies_meta
+                .get(name)
+                .map(|meta| meta.optional)
+                .unwrap_or(false)
+        })
+        .collect()
 }
 
 fn read_requirements_file(path: &Path) -> Result<ProjectRequirements> {
@@ -1275,13 +1295,7 @@ fn resolve_npm(client: &Client, spec: &PackageSpec) -> Result<ResolvedPackage> {
         return Err(OmcRegistryError::PackageNotFound(spec.requested()));
     }
     let version_doc = response.error_for_status()?.json::<NpmVersion>()?;
-    let dependencies = version_doc
-        .dependencies
-        .clone()
-        .unwrap_or_default()
-        .into_iter()
-        .map(|(name, requirement)| PackageSpec::new(Ecosystem::Npm, name, Some(requirement)))
-        .collect::<Vec<_>>();
+    let dependencies = npm_runtime_dependencies(&version_doc);
     let filename = version_doc
         .dist
         .tarball
@@ -1311,6 +1325,30 @@ fn npm_registry_name_and_requirement(spec: &PackageSpec) -> Result<(String, Opti
     };
     let alias_spec = parse_npm_spec(requirement, alias)?;
     Ok((alias_spec.name, alias_spec.version))
+}
+
+fn npm_runtime_dependencies(version_doc: &NpmVersion) -> Vec<PackageSpec> {
+    let mut dependencies = BTreeMap::new();
+
+    dependencies.extend(version_doc.dependencies.clone().unwrap_or_default());
+    dependencies.extend(
+        version_doc
+            .optional_dependencies
+            .clone()
+            .unwrap_or_default(),
+    );
+    dependencies.extend(required_peer_dependencies(
+        version_doc.peer_dependencies.clone().unwrap_or_default(),
+        version_doc
+            .peer_dependencies_meta
+            .clone()
+            .unwrap_or_default(),
+    ));
+
+    dependencies
+        .into_iter()
+        .map(|(name, requirement)| PackageSpec::new(Ecosystem::Npm, name, Some(requirement)))
+        .collect()
 }
 
 fn resolve_pypi(
@@ -2363,6 +2401,12 @@ struct ProjectPackageJson {
     dependencies: BTreeMap<String, String>,
     #[serde(default, rename = "devDependencies")]
     dev_dependencies: BTreeMap<String, String>,
+    #[serde(default, rename = "optionalDependencies")]
+    optional_dependencies: BTreeMap<String, String>,
+    #[serde(default, rename = "peerDependencies")]
+    peer_dependencies: BTreeMap<String, String>,
+    #[serde(default, rename = "peerDependenciesMeta")]
+    peer_dependencies_meta: BTreeMap<String, NpmPeerDependencyMeta>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -2405,6 +2449,18 @@ struct NpmVersion {
     scripts: Option<BTreeMap<String, String>>,
     #[serde(default)]
     dependencies: Option<BTreeMap<String, String>>,
+    #[serde(default, rename = "optionalDependencies")]
+    optional_dependencies: Option<BTreeMap<String, String>>,
+    #[serde(default, rename = "peerDependencies")]
+    peer_dependencies: Option<BTreeMap<String, String>>,
+    #[serde(default, rename = "peerDependenciesMeta")]
+    peer_dependencies_meta: Option<BTreeMap<String, NpmPeerDependencyMeta>>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+struct NpmPeerDependencyMeta {
+    #[serde(default)]
+    optional: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -2519,7 +2575,15 @@ mod tests {
             &package_json,
             r#"{
                 "dependencies": { "is-odd": "3.0.1" },
-                "devDependencies": { "which": "^2.0.2" }
+                "devDependencies": { "which": "^2.0.2" },
+                "optionalDependencies": { "is-even": "1.0.0" },
+                "peerDependencies": {
+                    "left-pad": "1.3.0",
+                    "optional-peer": "1.0.0"
+                },
+                "peerDependenciesMeta": {
+                    "optional-peer": { "optional": true }
+                }
             }"#,
         )
         .unwrap();
@@ -2530,6 +2594,52 @@ mod tests {
         assert!(specs
             .iter()
             .any(|spec| spec.name == "which" && spec.version.as_deref() == Some("^2.0.2")));
+        assert!(specs
+            .iter()
+            .any(|spec| spec.name == "is-even" && spec.version.as_deref() == Some("1.0.0")));
+        assert!(specs
+            .iter()
+            .any(|spec| spec.name == "left-pad" && spec.version.as_deref() == Some("1.3.0")));
+        assert!(!specs.iter().any(|spec| spec.name == "optional-peer"));
+    }
+
+    #[test]
+    fn reads_npm_runtime_optional_and_peer_dependencies() {
+        let version_doc = NpmVersion {
+            version: "1.0.0".to_owned(),
+            dist: NpmDist {
+                tarball: "https://example.invalid/package.tgz".to_owned(),
+            },
+            scripts: None,
+            dependencies: Some(BTreeMap::from([(
+                "runtime".to_owned(),
+                "^1.0.0".to_owned(),
+            )])),
+            optional_dependencies: Some(BTreeMap::from([(
+                "optional-runtime".to_owned(),
+                "^2.0.0".to_owned(),
+            )])),
+            peer_dependencies: Some(BTreeMap::from([
+                ("required-peer".to_owned(), "^3.0.0".to_owned()),
+                ("optional-peer".to_owned(), "^4.0.0".to_owned()),
+            ])),
+            peer_dependencies_meta: Some(BTreeMap::from([(
+                "optional-peer".to_owned(),
+                NpmPeerDependencyMeta { optional: true },
+            )])),
+        };
+
+        let dependencies = npm_runtime_dependencies(&version_doc);
+        assert!(dependencies
+            .iter()
+            .any(|spec| spec.name == "runtime" && spec.version.as_deref() == Some("^1.0.0")));
+        assert!(dependencies.iter().any(
+            |spec| spec.name == "optional-runtime" && spec.version.as_deref() == Some("^2.0.0")
+        ));
+        assert!(dependencies
+            .iter()
+            .any(|spec| spec.name == "required-peer" && spec.version.as_deref() == Some("^3.0.0")));
+        assert!(!dependencies.iter().any(|spec| spec.name == "optional-peer"));
     }
 
     #[test]
