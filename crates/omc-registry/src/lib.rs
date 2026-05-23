@@ -16,6 +16,7 @@ use omc_verify::{verify_module, VerifyFinding};
 use rand_core::OsRng;
 use reqwest::blocking::multipart::{Form, Part};
 use reqwest::blocking::Client;
+use reqwest::{Certificate, Identity};
 use semver::Version;
 use serde::{Deserialize, Serialize};
 use sha1::Sha1;
@@ -7518,6 +7519,14 @@ pub struct PypiUploadResult {
     pub response_text: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, Default)]
+pub struct PypiUploadOptions<'a> {
+    pub skip_existing: bool,
+    pub comment: Option<&'a str>,
+    pub cert: Option<&'a Path>,
+    pub client_cert: Option<&'a Path>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct PypiUploadDistribution {
     filename: String,
@@ -8621,8 +8630,7 @@ pub fn upload_pypi_distribution(
     username: &str,
     password: &str,
     path: &Path,
-    skip_existing: bool,
-    comment: Option<&str>,
+    options: PypiUploadOptions<'_>,
 ) -> Result<PypiUploadResult> {
     let repository_url = repository_url.trim();
     if repository_url.is_empty() {
@@ -8630,24 +8638,24 @@ pub fn upload_pypi_distribution(
             "twine upload needs a repository URL".to_owned(),
         ));
     }
-    if username.trim().is_empty() || password.is_empty() {
+    if username.trim().is_empty() && password.is_empty() && options.client_cert.is_none() {
         return Err(OmcRegistryError::UnsupportedSpec(
-            "twine upload needs authentication; pass --username/--password, set TWINE_USERNAME/TWINE_PASSWORD, or configure .pypirc".to_owned(),
+            "twine upload needs authentication; pass --username/--password, set TWINE_USERNAME/TWINE_PASSWORD, configure .pypirc, or pass --client-cert".to_owned(),
         ));
     }
 
     let distribution = prepare_pypi_upload_distribution(path)?;
-    let form = pypi_upload_form(&distribution, comment)?;
-    let client = Client::builder().user_agent("omc-prototype/0.1").build()?;
-    let response = client
-        .post(repository_url)
-        .basic_auth(username, Some(password))
-        .multipart(form)
-        .send()?;
+    let form = pypi_upload_form(&distribution, options.comment)?;
+    let client = pypi_upload_client(options.cert, options.client_cert)?;
+    let mut request = client.post(repository_url);
+    if !username.trim().is_empty() || !password.is_empty() {
+        request = request.basic_auth(username, Some(password));
+    }
+    let response = request.multipart(form).send()?;
     let status = response.status();
     let status_code = status.as_u16();
     let text = response.text()?;
-    let skipped = skip_existing && pypi_upload_response_is_existing(status_code, &text);
+    let skipped = options.skip_existing && pypi_upload_response_is_existing(status_code, &text);
     if !status.is_success() && !skipped {
         let detail = text.trim();
         let message = if detail.is_empty() {
@@ -8676,6 +8684,21 @@ pub fn upload_pypi_distribution(
         skipped,
         response_text: (!text.trim().is_empty()).then_some(text),
     })
+}
+
+fn pypi_upload_client(cert: Option<&Path>, client_cert: Option<&Path>) -> Result<Client> {
+    let mut builder = Client::builder().user_agent("omc-prototype/0.1");
+    if let Some(cert) = cert {
+        let bytes = fs::read(cert)?;
+        for cert in Certificate::from_pem_bundle(&bytes)? {
+            builder = builder.add_root_certificate(cert);
+        }
+    }
+    if let Some(client_cert) = client_cert {
+        let bytes = fs::read(client_cert)?;
+        builder = builder.identity(Identity::from_pem(&bytes)?);
+    }
+    Ok(builder.build()?)
 }
 
 fn prepare_pypi_upload_distribution(path: &Path) -> Result<PypiUploadDistribution> {
@@ -18329,8 +18352,10 @@ wheels = [
             "__token__",
             "pypi-token",
             &wheel_path,
-            false,
-            Some("release upload"),
+            PypiUploadOptions {
+                comment: Some("release upload"),
+                ..PypiUploadOptions::default()
+            },
         )
         .unwrap();
         assert_eq!(result.repository_url, format!("http://{addr}/legacy/"));

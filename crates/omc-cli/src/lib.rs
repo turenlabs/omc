@@ -27,7 +27,7 @@ use omc_registry::{
     NpmPublishResult, NpmSearchPackage, NpmTokenCreateOptions, NpmTokenCreateResult,
     NpmTokenListResult, NpmTokenRevokeResult, NpmWhoamiResult, NpmWorkspacePackage,
     OmcRegistryError, PackageSpec, ProjectRequirements, PypiBinaryMode, PypiCheckIssue,
-    PypiUploadResult, PythonLocalRequirement, PythonVcsRequirement, Verdict,
+    PypiUploadOptions, PypiUploadResult, PythonLocalRequirement, PythonVcsRequirement, Verdict,
 };
 use sha2::{Digest, Sha256, Sha384, Sha512};
 
@@ -805,6 +805,8 @@ struct TwineUploadAction {
     username: Option<String>,
     password: Option<String>,
     config_file: Option<PathBuf>,
+    cert: Option<PathBuf>,
+    client_cert: Option<PathBuf>,
     skip_existing: bool,
     comment: Option<String>,
 }
@@ -814,6 +816,8 @@ struct TwineUploadSettings {
     repository_url: String,
     username: String,
     password: String,
+    cert: Option<PathBuf>,
+    client_cert: Option<PathBuf>,
 }
 
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -2326,8 +2330,12 @@ fn print_twine_upload(
             &settings.username,
             &settings.password,
             &path,
-            action.skip_existing,
-            action.comment.as_deref(),
+            PypiUploadOptions {
+                skip_existing: action.skip_existing,
+                comment: action.comment.as_deref(),
+                cert: settings.cert.as_deref(),
+                client_cert: settings.client_cert.as_deref(),
+            },
         )?;
         print_twine_upload_result(&result);
     }
@@ -2375,32 +2383,76 @@ fn resolve_twine_upload_settings(
                 "twine upload could not resolve repository `{repository_name}`"
             ))
         })?;
+    let cert = action
+        .cert
+        .clone()
+        .or_else(|| {
+            env::var("TWINE_CERT")
+                .ok()
+                .filter(|value| !value.trim().is_empty())
+                .map(PathBuf::from)
+        })
+        .or_else(|| {
+            section
+                .and_then(|values| values.get("ca_cert"))
+                .map(PathBuf::from)
+        })
+        .map(|path| absolutize_path(project_dir, path));
+    let client_cert = action
+        .client_cert
+        .clone()
+        .or_else(|| {
+            section
+                .and_then(|values| values.get("client_cert"))
+                .map(PathBuf::from)
+        })
+        .map(|path| absolutize_path(project_dir, path));
 
     let username = action
         .username
         .clone()
         .or_else(|| env::var("TWINE_USERNAME").ok())
-        .or_else(|| section.and_then(|values| values.get("username")).cloned())
-        .ok_or_else(|| {
-            OmcRegistryError::UnsupportedSpec(
-                "twine upload needs a username; pass --username, set TWINE_USERNAME, or configure .pypirc".to_owned(),
-            )
-        })?;
+        .or_else(|| section.and_then(|values| values.get("username")).cloned());
+    let username = match username {
+        Some(username) => username,
+        None if client_cert.is_some() => String::new(),
+        None => {
+            return Err(OmcRegistryError::UnsupportedSpec(
+                "twine upload needs a username; pass --username, set TWINE_USERNAME, configure .pypirc, or pass --client-cert".to_owned(),
+            ));
+        }
+    };
     let password = action
         .password
         .clone()
         .or_else(|| env::var("TWINE_PASSWORD").ok())
-        .or_else(|| section.and_then(|values| values.get("password")).cloned())
-        .ok_or_else(|| {
-            OmcRegistryError::UnsupportedSpec(
-                "twine upload needs a password/token; pass --password, set TWINE_PASSWORD, or configure .pypirc".to_owned(),
-            )
-        })?;
+        .or_else(|| section.and_then(|values| values.get("password")).cloned());
+    let password = match password {
+        Some(password) => password,
+        None if client_cert.is_some() => String::new(),
+        None => {
+            return Err(OmcRegistryError::UnsupportedSpec(
+                "twine upload needs a password/token; pass --password, set TWINE_PASSWORD, configure .pypirc, or pass --client-cert".to_owned(),
+            ));
+        }
+    };
+    if client_cert.is_none() && username.trim().is_empty() {
+        return Err(OmcRegistryError::UnsupportedSpec(
+                "twine upload needs a username; pass --username, set TWINE_USERNAME, configure .pypirc, or pass --client-cert".to_owned(),
+            ));
+    }
+    if client_cert.is_none() && password.is_empty() {
+        return Err(OmcRegistryError::UnsupportedSpec(
+                "twine upload needs a password/token; pass --password, set TWINE_PASSWORD, configure .pypirc, or pass --client-cert".to_owned(),
+            ));
+    }
 
     Ok(TwineUploadSettings {
         repository_url,
         username,
         password,
+        cert,
+        client_cert,
     })
 }
 
@@ -3045,7 +3097,7 @@ fn twine_help_text(topic: Option<&str>) -> String {
             "twine upload [options] dist [dist ...]",
             &[
                 "Upload one or more .whl, .tar.gz, .tgz, or .zip distributions.",
-                "Supports -r/--repository, --repository-url, -u/--username, -p/--password, --config-file, --skip-existing, --non-interactive, --comment, --verbose, and --disable-progress-bar.",
+                "Supports -r/--repository, --repository-url, -u/--username, -p/--password, --config-file, --cert, --client-cert, --skip-existing, --non-interactive, --comment, --verbose, and --disable-progress-bar.",
             ],
         ),
         Some(_) => twine_command_help(
@@ -11806,6 +11858,8 @@ fn parse_twine_upload_args(args: &[String]) -> Result<TwineCompatAction, OmcRegi
     let mut username = None;
     let mut password = None;
     let mut config_file = None;
+    let mut cert = None;
+    let mut client_cert = None;
     let mut skip_existing = false;
     let mut comment = None;
     let mut index = 0;
@@ -11840,6 +11894,16 @@ fn parse_twine_upload_args(args: &[String]) -> Result<TwineCompatAction, OmcRegi
             config_file = Some(PathBuf::from(twine_flag_value(args, index, arg)?));
         } else if let Some(value) = arg.strip_prefix("--config-file=") {
             config_file = Some(PathBuf::from(value));
+        } else if arg == "--cert" {
+            index += 1;
+            cert = Some(PathBuf::from(twine_flag_value(args, index, arg)?));
+        } else if let Some(value) = arg.strip_prefix("--cert=") {
+            cert = Some(PathBuf::from(value));
+        } else if arg == "--client-cert" {
+            index += 1;
+            client_cert = Some(PathBuf::from(twine_flag_value(args, index, arg)?));
+        } else if let Some(value) = arg.strip_prefix("--client-cert=") {
+            client_cert = Some(PathBuf::from(value));
         } else if arg == "-c" || arg == "--comment" {
             index += 1;
             comment = Some(twine_flag_value(args, index, arg)?);
@@ -11851,16 +11915,7 @@ fn parse_twine_upload_args(args: &[String]) -> Result<TwineCompatAction, OmcRegi
             arg.as_str(),
             "--non-interactive" | "--disable-progress-bar" | "--verbose"
         ) {
-        } else if matches!(arg.as_str(), "--cert" | "--client-cert") {
-            index += 1;
-            let _ = twine_flag_value(args, index, arg)?;
-            return Err(OmcRegistryError::UnsupportedSpec(format!(
-                "twine upload {arg} is not implemented yet"
-            )));
-        } else if arg.starts_with("--cert=")
-            || arg.starts_with("--client-cert=")
-            || matches!(arg.as_str(), "--attestations" | "-s" | "--sign")
-        {
+        } else if matches!(arg.as_str(), "--attestations" | "-s" | "--sign") {
             return Err(OmcRegistryError::UnsupportedSpec(format!(
                 "twine upload {arg} is not implemented yet"
             )));
@@ -11888,6 +11943,8 @@ fn parse_twine_upload_args(args: &[String]) -> Result<TwineCompatAction, OmcRegi
         username,
         password,
         config_file,
+        cert,
+        client_cert,
         skip_existing,
         comment,
     }))
@@ -16370,6 +16427,9 @@ mod tests {
                 "-p",
                 "pypi-token",
                 "--config-file=release.pypirc",
+                "--cert",
+                "certs/ca.pem",
+                "--client-cert=certs/client.pem",
                 "--skip-existing",
                 "--comment",
                 "release upload",
@@ -16389,6 +16449,8 @@ mod tests {
                 username: Some("__token__".to_owned()),
                 password: Some("pypi-token".to_owned()),
                 config_file: Some(PathBuf::from("release.pypirc")),
+                cert: Some(PathBuf::from("certs/ca.pem")),
+                client_cert: Some(PathBuf::from("certs/client.pem")),
                 skip_existing: true,
                 comment: Some("release upload".to_owned()),
             })
@@ -16400,7 +16462,7 @@ mod tests {
         let dir = test_dir("twine-pypirc");
         fs::write(
             dir.join("release.pypirc"),
-            "[distutils]\nindex-servers =\n    private\n\n[private]\nrepository = https://upload.example/legacy/\nusername = __token__\npassword = pypi-token\n",
+            "[distutils]\nindex-servers =\n    private\n\n[private]\nrepository = https://upload.example/legacy/\nusername = __token__\npassword = pypi-token\nca_cert = certs/ca.pem\nclient_cert = certs/client.pem\n",
         )
         .unwrap();
 
@@ -16413,6 +16475,8 @@ mod tests {
                 username: None,
                 password: None,
                 config_file: Some(PathBuf::from("release.pypirc")),
+                cert: None,
+                client_cert: None,
                 skip_existing: false,
                 comment: None,
             },
@@ -16421,6 +16485,36 @@ mod tests {
         assert_eq!(settings.repository_url, "https://upload.example/legacy/");
         assert_eq!(settings.username, "__token__");
         assert_eq!(settings.password, "pypi-token");
+        assert_eq!(settings.cert, Some(dir.join("certs/ca.pem")));
+        assert_eq!(settings.client_cert, Some(dir.join("certs/client.pem")));
+
+        let mtls_settings = resolve_twine_upload_settings(
+            &dir,
+            &TwineUploadAction {
+                paths: vec![PathBuf::from("dist/demo-1.0.0.tar.gz")],
+                repository: None,
+                repository_url: Some("https://private.example/legacy/".to_owned()),
+                username: None,
+                password: None,
+                config_file: None,
+                cert: Some(PathBuf::from("certs/ca.pem")),
+                client_cert: Some(PathBuf::from("certs/client.pem")),
+                skip_existing: false,
+                comment: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            mtls_settings.repository_url,
+            "https://private.example/legacy/"
+        );
+        assert_eq!(mtls_settings.username, "");
+        assert_eq!(mtls_settings.password, "");
+        assert_eq!(mtls_settings.cert, Some(dir.join("certs/ca.pem")));
+        assert_eq!(
+            mtls_settings.client_cert,
+            Some(dir.join("certs/client.pem"))
+        );
 
         fs::remove_dir_all(dir).unwrap();
     }
