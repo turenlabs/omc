@@ -315,6 +315,7 @@ enum DirectCompatMode {
     Npm,
     Npx,
     Pip,
+    Python,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -348,6 +349,7 @@ fn run_entry() -> Result<ExitCode, OmcRegistryError> {
                 run_npm_compat(&invocation.project_dir, &npx_compat_args(invocation.args))
             }
             DirectCompatMode::Pip => run_pip_compat(&invocation.project_dir, &invocation.args),
+            DirectCompatMode::Python => run_python(&invocation.project_dir, &invocation.args),
         };
     }
 
@@ -362,6 +364,7 @@ fn direct_compat_mode(program: Option<&std::ffi::OsStr>) -> Option<DirectCompatM
         "npm" => Some(DirectCompatMode::Npm),
         "npx" => Some(DirectCompatMode::Npx),
         "pip" | "pip3" => Some(DirectCompatMode::Pip),
+        "python" | "python3" => Some(DirectCompatMode::Python),
         _ => None,
     }
 }
@@ -675,10 +678,25 @@ fn run_python(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRegist
         return run_pip_compat(project_dir, pip_args);
     }
 
-    let mut command = ProcessCommand::new("python3");
+    let mut command = ProcessCommand::new(host_python_program()?);
     apply_project_runtime_env(&mut command, project_dir)?;
     let status = command.arg("-S").args(args).status()?;
     Ok(exit_code(status.code()))
+}
+
+fn host_python_program() -> Result<PathBuf, OmcRegistryError> {
+    if let Some(path) = env::var_os("OMC_HOST_PYTHON") {
+        return Ok(PathBuf::from(path));
+    }
+
+    find_program_outside_current_exe_dir("python3")
+        .or_else(|| find_program_outside_current_exe_dir("python"))
+        .ok_or_else(|| {
+            OmcRegistryError::UnsupportedSpec(
+                "could not find a host python3 outside the OMC shim directory; set OMC_HOST_PYTHON"
+                    .to_owned(),
+            )
+        })
 }
 
 fn python_pip_module_args(args: &[String]) -> Option<&[String]> {
@@ -1562,6 +1580,40 @@ fn find_program_on_path(program: &str) -> Option<PathBuf> {
         }
     }
     None
+}
+
+fn find_program_outside_current_exe_dir(program: &str) -> Option<PathBuf> {
+    let current_exe = env::current_exe().ok().and_then(canonicalize_path);
+    let current_exe_dir = current_exe
+        .as_deref()
+        .and_then(Path::parent)
+        .map(Path::to_path_buf);
+    let path = env::var_os("PATH")?;
+    for dir in env::split_paths(&path) {
+        let candidate = dir.join(program);
+        if !candidate.is_file() {
+            continue;
+        }
+        let normalized = canonicalize_path(candidate.clone()).unwrap_or_else(|| candidate.clone());
+        if current_exe
+            .as_ref()
+            .is_some_and(|current| current == &normalized)
+        {
+            continue;
+        }
+        if current_exe_dir
+            .as_ref()
+            .is_some_and(|current_dir| normalized.parent() == Some(current_dir.as_path()))
+        {
+            continue;
+        }
+        return Some(candidate);
+    }
+    None
+}
+
+fn canonicalize_path(path: PathBuf) -> Option<PathBuf> {
+    path.canonicalize().ok()
 }
 
 fn collect_npm_package_bin_env(package: &serde_json::Value, vars: &mut BTreeMap<String, String>) {
@@ -2654,7 +2706,7 @@ mod tests {
     }
 
     #[test]
-    fn detects_direct_npm_npx_and_pip_compat_binaries() {
+    fn detects_direct_compat_binaries() {
         assert_eq!(
             direct_compat_mode(Some(Path::new("/tmp/npm").as_os_str())),
             Some(DirectCompatMode::Npm)
@@ -2666,6 +2718,14 @@ mod tests {
         assert_eq!(
             direct_compat_mode(Some(Path::new("/tmp/pip3").as_os_str())),
             Some(DirectCompatMode::Pip)
+        );
+        assert_eq!(
+            direct_compat_mode(Some(Path::new("/tmp/python").as_os_str())),
+            Some(DirectCompatMode::Python)
+        );
+        assert_eq!(
+            direct_compat_mode(Some(Path::new("/tmp/python3").as_os_str())),
+            Some(DirectCompatMode::Python)
         );
         assert_eq!(
             direct_compat_mode(Some(Path::new("/tmp/omc").as_os_str())),
@@ -2722,6 +2782,24 @@ mod tests {
         assert_eq!(
             npx_compat_args(args(&["eslint", "--", "."])),
             args(&["exec", "eslint", "--", "."])
+        );
+        assert_eq!(
+            parse_direct_compat_invocation(
+                DirectCompatMode::Python,
+                os_args(&[
+                    "--omc-project-dir",
+                    "/tmp/project",
+                    "-m",
+                    "pip",
+                    "install",
+                    "requests",
+                ])
+            )
+            .unwrap(),
+            DirectCompatInvocation {
+                project_dir: PathBuf::from("/tmp/project"),
+                args: args(&["-m", "pip", "install", "requests"]),
+            }
         );
     }
 

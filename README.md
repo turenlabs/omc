@@ -127,6 +127,7 @@ cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip install --targ
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip install ./dist/local_pkg-1.0.0-py3-none-any.whl
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo python -m pip install -e ../local-package
 cargo run -p omc-cli --bin pip3 -- --omc-project-dir /tmp/omc-demo freeze
+cargo run -p omc-cli --bin python3 -- --omc-project-dir /tmp/omc-demo -m pip freeze
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip freeze
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip show requests
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip list --format=json
@@ -137,13 +138,16 @@ cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo audit --json
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo remove --npm is-odd left-pad
 ```
 
-Installing with `--bins` also provides `npm`, `npx`, `pip`, and `pip3` compatibility
-binaries. They dispatch directly into OMC when they are first on `PATH`, so
-existing scripts can call `npm install`, `npm test`, `npx eslint`,
-`pip install`, `pip3 install`, `pip freeze`, and related supported commands without spelling
-`omc npm` or `omc pip`. They default to the current directory; use
+Installing with `--bins` also provides `npm`, `npx`, `pip`, `pip3`, `python`,
+and `python3` compatibility binaries. They dispatch directly into OMC when they
+are first on `PATH`, so existing scripts can call `npm install`, `npm test`,
+`npx eslint`, `pip install`, `pip3 install`, `pip freeze`, `python -m pip`,
+`python3 -m pip`, and related supported commands without spelling `omc npm`,
+`omc pip`, or `omc python`. They default to the current directory; use
 `OMC_PROJECT_DIR=/path/to/project`, `--project-dir PATH`, or
-`--omc-project-dir PATH` for an explicit project root.
+`--omc-project-dir PATH` for an explicit project root. The Python shims run a
+host interpreter with OMC's isolated import path; set `OMC_HOST_PYTHON` if the
+host `python3` is not discoverable outside the OMC shim directory.
 
 For existing projects, `install` reads normal project files:
 
@@ -408,7 +412,8 @@ Supported now:
   `pip install -e '.[dev]'`; direct
   `pip install ./archive.whl`, `./archive.tar.gz`, and HTTPS archive URL
   installs; `omc python -m pip ...` dispatches to the same compatibility path;
-  and direct `pip` / `pip3` compatibility binaries
+  direct `pip` / `pip3` compatibility binaries; and direct `python` / `python3`
+  compatibility binaries for isolated interpreter use and `python -m pip` flows
 - isolated `omc python` execution that uses OMC site-packages without ambient
   user/global Python site-packages or startup/hook environment variables
 - isolated Node execution wrappers that remove ambient `NODE_PATH` module

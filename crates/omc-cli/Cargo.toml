@@ -25,6 +25,14 @@ path = "src/bin/pip3.rs"
 name = "npx"
 path = "src/bin/npx.rs"
 
+[[bin]]
+name = "python"
+path = "src/bin/python.rs"
+
+[[bin]]
+name = "python3"
+path = "src/bin/python3.rs"
+
 [dependencies]
 clap = { version = "4", features = ["derive"] }
 omc-cap = { path = "../omc-cap" }
