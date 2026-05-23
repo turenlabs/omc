@@ -528,6 +528,7 @@ pub struct LinkOptions {
     pub python_vcs_requirements: Vec<PythonVcsRequirement>,
     pub python_vcs_locks: Vec<LockedPythonVcsDependency>,
     pub requirement_files: Vec<PathBuf>,
+    pub constraint_files: Vec<PathBuf>,
     pub project_extras: BTreeSet<String>,
     pub include_dev_dependencies: bool,
     pub save_dev_dependency: bool,
@@ -551,6 +552,7 @@ impl LinkOptions {
             python_vcs_requirements: Vec::new(),
             python_vcs_locks: Vec::new(),
             requirement_files: Vec::new(),
+            constraint_files: Vec::new(),
             project_extras: BTreeSet::new(),
             include_dev_dependencies: true,
             save_dev_dependency: false,
@@ -869,6 +871,10 @@ fn project_requested_specs(options: &mut LinkOptions, locked: bool) -> Result<Ve
 
     if !options.requirement_files.is_empty() {
         let requirements = read_requirements_files(&options.requirement_files)?;
+        apply_project_requirements_to_options(options, &mut specs, requirements);
+    }
+    if !options.constraint_files.is_empty() {
+        let requirements = read_constraint_files(&options.constraint_files)?;
         apply_project_requirements_to_options(options, &mut specs, requirements);
     }
 
@@ -3129,6 +3135,20 @@ fn read_requirements_files(paths: &[PathBuf]) -> Result<ProjectRequirements> {
     }
     if discovered.pypi_require_hashes {
         enforce_requirements_hashes(&discovered)?;
+    }
+    Ok(discovered)
+}
+
+fn read_constraint_files(paths: &[PathBuf]) -> Result<ProjectRequirements> {
+    let mut discovered = ProjectRequirements::default();
+    let mut seen = BTreeSet::new();
+    for path in paths {
+        read_requirements_file_inner(
+            path,
+            RequirementsMode::Constraint,
+            &mut seen,
+            &mut discovered,
+        )?;
     }
     Ok(discovered)
 }
@@ -12030,6 +12050,30 @@ packages:
         assert_eq!(
             local_paths.trim(),
             fs::canonicalize(src).unwrap().to_string_lossy()
+        );
+    }
+
+    #[test]
+    fn applies_explicit_constraint_files() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("requirements.txt"), "idna>=2\n").unwrap();
+        fs::write(dir.path().join("constraints.txt"), "idna==3.7\n").unwrap();
+
+        let mut options = LinkOptions::new(dir.path());
+        options
+            .requirement_files
+            .push(dir.path().join("requirements.txt"));
+        options
+            .constraint_files
+            .push(dir.path().join("constraints.txt"));
+        let specs = project_requested_specs(&mut options, false).unwrap();
+
+        assert!(specs
+            .iter()
+            .any(|spec| spec.name == "idna" && spec.version.as_deref() == Some(">=2")));
+        assert_eq!(
+            options.constraints.get("pypi:idna").map(String::as_str),
+            Some("==3.7")
         );
     }
 

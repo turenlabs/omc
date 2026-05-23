@@ -114,6 +114,13 @@ enum Command {
         )]
         requirements: Vec<PathBuf>,
         #[arg(
+            short = 'c',
+            long = "constraint",
+            value_name = "PATH",
+            help = "Read an additional pip-style constraints file"
+        )]
+        constraints: Vec<PathBuf>,
+        #[arg(
             long = "omit-dev",
             alias = "production",
             help = "Skip dev dependency inputs across npm and Python project files"
@@ -143,6 +150,13 @@ enum Command {
             help = "Read an additional requirements file"
         )]
         requirements: Vec<PathBuf>,
+        #[arg(
+            short = 'c',
+            long = "constraint",
+            value_name = "PATH",
+            help = "Read an additional pip-style constraints file"
+        )]
+        constraints: Vec<PathBuf>,
         #[arg(
             long = "omit-dev",
             alias = "production",
@@ -233,6 +247,7 @@ enum PipCompatAction {
     Install {
         specs: Vec<String>,
         requirements: Vec<PathBuf>,
+        constraints: Vec<PathBuf>,
         index_url: Option<String>,
         extra_index_urls: Vec<String>,
         find_links: Vec<String>,
@@ -353,6 +368,7 @@ fn run() -> Result<ExitCode, OmcRegistryError> {
             allow,
             extra,
             requirements,
+            constraints,
             omit_dev,
             locked,
             allow_all_host,
@@ -362,6 +378,7 @@ fn run() -> Result<ExitCode, OmcRegistryError> {
                 &allow,
                 extra,
                 requirements,
+                constraints,
                 omit_dev,
                 allow_all_host,
             )?;
@@ -376,6 +393,7 @@ fn run() -> Result<ExitCode, OmcRegistryError> {
             allow,
             extra,
             requirements,
+            constraints,
             omit_dev,
             allow_all_host,
         } => {
@@ -384,6 +402,7 @@ fn run() -> Result<ExitCode, OmcRegistryError> {
                 &allow,
                 extra,
                 requirements,
+                constraints,
                 omit_dev,
                 allow_all_host,
             )?;
@@ -463,6 +482,7 @@ fn install_options(
     allow: &[String],
     extra: Vec<String>,
     requirements: Vec<PathBuf>,
+    constraints: Vec<PathBuf>,
     omit_dev: bool,
     allow_all_host: bool,
 ) -> Result<LinkOptions, OmcRegistryError> {
@@ -474,13 +494,11 @@ fn install_options(
         .collect();
     options.requirement_files = requirements
         .into_iter()
-        .map(|path| {
-            if path.is_absolute() {
-                path
-            } else {
-                project_dir.join(path)
-            }
-        })
+        .map(|path| absolutize_path(project_dir, path))
+        .collect();
+    options.constraint_files = constraints
+        .into_iter()
+        .map(|path| absolutize_path(project_dir, path))
         .collect();
     options.include_dev_dependencies = !omit_dev;
     Ok(options)
@@ -619,6 +637,7 @@ fn run_pip_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
         PipCompatAction::Install {
             specs,
             requirements,
+            constraints,
             index_url,
             extra_index_urls,
             find_links,
@@ -631,6 +650,7 @@ fn run_pip_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
                 let mut options = LinkOptions::new(project_dir);
                 options.allowed_capabilities = allowed_capabilities;
                 options.requirement_files = absolutize_paths(project_dir, requirements);
+                options.constraint_files = absolutize_paths(project_dir, constraints);
                 apply_pip_compat_index_options(
                     &mut options,
                     index_url,
@@ -645,6 +665,7 @@ fn run_pip_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
                 let mut options = LinkOptions::new(project_dir);
                 options.allowed_capabilities = allowed_capabilities;
                 options.requirement_files = absolutize_paths(project_dir, requirements);
+                options.constraint_files = absolutize_paths(project_dir, constraints);
                 apply_pip_compat_index_options(
                     &mut options,
                     index_url,
@@ -657,7 +678,9 @@ fn run_pip_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
                     all_reports.extend(add_package_graph(spec, &options)?);
                 }
                 print_link_reports(&all_reports);
-                let install = if options.requirement_files.is_empty() {
+                let install = if options.requirement_files.is_empty()
+                    && options.constraint_files.is_empty()
+                {
                     install_locked_packages(project_dir)?
                 } else {
                     install_project(&options)?
@@ -785,14 +808,16 @@ fn print_locked_pip_json(project_dir: &Path) -> Result<(), OmcRegistryError> {
 fn absolutize_paths(project_dir: &Path, paths: Vec<PathBuf>) -> Vec<PathBuf> {
     paths
         .into_iter()
-        .map(|path| {
-            if path.is_absolute() {
-                path
-            } else {
-                project_dir.join(path)
-            }
-        })
+        .map(|path| absolutize_path(project_dir, path))
         .collect()
+}
+
+fn absolutize_path(project_dir: &Path, path: PathBuf) -> PathBuf {
+    if path.is_absolute() {
+        path
+    } else {
+        project_dir.join(path)
+    }
 }
 
 fn apply_pip_compat_index_options(
@@ -992,6 +1017,10 @@ fn parse_npm_compat_action(args: &[String]) -> Result<NpmCompatAction, OmcRegist
             let (name, rest) = split_first_position("npm run", &args[1..])?;
             Ok(NpmCompatAction::RunScript { name, args: rest })
         }
+        "test" | "start" | "stop" | "restart" => Ok(NpmCompatAction::RunScript {
+            name: command.to_owned(),
+            args: strip_optional_double_dash(&args[1..]),
+        }),
         "exec" | "x" | "npx" => {
             let (command, rest) = split_first_position("npm exec", &args[1..])?;
             Ok(NpmCompatAction::Exec {
@@ -1066,6 +1095,7 @@ fn parse_pip_compat_action(args: &[String]) -> Result<PipCompatAction, OmcRegist
 
 fn parse_pip_install_args(args: &[String]) -> Result<PipCompatAction, OmcRegistryError> {
     let mut requirements = Vec::new();
+    let mut constraints = Vec::new();
     let mut index_url = None;
     let mut extra_index_urls = Vec::new();
     let mut find_links = Vec::new();
@@ -1084,6 +1114,16 @@ fn parse_pip_install_args(args: &[String]) -> Result<PipCompatAction, OmcRegistr
             requirements.push(PathBuf::from(path));
         } else if let Some(path) = arg.strip_prefix("--requirement=") {
             requirements.push(PathBuf::from(path));
+        } else if arg == "-c" || arg == "--constraint" {
+            index += 1;
+            let Some(path) = args.get(index) else {
+                return Err(OmcRegistryError::UnsupportedSpec(format!(
+                    "{arg} needs a path"
+                )));
+            };
+            constraints.push(PathBuf::from(path));
+        } else if let Some(path) = arg.strip_prefix("--constraint=") {
+            constraints.push(PathBuf::from(path));
         } else if arg == "-i" || arg == "--index-url" {
             index += 1;
             let Some(url) = args.get(index) else {
@@ -1154,6 +1194,7 @@ fn parse_pip_install_args(args: &[String]) -> Result<PipCompatAction, OmcRegistr
     Ok(PipCompatAction::Install {
         specs: positionals.into_iter().filter(|spec| spec != ".").collect(),
         requirements,
+        constraints,
         index_url,
         extra_index_urls,
         find_links,
@@ -1310,6 +1351,14 @@ fn split_first_position(
     Ok((name, args))
 }
 
+fn strip_optional_double_dash(args: &[String]) -> Vec<String> {
+    let mut args = args.to_vec();
+    if args.first().map(String::as_str) == Some("--") {
+        args.remove(0);
+    }
+    args
+}
+
 fn unsupported_compat_arg(command: &str, arg: &str) -> OmcRegistryError {
     OmcRegistryError::UnsupportedSpec(format!(
         "{command} does not support compatibility argument `{arg}`"
@@ -1428,6 +1477,13 @@ mod tests {
             }
         );
         assert_eq!(
+            parse_npm_compat_action(&args(&["test", "--", "--watch"])).unwrap(),
+            NpmCompatAction::RunScript {
+                name: "test".to_owned(),
+                args: vec!["--watch".to_owned()],
+            }
+        );
+        assert_eq!(
             parse_npm_compat_action(&args(&["exec", "eslint", "--", "."])).unwrap(),
             NpmCompatAction::Exec {
                 command: "eslint".to_owned(),
@@ -1442,6 +1498,8 @@ mod tests {
             "install",
             "-r",
             "requirements.txt",
+            "-c",
+            "constraints.txt",
             "--index-url",
             "https://mirror.example/simple",
             "--extra-index-url=https://extra.example/simple",
@@ -1458,6 +1516,7 @@ mod tests {
             PipCompatAction::Install {
                 specs: vec!["requests==2.32.3".to_owned()],
                 requirements: vec![PathBuf::from("requirements.txt")],
+                constraints: vec![PathBuf::from("constraints.txt")],
                 index_url: Some("https://mirror.example/simple".to_owned()),
                 extra_index_urls: vec!["https://extra.example/simple".to_owned()],
                 find_links: vec!["wheelhouse".to_owned()],
