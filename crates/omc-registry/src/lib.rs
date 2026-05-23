@@ -4643,6 +4643,12 @@ pub fn install_locked_packages(project_dir: impl AsRef<Path>) -> Result<InstallR
     let mut report = install_lock(project_dir, &lock)?;
     report.npm_bins +=
         install_npm_project_links(project_dir, &report.node_modules, &report.npm_bin_dir, true)?;
+    let project = discover_project_requirements_with_options(project_dir, &BTreeSet::new(), true)?;
+    report.python_scripts += install_python_local_paths(
+        &project.python_local_paths,
+        &report.python_site_packages,
+        &report.python_bin_dir,
+    )?;
     Ok(report)
 }
 
@@ -11260,6 +11266,63 @@ packages:
         .unwrap();
         assert!(output.status.success());
         assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "root-ok");
+    }
+
+    #[test]
+    fn locked_install_restores_root_python_project_scripts() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src");
+        fs::create_dir_all(src.join("rootpkg")).unwrap();
+        fs::write(
+            src.join("rootpkg").join("__init__.py"),
+            "VALUE = 'locked-root-ok'\n",
+        )
+        .unwrap();
+        fs::write(
+            src.join("rootpkg").join("cli.py"),
+            "from rootpkg import VALUE\n\ndef main():\n    print(VALUE)\n",
+        )
+        .unwrap();
+        fs::write(
+            dir.path().join("pyproject.toml"),
+            r#"
+            [project]
+            name = "rootpkg"
+            version = "0.1.0"
+
+            [project.scripts]
+            root-cli = "rootpkg.cli:main"
+            "#,
+        )
+        .unwrap();
+        fs::write(
+            dir.path().join("omc.lock"),
+            toml::to_string_pretty(&OmcLock::new()).unwrap(),
+        )
+        .unwrap();
+
+        let report = install_locked_packages(dir.path()).unwrap();
+        assert_eq!(report.python_scripts, 1);
+
+        let expected = fs::canonicalize(src).unwrap();
+        let content =
+            fs::read_to_string(dir.path().join(".omc").join("python").join("local-paths")).unwrap();
+        assert_eq!(content.trim(), expected.to_string_lossy());
+
+        let output = Command::new(
+            dir.path()
+                .join(".omc")
+                .join("python")
+                .join("bin")
+                .join("root-cli"),
+        )
+        .output()
+        .unwrap();
+        assert!(output.status.success());
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout).trim(),
+            "locked-root-ok"
+        );
     }
 
     #[test]
