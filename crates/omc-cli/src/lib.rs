@@ -19,11 +19,11 @@ use omc_registry::{
     read_npm_package_metadata, read_npm_ping_with_userconfig, read_npm_search, read_npm_token_list,
     read_npm_whoami, read_npm_workspace_packages, read_package_scripts, read_pip_config_snapshot,
     read_pypi_available_versions, read_requirements_files, remove_manifest_dependency,
-    revoke_npm_token, Behavior, Ecosystem, InstallReport, LinkOptions, LockedPackage,
-    LockedPythonVcsDependency, NpmAccessToken, NpmPingResult, NpmPublishPackage, NpmPublishResult,
-    NpmSearchPackage, NpmTokenListResult, NpmTokenRevokeResult, NpmWhoamiResult,
+    revoke_npm_token, upload_pypi_distribution, Behavior, Ecosystem, InstallReport, LinkOptions,
+    LockedPackage, LockedPythonVcsDependency, NpmAccessToken, NpmPingResult, NpmPublishPackage,
+    NpmPublishResult, NpmSearchPackage, NpmTokenListResult, NpmTokenRevokeResult, NpmWhoamiResult,
     NpmWorkspacePackage, OmcRegistryError, PackageSpec, ProjectRequirements, PypiBinaryMode,
-    PypiCheckIssue, PythonLocalRequirement, PythonVcsRequirement, Verdict,
+    PypiCheckIssue, PypiUploadResult, PythonLocalRequirement, PythonVcsRequirement, Verdict,
 };
 use sha2::{Digest, Sha256, Sha384, Sha512};
 
@@ -221,6 +221,11 @@ enum Command {
     },
     #[command(about = "Run common pip-compatible commands through OMC")]
     Pip {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    #[command(about = "Run common Twine-compatible PyPI publish commands through OMC")]
+    Twine {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
@@ -743,6 +748,37 @@ enum PipConfigLocation {
     Global,
 }
 
+#[derive(Debug, PartialEq, Eq)]
+enum TwineCompatAction {
+    Help { topic: Option<String> },
+    Version,
+    Upload(TwineUploadAction),
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct TwineUploadAction {
+    paths: Vec<PathBuf>,
+    repository: Option<String>,
+    repository_url: Option<String>,
+    username: Option<String>,
+    password: Option<String>,
+    config_file: Option<PathBuf>,
+    skip_existing: bool,
+    comment: Option<String>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct TwineUploadSettings {
+    repository_url: String,
+    username: String,
+    password: String,
+}
+
+#[derive(Debug, Default, PartialEq, Eq)]
+struct TwinePypirc {
+    sections: BTreeMap<String, BTreeMap<String, String>>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DirectCompatMode {
     Node,
@@ -750,6 +786,7 @@ enum DirectCompatMode {
     Npx,
     Pip,
     Python,
+    Twine,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -785,6 +822,7 @@ fn run_entry() -> Result<ExitCode, OmcRegistryError> {
             }
             DirectCompatMode::Pip => run_pip_compat(&invocation.project_dir, &invocation.args),
             DirectCompatMode::Python => run_python(&invocation.project_dir, &invocation.args),
+            DirectCompatMode::Twine => run_twine_compat(&invocation.project_dir, &invocation.args),
         };
     }
 
@@ -801,6 +839,7 @@ fn direct_compat_mode(program: Option<&std::ffi::OsStr>) -> Option<DirectCompatM
         "npx" => Some(DirectCompatMode::Npx),
         "pip" | "pip3" => Some(DirectCompatMode::Pip),
         "python" | "python3" => Some(DirectCompatMode::Python),
+        "twine" => Some(DirectCompatMode::Twine),
         _ => None,
     }
 }
@@ -1025,6 +1064,7 @@ fn run() -> Result<ExitCode, OmcRegistryError> {
         }
         Command::Npm { args } => return run_npm_compat(&cli.project_dir, &args),
         Command::Pip { args } => return run_pip_compat(&cli.project_dir, &args),
+        Command::Twine { args } => return run_twine_compat(&cli.project_dir, &args),
     }
 
     Ok(ExitCode::SUCCESS)
@@ -1207,6 +1247,9 @@ fn run_python(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRegist
     if let Some(pip_args) = python_pip_module_args(args) {
         return run_pip_compat(project_dir, pip_args);
     }
+    if let Some(twine_args) = python_twine_module_args(args) {
+        return run_twine_compat(project_dir, twine_args);
+    }
 
     let mut command = ProcessCommand::new(host_python_program()?);
     apply_project_runtime_env(&mut command, project_dir)?;
@@ -1238,16 +1281,24 @@ fn host_program(
 }
 
 fn python_pip_module_args(args: &[String]) -> Option<&[String]> {
+    python_module_args(args, is_pip_module)
+}
+
+fn python_twine_module_args(args: &[String]) -> Option<&[String]> {
+    python_module_args(args, is_twine_module)
+}
+
+fn python_module_args(args: &[String], is_module: impl Fn(&str) -> bool) -> Option<&[String]> {
     let mut index = 0;
     while index < args.len() {
         let arg = args[index].as_str();
         if arg == "-m" {
             let module = args.get(index + 1)?;
-            return is_pip_module(module).then_some(&args[index + 2..]);
+            return is_module(module).then_some(&args[index + 2..]);
         }
         if let Some(module) = arg.strip_prefix("-m") {
             if !module.is_empty() {
-                return is_pip_module(module).then_some(&args[index + 1..]);
+                return is_module(module).then_some(&args[index + 1..]);
             }
         }
 
@@ -1263,6 +1314,10 @@ fn python_pip_module_args(args: &[String]) -> Option<&[String]> {
 
 fn is_pip_module(module: &str) -> bool {
     matches!(module, "pip" | "pip3" | "pip.__main__")
+}
+
+fn is_twine_module(module: &str) -> bool {
+    matches!(module, "twine" | "twine.__main__")
 }
 
 fn run_package_script(
@@ -2195,6 +2250,208 @@ fn run_pip_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
     Ok(ExitCode::SUCCESS)
 }
 
+fn run_twine_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRegistryError> {
+    match parse_twine_compat_action(args)? {
+        TwineCompatAction::Help { topic } => print_twine_help(topic.as_deref()),
+        TwineCompatAction::Version => println!("twine {} from OMC", env!("CARGO_PKG_VERSION")),
+        TwineCompatAction::Upload(action) => print_twine_upload(project_dir, action)?,
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+fn print_twine_upload(
+    project_dir: &Path,
+    action: TwineUploadAction,
+) -> Result<(), OmcRegistryError> {
+    if action.paths.is_empty() {
+        return Err(OmcRegistryError::UnsupportedSpec(
+            "twine upload needs at least one distribution file".to_owned(),
+        ));
+    }
+
+    let settings = resolve_twine_upload_settings(project_dir, &action)?;
+    println!("Uploading distributions to {}", settings.repository_url);
+    for path in &action.paths {
+        let path = absolutize_path(project_dir, path.clone());
+        let filename = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("distribution");
+        println!("Uploading {filename}");
+        let result = upload_pypi_distribution(
+            &settings.repository_url,
+            &settings.username,
+            &settings.password,
+            &path,
+            action.skip_existing,
+            action.comment.as_deref(),
+        )?;
+        print_twine_upload_result(&result);
+    }
+    Ok(())
+}
+
+fn print_twine_upload_result(result: &PypiUploadResult) {
+    if result.skipped {
+        println!(
+            "Skipping {} because it appears to already exist",
+            result.filename
+        );
+    } else {
+        println!("Uploaded {}", result.filename);
+    }
+}
+
+fn resolve_twine_upload_settings(
+    project_dir: &Path,
+    action: &TwineUploadAction,
+) -> Result<TwineUploadSettings, OmcRegistryError> {
+    let env_repository = env::var("TWINE_REPOSITORY")
+        .ok()
+        .filter(|value| !value.trim().is_empty());
+    let env_repository_url = env::var("TWINE_REPOSITORY_URL")
+        .ok()
+        .filter(|value| !value.trim().is_empty());
+    let repository = action.repository.clone().or(env_repository);
+    let repository_name = repository
+        .as_deref()
+        .filter(|value| !looks_like_url(value))
+        .unwrap_or("pypi");
+    let config = read_twine_pypirc(project_dir, action.config_file.as_deref())?;
+    let section = config.sections.get(repository_name);
+
+    let repository_url = action
+        .repository_url
+        .clone()
+        .or(env_repository_url)
+        .or_else(|| repository.clone().filter(|value| looks_like_url(value)))
+        .or_else(|| section.and_then(|values| values.get("repository")).cloned())
+        .or_else(|| default_twine_repository_url(repository_name).map(str::to_owned))
+        .ok_or_else(|| {
+            OmcRegistryError::UnsupportedSpec(format!(
+                "twine upload could not resolve repository `{repository_name}`"
+            ))
+        })?;
+
+    let username = action
+        .username
+        .clone()
+        .or_else(|| env::var("TWINE_USERNAME").ok())
+        .or_else(|| section.and_then(|values| values.get("username")).cloned())
+        .ok_or_else(|| {
+            OmcRegistryError::UnsupportedSpec(
+                "twine upload needs a username; pass --username, set TWINE_USERNAME, or configure .pypirc".to_owned(),
+            )
+        })?;
+    let password = action
+        .password
+        .clone()
+        .or_else(|| env::var("TWINE_PASSWORD").ok())
+        .or_else(|| section.and_then(|values| values.get("password")).cloned())
+        .ok_or_else(|| {
+            OmcRegistryError::UnsupportedSpec(
+                "twine upload needs a password/token; pass --password, set TWINE_PASSWORD, or configure .pypirc".to_owned(),
+            )
+        })?;
+
+    Ok(TwineUploadSettings {
+        repository_url,
+        username,
+        password,
+    })
+}
+
+fn looks_like_url(value: &str) -> bool {
+    value.starts_with("http://") || value.starts_with("https://")
+}
+
+fn default_twine_repository_url(name: &str) -> Option<&'static str> {
+    match name {
+        "pypi" => Some("https://upload.pypi.org/legacy/"),
+        "testpypi" => Some("https://test.pypi.org/legacy/"),
+        _ => None,
+    }
+}
+
+fn read_twine_pypirc(
+    project_dir: &Path,
+    config_file: Option<&Path>,
+) -> Result<TwinePypirc, OmcRegistryError> {
+    let Some(path) = config_file
+        .map(|path| absolutize_path(project_dir, path.to_path_buf()))
+        .or_else(default_twine_pypirc_path)
+    else {
+        return Ok(TwinePypirc::default());
+    };
+    if !path.exists() {
+        if config_file.is_some() {
+            return Err(OmcRegistryError::UnsupportedSpec(format!(
+                "twine config file `{}` does not exist",
+                path.display()
+            )));
+        }
+        return Ok(TwinePypirc::default());
+    }
+    Ok(parse_twine_pypirc(&fs::read_to_string(path)?))
+}
+
+fn default_twine_pypirc_path() -> Option<PathBuf> {
+    env::var_os("HOME")
+        .filter(|home| !home.is_empty())
+        .map(PathBuf::from)
+        .map(|home| home.join(".pypirc"))
+}
+
+fn parse_twine_pypirc(content: &str) -> TwinePypirc {
+    let mut config = TwinePypirc::default();
+    let mut current_section: Option<String> = None;
+    for raw_line in content.lines() {
+        let line = strip_pypirc_comment(raw_line).trim();
+        if line.is_empty() {
+            continue;
+        }
+        if line.starts_with('[') && line.ends_with(']') {
+            let section = line
+                .trim_start_matches('[')
+                .trim_end_matches(']')
+                .trim()
+                .to_owned();
+            current_section = (!section.is_empty()).then_some(section);
+            continue;
+        }
+        let Some(section) = current_section.as_ref() else {
+            continue;
+        };
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        config
+            .sections
+            .entry(section.clone())
+            .or_default()
+            .insert(key.trim().to_ascii_lowercase(), value.trim().to_owned());
+    }
+    config
+}
+
+fn strip_pypirc_comment(line: &str) -> &str {
+    let trimmed = line.trim_start();
+    if trimmed.starts_with('#') || trimmed.starts_with(';') {
+        return "";
+    }
+    for (index, ch) in line.char_indices() {
+        let previous_was_whitespace = line[..index]
+            .chars()
+            .last()
+            .map(char::is_whitespace)
+            .unwrap_or(false);
+        if matches!(ch, '#' | ';') && previous_was_whitespace {
+            return &line[..index];
+        }
+    }
+    line
+}
+
 fn run_pip_install_dry_run(
     project_dir: &Path,
     action: PipInstallAction,
@@ -2715,6 +2972,53 @@ fn pip_help_topic(topic: &str) -> Option<&'static str> {
         "cache" => Some("cache"),
         "index" => Some("index"),
         "config" => Some("config"),
+        _ => Some("unknown"),
+    }
+}
+
+fn print_twine_help(topic: Option<&str>) {
+    print!("{}", twine_help_text(topic));
+}
+
+fn twine_help_text(topic: Option<&str>) -> String {
+    match topic.and_then(twine_help_topic) {
+        None => twine_command_help(
+            "twine <command>",
+            &[
+                "OMC Twine compatibility uploads Python wheel and sdist artifacts through the OMC registry client.",
+                "Supported commands: upload.",
+            ],
+        ),
+        Some("upload") => twine_command_help(
+            "twine upload [options] dist [dist ...]",
+            &[
+                "Upload one or more .whl, .tar.gz, .tgz, or .zip distributions.",
+                "Supports -r/--repository, --repository-url, -u/--username, -p/--password, --config-file, --skip-existing, --non-interactive, --comment, --verbose, and --disable-progress-bar.",
+            ],
+        ),
+        Some(_) => twine_command_help(
+            "twine help [command]",
+            &["No focused OMC help is available for that topic yet."],
+        ),
+    }
+}
+
+fn twine_command_help(usage: &str, lines: &[&str]) -> String {
+    let mut output = format!("OMC Twine compatibility\n\nUsage: {usage}\n");
+    if !lines.is_empty() {
+        output.push('\n');
+        for line in lines {
+            output.push_str(line);
+            output.push('\n');
+        }
+    }
+    output
+}
+
+fn twine_help_topic(topic: &str) -> Option<&'static str> {
+    match topic {
+        "help" | "--help" | "-h" => None,
+        "upload" => Some("upload"),
         _ => Some("unknown"),
     }
 }
@@ -10658,6 +10962,175 @@ fn parse_pip_compat_action(args: &[String]) -> Result<PipCompatAction, OmcRegist
     }
 }
 
+fn parse_twine_compat_action(args: &[String]) -> Result<TwineCompatAction, OmcRegistryError> {
+    let normalized = normalize_twine_global_args(args)?;
+    let args = normalized.as_slice();
+    if let Some(action) = parse_twine_help_request(args) {
+        return Ok(action);
+    }
+    let Some(command) = args.first().map(String::as_str) else {
+        return Err(OmcRegistryError::UnsupportedSpec(
+            "twine compatibility needs a command such as upload".to_owned(),
+        ));
+    };
+
+    match command {
+        "--version" | "-V" => Ok(TwineCompatAction::Version),
+        "upload" => parse_twine_upload_args(&args[1..]),
+        other => Err(OmcRegistryError::UnsupportedSpec(format!(
+            "unsupported twine compatibility command `{other}`"
+        ))),
+    }
+}
+
+fn parse_twine_help_request(args: &[String]) -> Option<TwineCompatAction> {
+    let command = args.first()?;
+    if twine_help_flag(command) {
+        return Some(TwineCompatAction::Help { topic: None });
+    }
+    if command == "help" {
+        let topic = args
+            .iter()
+            .skip(1)
+            .find(|arg| !arg.starts_with('-'))
+            .cloned();
+        return Some(TwineCompatAction::Help { topic });
+    }
+    if args
+        .iter()
+        .take_while(|arg| arg.as_str() != "--")
+        .any(|arg| twine_help_flag(arg))
+    {
+        return Some(TwineCompatAction::Help {
+            topic: Some(command.clone()),
+        });
+    }
+    None
+}
+
+fn twine_help_flag(arg: &str) -> bool {
+    matches!(arg, "--help" | "-h")
+}
+
+fn normalize_twine_global_args(args: &[String]) -> Result<Vec<String>, OmcRegistryError> {
+    let mut index = 0;
+    while index < args.len() {
+        let arg = &args[index];
+        if matches!(arg.as_str(), "--version" | "-V") {
+            return Ok(vec![arg.clone()]);
+        } else if matches!(arg.as_str(), "--no-color" | "--no-input") {
+        } else if arg.starts_with('-') {
+            return Ok(args[index..].to_vec());
+        } else if index == 0 {
+            return Ok(args.to_vec());
+        } else {
+            return Ok(args[index..].to_vec());
+        }
+        index += 1;
+    }
+    Ok(Vec::new())
+}
+
+fn parse_twine_upload_args(args: &[String]) -> Result<TwineCompatAction, OmcRegistryError> {
+    let mut paths = Vec::new();
+    let mut repository = None;
+    let mut repository_url = None;
+    let mut username = None;
+    let mut password = None;
+    let mut config_file = None;
+    let mut skip_existing = false;
+    let mut comment = None;
+    let mut index = 0;
+    while index < args.len() {
+        let arg = &args[index];
+        if twine_help_flag(arg) {
+            return Ok(TwineCompatAction::Help {
+                topic: Some("upload".to_owned()),
+            });
+        } else if arg == "-r" || arg == "--repository" {
+            index += 1;
+            repository = Some(twine_flag_value(args, index, arg)?);
+        } else if let Some(value) = arg.strip_prefix("--repository=") {
+            repository = Some(value.to_owned());
+        } else if arg == "--repository-url" {
+            index += 1;
+            repository_url = Some(twine_flag_value(args, index, arg)?);
+        } else if let Some(value) = arg.strip_prefix("--repository-url=") {
+            repository_url = Some(value.to_owned());
+        } else if arg == "-u" || arg == "--username" {
+            index += 1;
+            username = Some(twine_flag_value(args, index, arg)?);
+        } else if let Some(value) = arg.strip_prefix("--username=") {
+            username = Some(value.to_owned());
+        } else if arg == "-p" || arg == "--password" {
+            index += 1;
+            password = Some(twine_flag_value(args, index, arg)?);
+        } else if let Some(value) = arg.strip_prefix("--password=") {
+            password = Some(value.to_owned());
+        } else if arg == "--config-file" {
+            index += 1;
+            config_file = Some(PathBuf::from(twine_flag_value(args, index, arg)?));
+        } else if let Some(value) = arg.strip_prefix("--config-file=") {
+            config_file = Some(PathBuf::from(value));
+        } else if arg == "-c" || arg == "--comment" {
+            index += 1;
+            comment = Some(twine_flag_value(args, index, arg)?);
+        } else if let Some(value) = arg.strip_prefix("--comment=") {
+            comment = Some(value.to_owned());
+        } else if arg == "--skip-existing" {
+            skip_existing = true;
+        } else if matches!(
+            arg.as_str(),
+            "--non-interactive" | "--disable-progress-bar" | "--verbose"
+        ) {
+        } else if matches!(arg.as_str(), "--cert" | "--client-cert") {
+            index += 1;
+            let _ = twine_flag_value(args, index, arg)?;
+            return Err(OmcRegistryError::UnsupportedSpec(format!(
+                "twine upload {arg} is not implemented yet"
+            )));
+        } else if arg.starts_with("--cert=")
+            || arg.starts_with("--client-cert=")
+            || matches!(arg.as_str(), "--attestations" | "-s" | "--sign")
+        {
+            return Err(OmcRegistryError::UnsupportedSpec(format!(
+                "twine upload {arg} is not implemented yet"
+            )));
+        } else if matches!(arg.as_str(), "--sign-with" | "-i" | "--identity") {
+            index += 1;
+            let _ = twine_flag_value(args, index, arg)?;
+            return Err(OmcRegistryError::UnsupportedSpec(format!(
+                "twine upload {arg} is not implemented yet"
+            )));
+        } else if arg.starts_with("--sign-with=") || arg.starts_with("--identity=") {
+            return Err(OmcRegistryError::UnsupportedSpec(format!(
+                "twine upload {arg} is not implemented yet"
+            )));
+        } else if arg.starts_with('-') {
+            return Err(unsupported_compat_arg("twine upload", arg));
+        } else {
+            paths.push(PathBuf::from(arg));
+        }
+        index += 1;
+    }
+    Ok(TwineCompatAction::Upload(TwineUploadAction {
+        paths,
+        repository,
+        repository_url,
+        username,
+        password,
+        config_file,
+        skip_existing,
+        comment,
+    }))
+}
+
+fn twine_flag_value(args: &[String], index: usize, flag: &str) -> Result<String, OmcRegistryError> {
+    args.get(index)
+        .cloned()
+        .ok_or_else(|| OmcRegistryError::UnsupportedSpec(format!("{flag} needs a value")))
+}
+
 fn parse_pip_help_request(args: &[String]) -> Option<PipCompatAction> {
     let command = args.first()?;
     if pip_help_flag(command) {
@@ -12606,6 +13079,10 @@ mod tests {
             Some(DirectCompatMode::Python)
         );
         assert_eq!(
+            direct_compat_mode(Some(Path::new("/tmp/twine").as_os_str())),
+            Some(DirectCompatMode::Twine)
+        );
+        assert_eq!(
             direct_compat_mode(Some(Path::new("/tmp/omc").as_os_str())),
             None
         );
@@ -12688,6 +13165,24 @@ mod tests {
             DirectCompatInvocation {
                 project_dir: PathBuf::from("/tmp/project"),
                 args: args(&["-m", "pip", "install", "requests"]),
+            }
+        );
+        assert_eq!(
+            parse_direct_compat_invocation(
+                DirectCompatMode::Twine,
+                os_args(&[
+                    "--omc-project-dir",
+                    "/tmp/project",
+                    "upload",
+                    "--repository",
+                    "testpypi",
+                    "dist/pkg.whl",
+                ])
+            )
+            .unwrap(),
+            DirectCompatInvocation {
+                project_dir: PathBuf::from("/tmp/project"),
+                args: args(&["upload", "--repository", "testpypi", "dist/pkg.whl"]),
             }
         );
     }
@@ -14884,6 +15379,99 @@ mod tests {
 
         let script = args(&["script.py", "-m", "pip"]);
         assert_eq!(python_pip_module_args(&script), None);
+
+        let twine = args(&["-m", "twine", "upload", "dist/pkg.whl"]);
+        assert_eq!(
+            python_twine_module_args(&twine),
+            Some(args(&["upload", "dist/pkg.whl"]).as_slice())
+        );
+
+        let compact_twine = args(&["-mtwine", "--version"]);
+        assert_eq!(
+            python_twine_module_args(&compact_twine),
+            Some(args(&["--version"]).as_slice())
+        );
+    }
+
+    #[test]
+    fn parses_twine_upload_compat_flags() {
+        assert_eq!(
+            parse_twine_compat_action(&args(&["--version"])).unwrap(),
+            TwineCompatAction::Version
+        );
+        assert_eq!(
+            parse_twine_compat_action(&args(&["--help"])).unwrap(),
+            TwineCompatAction::Help { topic: None }
+        );
+        assert_eq!(
+            parse_twine_compat_action(&args(&["upload", "--help"])).unwrap(),
+            TwineCompatAction::Help {
+                topic: Some("upload".to_owned())
+            }
+        );
+        assert_eq!(
+            parse_twine_compat_action(&args(&[
+                "upload",
+                "--repository-url",
+                "https://upload.example/legacy/",
+                "-u",
+                "__token__",
+                "-p",
+                "pypi-token",
+                "--config-file=release.pypirc",
+                "--skip-existing",
+                "--comment",
+                "release upload",
+                "--non-interactive",
+                "--disable-progress-bar",
+                "dist/demo-1.0.0.tar.gz",
+                "dist/demo-1.0.0-py3-none-any.whl",
+            ]))
+            .unwrap(),
+            TwineCompatAction::Upload(TwineUploadAction {
+                paths: vec![
+                    PathBuf::from("dist/demo-1.0.0.tar.gz"),
+                    PathBuf::from("dist/demo-1.0.0-py3-none-any.whl"),
+                ],
+                repository: None,
+                repository_url: Some("https://upload.example/legacy/".to_owned()),
+                username: Some("__token__".to_owned()),
+                password: Some("pypi-token".to_owned()),
+                config_file: Some(PathBuf::from("release.pypirc")),
+                skip_existing: true,
+                comment: Some("release upload".to_owned()),
+            })
+        );
+    }
+
+    #[test]
+    fn resolves_twine_upload_settings_from_pypirc() {
+        let dir = test_dir("twine-pypirc");
+        fs::write(
+            dir.join("release.pypirc"),
+            "[distutils]\nindex-servers =\n    private\n\n[private]\nrepository = https://upload.example/legacy/\nusername = __token__\npassword = pypi-token\n",
+        )
+        .unwrap();
+
+        let settings = resolve_twine_upload_settings(
+            &dir,
+            &TwineUploadAction {
+                paths: vec![PathBuf::from("dist/demo-1.0.0.tar.gz")],
+                repository: Some("private".to_owned()),
+                repository_url: None,
+                username: None,
+                password: None,
+                config_file: Some(PathBuf::from("release.pypirc")),
+                skip_existing: false,
+                comment: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(settings.repository_url, "https://upload.example/legacy/");
+        assert_eq!(settings.username, "__token__");
+        assert_eq!(settings.password, "pypi-token");
+
+        fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

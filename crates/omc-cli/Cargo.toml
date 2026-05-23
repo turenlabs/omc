@@ -37,6 +37,10 @@ path = "src/bin/python.rs"
 name = "python3"
 path = "src/bin/python3.rs"
 
+[[bin]]
+name = "twine"
+path = "src/bin/twine.rs"
+
 [dependencies]
 clap = { version = "4", features = ["derive"] }
 flate2 = "1"

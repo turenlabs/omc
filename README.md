@@ -183,6 +183,10 @@ cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip cache list
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip config get global.index-url
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip config set global.index-url https://pypi.org/simple/
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip uninstall -r requirements.txt -y
+cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo twine upload -r testpypi dist/*
+cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo twine upload --repository-url https://upload.pypi.org/legacy/ -u __token__ -p "$PYPI_API_TOKEN" --skip-existing dist/*
+cargo run -p omc-cli --bin twine -- --omc-project-dir /tmp/omc-demo upload --repository-url https://test.pypi.org/legacy/ -u __token__ -p "$TEST_PYPI_API_TOKEN" dist/*
+cargo run -p omc-cli --bin python3 -- --omc-project-dir /tmp/omc-demo -m twine upload dist/*
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo list
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo list --json
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo audit
@@ -191,11 +195,12 @@ cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo remove --npm is-od
 ```
 
 Installing with `--bins` also provides `node`, `npm`, `npx`, `pip`, `pip3`,
-`python`, and `python3` compatibility binaries. They dispatch directly into OMC
+`python`, `python3`, and `twine` compatibility binaries. They dispatch directly into OMC
 when they are first on `PATH`, so existing scripts can call standard commands
 such as `node`, `npm install`, `npm test`, `npx eslint`, `pip install`,
-`pip3 install`, `pip freeze`, `python -m pip`, and `python3 -m pip` without
-spelling `omc node`, `omc npm`, `omc pip`, or `omc python`. They default to the
+`pip3 install`, `pip freeze`, `python -m pip`, `python3 -m pip`,
+`twine upload`, and `python -m twine` without spelling `omc node`, `omc npm`,
+`omc pip`, `omc python`, or `omc twine`. They default to the
 current directory; use
 `OMC_PROJECT_DIR=/path/to/project`, `--project-dir PATH`, or
 `--omc-project-dir PATH` for an explicit project root. The Python shims run a
@@ -213,6 +218,7 @@ npm-shrinkwrap.json exact versions, resolved tarball URLs, and integrity hashes 
 yarn.lock          Yarn Classic exact versions, resolved tarball URLs, and integrity hashes for uniquely locked npm packages
 pnpm-lock.yaml     pnpm importer dependencies, exact versions, resolved tarball URLs, and integrity hashes
 pip.conf           PyPI index-url, extra-index-url, find-links, no-index, no-binary, and only-binary configuration
+.pypirc            PyPI/TestPyPI/private repository upload URLs plus username/password or token credentials for Twine-compatible upload
 requirements.txt  PyPI requirements, direct wheel/sdist URLs and paths, VCS git dependencies, hashes, extras, local editable/direct/bare directory paths, -r includes, -c constraints, markers, simple indexes, find-links wheel/sdist archives
 requirements-dev.txt / dev-requirements.txt  dev requirements read unless --omit-dev is set
 requirements/base.txt / requirements/dev.txt  common requirements directory layout; dev is read unless --omit-dev is set
