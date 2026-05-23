@@ -655,10 +655,42 @@ fn run_node(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRegistry
 }
 
 fn run_python(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRegistryError> {
+    if let Some(pip_args) = python_pip_module_args(args) {
+        return run_pip_compat(project_dir, pip_args);
+    }
+
     let mut command = ProcessCommand::new("python3");
     apply_project_runtime_env(&mut command, project_dir)?;
     let status = command.arg("-S").args(args).status()?;
     Ok(exit_code(status.code()))
+}
+
+fn python_pip_module_args(args: &[String]) -> Option<&[String]> {
+    let mut index = 0;
+    while index < args.len() {
+        let arg = args[index].as_str();
+        if arg == "-m" {
+            let module = args.get(index + 1)?;
+            return is_pip_module(module).then_some(&args[index + 2..]);
+        }
+        if let Some(module) = arg.strip_prefix("-m") {
+            if !module.is_empty() {
+                return is_pip_module(module).then_some(&args[index + 1..]);
+            }
+        }
+
+        match arg {
+            "-S" | "-s" | "-E" | "-I" | "-B" | "-u" | "-q" | "-O" | "-OO" => index += 1,
+            "-W" | "-X" => index += 2,
+            _ if arg.starts_with("-W") || arg.starts_with("-X") => index += 1,
+            _ => return None,
+        }
+    }
+    None
+}
+
+fn is_pip_module(module: &str) -> bool {
+    matches!(module, "pip" | "pip3" | "pip.__main__")
 }
 
 fn run_package_script(
@@ -3011,6 +3043,30 @@ mod tests {
                 allow_all_host: false,
             }))
         );
+    }
+
+    #[test]
+    fn detects_python_module_pip_invocations() {
+        let command = args(&["-m", "pip", "install", "requests==2.32.3"]);
+        assert_eq!(
+            python_pip_module_args(&command),
+            Some(args(&["install", "requests==2.32.3"]).as_slice())
+        );
+
+        let isolated = args(&["-I", "-S", "-m", "pip3", "--version"]);
+        assert_eq!(
+            python_pip_module_args(&isolated),
+            Some(args(&["--version"]).as_slice())
+        );
+
+        let compact = args(&["-mpip", "freeze"]);
+        assert_eq!(
+            python_pip_module_args(&compact),
+            Some(args(&["freeze"]).as_slice())
+        );
+
+        let script = args(&["script.py", "-m", "pip"]);
+        assert_eq!(python_pip_module_args(&script), None);
     }
 
     #[test]

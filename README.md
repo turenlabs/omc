@@ -124,6 +124,7 @@ cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip install -e ../
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip install --no-deps ./dist/local_pkg-1.0.0-py3-none-any.whl
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip install --target vendor ./dist/local_pkg-1.0.0.tar.gz
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip install ./dist/local_pkg-1.0.0-py3-none-any.whl
+cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo python -m pip install -e ../local-package
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip freeze
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip show requests
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip list --format=json
@@ -401,7 +402,8 @@ Supported now:
   delegating to pip; direct `pip install -e PATH` and `pip install ./path`
   local directory installs; direct
   `pip install ./archive.whl`, `./archive.tar.gz`, and HTTPS archive URL
-  installs; and a direct `pip` compatibility binary
+  installs; `omc python -m pip ...` dispatches to the same compatibility path;
+  and a direct `pip` compatibility binary
 - isolated `omc python` execution that uses OMC site-packages without ambient
   user/global Python site-packages or startup/hook environment variables
 - isolated Node execution wrappers that remove ambient `NODE_PATH` module
