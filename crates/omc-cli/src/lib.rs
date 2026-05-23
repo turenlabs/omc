@@ -267,6 +267,9 @@ enum NpmCompatAction {
         all_workspaces: bool,
         include_workspace_root: bool,
     },
+    RunList {
+        action: NpmRunListAction,
+    },
     Exec {
         command: String,
         args: Vec<String>,
@@ -324,6 +327,14 @@ enum NpmMaintenanceCommand {
 struct NpmListAction {
     json: bool,
     packages: Vec<String>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct NpmRunListAction {
+    json: bool,
+    workspaces: Vec<String>,
+    all_workspaces: bool,
+    include_workspace_root: bool,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -1127,6 +1138,97 @@ fn select_npm_workspace(
     Err(OmcRegistryError::UnsupportedSpec(detail))
 }
 
+fn print_npm_run_list(
+    project_dir: &Path,
+    action: NpmRunListAction,
+) -> Result<(), OmcRegistryError> {
+    let script_dirs = npm_script_target_dirs(
+        project_dir,
+        &action.workspaces,
+        action.all_workspaces,
+        action.include_workspace_root,
+    )?;
+    let workspace_mode =
+        !action.workspaces.is_empty() || action.all_workspaces || action.include_workspace_root;
+    let mut entries = Vec::new();
+    for script_dir in script_dirs {
+        let scripts = read_package_scripts(&script_dir)?;
+        let label = npm_run_list_label(project_dir, &script_dir)?;
+        entries.push((label, scripts));
+    }
+
+    if action.json {
+        if workspace_mode {
+            let value = entries.into_iter().collect::<BTreeMap<_, _>>();
+            println!("{}", serde_json::to_string_pretty(&value)?);
+        } else {
+            let scripts = entries
+                .into_iter()
+                .next()
+                .map(|(_, scripts)| scripts)
+                .unwrap_or_default();
+            println!("{}", serde_json::to_string_pretty(&scripts)?);
+        }
+    } else {
+        for (index, (label, scripts)) in entries.iter().enumerate() {
+            if index > 0 {
+                println!();
+            }
+            print_npm_run_text_list(label, scripts);
+        }
+    }
+
+    Ok(())
+}
+
+fn npm_run_list_label(project_dir: &Path, script_dir: &Path) -> Result<String, OmcRegistryError> {
+    let package_json = script_dir.join("package.json");
+    if package_json.exists() {
+        let package = read_npm_pkg_json(&package_json)?;
+        if let Some(name) = package.get("name").and_then(serde_json::Value::as_str) {
+            return Ok(name.to_owned());
+        }
+    }
+    if script_dir == project_dir {
+        return Ok("undefined".to_owned());
+    }
+    Ok(script_dir
+        .strip_prefix(project_dir)
+        .unwrap_or(script_dir)
+        .to_string_lossy()
+        .into_owned())
+}
+
+fn print_npm_run_text_list(label: &str, scripts: &BTreeMap<String, String>) {
+    let lifecycle = ["test", "start", "stop", "restart"];
+    let lifecycle_scripts = lifecycle
+        .iter()
+        .filter_map(|name| scripts.get(*name).map(|script| (*name, script)))
+        .collect::<Vec<_>>();
+    if !lifecycle_scripts.is_empty() {
+        println!("Lifecycle scripts included in {label}:");
+        for (name, script) in lifecycle_scripts {
+            println!("  {name}");
+            println!("    {script}");
+        }
+    }
+
+    let available = scripts
+        .iter()
+        .filter(|(name, _)| !lifecycle.contains(&name.as_str()))
+        .collect::<Vec<_>>();
+    if !available.is_empty() {
+        println!("available via `npm run`:");
+        for (name, script) in available {
+            println!("  {name}");
+            println!("    {script}");
+        }
+    }
+    if scripts.is_empty() {
+        println!("No scripts found in {label}");
+    }
+}
+
 fn package_script_lifecycle_order(
     scripts: &BTreeMap<String, String>,
     name: &str,
@@ -1306,6 +1408,9 @@ fn run_npm_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
                     include_workspace_root,
                 },
             )
+        }
+        NpmCompatAction::RunList { action } => {
+            print_npm_run_list(project_dir, action)?;
         }
         NpmCompatAction::Exec { command, args } => {
             return run_project_command(project_dir, &command, &args)
@@ -4783,32 +4888,45 @@ fn parse_npm_compat_action(args: &[String]) -> Result<NpmCompatAction, OmcRegist
                 name,
                 args,
                 if_present,
+                json,
                 workspaces,
                 all_workspaces,
                 include_workspace_root,
             } = parse_npm_run_args("npm run", &args[1..], None)?;
-            Ok(NpmCompatAction::RunScript {
-                command: command.to_owned(),
-                name,
-                args,
-                if_present,
-                workspaces,
-                all_workspaces,
-                include_workspace_root,
-            })
+            if let Some(name) = name {
+                Ok(NpmCompatAction::RunScript {
+                    command: command.to_owned(),
+                    name,
+                    args,
+                    if_present,
+                    workspaces,
+                    all_workspaces,
+                    include_workspace_root,
+                })
+            } else {
+                Ok(NpmCompatAction::RunList {
+                    action: NpmRunListAction {
+                        json,
+                        workspaces,
+                        all_workspaces,
+                        include_workspace_root,
+                    },
+                })
+            }
         }
         "test" | "start" | "stop" | "restart" => {
             let NpmRunArgs {
                 name,
                 args,
                 if_present,
+                json: _,
                 workspaces,
                 all_workspaces,
                 include_workspace_root,
             } = parse_npm_run_args(command, &args[1..], Some(command))?;
             Ok(NpmCompatAction::RunScript {
                 command: command.to_owned(),
-                name,
+                name: name.expect("implicit npm script command has a script name"),
                 args,
                 if_present,
                 workspaces,
@@ -4988,6 +5106,8 @@ fn npm_global_arg_supported_by_command(command: &str, arg: &str) -> bool {
         return matches!(
             command,
             "version"
+                | "run"
+                | "run-script"
                 | "list"
                 | "ls"
                 | "ll"
@@ -6157,9 +6277,10 @@ fn npm_audit_equals_value_flag(arg: &str) -> bool {
 
 #[derive(Debug, PartialEq, Eq)]
 struct NpmRunArgs {
-    name: String,
+    name: Option<String>,
     args: Vec<String>,
     if_present: bool,
+    json: bool,
     workspaces: Vec<String>,
     all_workspaces: bool,
     include_workspace_root: bool,
@@ -6173,6 +6294,7 @@ fn parse_npm_run_args(
     let mut name = implicit_name.map(str::to_owned);
     let mut script_args = Vec::new();
     let mut if_present = false;
+    let mut json = false;
     let mut workspaces = Vec::new();
     let mut all_workspaces = false;
     let mut include_workspace_root = false;
@@ -6189,6 +6311,10 @@ fn parse_npm_run_args(
             if arg == "--if-present" {
                 if_present = true;
             }
+        } else if arg == "--json" || arg == "--json=true" {
+            json = true;
+        } else if arg == "--json=false" {
+            json = false;
         } else if matches!(arg.as_str(), "--workspaces" | "--workspace=true") {
             all_workspaces = true;
         } else if matches!(
@@ -6227,15 +6353,16 @@ fn parse_npm_run_args(
         index += 1;
     }
 
-    let Some(name) = name else {
+    if name.is_none() && !script_args.is_empty() {
         return Err(OmcRegistryError::UnsupportedSpec(format!(
             "{command} needs a target"
         )));
-    };
+    }
     Ok(NpmRunArgs {
         name,
         args: script_args,
         if_present,
+        json,
         workspaces,
         all_workspaces,
         include_workspace_root,
@@ -8526,6 +8653,29 @@ mod tests {
 
     #[test]
     fn parses_npm_run_and_exec_compat_commands() {
+        assert_eq!(
+            parse_npm_compat_action(&args(&["run"])).unwrap(),
+            NpmCompatAction::RunList {
+                action: NpmRunListAction {
+                    json: false,
+                    workspaces: Vec::new(),
+                    all_workspaces: false,
+                    include_workspace_root: false,
+                },
+            }
+        );
+        assert_eq!(
+            parse_npm_compat_action(&args(&["--json", "--workspace", "@demo/lib", "run",]))
+                .unwrap(),
+            NpmCompatAction::RunList {
+                action: NpmRunListAction {
+                    json: true,
+                    workspaces: vec!["@demo/lib".to_owned()],
+                    all_workspaces: false,
+                    include_workspace_root: false,
+                },
+            }
+        );
         assert_eq!(
             parse_npm_compat_action(&args(&["run", "test", "--", "--watch"])).unwrap(),
             NpmCompatAction::RunScript {

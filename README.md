@@ -118,6 +118,7 @@ cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm install left-p
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm install --registry https://registry.npmjs.org left-pad@1.3.0
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm update --package-lock-only
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm ci --omit=dev
+cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm run --json
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm run test -- --watch
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm run build --workspace @demo/lib
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm audit --json
@@ -444,7 +445,8 @@ Supported now:
   lifecycle/package environment variables such as `npm_lifecycle_event`,
   `npm_lifecycle_script`, `npm_package_name`, `npm_package_version`,
   `npm_package_config_*`, `npm_package_bin_*`, `npm_package_json`,
-  `npm_config_user_agent`, and `INIT_CWD`, and `pre<script>` / `post<script>`
+  `npm_config_user_agent`, and `INIT_CWD`; `npm run` lists root or workspace
+  scripts in text or JSON mode; `pre<script>` / `post<script>`
   lifecycle hooks are executed around the requested script; common script and
   workspace flags such as `--if-present`, `--workspace`, `--workspaces`,
   `--include-workspace-root`, `--silent`, `-s`, and `--loglevel=silent` are
