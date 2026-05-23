@@ -120,6 +120,8 @@ cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm ci --omit=dev
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm run test -- --watch
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm audit --json
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm outdated --json
+cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm prune --omit=dev
+cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm dedupe
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm config get registry
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm view left-pad version
 cargo run -p omc-cli --bin npx -- --omc-project-dir /tmp/omc-demo eslint -- .
@@ -401,10 +403,11 @@ Supported now:
 - `omc node`, `omc python`, `omc script`, and `omc run` wrappers, including
   package.json and Pipfile project scripts
 - `omc npm` compatibility commands for common `install`, `update` / `up` /
-  `upgrade`, `ci`, `test`, `start`, `stop`, `restart`, `run`, `exec`,
-  `remove`, `bin`, `root`, `prefix`, `audit` / `audit --json`, `config get`,
-  `config list`, `get`, `view` / `info` / `show`, `list` / `list --json`, and
-  `outdated` / `outdated --json` flows without delegating to npm, plus a direct
+  `upgrade`, `ci`, `prune`, `dedupe`, `test`, `start`, `stop`, `restart`,
+  `run`, `exec`, `remove`, `bin`, `root`, `prefix`, `audit` / `audit --json`,
+  `config get`, `config list`, `get`, `view` / `info` / `show`,
+  `list` / `list --json`, and `outdated` / `outdated --json` flows without
+  delegating to npm, plus a direct
   `npm` compatibility binary and direct `npx` compatibility binary for
   project-local executable flows; direct local npm tarballs and local package
   directories are accepted as install/update inputs; common `npm exec` / `npx`

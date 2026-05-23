@@ -241,6 +241,12 @@ enum NpmCompatAction {
         allow: Vec<String>,
         allow_all_host: bool,
     },
+    Maintenance {
+        command: NpmMaintenanceCommand,
+        omit_dev: bool,
+        allow: Vec<String>,
+        allow_all_host: bool,
+    },
     RunScript {
         command: String,
         name: String,
@@ -276,6 +282,12 @@ enum NpmCompatAction {
         json: bool,
         npm_registry: Option<String>,
     },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NpmMaintenanceCommand {
+    Prune,
+    Dedupe,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -947,6 +959,18 @@ fn run_npm_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
                 &allow,
                 allow_all_host,
             )?;
+        }
+        NpmCompatAction::Maintenance {
+            command,
+            omit_dev,
+            allow,
+            allow_all_host,
+        } => {
+            let mut options = LinkOptions::new(project_dir);
+            options.allowed_capabilities = parse_grants(&allow, allow_all_host)?;
+            options.include_dev_dependencies = !omit_dev;
+            let install = install_locked_project(&options)?;
+            print_npm_maintenance_report(command, &install);
         }
         NpmCompatAction::RunScript {
             command,
@@ -1671,6 +1695,14 @@ fn pip_config_key_aliases(key: &str) -> Vec<String> {
 
 fn print_lock_only_report(project_dir: &Path) {
     println!("lockfile {}", project_dir.join("omc.lock").display());
+}
+
+fn print_npm_maintenance_report(command: NpmMaintenanceCommand, install: &InstallReport) {
+    match command {
+        NpmMaintenanceCommand::Prune => println!("pruned OMC npm install state"),
+        NpmMaintenanceCommand::Dedupe => println!("deduped OMC npm install state"),
+    }
+    print_install_report(install);
 }
 
 fn remove_specs(
@@ -2545,6 +2577,12 @@ fn parse_npm_compat_action(args: &[String]) -> Result<NpmCompatAction, OmcRegist
                 allow_all_host,
             })
         }
+        "prune" => {
+            parse_npm_maintenance_args("npm prune", NpmMaintenanceCommand::Prune, &args[1..])
+        }
+        "dedupe" | "ddp" | "find-dupes" => {
+            parse_npm_maintenance_args("npm dedupe", NpmMaintenanceCommand::Dedupe, &args[1..])
+        }
         "run" | "run-script" => {
             let NpmRunArgs {
                 name,
@@ -2618,6 +2656,54 @@ fn parse_npm_path_args(command: &str, args: &[String]) -> Result<(), OmcRegistry
         return Err(unsupported_compat_arg(command, arg));
     }
     Ok(())
+}
+
+fn parse_npm_maintenance_args(
+    command: &str,
+    maintenance: NpmMaintenanceCommand,
+    args: &[String],
+) -> Result<NpmCompatAction, OmcRegistryError> {
+    let mut filtered = Vec::new();
+    let mut index = 0;
+    while index < args.len() {
+        let arg = &args[index];
+        if matches!(arg.as_str(), "--dry-run" | "--json" | "--silent" | "-s") {
+        } else if matches!(arg.as_str(), "--loglevel" | "--cache") {
+            index += 1;
+            if args.get(index).is_none() {
+                return Err(OmcRegistryError::UnsupportedSpec(format!(
+                    "{arg} needs a value"
+                )));
+            }
+        } else if npm_maintenance_equals_value_flag(arg) {
+        } else {
+            filtered.push(arg.clone());
+        }
+        index += 1;
+    }
+
+    let CommonCompatFlags {
+        omit_dev,
+        allow,
+        allow_all_host,
+        positionals,
+        ..
+    } = parse_common_compat_flags(&filtered, true)?;
+    if !positionals.is_empty() {
+        return Err(unsupported_compat_arg(command, &positionals[0]));
+    }
+    Ok(NpmCompatAction::Maintenance {
+        command: maintenance,
+        omit_dev,
+        allow,
+        allow_all_host,
+    })
+}
+
+fn npm_maintenance_equals_value_flag(arg: &str) -> bool {
+    ["--loglevel=", "--cache="]
+        .iter()
+        .any(|prefix| arg.starts_with(prefix))
 }
 
 fn parse_npm_install_args(args: &[String]) -> Result<NpmCompatAction, OmcRegistryError> {
@@ -4576,6 +4662,31 @@ mod tests {
             parse_npm_compat_action(&args(&["prefix", "--parseable"])).unwrap(),
             NpmCompatAction::Path {
                 kind: NpmPathKind::Prefix,
+            }
+        );
+        assert_eq!(
+            parse_npm_compat_action(&args(&[
+                "prune",
+                "--omit=dev",
+                "--loglevel=silent",
+                "--allow-all-host",
+            ]))
+            .unwrap(),
+            NpmCompatAction::Maintenance {
+                command: NpmMaintenanceCommand::Prune,
+                omit_dev: true,
+                allow: Vec::new(),
+                allow_all_host: true,
+            }
+        );
+        assert_eq!(
+            parse_npm_compat_action(&args(&["dedupe", "--dry-run", "--cache", "/tmp/npm-cache"]))
+                .unwrap(),
+            NpmCompatAction::Maintenance {
+                command: NpmMaintenanceCommand::Dedupe,
+                omit_dev: false,
+                allow: Vec::new(),
+                allow_all_host: false,
             }
         );
         assert_eq!(
