@@ -9435,6 +9435,13 @@ fn parse_pypi_vcs_direct_requirement(
     parse_python_vcs_requirement(Some((name, extras)), url.trim(), None, false)
 }
 
+pub fn parse_pypi_vcs_requirement(value: &str) -> Result<Option<PythonVcsRequirement>> {
+    if let Some(requirement) = parse_pypi_vcs_direct_requirement(value, &BTreeSet::new())? {
+        return Ok(Some(requirement));
+    }
+    parse_requirements_bare_vcs_requirement(value, &BTreeSet::new())
+}
+
 fn parse_requirements_editable_vcs_requirement(
     value: &str,
 ) -> Result<Option<PythonVcsRequirement>> {

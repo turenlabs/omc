@@ -12,12 +12,13 @@ use omc_registry::{
     apply_pypi_binary_option, check_pypi_lock, compare_npm_versions, compare_pypi_versions,
     init_project, install_locked_packages, install_locked_project, install_project, lock_project,
     parse_capability_grant, parse_npm_direct_archive_reference,
-    parse_pypi_direct_archive_reference, read_constraint_files, read_lockfile, read_manifest,
-    read_npm_config_snapshot, read_npm_package_metadata, read_package_scripts,
-    read_pip_config_snapshot, read_pypi_available_versions, read_requirements_files,
-    remove_manifest_dependency, Behavior, Ecosystem, InstallReport, LinkOptions, LockedPackage,
-    OmcRegistryError, PackageSpec, ProjectRequirements, PypiBinaryMode, PypiCheckIssue,
-    PythonLocalRequirement, Verdict,
+    parse_pypi_direct_archive_reference, parse_pypi_vcs_requirement, read_constraint_files,
+    read_lockfile, read_manifest, read_npm_config_snapshot, read_npm_package_metadata,
+    read_package_scripts, read_pip_config_snapshot, read_pypi_available_versions,
+    read_requirements_files, remove_manifest_dependency, Behavior, Ecosystem, InstallReport,
+    LinkOptions, LockedPackage, LockedPythonVcsDependency, OmcRegistryError, PackageSpec,
+    ProjectRequirements, PypiBinaryMode, PypiCheckIssue, PythonLocalRequirement,
+    PythonVcsRequirement, Verdict,
 };
 use sha2::{Digest, Sha256, Sha384, Sha512};
 
@@ -471,6 +472,7 @@ struct PipInstallAction {
     require_hashes: bool,
     no_deps: bool,
     target: Option<PathBuf>,
+    vcs_requirements: Vec<PythonVcsRequirement>,
     allow: Vec<String>,
     allow_all_host: bool,
 }
@@ -1202,6 +1204,7 @@ fn run_pip_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
                 require_hashes,
                 no_deps,
                 target,
+                vcs_requirements,
                 allow,
                 allow_all_host,
             } = *action;
@@ -1225,6 +1228,7 @@ fn run_pip_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
                 options.pypi_binary_all = binary_all;
                 options.pypi_binary_packages = binary_packages;
                 options.python_target_dir = target.map(|path| absolutize_path(project_dir, path));
+                options.python_vcs_requirements = vcs_requirements;
                 let install = install_project(&options)?;
                 print_install_report(&install);
             } else {
@@ -1246,6 +1250,7 @@ fn run_pip_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
                 options.pypi_binary_all = binary_all;
                 options.pypi_binary_packages = binary_packages;
                 options.python_target_dir = target.map(|path| absolutize_path(project_dir, path));
+                options.python_vcs_requirements = vcs_requirements;
                 let mut specs = parse_package_specs(&specs, Some(Ecosystem::Pypi))?;
                 specs.extend(parse_pip_archive_references(
                     project_dir,
@@ -3591,12 +3596,43 @@ fn print_locked_freeze(project_dir: &Path) -> Result<(), OmcRegistryError> {
     let lock = read_lockfile(project_dir.join("omc.lock"))?;
     for package in lock
         .packages
-        .into_iter()
+        .iter()
         .filter(|package| package.ecosystem == Ecosystem::Pypi)
     {
         println!("{}=={}", package.name, package.version);
     }
+    for dependency in &lock.python_vcs {
+        println!("{}", pip_freeze_vcs_requirement(dependency));
+    }
     Ok(())
+}
+
+fn pip_freeze_vcs_requirement(dependency: &LockedPythonVcsDependency) -> String {
+    let mut name = dependency.name.clone();
+    if !dependency.extras.is_empty() {
+        name.push('[');
+        name.push_str(&dependency.extras.join(","));
+        name.push(']');
+    }
+
+    let reference = if dependency.resolved_commit.is_empty() {
+        dependency.reference.as_deref().unwrap_or_default()
+    } else {
+        dependency.resolved_commit.as_str()
+    };
+    let mut url = format!("git+{}", dependency.url);
+    if !reference.is_empty() {
+        url.push('@');
+        url.push_str(reference);
+    }
+    if let Some(subdirectory) = &dependency.subdirectory {
+        if !subdirectory.is_empty() {
+            url.push_str("#subdirectory=");
+            url.push_str(subdirectory);
+        }
+    }
+
+    format!("{name} @ {url}")
 }
 
 fn print_locked_pip_json(project_dir: &Path) -> Result<(), OmcRegistryError> {
@@ -6368,6 +6404,7 @@ fn parse_pip_install_args(args: &[String]) -> Result<PipCompatAction, OmcRegistr
     let mut target = None;
     let mut archive_references = Vec::new();
     let mut local_paths = Vec::new();
+    let mut vcs_requirements = Vec::new();
     let mut filtered = Vec::new();
     let mut index = 0;
     while index < args.len() {
@@ -6481,9 +6518,17 @@ fn parse_pip_install_args(args: &[String]) -> Result<PipCompatAction, OmcRegistr
                     "{arg} needs a path"
                 )));
             };
-            local_paths.push(pip_local_path_arg(path)?);
+            if let Some(requirement) = parse_pypi_vcs_requirement(path)? {
+                vcs_requirements.push(requirement);
+            } else {
+                local_paths.push(pip_local_path_arg(path)?);
+            }
         } else if let Some(path) = arg.strip_prefix("--editable=") {
-            local_paths.push(pip_local_path_arg(path)?);
+            if let Some(requirement) = parse_pypi_vcs_requirement(path)? {
+                vcs_requirements.push(requirement);
+            } else {
+                local_paths.push(pip_local_path_arg(path)?);
+            }
         } else if matches!(
             arg.as_str(),
             "--upgrade"
@@ -6512,6 +6557,8 @@ fn parse_pip_install_args(args: &[String]) -> Result<PipCompatAction, OmcRegistr
         } else if pip_ignored_install_equals_flag(arg) {
         } else if is_pip_archive_arg(arg) {
             archive_references.push(arg.clone());
+        } else if let Some(requirement) = parse_pypi_vcs_requirement(arg)? {
+            vcs_requirements.push(requirement);
         } else if is_pip_local_directory_arg(arg) {
             local_paths.push(pip_local_path_arg(arg)?);
         } else {
@@ -6542,6 +6589,7 @@ fn parse_pip_install_args(args: &[String]) -> Result<PipCompatAction, OmcRegistr
         require_hashes,
         no_deps,
         target,
+        vcs_requirements,
         allow,
         allow_all_host,
     })))
@@ -8551,6 +8599,7 @@ mod tests {
                 require_hashes: true,
                 no_deps: true,
                 target: Some(PathBuf::from("vendor")),
+                vcs_requirements: Vec::new(),
                 allow: Vec::new(),
                 allow_all_host: true,
             }))
@@ -8677,6 +8726,51 @@ mod tests {
                 require_hashes: false,
                 no_deps: false,
                 target: None,
+                vcs_requirements: Vec::new(),
+                allow: Vec::new(),
+                allow_all_host: false,
+            }))
+        );
+
+        assert_eq!(
+            parse_pip_compat_action(&args(&[
+                "install",
+                "-e",
+                "git+https://example.invalid/demo.git@main#egg=demo[cli]&subdirectory=src",
+                "--editable=other @ git+https://example.invalid/other.git@v1#subdirectory=python",
+            ]))
+            .unwrap(),
+            PipCompatAction::Install(Box::new(PipInstallAction {
+                specs: Vec::new(),
+                requirements: Vec::new(),
+                constraints: Vec::new(),
+                archive_references: Vec::new(),
+                local_paths: Vec::new(),
+                index_url: None,
+                extra_index_urls: Vec::new(),
+                find_links: Vec::new(),
+                no_index: false,
+                binary_all: None,
+                binary_packages: BTreeMap::new(),
+                require_hashes: false,
+                no_deps: false,
+                target: None,
+                vcs_requirements: vec![
+                    PythonVcsRequirement {
+                        name: "demo".to_owned(),
+                        url: "https://example.invalid/demo.git".to_owned(),
+                        reference: Some("main".to_owned()),
+                        subdirectory: Some(PathBuf::from("src")),
+                        extras: BTreeSet::from(["cli".to_owned()]),
+                    },
+                    PythonVcsRequirement {
+                        name: "other".to_owned(),
+                        url: "https://example.invalid/other.git".to_owned(),
+                        reference: Some("v1".to_owned()),
+                        subdirectory: Some(PathBuf::from("python")),
+                        extras: BTreeSet::new(),
+                    },
+                ],
                 allow: Vec::new(),
                 allow_all_host: false,
             }))
@@ -8710,6 +8804,7 @@ mod tests {
                 require_hashes: false,
                 no_deps: false,
                 target: None,
+                vcs_requirements: Vec::new(),
                 allow: Vec::new(),
                 allow_all_host: false,
             }))
@@ -8783,6 +8878,19 @@ mod tests {
         assert_eq!(
             parse_pip_compat_action(&args(&["freeze"])).unwrap(),
             PipCompatAction::Freeze
+        );
+        assert_eq!(
+            pip_freeze_vcs_requirement(&LockedPythonVcsDependency {
+                name: "demo".to_owned(),
+                url: "https://example.invalid/demo.git".to_owned(),
+                reference: Some("main".to_owned()),
+                resolved_commit: "0123456789abcdef0123456789abcdef01234567".to_owned(),
+                archive: String::new(),
+                sha256: String::new(),
+                subdirectory: Some("src".to_owned()),
+                extras: vec!["cli".to_owned(), "test".to_owned()],
+            }),
+            "demo[cli,test] @ git+https://example.invalid/demo.git@0123456789abcdef0123456789abcdef01234567#subdirectory=src"
         );
         assert_eq!(
             parse_pip_compat_action(&args(&["check", "--disable-pip-version-check"])).unwrap(),

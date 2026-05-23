@@ -137,6 +137,7 @@ cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm bin
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip install -r requirements.txt -c constraints.txt
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip install requests==2.32.3 --allow-all-host
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip install -e ../local-package
+cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip install -e 'git+https://example.com/acme/pkg.git@main#egg=acme-pkg'
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip install --no-deps ./dist/local_pkg-1.0.0-py3-none-any.whl
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip install --target vendor ./dist/local_pkg-1.0.0.tar.gz
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip install ./dist/local_pkg-1.0.0-py3-none-any.whl
@@ -460,7 +461,8 @@ Supported now:
   installs, including selected extras such as
   `pip install -e '.[dev]'`; direct
   `pip install ./archive.whl`, `./archive.tar.gz`, and HTTPS archive URL
-  installs; `omc python -m pip ...` dispatches to the same compatibility path;
+  installs; editable git/VCS installs such as `pip install -e git+...#egg=name`;
+  `omc python -m pip ...` dispatches to the same compatibility path;
   direct `pip` / `pip3` compatibility binaries; and direct `python` / `python3`
   compatibility binaries for isolated interpreter use and `python -m pip` flows
 - isolated `omc python` execution that uses OMC site-packages without ambient
