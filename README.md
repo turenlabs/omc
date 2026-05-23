@@ -145,6 +145,8 @@ cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm dedupe
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm rebuild node-sass --ignore-scripts
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm config get registry
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm config set registry https://registry.npmjs.org/
+cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm config set registry https://project-registry.example/npm --location=project
+cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm config set registry https://global-registry.example/npm --location=global --globalconfig=global.npmrc
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm cache verify
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm fund --json
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm pkg get name version
@@ -255,7 +257,7 @@ For existing projects, `install` reads normal project files:
 
 ```text
 package.json       root/workspace dependencies, devDependencies, optionalDependencies, peers, overrides/resolutions, HTTPS/file tarball deps, local file/link dirs; use --omit-dev for production installs
-.npmrc             npm registry, scoped registry, and host-scoped auth token configuration; NPM_CONFIG_USERCONFIG selects a custom user file, and NPM_CONFIG_REGISTRY / npm_config_registry override the default registry
+.npmrc             global/project/user npm registry, scoped registry, and host-scoped auth token configuration; NPM_CONFIG_GLOBALCONFIG selects a custom global file, NPM_CONFIG_USERCONFIG selects a custom user file, and NPM_CONFIG_REGISTRY / npm_config_registry override the default registry
 package-lock.json  exact versions, resolved tarball URLs, and integrity hashes for uniquely locked npm packages
 npm-shrinkwrap.json exact versions, resolved tarball URLs, and integrity hashes for uniquely locked npm packages
 yarn.lock          Yarn Classic exact versions, resolved tarball URLs, and integrity hashes for uniquely locked npm packages
@@ -282,7 +284,7 @@ What `add` does:
 resolve package version ranges from npm or PyPI
 walk runtime dependencies recursively
 download the registry artifact without executing it
-use project/user `.npmrc` registry, scoped registry, auth token settings, npm userconfig env vars, and npm registry env vars for npm
+use global/project/user `.npmrc` registry, scoped registry, auth token settings, npm globalconfig/userconfig env vars, and npm registry env vars for npm
 use `omc.toml` PyPI simple-index settings for OMC-managed PyPI adds
 use project/user `pip.conf` PyPI simple-index settings when no project index is set
 use `PIP_INDEX_URL` / `PIP_EXTRA_INDEX_URL` when no project PyPI index is set
@@ -374,10 +376,11 @@ Supported now:
 - interpreter checks the same broker policy at runtime
 - npm and PyPI exact-version resolution
 - npm semver range resolution for common dependency ranges
-- project and user `.npmrc` support for `registry`, `@scope:registry`, and
-  host-scoped `_authToken` npm registry access, plus `NPM_CONFIG_REGISTRY` /
-  `npm_config_registry` default-registry overrides and `NPM_CONFIG_USERCONFIG` /
-  `npm_config_userconfig` user `.npmrc` path selection
+- global, project, and user `.npmrc` support for `registry`, `@scope:registry`,
+  and host-scoped `_authToken` npm registry access, plus `NPM_CONFIG_REGISTRY` /
+  `npm_config_registry` default-registry overrides, `NPM_CONFIG_GLOBALCONFIG` /
+  `npm_config_globalconfig` global `.npmrc` path selection, and
+  `NPM_CONFIG_USERCONFIG` / `npm_config_userconfig` user `.npmrc` path selection
 - project `omc.toml` PyPI simple-index support for `pypi-index-url` and
   `pypi-extra-index-urls`
 - global/project/user `pip.conf` and `PIP_CONFIG_FILE` PyPI support for `index-url`,

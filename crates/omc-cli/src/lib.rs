@@ -20,7 +20,7 @@ use omc_registry::{
     parse_npm_direct_archive_reference, parse_pypi_direct_archive_reference,
     parse_pypi_vcs_requirement, publish_npm_package, read_constraint_files, read_lockfile,
     read_manifest, read_npm_access_collaborators, read_npm_access_packages, read_npm_access_status,
-    read_npm_config_snapshot, read_npm_org_users, read_npm_package_metadata,
+    read_npm_config_snapshot_with_globalconfig, read_npm_org_users, read_npm_package_metadata,
     read_npm_package_metadata_with_userconfig, read_npm_package_owners,
     read_npm_ping_with_userconfig, read_npm_profile, read_npm_search, read_npm_stars,
     read_npm_team_users, read_npm_teams, read_npm_token_list, read_npm_whoami,
@@ -476,6 +476,7 @@ enum NpmCompatAction {
         action: NpmConfigAction,
         npm_registry: Option<String>,
         userconfig: Option<PathBuf>,
+        globalconfig: Option<PathBuf>,
     },
     View {
         spec: String,
@@ -960,10 +961,30 @@ enum NpmPackInput {
 
 #[derive(Debug, PartialEq, Eq)]
 enum NpmConfigAction {
-    Get { keys: Vec<String>, json: bool },
-    List { json: bool },
-    Set { assignments: Vec<(String, String)> },
-    Delete { keys: Vec<String> },
+    Get {
+        keys: Vec<String>,
+        json: bool,
+        location: NpmConfigLocation,
+    },
+    List {
+        json: bool,
+        location: NpmConfigLocation,
+    },
+    Set {
+        assignments: Vec<(String, String)>,
+        location: NpmConfigLocation,
+    },
+    Delete {
+        keys: Vec<String>,
+        location: NpmConfigLocation,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NpmConfigLocation {
+    User,
+    Project,
+    Global,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -3022,11 +3043,13 @@ fn run_npm_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
             action,
             npm_registry,
             userconfig,
+            globalconfig,
         } => print_npm_config(
             project_dir,
             action,
             npm_registry.as_deref(),
             userconfig.as_deref(),
+            globalconfig.as_deref(),
         )?,
         NpmCompatAction::View {
             spec,
@@ -4011,7 +4034,7 @@ fn npm_help_text(topic: Option<&str>) -> String {
             "npm config <get|set|delete|list> ...",
             &[
                 "Read and update npm registry config used by OMC.",
-                "Aliases: c, npm get. Supports --json, --registry, and --userconfig where relevant.",
+                "Aliases: c, npm get. Supports --json, --registry, --userconfig, --globalconfig, --global, and --location where relevant.",
             ],
         ),
         Some("cache") => npm_command_help(
@@ -4724,22 +4747,42 @@ fn print_npm_config(
     action: NpmConfigAction,
     npm_registry: Option<&str>,
     userconfig: Option<&Path>,
+    globalconfig: Option<&Path>,
 ) -> Result<(), OmcRegistryError> {
     match action {
-        NpmConfigAction::Set { assignments } => {
-            write_npm_config_assignments(project_dir, userconfig, &assignments)?;
+        NpmConfigAction::Set {
+            assignments,
+            location,
+        } => {
+            write_npm_config_assignments(
+                project_dir,
+                userconfig,
+                globalconfig,
+                location,
+                &assignments,
+            )?;
             return Ok(());
         }
-        NpmConfigAction::Delete { keys } => {
-            delete_npm_config_keys(project_dir, userconfig, &keys)?;
+        NpmConfigAction::Delete { keys, location } => {
+            delete_npm_config_keys(project_dir, userconfig, globalconfig, location, &keys)?;
             return Ok(());
         }
         NpmConfigAction::Get { .. } | NpmConfigAction::List { .. } => {}
     }
 
-    let values = npm_config_values(project_dir, npm_registry, userconfig)?;
+    let location = match &action {
+        NpmConfigAction::Get { location, .. } | NpmConfigAction::List { location, .. } => *location,
+        NpmConfigAction::Set { .. } | NpmConfigAction::Delete { .. } => unreachable!(),
+    };
+    let values = npm_config_values(
+        project_dir,
+        npm_registry,
+        userconfig,
+        globalconfig,
+        location,
+    )?;
     match action {
-        NpmConfigAction::Get { keys, json } => {
+        NpmConfigAction::Get { keys, json, .. } => {
             if json {
                 if keys.len() == 1 {
                     let value = npm_config_value_for_key(&values, &keys[0]);
@@ -4760,7 +4803,7 @@ fn print_npm_config(
                 }
             }
         }
-        NpmConfigAction::List { json } => {
+        NpmConfigAction::List { json, .. } => {
             if json {
                 println!("{}", serde_json::to_string_pretty(&values)?);
             } else {
@@ -4778,8 +4821,15 @@ fn npm_config_values(
     project_dir: &Path,
     npm_registry: Option<&str>,
     userconfig: Option<&Path>,
+    globalconfig: Option<&Path>,
+    location: NpmConfigLocation,
 ) -> Result<BTreeMap<String, String>, OmcRegistryError> {
-    let snapshot = read_npm_config_snapshot(project_dir, npm_registry, userconfig)?;
+    let snapshot = read_npm_config_snapshot_with_globalconfig(
+        project_dir,
+        npm_registry,
+        userconfig,
+        globalconfig,
+    )?;
     let project_dir = absolute_project_dir(project_dir);
     let mut values = BTreeMap::from([
         ("audit".to_owned(), "true".to_owned()),
@@ -4793,11 +4843,21 @@ fn npm_config_values(
                 .into_owned(),
         ),
         ("fund".to_owned(), "false".to_owned()),
-        ("global".to_owned(), "false".to_owned()),
+        (
+            "global".to_owned(),
+            (location == NpmConfigLocation::Global).to_string(),
+        ),
+        (
+            "globalconfig".to_owned(),
+            npm_globalconfig_path(project_dir.as_path(), globalconfig)
+                .to_string_lossy()
+                .into_owned(),
+        ),
         (
             "local-prefix".to_owned(),
             project_dir.to_string_lossy().into_owned(),
         ),
+        ("location".to_owned(), location.as_str().to_owned()),
         ("loglevel".to_owned(), "notice".to_owned()),
         ("package-lock".to_owned(), "true".to_owned()),
         (
@@ -4836,6 +4896,65 @@ fn npm_userconfig_path(project_dir: &Path, userconfig: Option<&Path>) -> PathBuf
         .join(".npmrc")
 }
 
+fn npm_globalconfig_path(project_dir: &Path, globalconfig: Option<&Path>) -> PathBuf {
+    if let Some(globalconfig) = globalconfig {
+        return absolutize_path(project_dir, globalconfig.to_path_buf());
+    }
+    if let Some(globalconfig) = env::var_os("npm_config_globalconfig")
+        .or_else(|| env::var_os("NPM_CONFIG_GLOBALCONFIG"))
+        .map(PathBuf::from)
+        .filter(|path| !path.as_os_str().is_empty())
+    {
+        return absolutize_path(project_dir, globalconfig);
+    }
+    npm_global_prefix_path().join("etc").join("npmrc")
+}
+
+fn npm_global_prefix_path() -> PathBuf {
+    if let Some(prefix) = env::var_os("npm_config_prefix")
+        .or_else(|| env::var_os("NPM_CONFIG_PREFIX"))
+        .map(PathBuf::from)
+        .filter(|path| !path.as_os_str().is_empty())
+    {
+        return prefix;
+    }
+    npm_default_global_prefix_path()
+}
+
+#[cfg(target_os = "macos")]
+fn npm_default_global_prefix_path() -> PathBuf {
+    let homebrew = PathBuf::from("/opt/homebrew");
+    if homebrew.exists() {
+        homebrew
+    } else {
+        PathBuf::from("/usr/local")
+    }
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn npm_default_global_prefix_path() -> PathBuf {
+    PathBuf::from("/usr/local")
+}
+
+#[cfg(windows)]
+fn npm_default_global_prefix_path() -> PathBuf {
+    env::var_os("APPDATA")
+        .map(PathBuf::from)
+        .filter(|path| !path.as_os_str().is_empty())
+        .map(|path| path.join("npm"))
+        .unwrap_or_else(|| PathBuf::from("npm"))
+}
+
+impl NpmConfigLocation {
+    fn as_str(self) -> &'static str {
+        match self {
+            NpmConfigLocation::User => "user",
+            NpmConfigLocation::Project => "project",
+            NpmConfigLocation::Global => "global",
+        }
+    }
+}
+
 fn npm_config_value_for_key(values: &BTreeMap<String, String>, key: &str) -> String {
     values
         .get(key)
@@ -4846,9 +4965,11 @@ fn npm_config_value_for_key(values: &BTreeMap<String, String>, key: &str) -> Str
 fn write_npm_config_assignments(
     project_dir: &Path,
     userconfig: Option<&Path>,
+    globalconfig: Option<&Path>,
+    location: NpmConfigLocation,
     assignments: &[(String, String)],
 ) -> Result<(), OmcRegistryError> {
-    let path = npm_config_write_path(project_dir, userconfig);
+    let path = npm_config_write_path(project_dir, userconfig, globalconfig, location);
     let mut lines = read_npm_config_lines(&path)?;
     for (key, value) in assignments {
         upsert_npm_config_line(&mut lines, key, value);
@@ -4859,9 +4980,11 @@ fn write_npm_config_assignments(
 fn delete_npm_config_keys(
     project_dir: &Path,
     userconfig: Option<&Path>,
+    globalconfig: Option<&Path>,
+    location: NpmConfigLocation,
     keys: &[String],
 ) -> Result<(), OmcRegistryError> {
-    let path = npm_config_write_path(project_dir, userconfig);
+    let path = npm_config_write_path(project_dir, userconfig, globalconfig, location);
     let mut lines = read_npm_config_lines(&path)?;
     lines.retain(|line| {
         let Some(key) = npm_config_line_key(line) else {
@@ -4872,11 +4995,17 @@ fn delete_npm_config_keys(
     write_npm_config_lines(&path, &lines)
 }
 
-fn npm_config_write_path(project_dir: &Path, userconfig: Option<&Path>) -> PathBuf {
-    if let Some(userconfig) = userconfig {
-        return absolutize_path(project_dir, userconfig.to_path_buf());
+fn npm_config_write_path(
+    project_dir: &Path,
+    userconfig: Option<&Path>,
+    globalconfig: Option<&Path>,
+    location: NpmConfigLocation,
+) -> PathBuf {
+    match location {
+        NpmConfigLocation::User => npm_userconfig_path(project_dir, userconfig),
+        NpmConfigLocation::Project => project_dir.join(".npmrc"),
+        NpmConfigLocation::Global => npm_globalconfig_path(project_dir, globalconfig),
     }
-    project_dir.join(".npmrc")
 }
 
 fn read_npm_config_lines(path: &Path) -> Result<Vec<String>, OmcRegistryError> {
@@ -5341,7 +5470,7 @@ fn write_npm_login_credentials(
     target: &NpmAuthTarget,
     token: &str,
 ) -> Result<usize, OmcRegistryError> {
-    let path = npm_config_write_path(project_dir, userconfig);
+    let path = npm_config_write_path(project_dir, userconfig, None, NpmConfigLocation::User);
     let mut lines = read_npm_config_lines(&path)?;
     let mut written = 0usize;
     if let Some(scope) = &target.scope {
@@ -5393,7 +5522,13 @@ fn npm_auth_target(
     userconfig: Option<&Path>,
     scope: Option<&str>,
 ) -> Result<NpmAuthTarget, OmcRegistryError> {
-    let values = npm_config_values(project_dir, npm_registry, userconfig)?;
+    let values = npm_config_values(
+        project_dir,
+        npm_registry,
+        userconfig,
+        None,
+        NpmConfigLocation::User,
+    )?;
     let scope = scope.map(normalize_npm_scope);
     let registry = if npm_registry.is_some() {
         npm_config_value_for_key(&values, "registry")
@@ -5416,7 +5551,7 @@ fn clear_npm_logout_credentials(
     userconfig: Option<&Path>,
     target: &NpmAuthTarget,
 ) -> Result<usize, OmcRegistryError> {
-    let path = npm_config_write_path(project_dir, userconfig);
+    let path = npm_config_write_path(project_dir, userconfig, None, NpmConfigLocation::User);
     let mut lines = read_npm_config_lines(&path)?;
     if lines.is_empty() && !path.exists() {
         return Ok(0);
@@ -17076,9 +17211,13 @@ fn npm_outdated_equals_value_flag(arg: &str) -> bool {
 fn parse_npm_config_args(args: &[String]) -> Result<NpmCompatAction, OmcRegistryError> {
     let Some(command) = args.first().map(String::as_str) else {
         return Ok(NpmCompatAction::Config {
-            action: NpmConfigAction::List { json: false },
+            action: NpmConfigAction::List {
+                json: false,
+                location: NpmConfigLocation::User,
+            },
             npm_registry: None,
             userconfig: None,
+            globalconfig: None,
         });
     };
     match command {
@@ -17198,8 +17337,10 @@ fn npm_view_equals_value_flag(arg: &str) -> bool {
 fn parse_npm_config_get_args(args: &[String]) -> Result<NpmCompatAction, OmcRegistryError> {
     let NpmConfigArgs {
         json,
+        location,
         npm_registry,
         userconfig,
+        globalconfig,
         positionals,
     } = parse_npm_config_common_args(args)?;
     if positionals.is_empty() {
@@ -17211,48 +17352,61 @@ fn parse_npm_config_get_args(args: &[String]) -> Result<NpmCompatAction, OmcRegi
         action: NpmConfigAction::Get {
             keys: positionals,
             json,
+            location,
         },
         npm_registry,
         userconfig,
+        globalconfig,
     })
 }
 
 fn parse_npm_config_list_args(args: &[String]) -> Result<NpmCompatAction, OmcRegistryError> {
     let NpmConfigArgs {
         json,
+        location,
         npm_registry,
         userconfig,
+        globalconfig,
         positionals,
     } = parse_npm_config_common_args(args)?;
     if !positionals.is_empty() {
         return Err(unsupported_compat_arg("npm config list", &positionals[0]));
     }
     Ok(NpmCompatAction::Config {
-        action: NpmConfigAction::List { json },
+        action: NpmConfigAction::List { json, location },
         npm_registry,
         userconfig,
+        globalconfig,
     })
 }
 
 fn parse_npm_config_set_args(args: &[String]) -> Result<NpmCompatAction, OmcRegistryError> {
     let NpmConfigArgs {
+        location,
         npm_registry,
         userconfig,
+        globalconfig,
         positionals,
         ..
     } = parse_npm_config_common_args(args)?;
     let assignments = parse_npm_config_assignments(positionals)?;
     Ok(NpmCompatAction::Config {
-        action: NpmConfigAction::Set { assignments },
+        action: NpmConfigAction::Set {
+            assignments,
+            location,
+        },
         npm_registry,
         userconfig,
+        globalconfig,
     })
 }
 
 fn parse_npm_config_delete_args(args: &[String]) -> Result<NpmCompatAction, OmcRegistryError> {
     let NpmConfigArgs {
+        location,
         npm_registry,
         userconfig,
+        globalconfig,
         positionals,
         ..
     } = parse_npm_config_common_args(args)?;
@@ -17262,9 +17416,13 @@ fn parse_npm_config_delete_args(args: &[String]) -> Result<NpmCompatAction, OmcR
         ));
     }
     Ok(NpmCompatAction::Config {
-        action: NpmConfigAction::Delete { keys: positionals },
+        action: NpmConfigAction::Delete {
+            keys: positionals,
+            location,
+        },
         npm_registry,
         userconfig,
+        globalconfig,
     })
 }
 
@@ -17310,14 +17468,18 @@ fn npm_config_assignment(key: &str, value: &str) -> Result<(String, String), Omc
 #[derive(Debug)]
 struct NpmConfigArgs {
     json: bool,
+    location: NpmConfigLocation,
     npm_registry: Option<String>,
     userconfig: Option<PathBuf>,
+    globalconfig: Option<PathBuf>,
     positionals: Vec<String>,
 }
 
 fn parse_npm_config_common_args(args: &[String]) -> Result<NpmConfigArgs, OmcRegistryError> {
     let mut json = false;
+    let mut location = NpmConfigLocation::User;
     let mut userconfig = None;
+    let mut globalconfig = None;
     let mut filtered = Vec::new();
     let mut index = 0;
     while index < args.len() {
@@ -17334,18 +17496,29 @@ fn parse_npm_config_common_args(args: &[String]) -> Result<NpmConfigArgs, OmcReg
             userconfig = Some(PathBuf::from(path));
         } else if let Some(path) = arg.strip_prefix("--userconfig=") {
             userconfig = Some(PathBuf::from(path));
-        } else if matches!(
-            arg.as_str(),
-            "--global" | "-g" | "--long" | "-l" | "--parseable"
-        ) {
+        } else if arg == "--globalconfig" {
+            index += 1;
+            let Some(path) = args.get(index) else {
+                return Err(OmcRegistryError::UnsupportedSpec(
+                    "--globalconfig needs a path".to_owned(),
+                ));
+            };
+            globalconfig = Some(PathBuf::from(path));
+        } else if let Some(path) = arg.strip_prefix("--globalconfig=") {
+            globalconfig = Some(PathBuf::from(path));
+        } else if matches!(arg.as_str(), "--global" | "-g") {
+            location = NpmConfigLocation::Global;
         } else if arg == "--location" {
             index += 1;
-            if args.get(index).is_none() {
+            let Some(value) = args.get(index) else {
                 return Err(OmcRegistryError::UnsupportedSpec(
                     "--location needs a value".to_owned(),
                 ));
-            }
-        } else if arg.starts_with("--location=") {
+            };
+            location = parse_npm_config_location(value)?;
+        } else if let Some(value) = arg.strip_prefix("--location=") {
+            location = parse_npm_config_location(value)?;
+        } else if matches!(arg.as_str(), "--long" | "-l" | "--parseable") {
         } else {
             filtered.push(arg.clone());
         }
@@ -17359,10 +17532,23 @@ fn parse_npm_config_common_args(args: &[String]) -> Result<NpmConfigArgs, OmcReg
     } = parse_common_compat_flags(&filtered, true)?;
     Ok(NpmConfigArgs {
         json,
+        location,
         npm_registry,
         userconfig,
+        globalconfig,
         positionals,
     })
+}
+
+fn parse_npm_config_location(value: &str) -> Result<NpmConfigLocation, OmcRegistryError> {
+    match value {
+        "user" => Ok(NpmConfigLocation::User),
+        "project" => Ok(NpmConfigLocation::Project),
+        "global" => Ok(NpmConfigLocation::Global),
+        other => Err(OmcRegistryError::UnsupportedSpec(format!(
+            "unsupported npm config location `{other}`"
+        ))),
+    }
 }
 
 fn npm_audit_equals_value_flag(arg: &str) -> bool {
@@ -22437,9 +22623,11 @@ mod tests {
                 action: NpmConfigAction::Get {
                     keys: vec!["registry".to_owned()],
                     json: true,
+                    location: NpmConfigLocation::Project,
                 },
                 npm_registry: None,
                 userconfig: Some(PathBuf::from("ci.npmrc")),
+                globalconfig: None,
             }
         );
         assert_eq!(
@@ -22454,17 +22642,23 @@ mod tests {
                 action: NpmConfigAction::Get {
                     keys: vec!["prefix".to_owned()],
                     json: false,
+                    location: NpmConfigLocation::User,
                 },
                 npm_registry: Some("https://registry.example.invalid/npm".to_owned()),
                 userconfig: None,
+                globalconfig: None,
             }
         );
         assert_eq!(
             parse_npm_compat_action(&args(&["config", "list", "--json", "--long"])).unwrap(),
             NpmCompatAction::Config {
-                action: NpmConfigAction::List { json: true },
+                action: NpmConfigAction::List {
+                    json: true,
+                    location: NpmConfigLocation::User,
+                },
                 npm_registry: None,
                 userconfig: None,
+                globalconfig: None,
             }
         );
         assert_eq!(
@@ -22472,9 +22666,11 @@ mod tests {
             NpmCompatAction::Config {
                 action: NpmConfigAction::Set {
                     assignments: vec![("registry".to_owned(), "x".to_owned())],
+                    location: NpmConfigLocation::User,
                 },
                 npm_registry: None,
                 userconfig: None,
+                globalconfig: None,
             }
         );
         assert_eq!(
@@ -22491,9 +22687,35 @@ mod tests {
                         "@scope:registry".to_owned(),
                         "https://registry.example.invalid/npm".to_owned(),
                     )],
+                    location: NpmConfigLocation::User,
                 },
                 npm_registry: None,
                 userconfig: Some(PathBuf::from("ci.npmrc")),
+                globalconfig: None,
+            }
+        );
+        assert_eq!(
+            parse_npm_compat_action(&args(&[
+                "config",
+                "set",
+                "registry",
+                "https://global.example.invalid/npm",
+                "--location=global",
+                "--globalconfig",
+                "global.npmrc",
+            ]))
+            .unwrap(),
+            NpmCompatAction::Config {
+                action: NpmConfigAction::Set {
+                    assignments: vec![(
+                        "registry".to_owned(),
+                        "https://global.example.invalid/npm".to_owned(),
+                    )],
+                    location: NpmConfigLocation::Global,
+                },
+                npm_registry: None,
+                userconfig: None,
+                globalconfig: Some(PathBuf::from("global.npmrc")),
             }
         );
         assert_eq!(
@@ -22501,9 +22723,11 @@ mod tests {
             NpmCompatAction::Config {
                 action: NpmConfigAction::Delete {
                     keys: vec!["registry".to_owned()],
+                    location: NpmConfigLocation::User,
                 },
                 npm_registry: None,
                 userconfig: None,
+                globalconfig: None,
             }
         );
     }
@@ -22652,7 +22876,9 @@ verdict = "accepted"
                         "https://scope.example.invalid/npm".to_owned(),
                     ),
                 ],
+                location: NpmConfigLocation::Project,
             },
+            None,
             None,
             None,
         )
@@ -22662,7 +22888,14 @@ verdict = "accepted"
         assert!(config.contains("registry=https://new.example.invalid/npm\n"));
         assert!(config.contains("# keep this\n"));
         assert!(config.contains("@scope:registry=https://scope.example.invalid/npm\n"));
-        let values = npm_config_values(&dir, None, Some(Path::new("empty-user.npmrc"))).unwrap();
+        let values = npm_config_values(
+            &dir,
+            None,
+            Some(Path::new("empty-user.npmrc")),
+            Some(Path::new("empty-global.npmrc")),
+            NpmConfigLocation::Project,
+        )
+        .unwrap();
         assert_eq!(
             values.get("registry").map(String::as_str),
             Some("https://new.example.invalid/npm/")
@@ -22676,7 +22909,9 @@ verdict = "accepted"
             &dir,
             NpmConfigAction::Delete {
                 keys: vec!["registry".to_owned()],
+                location: NpmConfigLocation::Project,
             },
+            None,
             None,
             None,
         )
@@ -22692,15 +22927,51 @@ verdict = "accepted"
                     "registry".to_owned(),
                     "https://ci.example.invalid".to_owned(),
                 )],
+                location: NpmConfigLocation::User,
             },
             None,
             Some(Path::new("ci.npmrc")),
+            None,
         )
         .unwrap();
         assert_eq!(
             fs::read_to_string(dir.join("ci.npmrc")).unwrap(),
             "registry=https://ci.example.invalid\n"
         );
+
+        print_npm_config(
+            &dir,
+            NpmConfigAction::Set {
+                assignments: vec![(
+                    "registry".to_owned(),
+                    "https://global.example.invalid/npm".to_owned(),
+                )],
+                location: NpmConfigLocation::Global,
+            },
+            None,
+            None,
+            Some(Path::new("global.npmrc")),
+        )
+        .unwrap();
+        assert_eq!(
+            fs::read_to_string(dir.join("global.npmrc")).unwrap(),
+            "registry=https://global.example.invalid/npm\n"
+        );
+
+        print_npm_config(
+            &dir,
+            NpmConfigAction::Delete {
+                keys: vec!["registry".to_owned()],
+                location: NpmConfigLocation::Global,
+            },
+            None,
+            None,
+            Some(Path::new("global.npmrc")),
+        )
+        .unwrap();
+        assert!(!fs::read_to_string(dir.join("global.npmrc"))
+            .unwrap()
+            .contains("registry=https://global.example.invalid/npm\n"));
     }
 
     #[test]

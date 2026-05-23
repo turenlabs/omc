@@ -8017,7 +8017,17 @@ fn read_npm_config_with_overrides(
     registry_override: Option<&str>,
     userconfig_override: Option<&Path>,
 ) -> Result<NpmConfig> {
+    read_npm_config_with_config_paths(project_dir, registry_override, userconfig_override, None)
+}
+
+fn read_npm_config_with_config_paths(
+    project_dir: &Path,
+    registry_override: Option<&str>,
+    userconfig_override: Option<&Path>,
+    globalconfig_override: Option<&Path>,
+) -> Result<NpmConfig> {
     let mut config = NpmConfig::default();
+    read_npm_global_config(project_dir, globalconfig_override, &mut config)?;
     let user_config = userconfig_override
         .map(Path::to_path_buf)
         .or_else(npm_userconfig_env_path);
@@ -8037,8 +8047,26 @@ pub fn read_npm_config_snapshot(
     registry_override: Option<&str>,
     userconfig_override: Option<&Path>,
 ) -> Result<NpmConfigSnapshot> {
-    let config =
-        read_npm_config_with_overrides(project_dir, registry_override, userconfig_override)?;
+    read_npm_config_snapshot_with_globalconfig(
+        project_dir,
+        registry_override,
+        userconfig_override,
+        None,
+    )
+}
+
+pub fn read_npm_config_snapshot_with_globalconfig(
+    project_dir: &Path,
+    registry_override: Option<&str>,
+    userconfig_override: Option<&Path>,
+    globalconfig_override: Option<&Path>,
+) -> Result<NpmConfigSnapshot> {
+    let config = read_npm_config_with_config_paths(
+        project_dir,
+        registry_override,
+        userconfig_override,
+        globalconfig_override,
+    )?;
     Ok(NpmConfigSnapshot {
         registry: config.registry,
         scoped_registries: config.scoped_registries,
@@ -8069,16 +8097,33 @@ fn npm_userconfig_env_path() -> Option<PathBuf> {
         .filter(|path| !path.as_os_str().is_empty())
 }
 
+fn npm_globalconfig_env_path() -> Option<PathBuf> {
+    env::var_os("npm_config_globalconfig")
+        .or_else(|| env::var_os("NPM_CONFIG_GLOBALCONFIG"))
+        .map(PathBuf::from)
+        .filter(|path| !path.as_os_str().is_empty())
+}
+
+fn read_npm_global_config(
+    project_dir: &Path,
+    global_config: Option<&Path>,
+    config: &mut NpmConfig,
+) -> Result<()> {
+    let path = global_config
+        .map(Path::to_path_buf)
+        .or_else(npm_globalconfig_env_path)
+        .map(|path| resolve_npm_config_path(project_dir, &path))
+        .unwrap_or_else(npm_globalconfig_default_path);
+    read_npmrc_into(&path, config)
+}
+
 fn read_npm_user_config(
     project_dir: &Path,
     user_config: Option<&Path>,
     config: &mut NpmConfig,
 ) -> Result<()> {
     if let Some(user_config) = user_config {
-        return read_npmrc_into(
-            &resolve_npm_userconfig_path(project_dir, user_config),
-            config,
-        );
+        return read_npmrc_into(&resolve_npm_config_path(project_dir, user_config), config);
     }
     if let Some(home) = env::var_os("HOME") {
         read_npmrc_into(&PathBuf::from(home).join(".npmrc"), config)?;
@@ -8086,12 +8131,51 @@ fn read_npm_user_config(
     Ok(())
 }
 
-fn resolve_npm_userconfig_path(project_dir: &Path, path: &Path) -> PathBuf {
+fn resolve_npm_config_path(project_dir: &Path, path: &Path) -> PathBuf {
     if path.is_absolute() {
         path.to_path_buf()
     } else {
         project_dir.join(path)
     }
+}
+
+fn npm_globalconfig_default_path() -> PathBuf {
+    npm_global_prefix_path().join("etc").join("npmrc")
+}
+
+fn npm_global_prefix_path() -> PathBuf {
+    if let Some(prefix) = env::var_os("npm_config_prefix")
+        .or_else(|| env::var_os("NPM_CONFIG_PREFIX"))
+        .map(PathBuf::from)
+        .filter(|path| !path.as_os_str().is_empty())
+    {
+        return prefix;
+    }
+    npm_default_global_prefix_path()
+}
+
+#[cfg(target_os = "macos")]
+fn npm_default_global_prefix_path() -> PathBuf {
+    let homebrew = PathBuf::from("/opt/homebrew");
+    if homebrew.exists() {
+        homebrew
+    } else {
+        PathBuf::from("/usr/local")
+    }
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn npm_default_global_prefix_path() -> PathBuf {
+    PathBuf::from("/usr/local")
+}
+
+#[cfg(windows)]
+fn npm_default_global_prefix_path() -> PathBuf {
+    env::var_os("APPDATA")
+        .map(PathBuf::from)
+        .filter(|path| !path.as_os_str().is_empty())
+        .map(|path| path.join("npm"))
+        .unwrap_or_else(|| PathBuf::from("npm"))
 }
 
 fn read_npmrc_into(path: &Path, config: &mut NpmConfig) -> Result<()> {
@@ -22165,6 +22249,36 @@ wheels = [
         assert_eq!(
             config.registry,
             "https://ci-userconfig.example.invalid/npm/"
+        );
+    }
+
+    #[test]
+    fn npm_globalconfig_reads_before_user_and_project_npmrc() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(
+            dir.path().join("global.npmrc"),
+            "registry=https://global.example.invalid/npm\n",
+        )
+        .unwrap();
+        fs::write(
+            dir.path().join("user.npmrc"),
+            "@scope:registry=https://scope.example.invalid/npm\n",
+        )
+        .unwrap();
+        fs::write(dir.path().join(".npmrc"), "legacy-peer-deps=true\n").unwrap();
+
+        let snapshot = read_npm_config_snapshot_with_globalconfig(
+            dir.path(),
+            None,
+            Some(Path::new("user.npmrc")),
+            Some(Path::new("global.npmrc")),
+        )
+        .unwrap();
+
+        assert_eq!(snapshot.registry, "https://global.example.invalid/npm/");
+        assert_eq!(
+            snapshot.scoped_registries.get("@scope").map(String::as_str),
+            Some("https://scope.example.invalid/npm/")
         );
     }
 
