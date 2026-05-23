@@ -521,6 +521,13 @@ pub fn discover_project_requirements_with_extras(
             .extend(read_package_json_specs(&package_json)?);
     }
 
+    let package_lock_json = project_dir.join("package-lock.json");
+    if package_lock_json.exists() {
+        project
+            .constraints
+            .extend(read_package_lock_constraints(&package_lock_json)?);
+    }
+
     let requirements_txt = project_dir.join("requirements.txt");
     if requirements_txt.exists() {
         let requirements = read_requirements_file(&requirements_txt)?;
@@ -743,6 +750,71 @@ fn required_peer_dependencies(
                 .unwrap_or(false)
         })
         .collect()
+}
+
+fn read_package_lock_constraints(path: &Path) -> Result<BTreeMap<String, String>> {
+    let lock = serde_json::from_str::<NpmPackageLock>(&fs::read_to_string(path)?)?;
+    let mut versions = BTreeMap::<String, BTreeSet<String>>::new();
+
+    for (path, package) in lock.packages {
+        if path.is_empty() {
+            continue;
+        }
+        let Some(name) = npm_package_name_from_lock_path(&path) else {
+            continue;
+        };
+        if let Some(version) = package.version {
+            versions.entry(name).or_default().insert(version);
+        }
+    }
+
+    collect_npm_lock_dependency_versions(lock.dependencies, &mut versions);
+
+    Ok(versions
+        .into_iter()
+        .filter_map(|(name, versions)| {
+            if versions.len() == 1 {
+                versions
+                    .into_iter()
+                    .next()
+                    .map(|version| (format!("npm:{name}"), version))
+            } else {
+                None
+            }
+        })
+        .collect())
+}
+
+fn collect_npm_lock_dependency_versions(
+    dependencies: BTreeMap<String, NpmPackageLockDependency>,
+    versions: &mut BTreeMap<String, BTreeSet<String>>,
+) {
+    for (name, dependency) in dependencies {
+        if let Some(version) = dependency.version {
+            versions.entry(name).or_default().insert(version);
+        }
+        collect_npm_lock_dependency_versions(dependency.dependencies, versions);
+    }
+}
+
+fn npm_package_name_from_lock_path(path: &str) -> Option<String> {
+    let mut components = path.split('/').peekable();
+    let mut name = None;
+
+    while let Some(component) = components.next() {
+        if component != "node_modules" {
+            continue;
+        }
+        let package = components.next()?;
+        if package.starts_with('@') {
+            let scoped = components.next()?;
+            name = Some(format!("{package}/{scoped}"));
+        } else {
+            name = Some(package.to_owned());
+        }
+    }
+
+    name
 }
 
 fn read_requirements_file(path: &Path) -> Result<ProjectRequirements> {
@@ -1310,16 +1382,22 @@ fn resolve_package(
     options: &LinkOptions,
 ) -> Result<ResolvedPackage> {
     match spec.ecosystem {
-        Ecosystem::Npm => resolve_npm(client, spec),
+        Ecosystem::Npm => resolve_npm(client, spec, options),
         Ecosystem::Pypi => resolve_pypi(client, spec, options),
     }
 }
 
-fn resolve_npm(client: &Client, spec: &PackageSpec) -> Result<ResolvedPackage> {
+fn resolve_npm(
+    client: &Client,
+    spec: &PackageSpec,
+    options: &LinkOptions,
+) -> Result<ResolvedPackage> {
     let (registry_name, version_requirement) = npm_registry_name_and_requirement(spec)?;
     let install_name = spec.name.clone();
     let encoded = urlencoding::encode(&registry_name);
-    let version = match version_requirement.as_deref() {
+    let constrained_requirement =
+        constrained_npm_requirement(spec, version_requirement.as_deref(), &options.constraints);
+    let version = match constrained_requirement.as_deref() {
         Some(requirement) if is_exact_npm_version(requirement) => requirement.to_owned(),
         Some(requirement) => {
             let url = format!("https://registry.npmjs.org/{encoded}");
@@ -1466,6 +1544,28 @@ fn constrained_pypi_requirement(
     spec: &PackageSpec,
     constraints: &BTreeMap<String, String>,
 ) -> Option<String> {
+    constrained_requirement(spec, constraints)
+}
+
+fn constrained_npm_requirement(
+    spec: &PackageSpec,
+    requirement: Option<&str>,
+    constraints: &BTreeMap<String, String>,
+) -> Option<String> {
+    match (requirement, constraints.get(&spec.constraint_key())) {
+        (Some(requirement), Some(constraint)) if !requirement.trim().is_empty() => {
+            Some(format!("{requirement},{constraint}"))
+        }
+        (Some(requirement), None) => Some(requirement.to_owned()),
+        (_, Some(constraint)) => Some(constraint.clone()),
+        (None, None) => None,
+    }
+}
+
+fn constrained_requirement(
+    spec: &PackageSpec,
+    constraints: &BTreeMap<String, String>,
+) -> Option<String> {
     match (
         spec.version.as_deref(),
         constraints.get(&spec.constraint_key()),
@@ -1527,6 +1627,7 @@ fn is_exact_npm_version(requirement: &str) -> bool {
 }
 
 fn npm_version_satisfies(version: &str, requirement: &str) -> bool {
+    let raw_version = version.trim();
     let Ok(version) = Version::parse(version) else {
         return false;
     };
@@ -1537,6 +1638,16 @@ fn npm_version_satisfies(version: &str, requirement: &str) -> bool {
     }
     if let Ok(exact) = Version::parse(requirement) {
         return version == exact;
+    }
+    let parts = requirement
+        .replace(',', " ")
+        .split_whitespace()
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    if parts.len() > 1 {
+        return parts
+            .iter()
+            .all(|part| npm_version_satisfies(raw_version, part));
     }
     if let Some(base) = requirement
         .strip_prefix('^')
@@ -2464,6 +2575,26 @@ struct ProjectPackageJson {
     peer_dependencies_meta: BTreeMap<String, NpmPeerDependencyMeta>,
 }
 
+#[derive(Debug, Default, Deserialize)]
+struct NpmPackageLock {
+    #[serde(default)]
+    packages: BTreeMap<String, NpmPackageLockPackage>,
+    #[serde(default)]
+    dependencies: BTreeMap<String, NpmPackageLockDependency>,
+}
+
+#[derive(Debug, Deserialize)]
+struct NpmPackageLockPackage {
+    version: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct NpmPackageLockDependency {
+    version: Option<String>,
+    #[serde(default)]
+    dependencies: BTreeMap<String, NpmPackageLockDependency>,
+}
+
 #[derive(Debug, Deserialize)]
 struct PyProjectToml {
     project: Option<PyProjectProject>,
@@ -2620,6 +2751,8 @@ mod tests {
         assert!(!npm_version_satisfies("7.0.0", "^6.0.0"));
         assert!(npm_version_satisfies("1.2.9", "~1.2.0"));
         assert!(!npm_version_satisfies("1.3.0", "~1.2.0"));
+        assert!(npm_version_satisfies("1.1.3", "^1.1.0,1.1.3"));
+        assert!(!npm_version_satisfies("1.3.0", "^1.1.0,1.1.3"));
     }
 
     #[test]
@@ -2708,6 +2841,93 @@ mod tests {
             .iter()
             .any(|spec| spec.name == "required-peer" && spec.version.as_deref() == Some("^3.0.0")));
         assert!(!dependencies.iter().any(|spec| spec.name == "optional-peer"));
+    }
+
+    #[test]
+    fn reads_package_lock_constraints_for_unique_versions() {
+        let dir = tempfile::tempdir().unwrap();
+        let package_lock = dir.path().join("package-lock.json");
+        fs::write(
+            &package_lock,
+            r#"{
+                "lockfileVersion": 3,
+                "packages": {
+                    "": { "name": "demo", "version": "0.1.0" },
+                    "node_modules/is-odd": { "version": "3.0.1" },
+                    "node_modules/@scope/pkg": { "version": "1.2.3" },
+                    "node_modules/a/node_modules/dup": { "version": "1.0.0" },
+                    "node_modules/b/node_modules/dup": { "version": "2.0.0" }
+                }
+            }"#,
+        )
+        .unwrap();
+
+        let constraints = read_package_lock_constraints(&package_lock).unwrap();
+        assert_eq!(
+            constraints.get("npm:is-odd").map(String::as_str),
+            Some("3.0.1")
+        );
+        assert_eq!(
+            constraints.get("npm:@scope/pkg").map(String::as_str),
+            Some("1.2.3")
+        );
+        assert!(!constraints.contains_key("npm:dup"));
+    }
+
+    #[test]
+    fn discovers_package_lock_constraints() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(
+            dir.path().join("package.json"),
+            r#"{ "dependencies": { "left-pad": "^1.1.0" } }"#,
+        )
+        .unwrap();
+        fs::write(
+            dir.path().join("package-lock.json"),
+            r#"{
+                "lockfileVersion": 3,
+                "packages": {
+                    "": { "name": "demo", "version": "0.1.0" },
+                    "node_modules/left-pad": { "version": "1.1.3" }
+                }
+            }"#,
+        )
+        .unwrap();
+
+        let discovered = discover_project_requirements(dir.path()).unwrap();
+        assert!(discovered
+            .specs
+            .iter()
+            .any(|spec| spec.name == "left-pad" && spec.version.as_deref() == Some("^1.1.0")));
+        assert_eq!(
+            discovered
+                .constraints
+                .get("npm:left-pad")
+                .map(String::as_str),
+            Some("1.1.3")
+        );
+    }
+
+    #[test]
+    fn merges_npm_lock_constraints_into_ranges_and_aliases() {
+        let spec = PackageSpec::new(Ecosystem::Npm, "is-odd", Some("^3.0.0".to_owned()));
+        let constraints = BTreeMap::from([("npm:is-odd".to_owned(), "3.0.1".to_owned())]);
+        assert_eq!(
+            constrained_npm_requirement(&spec, spec.version.as_deref(), &constraints).as_deref(),
+            Some("^3.0.0,3.0.1")
+        );
+
+        let alias = PackageSpec::new(
+            Ecosystem::Npm,
+            "string-width-cjs",
+            Some("npm:string-width@^4.2.0".to_owned()),
+        );
+        let (_, alias_requirement) = npm_registry_name_and_requirement(&alias).unwrap();
+        assert_eq!(
+            constrained_npm_requirement(&alias, alias_requirement.as_deref(), &BTreeMap::new())
+                .as_deref(),
+            Some("^4.2.0")
+        );
     }
 
     #[test]
