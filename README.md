@@ -114,6 +114,7 @@ cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo install --locked
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo ci
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo run normalizer --version
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm init -y
+cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm help install
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm install left-pad@1.3.0
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm install --registry https://registry.npmjs.org left-pad@1.3.0
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm update --package-lock-only
@@ -142,6 +143,7 @@ cargo run -p omc-cli --bin npx -- --omc-project-dir /tmp/omc-demo eslint -- .
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm root
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm bin
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip install -r requirements.txt -c constraints.txt
+cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip help install
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip install requests==2.32.3 --allow-all-host
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip install -e ../local-package
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip install -e 'git+https://example.com/acme/pkg.git@main#egg=acme-pkg'
@@ -427,7 +429,7 @@ Supported now:
 - `omc npm` compatibility commands for common `install`, `update` / `up` /
   `upgrade`, `ci`, `prune`, `dedupe`, `rebuild`, `test`, `start`, `stop`, `restart`,
   `run`, `exec`, `init`, `remove`, `bin`, `root`, `prefix`, `audit` / `audit --json`,
-  `fund` / `fund --json`, `cache verify/ls/rm/clean --force`, `pkg get/set/delete`, `version`,
+  `help`, `fund` / `fund --json`, `cache verify/ls/rm/clean --force`, `pkg get/set/delete`, `version`,
   `pack`, `search` / `find`, `config get/set/delete/list`, `get`, `view` / `info` / `show`,
   `list` / `ls` / `ll` / `la`, including `--json`, common depth/omit/workspace
   flags, and package-name filters; `explain` / `why`,
@@ -455,7 +457,7 @@ Supported now:
   `--include-workspace-root`, `--silent`, `-s`, and `--loglevel=silent` are
   understood
 - `omc pip` compatibility commands for common `install`, `uninstall`, `freeze`,
-  `download`, `check`, `debug`, `inspect`, `show`, `hash`, `cache dir/list/remove/purge`,
+  `download`, `check`, `debug`, `help`, `inspect`, `show`, `hash`, `cache dir/list/remove/purge`,
   `wheel`, `index versions`, `config get/set/unset/list`, and
   `list --format=columns|freeze|json` flows, including `pip list --outdated`,
   `-r`, index URL,

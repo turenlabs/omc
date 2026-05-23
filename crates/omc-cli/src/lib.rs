@@ -223,6 +223,9 @@ enum Command {
 
 #[derive(Debug, PartialEq, Eq)]
 enum NpmCompatAction {
+    Help {
+        topic: Option<String>,
+    },
     Version,
     Init {
         action: NpmInitAction,
@@ -438,6 +441,9 @@ enum NpmConfigAction {
 
 #[derive(Debug, PartialEq, Eq)]
 enum PipCompatAction {
+    Help {
+        topic: Option<String>,
+    },
     Version,
     Install(Box<PipInstallAction>),
     Download(Box<PipDownloadAction>),
@@ -1310,6 +1316,7 @@ fn run_project_command(
 
 fn run_npm_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRegistryError> {
     match parse_npm_compat_action(args)? {
+        NpmCompatAction::Help { topic } => print_npm_help(topic.as_deref()),
         NpmCompatAction::Version => println!("{}", env!("CARGO_PKG_VERSION")),
         NpmCompatAction::Init { action } => print_npm_init(project_dir, action)?,
         NpmCompatAction::PackageVersion { action } => print_npm_version(project_dir, action)?,
@@ -1486,6 +1493,7 @@ fn run_npm_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
 
 fn run_pip_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRegistryError> {
     match parse_pip_compat_action(args)? {
+        PipCompatAction::Help { topic } => print_pip_help(topic.as_deref()),
         PipCompatAction::Version => println!("pip {} from OMC", env!("CARGO_PKG_VERSION")),
         PipCompatAction::Install(action) => {
             let PipInstallAction {
@@ -1675,6 +1683,312 @@ fn print_npm_path(project_dir: &Path, kind: NpmPathKind) -> Result<(), OmcRegist
     };
     println!("{}", path.display());
     Ok(())
+}
+
+fn print_npm_help(topic: Option<&str>) {
+    print!("{}", npm_help_text(topic));
+}
+
+fn npm_help_text(topic: Option<&str>) -> String {
+    match topic.and_then(npm_help_topic) {
+        None => npm_general_help_text(),
+        Some("install") => npm_command_help(
+            "npm install [<package-spec>...]",
+            &[
+                "Resolve, verify, lock, and install npm packages with OMC.",
+                "Aliases: i, add, update, up, upgrade.",
+                "Common flags: --save, --no-save, --save-dev, --omit=dev, --include=dev, --package-lock-only, --registry, --allow, --allow-all-host.",
+                "Direct local inputs are supported for .tgz archives and local package directories.",
+            ],
+        ),
+        Some("ci") => npm_command_help(
+            "npm ci",
+            &[
+                "Install the exact OMC lockfile state.",
+                "Common flags: --omit=dev, --include=dev, --allow, --allow-all-host.",
+            ],
+        ),
+        Some("run") => npm_command_help(
+            "npm run [<script>] [-- <args>...]",
+            &[
+                "Run package.json scripts with OMC npm/Python bins and imports on PATH.",
+                "Without a script, lists scripts in text or JSON mode.",
+                "Common flags: --if-present, --workspace, --workspaces, --include-workspace-root, --json, --silent.",
+                "Aliases: run-script. Also supports npm test/start/stop/restart.",
+            ],
+        ),
+        Some("exec") => npm_command_help(
+            "npm exec <command> [-- <args>...]",
+            &[
+                "Run a project-local executable with OMC runtime paths.",
+                "Aliases: x, npx. Common flags: --yes, --package, --cache, --registry.",
+            ],
+        ),
+        Some("remove") => npm_command_help(
+            "npm remove <package-spec>...",
+            &[
+                "Remove OMC-managed npm dependencies and reinstall the remaining graph.",
+                "Aliases: uninstall, rm, un.",
+            ],
+        ),
+        Some("list") => npm_command_help(
+            "npm list [<package-spec>...]",
+            &[
+                "List locked npm packages.",
+                "Aliases: ls, ll, la. Common flags: --json, --depth, --omit, --include.",
+            ],
+        ),
+        Some("explain") => npm_command_help(
+            "npm explain <package-spec>...",
+            &[
+                "Explain why locked npm packages are present.",
+                "Alias: why. Supports --json.",
+            ],
+        ),
+        Some("audit") => npm_command_help(
+            "npm audit",
+            &["Print OMC verifier and capability findings. Supports --json."],
+        ),
+        Some("outdated") => npm_command_help(
+            "npm outdated",
+            &["Compare locked npm packages to registry versions. Supports --json and --parseable."],
+        ),
+        Some("fund") => npm_command_help(
+            "npm fund [<package-spec>]",
+            &[
+                "Show funding metadata from root/workspace package.json and installed packages.",
+                "Supports --json, --workspace, --workspaces, and --include-workspace-root.",
+            ],
+        ),
+        Some("rebuild") => npm_command_help(
+            "npm rebuild [<package-spec>...]",
+            &[
+                "Refresh OMC's locked install state without running package lifecycle scripts.",
+                "Alias: rb.",
+            ],
+        ),
+        Some("maintenance") => npm_command_help(
+            "npm <prune|dedupe>",
+            &[
+                "Refresh OMC's locked install state for common npm maintenance workflows.",
+                "Aliases: ddp, find-dupes.",
+            ],
+        ),
+        Some("pack") => npm_command_help(
+            "npm pack [<package-spec>|<local-dir>...]",
+            &[
+                "Create local package tarballs or download registry tarballs.",
+                "Common flags: --pack-destination, --json, --dry-run, --registry.",
+            ],
+        ),
+        Some("search") => npm_command_help(
+            "npm search <terms...>",
+            &["Search the configured npm registry. Aliases: s, se, find. Supports --json, --parseable, --searchlimit."],
+        ),
+        Some("view") => npm_command_help(
+            "npm view <package-spec> [field...]",
+            &["Read package metadata from the configured npm registry. Aliases: info, show, v. Supports --json."],
+        ),
+        Some("config") => npm_command_help(
+            "npm config <get|set|delete|list> ...",
+            &[
+                "Read and update npm registry config used by OMC.",
+                "Aliases: c, npm get. Supports --json, --registry, and --userconfig where relevant.",
+            ],
+        ),
+        Some("cache") => npm_command_help(
+            "npm cache <verify|ls|rm|clean>",
+            &["Inspect or clear OMC's npm cache. cache clean requires --force."],
+        ),
+        Some("pkg") => npm_command_help(
+            "npm pkg <get|set|delete> ...",
+            &["Read and update package.json fields."],
+        ),
+        Some("version") => npm_command_help(
+            "npm version [<newversion>|major|minor|patch|pre...]",
+            &["Read or bump package.json version. Supports --json, --preid, --allow-same-version, and --no-git-tag-version."],
+        ),
+        Some("init") => npm_command_help(
+            "npm init -y",
+            &["Create or update package.json with npm-compatible defaults."],
+        ),
+        Some("path") => npm_command_help(
+            "npm <bin|root|prefix>",
+            &["Print OMC project bin, node_modules, or project prefix paths."],
+        ),
+        Some(_) => npm_command_help(
+            "npm help [command]",
+            &["No focused OMC help is available for that topic yet."],
+        ),
+    }
+}
+
+fn npm_general_help_text() -> String {
+    npm_command_help(
+        "npm <command>",
+        &[
+            "OMC npm compatibility runs supported npm workflows through OMC's verifier, lockfile, cache, and project-local runtime paths.",
+            "Supported commands: install, ci, remove, run, test, start, stop, restart, exec, list, explain, audit, outdated, fund, prune, dedupe, rebuild, cache, pkg, version, pack, search, view, config, init, bin, root, prefix.",
+            "Use `npm help <command>` for focused OMC compatibility notes.",
+        ],
+    )
+}
+
+fn npm_command_help(usage: &str, lines: &[&str]) -> String {
+    let mut output = format!("OMC npm compatibility\n\nUsage: {usage}\n");
+    if !lines.is_empty() {
+        output.push('\n');
+        for line in lines {
+            output.push_str(line);
+            output.push('\n');
+        }
+    }
+    output
+}
+
+fn npm_help_topic(topic: &str) -> Option<&'static str> {
+    match topic {
+        "help" | "--help" | "-h" => None,
+        "install" | "i" | "add" | "update" | "up" | "upgrade" => Some("install"),
+        "ci" => Some("ci"),
+        "run" | "run-script" | "test" | "start" | "stop" | "restart" => Some("run"),
+        "exec" | "x" | "npx" => Some("exec"),
+        "remove" | "uninstall" | "rm" | "un" => Some("remove"),
+        "list" | "ls" | "ll" | "la" => Some("list"),
+        "explain" | "why" => Some("explain"),
+        "audit" => Some("audit"),
+        "outdated" => Some("outdated"),
+        "fund" => Some("fund"),
+        "prune" | "dedupe" | "ddp" | "find-dupes" => Some("maintenance"),
+        "rebuild" | "rb" => Some("rebuild"),
+        "pack" => Some("pack"),
+        "search" | "s" | "se" | "find" => Some("search"),
+        "view" | "info" | "show" | "v" => Some("view"),
+        "config" | "c" | "get" => Some("config"),
+        "cache" => Some("cache"),
+        "pkg" => Some("pkg"),
+        "version" => Some("version"),
+        "init" => Some("init"),
+        "bin" | "root" | "prefix" => Some("path"),
+        _ => Some("unknown"),
+    }
+}
+
+fn print_pip_help(topic: Option<&str>) {
+    print!("{}", pip_help_text(topic));
+}
+
+fn pip_help_text(topic: Option<&str>) -> String {
+    match topic.and_then(pip_help_topic) {
+        None => pip_general_help_text(),
+        Some("install") => pip_command_help(
+            "pip install [<requirement>...]",
+            &[
+                "Resolve, verify, lock, and install PyPI packages with OMC.",
+                "Supports requirements/constraints, indexes, find-links, no-index, hashes, no-deps, binary policy, target dirs, local archives, local directories, editable paths, and editable VCS requirements.",
+            ],
+        ),
+        Some("download") => pip_command_help(
+            "pip download [<requirement>...]",
+            &["Download locked PyPI archives into a destination directory. Shares install-style requirement and index flags."],
+        ),
+        Some("wheel") => pip_command_help(
+            "pip wheel [<requirement>...]",
+            &["Download wheel artifacts into a wheelhouse. Shares install-style requirement and index flags."],
+        ),
+        Some("uninstall") => pip_command_help(
+            "pip uninstall <package>...",
+            &["Remove OMC-managed PyPI dependencies and reinstall the remaining graph. Supports -r/--requirement."],
+        ),
+        Some("freeze") => pip_command_help(
+            "pip freeze",
+            &["Print locked PyPI requirements, including local editable and VCS entries where present."],
+        ),
+        Some("list") => pip_command_help(
+            "pip list",
+            &["List locked PyPI packages. Supports --format=columns|freeze|json and --outdated."],
+        ),
+        Some("show") => pip_command_help(
+            "pip show <package>...",
+            &["Show locked package metadata. Supports -f/--files."],
+        ),
+        Some("check") => pip_command_help(
+            "pip check",
+            &["Validate locked PyPI dependency requirements."],
+        ),
+        Some("inspect") => pip_command_help(
+            "pip inspect",
+            &["Print a JSON report for locked PyPI packages in pip inspect shape."],
+        ),
+        Some("debug") => pip_command_help(
+            "pip debug",
+            &["Print OMC compatibility diagnostics, including project paths, cache, index config, lockfile status, and optional target platform/Python/ABI args."],
+        ),
+        Some("hash") => pip_command_help(
+            "pip hash <file>...",
+            &["Hash local files with sha256, sha384, or sha512."],
+        ),
+        Some("cache") => pip_command_help(
+            "pip cache <dir|info|list|remove|purge>",
+            &["Inspect or clear OMC's PyPI cache."],
+        ),
+        Some("index") => pip_command_help(
+            "pip index versions <package>",
+            &["List available package versions from the configured index. Supports --json and index flags."],
+        ),
+        Some("config") => pip_command_help(
+            "pip config <get|set|unset|list> ...",
+            &["Read and update pip config used by OMC. Supports --site, --user, and --json where relevant."],
+        ),
+        Some(_) => pip_command_help(
+            "pip help [command]",
+            &["No focused OMC help is available for that topic yet."],
+        ),
+    }
+}
+
+fn pip_general_help_text() -> String {
+    pip_command_help(
+        "pip <command>",
+        &[
+            "OMC pip compatibility runs supported pip workflows through OMC's resolver, verifier, lockfile, cache, and isolated Python site-packages.",
+            "Supported commands: install, download, wheel, uninstall, freeze, list, show, check, inspect, debug, hash, cache, index versions, config.",
+            "Use `pip help <command>` for focused OMC compatibility notes.",
+        ],
+    )
+}
+
+fn pip_command_help(usage: &str, lines: &[&str]) -> String {
+    let mut output = format!("OMC pip compatibility\n\nUsage: {usage}\n");
+    if !lines.is_empty() {
+        output.push('\n');
+        for line in lines {
+            output.push_str(line);
+            output.push('\n');
+        }
+    }
+    output
+}
+
+fn pip_help_topic(topic: &str) -> Option<&'static str> {
+    match topic {
+        "help" | "--help" | "-h" => None,
+        "install" => Some("install"),
+        "download" => Some("download"),
+        "wheel" => Some("wheel"),
+        "uninstall" | "remove" => Some("uninstall"),
+        "freeze" => Some("freeze"),
+        "list" => Some("list"),
+        "show" => Some("show"),
+        "check" => Some("check"),
+        "inspect" => Some("inspect"),
+        "debug" => Some("debug"),
+        "hash" => Some("hash"),
+        "cache" => Some("cache"),
+        "index" => Some("index"),
+        "config" => Some("config"),
+        _ => Some("unknown"),
+    }
 }
 
 fn print_audit_report(project_dir: &Path, json: bool) -> Result<ExitCode, OmcRegistryError> {
@@ -5351,6 +5665,9 @@ fn behavior_label(behavior: Behavior) -> &'static str {
 fn parse_npm_compat_action(args: &[String]) -> Result<NpmCompatAction, OmcRegistryError> {
     let normalized = normalize_npm_global_args(args)?;
     let args = normalized.as_slice();
+    if let Some(action) = parse_npm_help_request(args) {
+        return Ok(action);
+    }
     let Some(command) = args.first().map(String::as_str) else {
         return Ok(NpmCompatAction::Install {
             specs: Vec::new(),
@@ -5505,6 +5822,35 @@ fn parse_npm_compat_action(args: &[String]) -> Result<NpmCompatAction, OmcRegist
             "unsupported npm compatibility command `{other}`"
         ))),
     }
+}
+
+fn parse_npm_help_request(args: &[String]) -> Option<NpmCompatAction> {
+    let command = args.first()?;
+    if npm_help_flag(command) {
+        return Some(NpmCompatAction::Help { topic: None });
+    }
+    if command == "help" {
+        let topic = args
+            .iter()
+            .skip(1)
+            .find(|arg| !arg.starts_with('-'))
+            .cloned();
+        return Some(NpmCompatAction::Help { topic });
+    }
+    if args
+        .iter()
+        .take_while(|arg| arg.as_str() != "--")
+        .any(|arg| npm_help_flag(arg))
+    {
+        return Some(NpmCompatAction::Help {
+            topic: Some(command.clone()),
+        });
+    }
+    None
+}
+
+fn npm_help_flag(arg: &str) -> bool {
+    matches!(arg, "--help" | "-h")
 }
 
 fn normalize_npm_global_args(args: &[String]) -> Result<Vec<String>, OmcRegistryError> {
@@ -7121,6 +7467,9 @@ fn npm_exec_equals_value_flag(arg: &str) -> bool {
 fn parse_pip_compat_action(args: &[String]) -> Result<PipCompatAction, OmcRegistryError> {
     let normalized = normalize_pip_global_args(args)?;
     let args = normalized.as_slice();
+    if let Some(action) = parse_pip_help_request(args) {
+        return Ok(action);
+    }
     let Some(command) = args.first().map(String::as_str) else {
         return Err(OmcRegistryError::UnsupportedSpec(
             "pip compatibility needs a command such as install, uninstall, freeze, or list"
@@ -7157,6 +7506,35 @@ fn parse_pip_compat_action(args: &[String]) -> Result<PipCompatAction, OmcRegist
             "unsupported pip compatibility command `{other}`"
         ))),
     }
+}
+
+fn parse_pip_help_request(args: &[String]) -> Option<PipCompatAction> {
+    let command = args.first()?;
+    if pip_help_flag(command) {
+        return Some(PipCompatAction::Help { topic: None });
+    }
+    if command == "help" {
+        let topic = args
+            .iter()
+            .skip(1)
+            .find(|arg| !arg.starts_with('-'))
+            .cloned();
+        return Some(PipCompatAction::Help { topic });
+    }
+    if args
+        .iter()
+        .take_while(|arg| arg.as_str() != "--")
+        .any(|arg| pip_help_flag(arg))
+    {
+        return Some(PipCompatAction::Help {
+            topic: Some(command.clone()),
+        });
+    }
+    None
+}
+
+fn pip_help_flag(arg: &str) -> bool {
+    matches!(arg, "--help" | "-h")
 }
 
 fn normalize_pip_global_args(args: &[String]) -> Result<Vec<String>, OmcRegistryError> {
@@ -9159,6 +9537,24 @@ mod tests {
             NpmCompatAction::Version
         );
         assert_eq!(
+            parse_npm_compat_action(&args(&["--help"])).unwrap(),
+            NpmCompatAction::Help { topic: None }
+        );
+        assert_eq!(
+            parse_npm_compat_action(&args(&["help", "install"])).unwrap(),
+            NpmCompatAction::Help {
+                topic: Some("install".to_owned()),
+            }
+        );
+        assert_eq!(
+            parse_npm_compat_action(&args(&["install", "--help"])).unwrap(),
+            NpmCompatAction::Help {
+                topic: Some("install".to_owned()),
+            }
+        );
+        assert!(npm_help_text(None).contains("Supported commands: install"));
+        assert!(npm_help_text(Some("fund")).contains("npm fund [<package-spec>]"));
+        assert_eq!(
             parse_npm_compat_action(&args(&[
                 "--silent",
                 "--registry",
@@ -10790,6 +11186,24 @@ mod tests {
             parse_pip_compat_action(&args(&["--quiet", "--version"])).unwrap(),
             PipCompatAction::Version
         );
+        assert_eq!(
+            parse_pip_compat_action(&args(&["--help"])).unwrap(),
+            PipCompatAction::Help { topic: None }
+        );
+        assert_eq!(
+            parse_pip_compat_action(&args(&["help", "install"])).unwrap(),
+            PipCompatAction::Help {
+                topic: Some("install".to_owned()),
+            }
+        );
+        assert_eq!(
+            parse_pip_compat_action(&args(&["install", "--help"])).unwrap(),
+            PipCompatAction::Help {
+                topic: Some("install".to_owned()),
+            }
+        );
+        assert!(pip_help_text(None).contains("Supported commands: install"));
+        assert!(pip_help_text(Some("debug")).contains("pip debug"));
         assert_eq!(
             parse_pip_compat_action(&args(&["uninstall", "-y", "requests"])).unwrap(),
             PipCompatAction::Uninstall {
