@@ -319,7 +319,8 @@ Supported now:
 - nested `node_modules` installation for conflicting npm dependency versions
 - npm alias dependencies such as `name: npm:other-name@range`
 - `.omc/python/site-packages` installation for PyPI wheels and pure Python
-  `.tar.gz` source distributions without executing build scripts
+  `.tar.gz`, `.tgz`, and `.zip` source distributions without executing build
+  scripts
 - platform-compatible PyPI wheel selection for native wheels
 - native/source build execution remains denied until build isolation and
   native-extension policy exist
