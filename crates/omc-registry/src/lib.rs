@@ -478,6 +478,7 @@ pub struct OmcArtifact {
     pub source_url: String,
     pub source_sha256: String,
     pub compiler: String,
+    pub microcode: Module,
     pub behavior: Behavior,
     pub verdict: Verdict,
     pub grants: Vec<String>,
@@ -1768,6 +1769,7 @@ fn link_package_inner(
         source_url: resolved.source_url.clone(),
         source_sha256: sha256.clone(),
         compiler: "omc-prototype-source-profiler".to_owned(),
+        microcode: module,
         behavior,
         verdict,
         grants: options
@@ -14577,6 +14579,64 @@ wheels = [
             .findings
             .iter()
             .any(|finding| finding.message.contains("env.read:NPM_TOKEN not granted")));
+    }
+
+    #[test]
+    fn artifact_serializes_generated_microcode() {
+        let package = ResolvedPackage {
+            ecosystem: Ecosystem::Npm,
+            name: "date-helper".to_owned(),
+            version: "1.2.4".to_owned(),
+            source_url: "https://example.invalid/date-helper.tgz".to_owned(),
+            download_url: None,
+            local_path: None,
+            filename: "date-helper.tgz".to_owned(),
+            expected_sha256: None,
+            expected_sha1: None,
+            expected_integrity: None,
+            npm_direct_tarball: false,
+            pypi_direct_wheel: false,
+            npm_scripts: BTreeMap::new(),
+            platform_compatible: true,
+            dependencies: Vec::new(),
+        };
+        let findings = vec![CapabilityFinding {
+            kind: CapabilityKind::EnvRead,
+            target: "NPM_TOKEN".to_owned(),
+            source: "index.js".to_owned(),
+            evidence: "process.env".to_owned(),
+        }];
+        let artifact = OmcArtifact {
+            schema: ARTIFACT_SCHEMA,
+            package: ArtifactPackage {
+                ecosystem: package.ecosystem,
+                name: package.name.clone(),
+                version: package.version.clone(),
+            },
+            source_url: package.source_url.clone(),
+            source_sha256: "0".repeat(64),
+            compiler: "test".to_owned(),
+            microcode: module_from_profile(&package, &findings),
+            behavior: Behavior::HostCapability,
+            verdict: Verdict::Blocked,
+            grants: Vec::new(),
+            dependencies: Vec::new(),
+            optional_dependencies: Vec::new(),
+            files_scanned: 1,
+            capabilities: findings,
+            verifier_findings: vec!["denied".to_owned()],
+        };
+
+        let json = serde_json::to_string(&artifact).unwrap();
+
+        assert!(json.contains("\"microcode\""));
+        assert!(json.contains("\"op\":\"cap\""));
+        let decoded: OmcArtifact = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded.microcode.package, "date-helper");
+        assert!(matches!(
+            decoded.microcode.functions[0].code[0],
+            Op::Cap(CapOp::EnvRead { .. })
+        ));
     }
 
     fn npm_tgz_for_test(package_json: &str) -> Vec<u8> {

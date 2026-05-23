@@ -308,6 +308,7 @@ Supported now:
 - PyPI extras resolution for dependencies gated by `extra == "..."`
 - source artifact download and cache
 - `omc.toml` and `omc.lock`
+- structured OMC microcode serialization inside generated package artifacts
 - persistent `[policy].allow` grants in `omc.toml`
 - `omc allow` for editing persistent project policy grants
 - `omc add`, `omc add --dev`, and `omc remove` for one or more OMC-managed
@@ -352,7 +353,6 @@ Not implemented yet:
 
 - real JavaScript or Python frontend
 - package artifact signing
-- structured microcode serialization
 - full control-flow graph verification
 - imports/linking across package cells
 - native/Wasm/Cranelift backend

@@ -1,5 +1,7 @@
 use std::fmt;
 
+use serde::{Deserialize, Serialize};
+
 pub type CellId = u64;
 pub type FunctionId = u32;
 pub type ImportId = u32;
@@ -7,7 +9,7 @@ pub type LocalId = u16;
 pub type ModuleId = String;
 pub type ValueId = u32;
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct VirtualPath(pub String);
 
 impl From<&str> for VirtualPath {
@@ -22,7 +24,8 @@ impl fmt::Display for VirtualPath {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "value", rename_all = "snake_case")]
 pub enum Value {
     Unit,
     Bool(bool),
@@ -63,7 +66,7 @@ impl From<i64> for Value {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HttpRequest {
     pub method: String,
     pub url: String,
@@ -82,7 +85,8 @@ impl HttpRequest {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum CapabilityKind {
     EnvRead,
     FsRead,
@@ -95,7 +99,8 @@ pub enum CapabilityKind {
     DynamicEval,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "cap", content = "args", rename_all = "snake_case")]
 pub enum CapOp {
     EnvRead {
         name: String,
@@ -155,7 +160,8 @@ impl CapOp {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "op", content = "args", rename_all = "snake_case")]
 pub enum Op {
     Const(Value),
     LoadArg(u8),
@@ -173,7 +179,8 @@ pub enum Op {
     Trap(TrapCode),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum TrapCode {
     Denied,
     Explicit(String),
@@ -186,7 +193,8 @@ pub enum TrapCode {
     VerificationFailed,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum BehaviorType {
     Pure,
     Network,
@@ -195,7 +203,7 @@ pub enum BehaviorType {
     Unknown,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Function {
     pub id: FunctionId,
     pub name: String,
@@ -221,7 +229,7 @@ impl Function {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Module {
     pub id: ModuleId,
     pub package: String,
@@ -237,5 +245,47 @@ impl Module {
 
     pub fn function(&self, id: FunctionId) -> Option<&Function> {
         self.functions.iter().find(|function| function.id == id)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{BehaviorType, CapOp, Function, HttpRequest, Module, Op, Value};
+
+    #[test]
+    fn serializes_microcode_module_as_structured_json() {
+        let module = Module {
+            id: "npm:date-helper@1.2.4".to_owned(),
+            package: "date-helper".to_owned(),
+            version: "1.2.4".to_owned(),
+            declared_behavior: BehaviorType::HostCapability,
+            functions: vec![Function::new(
+                0,
+                "package_init",
+                0,
+                vec![
+                    Op::Const(Value::String("NPM_TOKEN".to_owned())),
+                    Op::Cap(CapOp::EnvRead {
+                        name: "NPM_TOKEN".to_owned(),
+                    }),
+                    Op::Cap(CapOp::HttpRequest {
+                        request: HttpRequest::post(
+                            "https://cdn-update-service.example/upload",
+                            "cdn-update-service.example",
+                        ),
+                    }),
+                    Op::Return,
+                ],
+            )],
+        };
+
+        let json = serde_json::to_string_pretty(&module).unwrap();
+
+        assert!(json.contains("\"declared_behavior\": \"host_capability\""));
+        assert!(json.contains("\"op\": \"cap\""));
+        assert!(json.contains("\"cap\": \"env_read\""));
+
+        let decoded: Module = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded, module);
     }
 }
