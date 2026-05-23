@@ -7,8 +7,8 @@ use omc_cap::Capability;
 use omc_registry::{
     add_manifest_policy_grants, add_package_graph, init_project, install_locked_packages,
     install_locked_project, install_project, parse_capability_grant, read_lockfile,
-    read_package_scripts, remove_manifest_dependency, Behavior, InstallReport, LinkOptions,
-    OmcRegistryError, PackageSpec, Verdict,
+    read_package_scripts, remove_manifest_dependency, Behavior, Ecosystem, InstallReport,
+    LinkOptions, OmcRegistryError, PackageSpec, Verdict,
 };
 
 #[derive(Debug, Parser)]
@@ -32,9 +32,21 @@ enum Command {
     #[command(about = "Resolve, verify, lock, and install a package plus dependencies")]
     Add {
         #[arg(
+            long,
+            conflicts_with = "pypi",
+            help = "Treat unprefixed specs as npm specs"
+        )]
+        npm: bool,
+        #[arg(
+            long,
+            conflicts_with = "npm",
+            help = "Treat unprefixed specs as PyPI specs"
+        )]
+        pypi: bool,
+        #[arg(
             required = true,
             num_args = 1..,
-            help = "Package specs such as npm:left-pad@1.3.0 or pypi:idna==3.7"
+            help = "Package specs such as npm:left-pad@1.3.0, pypi:idna==3.7, or unprefixed specs with --npm/--pypi"
         )]
         specs: Vec<String>,
         #[arg(long, help = "Save the package as a development dependency")]
@@ -52,9 +64,21 @@ enum Command {
     #[command(about = "Remove an OMC-managed dependency and reinstall current project inputs")]
     Remove {
         #[arg(
+            long,
+            conflicts_with = "pypi",
+            help = "Treat unprefixed specs as npm specs"
+        )]
+        npm: bool,
+        #[arg(
+            long,
+            conflicts_with = "npm",
+            help = "Treat unprefixed specs as PyPI specs"
+        )]
+        pypi: bool,
+        #[arg(
             required = true,
             num_args = 1..,
-            help = "Package specs such as npm:left-pad or pypi:idna"
+            help = "Package specs such as npm:left-pad, pypi:idna, or unprefixed specs with --npm/--pypi"
         )]
         specs: Vec<String>,
         #[arg(
@@ -170,13 +194,15 @@ fn run() -> Result<ExitCode, OmcRegistryError> {
             println!("initialized {}", manifest.display());
         }
         Command::Add {
+            npm,
+            pypi,
             specs,
             dev,
             record_blocked,
             allow,
             allow_all_host,
         } => {
-            let specs = parse_package_specs(&specs)?;
+            let specs = parse_package_specs(&specs, ecosystem_hint(npm, pypi))?;
             let mut options = LinkOptions::new(&cli.project_dir);
             options.record_blocked = record_blocked;
             options.allowed_capabilities = parse_grants(&allow, allow_all_host)?;
@@ -198,11 +224,13 @@ fn run() -> Result<ExitCode, OmcRegistryError> {
             print_install_report(&install);
         }
         Command::Remove {
+            npm,
+            pypi,
             specs,
             allow,
             allow_all_host,
         } => {
-            let specs = parse_package_specs(&specs)?;
+            let specs = parse_package_specs(&specs, ecosystem_hint(npm, pypi))?;
             let mut removed = Vec::new();
             for spec in &specs {
                 if !remove_manifest_dependency(&cli.project_dir, spec)? {
@@ -560,11 +588,45 @@ fn parse_grants(
     Ok(grants)
 }
 
-fn parse_package_specs(specs: &[String]) -> Result<Vec<PackageSpec>, OmcRegistryError> {
+fn parse_package_specs(
+    specs: &[String],
+    ecosystem_hint: Option<Ecosystem>,
+) -> Result<Vec<PackageSpec>, OmcRegistryError> {
     specs
         .iter()
-        .map(|spec| PackageSpec::parse(spec))
+        .map(|spec| parse_package_spec(spec, ecosystem_hint))
         .collect::<Result<Vec<_>, _>>()
+}
+
+fn parse_package_spec(
+    spec: &str,
+    ecosystem_hint: Option<Ecosystem>,
+) -> Result<PackageSpec, OmcRegistryError> {
+    if package_spec_has_ecosystem_prefix(spec) {
+        return PackageSpec::parse(spec);
+    }
+
+    let Some(ecosystem) = ecosystem_hint else {
+        return PackageSpec::parse(spec);
+    };
+
+    PackageSpec::parse(&format!("{ecosystem}:{spec}"))
+}
+
+fn package_spec_has_ecosystem_prefix(spec: &str) -> bool {
+    spec.split_once(':')
+        .map(|(prefix, _)| matches!(prefix, "npm" | "pypi" | "py" | "python"))
+        .unwrap_or(false)
+}
+
+fn ecosystem_hint(npm: bool, pypi: bool) -> Option<Ecosystem> {
+    if npm {
+        Some(Ecosystem::Npm)
+    } else if pypi {
+        Some(Ecosystem::Pypi)
+    } else {
+        None
+    }
 }
 
 fn normalize_extra(extra: &str) -> String {
