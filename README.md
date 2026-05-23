@@ -138,6 +138,7 @@ cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip install --no-d
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip install --target vendor ./dist/local_pkg-1.0.0.tar.gz
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip install ./dist/local_pkg-1.0.0-py3-none-any.whl
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip download -r requirements.txt -d wheelhouse
+cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip wheel -r requirements.txt -w wheelhouse
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo python -m pip install -e ../local-package
 cargo run -p omc-cli --bin pip3 -- --omc-project-dir /tmp/omc-demo freeze
 cargo run -p omc-cli --bin python3 -- --omc-project-dir /tmp/omc-demo -m pip freeze
@@ -435,7 +436,7 @@ Supported now:
   understood
 - `omc pip` compatibility commands for common `install`, `uninstall`, `freeze`,
   `download`, `check`, `show`, `hash`, `cache dir/list/remove/purge`,
-  `index versions`, `config get/set/unset/list`, and
+  `wheel`, `index versions`, `config get/set/unset/list`, and
   `list --format=columns|freeze|json` flows, including `pip list --outdated`,
   `-r`, index URL,
   constraints, extra-index, find-links, no-index,

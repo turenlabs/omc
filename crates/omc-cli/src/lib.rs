@@ -355,6 +355,7 @@ enum PipCompatAction {
     Version,
     Install(Box<PipInstallAction>),
     Download(Box<PipDownloadAction>),
+    Wheel(Box<PipDownloadAction>),
     Uninstall {
         specs: Vec<String>,
         requirements: Vec<PathBuf>,
@@ -1242,6 +1243,9 @@ fn run_pip_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
         PipCompatAction::Download(action) => {
             download_pip_packages(project_dir, *action)?;
         }
+        PipCompatAction::Wheel(action) => {
+            download_pip_packages(project_dir, *action)?;
+        }
         PipCompatAction::Uninstall {
             mut specs,
             requirements,
@@ -1908,7 +1912,8 @@ fn download_pip_packages(
     }
     if resolved_specs.is_empty() {
         return Err(OmcRegistryError::UnsupportedSpec(
-            "pip download needs at least one package, archive, or requirement file".to_owned(),
+            "pip download/wheel needs at least one package, archive, or requirement file"
+                .to_owned(),
         ));
     }
 
@@ -4728,6 +4733,7 @@ fn parse_pip_compat_action(args: &[String]) -> Result<PipCompatAction, OmcRegist
         "--version" | "-V" => Ok(PipCompatAction::Version),
         "install" => parse_pip_install_args(&args[1..]),
         "download" => parse_pip_download_args(&args[1..]),
+        "wheel" => parse_pip_wheel_args(&args[1..]),
         "uninstall" | "remove" => parse_pip_uninstall_args(&args[1..]),
         "show" => parse_pip_show_args(&args[1..]),
         "hash" => parse_pip_hash_args(&args[1..]),
@@ -5483,13 +5489,30 @@ fn parse_pip_install_args(args: &[String]) -> Result<PipCompatAction, OmcRegistr
 }
 
 fn parse_pip_download_args(args: &[String]) -> Result<PipCompatAction, OmcRegistryError> {
+    parse_pip_artifact_args(args, PipArtifactCommand::Download)
+}
+
+fn parse_pip_wheel_args(args: &[String]) -> Result<PipCompatAction, OmcRegistryError> {
+    parse_pip_artifact_args(args, PipArtifactCommand::Wheel)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PipArtifactCommand {
+    Download,
+    Wheel,
+}
+
+fn parse_pip_artifact_args(
+    args: &[String],
+    command: PipArtifactCommand,
+) -> Result<PipCompatAction, OmcRegistryError> {
     let mut requirements = Vec::new();
     let mut constraints = Vec::new();
     let mut index_url = None;
     let mut extra_index_urls = Vec::new();
     let mut find_links = Vec::new();
     let mut no_index = false;
-    let mut binary_all = None;
+    let mut binary_all = (command == PipArtifactCommand::Wheel).then_some(PypiBinaryMode::Binary);
     let mut binary_packages = BTreeMap::new();
     let mut require_hashes = false;
     let mut no_deps = false;
@@ -5519,7 +5542,9 @@ fn parse_pip_download_args(args: &[String]) -> Result<PipCompatAction, OmcRegist
             constraints.push(PathBuf::from(path));
         } else if let Some(path) = arg.strip_prefix("--constraint=") {
             constraints.push(PathBuf::from(path));
-        } else if arg == "-d" || arg == "--dest" || arg == "--destination-dir" {
+        } else if command == PipArtifactCommand::Download
+            && (arg == "-d" || arg == "--dest" || arg == "--destination-dir")
+        {
             index += 1;
             let Some(path) = args.get(index) else {
                 return Err(OmcRegistryError::UnsupportedSpec(format!(
@@ -5527,10 +5552,29 @@ fn parse_pip_download_args(args: &[String]) -> Result<PipCompatAction, OmcRegist
                 )));
             };
             destination = PathBuf::from(path);
-        } else if let Some(path) = arg
-            .strip_prefix("--dest=")
-            .or_else(|| arg.strip_prefix("--destination-dir="))
+        } else if command == PipArtifactCommand::Download
+            && arg
+                .strip_prefix("--dest=")
+                .or_else(|| arg.strip_prefix("--destination-dir="))
+                .is_some()
         {
+            let path = arg
+                .strip_prefix("--dest=")
+                .or_else(|| arg.strip_prefix("--destination-dir="))
+                .expect("checked path option");
+            destination = PathBuf::from(path);
+        } else if command == PipArtifactCommand::Wheel && (arg == "-w" || arg == "--wheel-dir") {
+            index += 1;
+            let Some(path) = args.get(index) else {
+                return Err(OmcRegistryError::UnsupportedSpec(format!(
+                    "{arg} needs a path"
+                )));
+            };
+            destination = PathBuf::from(path);
+        } else if command == PipArtifactCommand::Wheel && arg.starts_with("--wheel-dir=") {
+            let path = arg
+                .strip_prefix("--wheel-dir=")
+                .expect("checked wheel-dir option");
             destination = PathBuf::from(path);
         } else if arg == "-i" || arg == "--index-url" {
             index += 1;
@@ -5569,6 +5613,10 @@ fn parse_pip_download_args(args: &[String]) -> Result<PipCompatAction, OmcRegist
         } else if arg == "--no-deps" {
             no_deps = true;
         } else if arg == "--prefer-binary" {
+        } else if command == PipArtifactCommand::Wheel && arg == "--no-binary" {
+            return Err(OmcRegistryError::UnsupportedSpec(
+                "pip wheel source builds are not supported by OMC compatibility; prebuilt wheels are required".to_owned(),
+            ));
         } else if arg == "--only-binary" || arg == "--no-binary" {
             index += 1;
             let Some(value) = args.get(index) else {
@@ -5589,6 +5637,10 @@ fn parse_pip_download_args(args: &[String]) -> Result<PipCompatAction, OmcRegist
                 PypiBinaryMode::Binary,
                 value,
             );
+        } else if command == PipArtifactCommand::Wheel && arg.starts_with("--no-binary=") {
+            return Err(OmcRegistryError::UnsupportedSpec(
+                "pip wheel source builds are not supported by OMC compatibility; prebuilt wheels are required".to_owned(),
+            ));
         } else if let Some(value) = arg.strip_prefix("--no-binary=") {
             apply_pypi_binary_option(
                 &mut binary_all,
@@ -5626,10 +5678,19 @@ fn parse_pip_download_args(args: &[String]) -> Result<PipCompatAction, OmcRegist
             }
         } else if pip_ignored_download_equals_flag(arg) {
         } else if is_pip_archive_arg(arg) {
+            if command == PipArtifactCommand::Wheel && !is_pip_wheel_archive_arg(arg) {
+                return Err(OmcRegistryError::UnsupportedSpec(format!(
+                    "pip wheel cannot build archive `{arg}` under OMC compatibility; pass a wheel archive"
+                )));
+            }
             archive_references.push(arg.clone());
         } else if is_pip_local_directory_arg(arg) {
+            let (command, expected) = match command {
+                PipArtifactCommand::Download => ("download", "a wheel or sdist archive"),
+                PipArtifactCommand::Wheel => ("wheel", "a wheel archive"),
+            };
             return Err(OmcRegistryError::UnsupportedSpec(format!(
-                "pip download cannot build local directory `{arg}`; pass a wheel or sdist archive"
+                "pip {command} cannot build local directory `{arg}`; pass {expected}"
             )));
         } else {
             filtered.push(arg.clone());
@@ -5644,7 +5705,13 @@ fn parse_pip_download_args(args: &[String]) -> Result<PipCompatAction, OmcRegist
         ..
     } = parse_common_compat_flags(&filtered, false)?;
 
-    Ok(PipCompatAction::Download(Box::new(PipDownloadAction {
+    if command == PipArtifactCommand::Wheel && binary_all != Some(PypiBinaryMode::Binary) {
+        return Err(OmcRegistryError::UnsupportedSpec(
+            "pip wheel source builds are not supported by OMC compatibility; prebuilt wheels are required".to_owned(),
+        ));
+    }
+
+    let action = PipDownloadAction {
         specs: positionals.into_iter().filter(|spec| spec != ".").collect(),
         requirements,
         constraints,
@@ -5660,7 +5727,11 @@ fn parse_pip_download_args(args: &[String]) -> Result<PipCompatAction, OmcRegist
         destination,
         allow,
         allow_all_host,
-    })))
+    };
+    Ok(match command {
+        PipArtifactCommand::Download => PipCompatAction::Download(Box::new(action)),
+        PipArtifactCommand::Wheel => PipCompatAction::Wheel(Box::new(action)),
+    })
 }
 
 fn pip_ignored_install_value_flag(arg: &str) -> bool {
@@ -5836,6 +5907,15 @@ fn is_pip_archive_arg(value: &str) -> bool {
         || filename.ends_with(".zip")
         || filename.ends_with(".tgz")
         || filename.ends_with(".tar.gz")
+}
+
+fn is_pip_wheel_archive_arg(value: &str) -> bool {
+    let value = value.split_once('#').map(|(path, _)| path).unwrap_or(value);
+    let filename = value
+        .rsplit_once('/')
+        .map(|(_, filename)| filename)
+        .unwrap_or(value);
+    filename.ends_with(".whl")
 }
 
 #[derive(Debug)]
@@ -7233,6 +7313,49 @@ mod tests {
                 allow: vec!["http:files.example".to_owned()],
                 allow_all_host: false,
             }))
+        );
+
+        let action = parse_pip_compat_action(&args(&[
+            "wheel",
+            "-r",
+            "requirements.txt",
+            "-w",
+            "wheelhouse",
+            "--index-url=https://mirror.example/simple",
+            "--find-links=vendor",
+            "--no-index",
+            "--require-hashes",
+            "--no-deps",
+            "--trusted-host",
+            "mirror.example",
+            "--allow",
+            "http:files.example",
+            "requests==2.32.3",
+        ]))
+        .unwrap();
+
+        assert_eq!(
+            action,
+            PipCompatAction::Wheel(Box::new(PipDownloadAction {
+                specs: vec!["requests==2.32.3".to_owned()],
+                requirements: vec![PathBuf::from("requirements.txt")],
+                constraints: Vec::new(),
+                archive_references: Vec::new(),
+                index_url: Some("https://mirror.example/simple".to_owned()),
+                extra_index_urls: Vec::new(),
+                find_links: vec!["vendor".to_owned()],
+                no_index: true,
+                binary_all: Some(PypiBinaryMode::Binary),
+                binary_packages: BTreeMap::new(),
+                require_hashes: true,
+                no_deps: true,
+                destination: PathBuf::from("wheelhouse"),
+                allow: vec!["http:files.example".to_owned()],
+                allow_all_host: false,
+            }))
+        );
+        assert!(
+            parse_pip_compat_action(&args(&["wheel", "--no-binary=:all:", "requests"])).is_err()
         );
     }
 
