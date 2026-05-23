@@ -119,6 +119,7 @@ For existing projects, `install` reads normal project files:
 
 ```text
 package.json       dependencies, devDependencies, optionalDependencies, peers; use --omit-dev for production installs
+.npmrc             npm registry, scoped registry, and host-scoped auth token configuration
 package-lock.json  exact versions, resolved tarball URLs, and integrity hashes for uniquely locked npm packages
 requirements.txt  PyPI requirements, direct wheel URLs, hashes, extras, -r includes, -c constraints, markers
 pyproject.toml    PEP 621 project dependencies, selected optional groups
@@ -132,6 +133,7 @@ What `add` does:
 resolve package version ranges from npm or PyPI
 walk runtime dependencies recursively
 download the registry artifact without executing it
+use project/user `.npmrc` registry, scoped registry, and auth token settings for npm
 verify npm shasum/integrity and PyPI sha256 when the registry provides them
 use package-lock.json npm resolved tarball URLs and integrity hashes when present
 cache the source artifact under .omc/cache
@@ -196,6 +198,8 @@ Supported now:
 - interpreter checks the same broker policy at runtime
 - npm and PyPI exact-version resolution
 - npm semver range resolution for common dependency ranges
+- project and user `.npmrc` support for `registry`, `@scope:registry`, and
+  host-scoped `_authToken` npm registry access
 - PyPI dependency range resolution with local `python3` `Requires-Python`
   filtering
 - recursive runtime dependency locking

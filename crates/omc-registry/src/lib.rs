@@ -917,7 +917,7 @@ fn link_package_inner(
         )));
     }
 
-    let archive_bytes = download_artifact(client, &resolved)?;
+    let archive_bytes = download_artifact(client, &resolved, &options.project_dir)?;
     let sha256 = sha256_hex(&archive_bytes);
 
     if let Some(expected) = &resolved.expected_sha256 {
@@ -2397,6 +2397,175 @@ pub fn parse_capability_grant(value: &str) -> Result<Capability> {
     }
 }
 
+#[derive(Debug, Clone)]
+struct NpmConfig {
+    registry: String,
+    scoped_registries: BTreeMap<String, String>,
+    auth_tokens: Vec<NpmAuthToken>,
+}
+
+#[derive(Debug, Clone)]
+struct NpmAuthToken {
+    scope: String,
+    token: String,
+}
+
+impl Default for NpmConfig {
+    fn default() -> Self {
+        Self {
+            registry: "https://registry.npmjs.org/".to_owned(),
+            scoped_registries: BTreeMap::new(),
+            auth_tokens: Vec::new(),
+        }
+    }
+}
+
+impl NpmConfig {
+    fn registry_for(&self, package: &str) -> &str {
+        let Some((scope, _)) = package.split_once('/') else {
+            return &self.registry;
+        };
+        self.scoped_registries
+            .get(scope)
+            .map(String::as_str)
+            .unwrap_or(&self.registry)
+    }
+
+    fn auth_token_for_url(&self, url: &str) -> Option<&str> {
+        let url = reqwest::Url::parse(url).ok()?;
+        let host = url.host_str()?;
+        let target = format!("{host}{}", url.path());
+        self.auth_tokens
+            .iter()
+            .filter(|token| target.starts_with(&token.scope))
+            .max_by_key(|token| token.scope.len())
+            .map(|token| token.token.as_str())
+    }
+}
+
+fn read_npm_config(project_dir: &Path) -> Result<NpmConfig> {
+    let mut config = NpmConfig::default();
+    if let Some(home) = env::var_os("HOME") {
+        read_npmrc_into(&PathBuf::from(home).join(".npmrc"), &mut config)?;
+    }
+    read_npmrc_into(&project_dir.join(".npmrc"), &mut config)?;
+    Ok(config)
+}
+
+fn read_npmrc_into(path: &Path, config: &mut NpmConfig) -> Result<()> {
+    if !path.exists() {
+        return Ok(());
+    }
+    parse_npmrc_content(&fs::read_to_string(path)?, config);
+    Ok(())
+}
+
+fn parse_npmrc_content(content: &str, config: &mut NpmConfig) {
+    for raw_line in content.lines() {
+        let line = strip_npmrc_comment(raw_line).trim();
+        if line.is_empty() {
+            continue;
+        }
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        let key = key.trim();
+        let Some(value) = expand_npmrc_value(value.trim()) else {
+            continue;
+        };
+
+        if key == "registry" {
+            if let Some(registry) = normalize_npm_registry(&value) {
+                config.registry = registry;
+            }
+        } else if key.starts_with('@') && key.ends_with(":registry") {
+            if let Some(registry) = normalize_npm_registry(&value) {
+                let scope = key.trim_end_matches(":registry").to_owned();
+                config.scoped_registries.insert(scope, registry);
+            }
+        } else if key.starts_with("//") && key.ends_with(":_authToken") {
+            let scope = key
+                .trim_start_matches("//")
+                .trim_end_matches(":_authToken")
+                .trim_start_matches('/')
+                .to_owned();
+            if !scope.is_empty() && !value.is_empty() {
+                config.auth_tokens.push(NpmAuthToken {
+                    scope: ensure_trailing_slash(&scope),
+                    token: value,
+                });
+            }
+        }
+    }
+}
+
+fn strip_npmrc_comment(line: &str) -> &str {
+    let trimmed = line.trim_start();
+    if trimmed.starts_with('#') || trimmed.starts_with(';') {
+        return "";
+    }
+    for (index, ch) in line.char_indices() {
+        let previous_was_whitespace = line[..index]
+            .chars()
+            .last()
+            .map(char::is_whitespace)
+            .unwrap_or(false);
+        if matches!(ch, '#' | ';') && previous_was_whitespace {
+            return &line[..index];
+        }
+    }
+    line
+}
+
+fn normalize_npm_registry(value: &str) -> Option<String> {
+    let value = value.trim();
+    if value.is_empty() {
+        None
+    } else {
+        Some(ensure_trailing_slash(value))
+    }
+}
+
+fn ensure_trailing_slash(value: &str) -> String {
+    if value.ends_with('/') {
+        value.to_owned()
+    } else {
+        format!("{value}/")
+    }
+}
+
+fn expand_npmrc_value(value: &str) -> Option<String> {
+    let mut expanded = String::new();
+    let mut rest = value.trim().trim_matches('"');
+    while let Some(start) = rest.find("${") {
+        expanded.push_str(&rest[..start]);
+        let after_start = &rest[start + 2..];
+        let end = after_start.find('}')?;
+        let key = &after_start[..end];
+        expanded.push_str(&env::var(key).ok()?);
+        rest = &after_start[end + 1..];
+    }
+    expanded.push_str(rest);
+    Some(expanded)
+}
+
+fn npm_registry_package_url(registry: &str, encoded: &str) -> String {
+    format!("{}{}", ensure_trailing_slash(registry), encoded)
+}
+
+fn npm_registry_package_version_url(registry: &str, encoded: &str, version: &str) -> String {
+    format!("{}{encoded}/{version}", ensure_trailing_slash(registry))
+}
+
+fn npm_get(client: &Client, url: &str, config: &NpmConfig) -> reqwest::blocking::RequestBuilder {
+    let request = client.get(url);
+    if let Some(token) = config.auth_token_for_url(url) {
+        request.bearer_auth(token)
+    } else {
+        request
+    }
+}
+
 fn resolve_package(
     client: &Client,
     spec: &PackageSpec,
@@ -2421,32 +2590,32 @@ fn resolve_npm(
         return Ok(resolved);
     }
 
+    let npm_config = read_npm_config(&options.project_dir)?;
+    let registry = npm_config.registry_for(&registry_name);
     let encoded = urlencoding::encode(&registry_name);
     let constrained_requirement =
         constrained_npm_requirement(spec, version_requirement.as_deref(), &options.constraints);
     let version = match constrained_requirement.as_deref() {
         Some(requirement) if is_exact_npm_version(requirement) => requirement.to_owned(),
         Some(requirement) => {
-            let url = format!("https://registry.npmjs.org/{encoded}");
-            let root = client
-                .get(url)
+            let url = npm_registry_package_url(registry, &encoded);
+            let root = npm_get(client, &url, &npm_config)
                 .send()?
                 .error_for_status()?
                 .json::<NpmRoot>()?;
             choose_npm_version(&registry_name, requirement, &root)?
         }
         None => {
-            let url = format!("https://registry.npmjs.org/{encoded}");
-            let root = client
-                .get(url)
+            let url = npm_registry_package_url(registry, &encoded);
+            let root = npm_get(client, &url, &npm_config)
                 .send()?
                 .error_for_status()?
                 .json::<NpmRoot>()?;
             root.dist_tags.latest
         }
     };
-    let url = format!("https://registry.npmjs.org/{encoded}/{version}");
-    let response = client.get(url).send()?;
+    let url = npm_registry_package_version_url(registry, &encoded, &version);
+    let response = npm_get(client, &url, &npm_config).send()?;
     if response.status().as_u16() == 404 {
         return Err(OmcRegistryError::PackageNotFound(spec.requested()));
     }
@@ -3749,13 +3918,22 @@ fn platform_system() -> &'static str {
     }
 }
 
-fn download_artifact(client: &Client, package: &ResolvedPackage) -> Result<Vec<u8>> {
-    Ok(client
-        .get(&package.source_url)
-        .send()?
-        .error_for_status()?
-        .bytes()?
-        .to_vec())
+fn download_artifact(
+    client: &Client,
+    package: &ResolvedPackage,
+    project_dir: &Path,
+) -> Result<Vec<u8>> {
+    let config = if package.ecosystem == Ecosystem::Npm {
+        Some(read_npm_config(project_dir)?)
+    } else {
+        None
+    };
+    let request = if let Some(config) = config.as_ref() {
+        npm_get(client, &package.source_url, config)
+    } else {
+        client.get(&package.source_url)
+    };
+    Ok(request.send()?.error_for_status()?.bytes()?.to_vec())
 }
 
 fn cache_archive(
@@ -5740,6 +5918,39 @@ mod tests {
         assert_eq!(
             parse_capability_grant("dynamic-eval").unwrap(),
             Capability::DynamicEval
+        );
+    }
+
+    #[test]
+    fn parses_npmrc_registry_and_auth_config() {
+        let mut config = NpmConfig::default();
+        parse_npmrc_content(
+            r#"
+            registry=https://registry.example.invalid/npm
+            @scope:registry=https://scope.example.invalid/
+            //scope.example.invalid/:_authToken=scope-token
+            //registry.example.invalid/npm/:_authToken=default-token
+            "#,
+            &mut config,
+        );
+
+        assert_eq!(config.registry, "https://registry.example.invalid/npm/");
+        assert_eq!(
+            config.registry_for("left-pad"),
+            "https://registry.example.invalid/npm/"
+        );
+        assert_eq!(
+            config.registry_for("@scope/pkg"),
+            "https://scope.example.invalid/"
+        );
+        assert_eq!(
+            config.auth_token_for_url("https://scope.example.invalid/@scope%2fpkg"),
+            Some("scope-token")
+        );
+        assert_eq!(
+            config
+                .auth_token_for_url("https://registry.example.invalid/npm/left-pad/-/left-pad.tgz"),
+            Some("default-token")
         );
     }
 
