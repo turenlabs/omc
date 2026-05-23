@@ -3705,6 +3705,13 @@ fn read_requirements_file_inner(
             if mode == RequirementsMode::Constraint {
                 return Err(OmcRegistryError::UnsupportedRequirement(line.to_owned()));
             }
+            if let Some(path) = pypi_direct_file_url_local_directory(spec.direct_url.as_deref())? {
+                if !parsed.hashes.is_empty() || !hashes.is_empty() {
+                    return Err(OmcRegistryError::UnsupportedRequirement(line.to_owned()));
+                }
+                discovered.python_local_paths.push(path);
+                continue;
+            }
             if !parsed.hashes.is_empty() || !hashes.is_empty() {
                 discovered
                     .hashes
@@ -3713,6 +3720,21 @@ fn read_requirements_file_inner(
                     .extend(parsed.hashes.into_iter().chain(hashes));
             }
             discovered.specs.push(spec);
+            continue;
+        }
+
+        if let Some(path) = parse_pypi_local_direct_path_requirement(
+            &parsed.requirement,
+            &BTreeSet::new(),
+            base_dir,
+        )? {
+            if mode == RequirementsMode::Constraint {
+                return Err(OmcRegistryError::UnsupportedRequirement(line.to_owned()));
+            }
+            if !parsed.hashes.is_empty() {
+                return Err(OmcRegistryError::UnsupportedRequirement(line.to_owned()));
+            }
+            discovered.python_local_paths.push(path);
             continue;
         }
 
@@ -3731,6 +3753,10 @@ fn read_requirements_file_inner(
             }
             discovered.specs.push(spec);
             continue;
+        }
+
+        if pypi_direct_reference_applies(&parsed.requirement, &BTreeSet::new()) {
+            return Err(OmcRegistryError::UnsupportedRequirement(line.to_owned()));
         }
 
         if parsed.requirement.contains("://") {
@@ -9335,6 +9361,32 @@ packages:
     }
 
     #[test]
+    fn reads_requirements_local_direct_paths() {
+        let dir = tempfile::tempdir().unwrap();
+        let requirements = dir.path().join("requirements.txt");
+        let local_pkg = dir.path().join("vendor/local-pkg");
+        let file_url_pkg = dir.path().join("vendor/file-url-pkg");
+        fs::create_dir_all(&local_pkg).unwrap();
+        fs::create_dir_all(&file_url_pkg).unwrap();
+        let file_url = reqwest::Url::from_directory_path(&file_url_pkg)
+            .unwrap()
+            .to_string();
+        fs::write(
+            &requirements,
+            format!(
+                "local-pkg @ ./vendor/local-pkg\nfile-url-pkg @ {file_url}\nskipped-local @ ./missing; sys_platform == 'win32'\n"
+            ),
+        )
+        .unwrap();
+
+        let discovered = read_requirements_file(&requirements).unwrap();
+        assert_eq!(discovered.python_local_paths, vec![local_pkg, file_url_pkg]);
+
+        let project = discover_project_requirements(dir.path()).unwrap();
+        assert_eq!(project.python_local_paths, discovered.python_local_paths);
+    }
+
+    #[test]
     fn rejects_editable_vcs_requirements() {
         let dir = tempfile::tempdir().unwrap();
         let requirements = dir.path().join("requirements.txt");
@@ -9716,6 +9768,12 @@ wheels = [
         fs::write(&requirements, "--no-deps\n").unwrap();
         let error = read_requirements_file(&requirements).unwrap_err();
         assert!(error.to_string().contains("unsupported requirements entry"));
+
+        fs::write(&requirements, "local-pkg @ ./missing\n").unwrap();
+        let error = read_requirements_file(&requirements).unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("unsupported requirements entry `local-pkg @ ./missing`"));
     }
 
     #[test]
