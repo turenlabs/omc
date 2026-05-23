@@ -10,10 +10,10 @@ use omc_registry::{
     apply_pypi_binary_option, check_pypi_lock, init_project, install_locked_packages,
     install_locked_project, install_project, lock_project, parse_capability_grant,
     parse_npm_direct_archive_reference, parse_pypi_direct_archive_reference, read_lockfile,
-    read_npm_config_snapshot, read_package_scripts, read_pip_config_snapshot,
-    read_requirements_files, remove_manifest_dependency, Behavior, Ecosystem, InstallReport,
-    LinkOptions, LockedPackage, OmcRegistryError, PackageSpec, PypiBinaryMode, PypiCheckIssue,
-    PythonLocalRequirement, Verdict,
+    read_npm_config_snapshot, read_npm_package_metadata, read_package_scripts,
+    read_pip_config_snapshot, read_requirements_files, remove_manifest_dependency, Behavior,
+    Ecosystem, InstallReport, LinkOptions, LockedPackage, OmcRegistryError, PackageSpec,
+    PypiBinaryMode, PypiCheckIssue, PythonLocalRequirement, Verdict,
 };
 
 #[derive(Debug, Parser)]
@@ -263,6 +263,12 @@ enum NpmCompatAction {
         action: NpmConfigAction,
         npm_registry: Option<String>,
         userconfig: Option<PathBuf>,
+    },
+    View {
+        spec: String,
+        fields: Vec<String>,
+        json: bool,
+        npm_registry: Option<String>,
     },
 }
 
@@ -955,6 +961,12 @@ fn run_npm_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
             npm_registry.as_deref(),
             userconfig.as_deref(),
         )?,
+        NpmCompatAction::View {
+            spec,
+            fields,
+            json,
+            npm_registry,
+        } => print_npm_view(project_dir, &spec, &fields, json, npm_registry.as_deref())?,
     }
 
     Ok(ExitCode::SUCCESS)
@@ -1248,6 +1260,96 @@ fn npm_config_value_for_key(values: &BTreeMap<String, String>, key: &str) -> Str
         .get(key)
         .cloned()
         .unwrap_or_else(|| "undefined".to_owned())
+}
+
+fn print_npm_view(
+    project_dir: &Path,
+    spec: &str,
+    fields: &[String],
+    json: bool,
+    npm_registry: Option<&str>,
+) -> Result<(), OmcRegistryError> {
+    let spec = parse_package_spec(spec, Some(Ecosystem::Npm))?;
+    let metadata = read_npm_package_metadata(project_dir, &spec, npm_registry)?;
+    if fields.is_empty() {
+        if json {
+            println!("{}", serde_json::to_string_pretty(&metadata.manifest)?);
+        } else {
+            println!("{}@{}", metadata.name, metadata.version);
+            if let Some(tarball) = npm_view_field_value(&metadata, "dist.tarball") {
+                println!("dist.tarball = {}", npm_view_text_value(&tarball));
+            }
+            if !metadata.dist_tags.is_empty() {
+                let tags = serde_json::to_value(&metadata.dist_tags)?;
+                println!("dist-tags = {}", npm_view_text_value(&tags));
+            }
+        }
+        return Ok(());
+    }
+
+    if json {
+        if fields.len() == 1 {
+            let value =
+                npm_view_field_value(&metadata, &fields[0]).unwrap_or(serde_json::Value::Null);
+            println!("{}", serde_json::to_string_pretty(&value)?);
+        } else {
+            let selected = fields
+                .iter()
+                .map(|field| {
+                    (
+                        field.clone(),
+                        npm_view_field_value(&metadata, field).unwrap_or(serde_json::Value::Null),
+                    )
+                })
+                .collect::<BTreeMap<_, _>>();
+            println!("{}", serde_json::to_string_pretty(&selected)?);
+        }
+    } else if fields.len() == 1 {
+        let value = npm_view_field_value(&metadata, &fields[0]).unwrap_or(serde_json::Value::Null);
+        println!("{}", npm_view_text_value(&value));
+    } else {
+        for field in fields {
+            let value = npm_view_field_value(&metadata, field).unwrap_or(serde_json::Value::Null);
+            println!("{field} = {}", npm_view_text_value(&value));
+        }
+    }
+
+    Ok(())
+}
+
+fn npm_view_field_value(
+    metadata: &omc_registry::NpmPackageMetadata,
+    field: &str,
+) -> Option<serde_json::Value> {
+    match field {
+        "name" => Some(serde_json::Value::String(metadata.name.clone())),
+        "version" => Some(serde_json::Value::String(metadata.version.clone())),
+        "versions" => serde_json::to_value(&metadata.versions).ok(),
+        "dist-tags" | "distTags" => serde_json::to_value(&metadata.dist_tags).ok(),
+        _ => metadata
+            .manifest
+            .pointer(&json_pointer_for_dotted_field(field))
+            .cloned(),
+    }
+}
+
+fn json_pointer_for_dotted_field(field: &str) -> String {
+    let mut pointer = String::new();
+    for part in field.split('.') {
+        pointer.push('/');
+        pointer.push_str(&part.replace('~', "~0").replace('/', "~1"));
+    }
+    pointer
+}
+
+fn npm_view_text_value(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::Null => "undefined".to_owned(),
+        serde_json::Value::String(value) => value.clone(),
+        serde_json::Value::Bool(value) => value.to_string(),
+        serde_json::Value::Number(value) => value.to_string(),
+        _ => serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string()),
+    }
 }
 
 fn print_pip_config(project_dir: &Path, action: PipConfigAction) -> Result<(), OmcRegistryError> {
@@ -2189,6 +2291,7 @@ fn parse_npm_compat_action(args: &[String]) -> Result<NpmCompatAction, OmcRegist
             json: parse_json_list_flag("npm list", &args[1..])?,
         }),
         "audit" => parse_npm_audit_args(&args[1..]),
+        "view" | "info" | "show" | "v" => parse_npm_view_args(&args[1..]),
         "config" | "c" => parse_npm_config_args(&args[1..]),
         "get" => parse_npm_config_get_args(&args[1..]),
         other => Err(OmcRegistryError::UnsupportedSpec(format!(
@@ -2305,6 +2408,55 @@ fn parse_npm_config_args(args: &[String]) -> Result<NpmCompatAction, OmcRegistry
             "unsupported npm config command `{other}`"
         ))),
     }
+}
+
+fn parse_npm_view_args(args: &[String]) -> Result<NpmCompatAction, OmcRegistryError> {
+    let mut json = false;
+    let mut filtered = Vec::new();
+    let mut index = 0;
+    while index < args.len() {
+        let arg = &args[index];
+        if arg == "--json" {
+            json = true;
+        } else if matches!(arg.as_str(), "--userconfig" | "--loglevel") {
+            index += 1;
+            if args.get(index).is_none() {
+                return Err(OmcRegistryError::UnsupportedSpec(format!(
+                    "{arg} needs a value"
+                )));
+            }
+        } else if matches!(arg.as_str(), "--silent" | "-s" | "--parseable" | "--long")
+            || npm_view_equals_value_flag(arg)
+        {
+        } else {
+            filtered.push(arg.clone());
+        }
+        index += 1;
+    }
+
+    let CommonCompatFlags {
+        npm_registry,
+        mut positionals,
+        ..
+    } = parse_common_compat_flags(&filtered, true)?;
+    if positionals.is_empty() {
+        return Err(OmcRegistryError::UnsupportedSpec(
+            "npm view needs a package".to_owned(),
+        ));
+    }
+    let spec = positionals.remove(0);
+    Ok(NpmCompatAction::View {
+        spec,
+        fields: positionals,
+        json,
+        npm_registry,
+    })
+}
+
+fn npm_view_equals_value_flag(arg: &str) -> bool {
+    ["--userconfig=", "--loglevel="]
+        .iter()
+        .any(|prefix| arg.starts_with(prefix))
 }
 
 fn parse_npm_config_get_args(args: &[String]) -> Result<NpmCompatAction, OmcRegistryError> {
@@ -3840,6 +3992,34 @@ mod tests {
             NpmCompatAction::Audit { json: true }
         );
         assert!(parse_npm_compat_action(&args(&["audit", "fix"])).is_err());
+        assert_eq!(
+            parse_npm_compat_action(&args(&[
+                "view",
+                "left-pad@1.3.0",
+                "version",
+                "dist.tarball",
+                "--json",
+                "--registry",
+                "https://registry.example.invalid/npm",
+                "--userconfig=ci.npmrc",
+            ]))
+            .unwrap(),
+            NpmCompatAction::View {
+                spec: "left-pad@1.3.0".to_owned(),
+                fields: vec!["version".to_owned(), "dist.tarball".to_owned()],
+                json: true,
+                npm_registry: Some("https://registry.example.invalid/npm".to_owned()),
+            }
+        );
+        assert_eq!(
+            parse_npm_compat_action(&args(&["info", "@scope/pkg", "versions"])).unwrap(),
+            NpmCompatAction::View {
+                spec: "@scope/pkg".to_owned(),
+                fields: vec!["versions".to_owned()],
+                json: false,
+                npm_registry: None,
+            }
+        );
         assert_eq!(
             parse_npm_compat_action(&args(&[
                 "config",

@@ -7298,6 +7298,15 @@ pub struct NpmConfigSnapshot {
     pub scoped_registries: BTreeMap<String, String>,
 }
 
+#[derive(Debug, Clone)]
+pub struct NpmPackageMetadata {
+    pub name: String,
+    pub version: String,
+    pub dist_tags: BTreeMap<String, String>,
+    pub versions: Vec<String>,
+    pub manifest: serde_json::Value,
+}
+
 impl Default for NpmConfig {
     fn default() -> Self {
         Self {
@@ -7620,6 +7629,62 @@ fn resolve_npm(
         npm_scripts: version_doc.scripts.unwrap_or_default(),
         platform_compatible,
         dependencies,
+    })
+}
+
+pub fn read_npm_package_metadata(
+    project_dir: &Path,
+    spec: &PackageSpec,
+    registry_override: Option<&str>,
+) -> Result<NpmPackageMetadata> {
+    if spec.ecosystem != Ecosystem::Npm || spec.direct_url.is_some() {
+        return Err(OmcRegistryError::UnsupportedSpec(spec.requested()));
+    }
+
+    let client = Client::new();
+    let mut options = LinkOptions::new(project_dir);
+    options.npm_registry_url = registry_override.map(str::to_owned);
+    let npm_config = read_npm_config_for_options(project_dir, &options)?;
+    let (registry_name, version_requirement) = npm_registry_name_and_requirement(spec)?;
+    let registry = npm_config.registry_for(&registry_name);
+    let encoded = urlencoding::encode(&registry_name);
+    let root_url = npm_registry_package_url(registry, &encoded);
+    let root_value = npm_get(&client, &root_url, &npm_config)
+        .send()?
+        .error_for_status()?
+        .json::<serde_json::Value>()?;
+    let root = serde_json::from_value::<NpmRoot>(root_value.clone())?;
+    let version = match version_requirement.as_deref() {
+        Some(requirement) if is_exact_npm_version(requirement) => requirement.to_owned(),
+        Some(requirement) => choose_npm_version(&registry_name, requirement, &root)?,
+        None => root.dist_tags.latest,
+    };
+    let version_url = npm_registry_package_version_url(registry, &encoded, &version);
+    let response = npm_get(&client, &version_url, &npm_config).send()?;
+    if response.status().as_u16() == 404 {
+        return Err(OmcRegistryError::PackageNotFound(spec.requested()));
+    }
+    let manifest = response.error_for_status()?.json::<serde_json::Value>()?;
+    let dist_tags = root_value
+        .get("dist-tags")
+        .and_then(serde_json::Value::as_object)
+        .map(|tags| {
+            tags.iter()
+                .filter_map(|(tag, version)| {
+                    version
+                        .as_str()
+                        .map(|version| (tag.clone(), version.to_owned()))
+                })
+                .collect::<BTreeMap<_, _>>()
+        })
+        .unwrap_or_default();
+
+    Ok(NpmPackageMetadata {
+        name: registry_name,
+        version,
+        dist_tags,
+        versions: root.versions.keys().cloned().collect(),
+        manifest,
     })
 }
 
