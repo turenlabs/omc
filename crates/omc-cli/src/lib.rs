@@ -276,6 +276,9 @@ enum NpmCompatAction {
     Cache {
         action: NpmCacheAction,
     },
+    Pkg {
+        action: NpmPkgAction,
+    },
     Config {
         action: NpmConfigAction,
         npm_registry: Option<String>,
@@ -308,6 +311,19 @@ enum NpmCacheAction {
     List { pattern: Option<String> },
     Remove { pattern: String },
     Clean,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum NpmPkgAction {
+    Get {
+        fields: Vec<String>,
+    },
+    Set {
+        assignments: Vec<(String, serde_json::Value)>,
+    },
+    Delete {
+        fields: Vec<String>,
+    },
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -1066,6 +1082,7 @@ fn run_npm_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
         } => return print_npm_outdated(project_dir, json, parseable, npm_registry.as_deref()),
         NpmCompatAction::Audit { json } => return print_audit_report(project_dir, json),
         NpmCompatAction::Cache { action } => print_npm_cache(project_dir, action)?,
+        NpmCompatAction::Pkg { action } => print_npm_pkg(project_dir, action)?,
         NpmCompatAction::Config {
             action,
             npm_registry,
@@ -1895,6 +1912,133 @@ fn print_npm_cache(project_dir: &Path, action: NpmCacheAction) -> Result<(), Omc
 
 fn npm_cache_dir(project_dir: &Path) -> PathBuf {
     project_dir.join(".omc").join("cache").join("npm")
+}
+
+fn print_npm_pkg(project_dir: &Path, action: NpmPkgAction) -> Result<(), OmcRegistryError> {
+    let package_json = project_dir.join("package.json");
+    let mut package = read_npm_pkg_json(&package_json)?;
+    match action {
+        NpmPkgAction::Get { fields } => {
+            if fields.is_empty() {
+                println!("{}", serde_json::to_string_pretty(&package)?);
+            } else if fields.len() == 1 {
+                let value = npm_pkg_get_path(&package, &fields[0])
+                    .cloned()
+                    .unwrap_or(serde_json::Value::Null);
+                println!("{}", serde_json::to_string_pretty(&value)?);
+            } else {
+                let mut selected = serde_json::Map::new();
+                for field in fields {
+                    let value = npm_pkg_get_path(&package, &field)
+                        .cloned()
+                        .unwrap_or(serde_json::Value::Null);
+                    selected.insert(field, value);
+                }
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::Value::Object(selected))?
+                );
+            }
+        }
+        NpmPkgAction::Set { assignments } => {
+            for (field, value) in assignments {
+                npm_pkg_set_path(&mut package, &field, value)?;
+            }
+            write_npm_pkg_json(&package_json, &package)?;
+        }
+        NpmPkgAction::Delete { fields } => {
+            for field in fields {
+                npm_pkg_delete_path(&mut package, &field);
+            }
+            write_npm_pkg_json(&package_json, &package)?;
+        }
+    }
+    Ok(())
+}
+
+fn read_npm_pkg_json(path: &Path) -> Result<serde_json::Value, OmcRegistryError> {
+    if !path.exists() {
+        return Err(OmcRegistryError::UnsupportedSpec(format!(
+            "{} does not exist",
+            path.display()
+        )));
+    }
+    let value: serde_json::Value = serde_json::from_str(&fs::read_to_string(path)?)?;
+    if !value.is_object() {
+        return Err(OmcRegistryError::UnsupportedSpec(format!(
+            "{} must contain a JSON object",
+            path.display()
+        )));
+    }
+    Ok(value)
+}
+
+fn write_npm_pkg_json(path: &Path, value: &serde_json::Value) -> Result<(), OmcRegistryError> {
+    fs::write(path, format!("{}\n", serde_json::to_string_pretty(value)?))?;
+    Ok(())
+}
+
+fn npm_pkg_get_path<'a>(value: &'a serde_json::Value, path: &str) -> Option<&'a serde_json::Value> {
+    let mut current = value;
+    for segment in npm_pkg_path_segments(path) {
+        current = current.get(segment)?;
+    }
+    Some(current)
+}
+
+fn npm_pkg_set_path(
+    value: &mut serde_json::Value,
+    path: &str,
+    new_value: serde_json::Value,
+) -> Result<(), OmcRegistryError> {
+    let segments = npm_pkg_path_segments(path);
+    if segments.is_empty() {
+        return Err(OmcRegistryError::UnsupportedSpec(
+            "npm pkg set needs a non-empty key".to_owned(),
+        ));
+    }
+    let mut current = value;
+    for segment in &segments[..segments.len() - 1] {
+        if !current.is_object() {
+            *current = serde_json::Value::Object(serde_json::Map::new());
+        }
+        let object = current.as_object_mut().ok_or_else(|| {
+            OmcRegistryError::UnsupportedSpec(format!("cannot set npm pkg path `{path}`"))
+        })?;
+        current = object
+            .entry((*segment).to_owned())
+            .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
+    }
+    let object = current.as_object_mut().ok_or_else(|| {
+        OmcRegistryError::UnsupportedSpec(format!("cannot set npm pkg path `{path}`"))
+    })?;
+    object.insert(segments[segments.len() - 1].to_owned(), new_value);
+    Ok(())
+}
+
+fn npm_pkg_delete_path(value: &mut serde_json::Value, path: &str) -> bool {
+    let segments = npm_pkg_path_segments(path);
+    if segments.is_empty() {
+        return false;
+    }
+    let mut current = value;
+    for segment in &segments[..segments.len() - 1] {
+        let Some(next) = current.get_mut(*segment) else {
+            return false;
+        };
+        current = next;
+    }
+    current
+        .as_object_mut()
+        .and_then(|object| object.remove(segments[segments.len() - 1]))
+        .is_some()
+}
+
+fn npm_pkg_path_segments(path: &str) -> Vec<&str> {
+    path.split('.')
+        .map(str::trim)
+        .filter(|segment| !segment.is_empty())
+        .collect()
 }
 
 fn verify_npm_locked_cache(project_dir: &Path) -> Result<usize, OmcRegistryError> {
@@ -3137,6 +3281,7 @@ fn parse_npm_compat_action(args: &[String]) -> Result<NpmCompatAction, OmcRegist
         "outdated" => parse_npm_outdated_args(&args[1..]),
         "audit" => parse_npm_audit_args(&args[1..]),
         "cache" => parse_npm_cache_args(&args[1..]),
+        "pkg" => parse_npm_pkg_args(&args[1..]),
         "view" | "info" | "show" | "v" => parse_npm_view_args(&args[1..]),
         "config" | "c" => parse_npm_config_args(&args[1..]),
         "get" => parse_npm_config_get_args(&args[1..]),
@@ -3376,6 +3521,100 @@ fn parse_npm_cache_args(args: &[String]) -> Result<NpmCompatAction, OmcRegistryE
 
 fn npm_cache_equals_value_flag(arg: &str) -> bool {
     ["--cache=", "--loglevel="]
+        .iter()
+        .any(|prefix| arg.starts_with(prefix))
+}
+
+fn parse_npm_pkg_args(args: &[String]) -> Result<NpmCompatAction, OmcRegistryError> {
+    let mut json = false;
+    let mut filtered = Vec::new();
+    let mut index = 0;
+    while index < args.len() {
+        let arg = &args[index];
+        if arg == "--json" {
+            json = true;
+        } else if matches!(
+            arg.as_str(),
+            "--silent" | "-s" | "--parseable" | "-p" | "--workspaces" | "--include-workspace-root"
+        ) {
+        } else if matches!(arg.as_str(), "--workspace" | "-w" | "--loglevel") {
+            index += 1;
+            if args.get(index).is_none() {
+                return Err(OmcRegistryError::UnsupportedSpec(format!(
+                    "{arg} needs a value"
+                )));
+            }
+        } else if npm_pkg_ignored_equals_flag(arg) {
+        } else if arg.starts_with('-') {
+            return Err(unsupported_compat_arg("npm pkg", arg));
+        } else {
+            filtered.push(arg.clone());
+        }
+        index += 1;
+    }
+
+    let command = filtered.first().map(String::as_str).unwrap_or("get");
+    let rest = if filtered.is_empty() {
+        &[][..]
+    } else {
+        &filtered[1..]
+    };
+    let action = match command {
+        "get" => NpmPkgAction::Get {
+            fields: rest.to_vec(),
+        },
+        "set" => {
+            if rest.is_empty() {
+                return Err(OmcRegistryError::UnsupportedSpec(
+                    "npm pkg set needs at least one key=value assignment".to_owned(),
+                ));
+            }
+            let mut assignments = Vec::new();
+            for assignment in rest {
+                let Some((key, value)) = assignment.split_once('=') else {
+                    return Err(OmcRegistryError::UnsupportedSpec(format!(
+                        "npm pkg set assignment `{assignment}` needs key=value"
+                    )));
+                };
+                if key.trim().is_empty() {
+                    return Err(OmcRegistryError::UnsupportedSpec(
+                        "npm pkg set key cannot be empty".to_owned(),
+                    ));
+                }
+                let value = if json {
+                    serde_json::from_str(value).map_err(|error| {
+                        OmcRegistryError::UnsupportedSpec(format!(
+                            "invalid JSON value for npm pkg set `{assignment}`: {error}"
+                        ))
+                    })?
+                } else {
+                    serde_json::Value::String(value.to_owned())
+                };
+                assignments.push((key.to_owned(), value));
+            }
+            NpmPkgAction::Set { assignments }
+        }
+        "delete" | "del" => {
+            if rest.is_empty() {
+                return Err(OmcRegistryError::UnsupportedSpec(
+                    "npm pkg delete needs at least one key".to_owned(),
+                ));
+            }
+            NpmPkgAction::Delete {
+                fields: rest.to_vec(),
+            }
+        }
+        other => {
+            return Err(OmcRegistryError::UnsupportedSpec(format!(
+                "unsupported npm pkg command `{other}`"
+            )))
+        }
+    };
+    Ok(NpmCompatAction::Pkg { action })
+}
+
+fn npm_pkg_ignored_equals_flag(arg: &str) -> bool {
+    ["--workspace=", "--loglevel="]
         .iter()
         .any(|prefix| arg.starts_with(prefix))
 }
@@ -5660,6 +5899,43 @@ mod tests {
             }
         );
         assert!(parse_npm_compat_action(&args(&["cache", "clean"])).is_err());
+        assert_eq!(
+            parse_npm_compat_action(&args(&["pkg", "get", "name", "version", "--json"])).unwrap(),
+            NpmCompatAction::Pkg {
+                action: NpmPkgAction::Get {
+                    fields: vec!["name".to_owned(), "version".to_owned()],
+                },
+            }
+        );
+        assert_eq!(
+            parse_npm_compat_action(&args(&[
+                "pkg",
+                "set",
+                "scripts.test=\"vitest\"",
+                "private=true",
+                "--json",
+            ]))
+            .unwrap(),
+            NpmCompatAction::Pkg {
+                action: NpmPkgAction::Set {
+                    assignments: vec![
+                        (
+                            "scripts.test".to_owned(),
+                            serde_json::Value::String("vitest".to_owned()),
+                        ),
+                        ("private".to_owned(), serde_json::Value::Bool(true)),
+                    ],
+                },
+            }
+        );
+        assert_eq!(
+            parse_npm_compat_action(&args(&["pkg", "delete", "scripts.pretest"])).unwrap(),
+            NpmCompatAction::Pkg {
+                action: NpmPkgAction::Delete {
+                    fields: vec!["scripts.pretest".to_owned()],
+                },
+            }
+        );
         assert_eq!(
             parse_npm_compat_action(&args(&[
                 "outdated",
