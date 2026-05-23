@@ -274,6 +274,10 @@ pub struct OmcManifest {
     pub dependencies: BTreeMap<String, String>,
     #[serde(default, rename = "dev-dependencies")]
     pub dev_dependencies: BTreeMap<String, String>,
+    #[serde(default, rename = "optional-dependencies")]
+    pub optional_dependencies: BTreeMap<String, String>,
+    #[serde(default, rename = "peer-dependencies")]
+    pub peer_dependencies: BTreeMap<String, String>,
     #[serde(
         default,
         rename = "npm-local-paths",
@@ -286,6 +290,18 @@ pub struct OmcManifest {
         skip_serializing_if = "Vec::is_empty"
     )]
     pub npm_dev_local_paths: Vec<String>,
+    #[serde(
+        default,
+        rename = "npm-optional-local-paths",
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub npm_optional_local_paths: Vec<String>,
+    #[serde(
+        default,
+        rename = "npm-peer-local-paths",
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub npm_peer_local_paths: Vec<String>,
     #[serde(default, skip_serializing_if = "ManifestPolicy::is_empty")]
     pub policy: ManifestPolicy,
     #[serde(default, skip_serializing_if = "ManifestRegistries::is_empty")]
@@ -333,12 +349,25 @@ impl OmcManifest {
             },
             dependencies: BTreeMap::new(),
             dev_dependencies: BTreeMap::new(),
+            optional_dependencies: BTreeMap::new(),
+            peer_dependencies: BTreeMap::new(),
             npm_local_paths: Vec::new(),
             npm_dev_local_paths: Vec::new(),
+            npm_optional_local_paths: Vec::new(),
+            npm_peer_local_paths: Vec::new(),
             policy: ManifestPolicy::default(),
             registries: ManifestRegistries::default(),
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ManifestDependencyKind {
+    #[default]
+    Production,
+    Dev,
+    Optional,
+    Peer,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -577,7 +606,7 @@ pub struct LinkOptions {
     pub include_dev_dependencies: bool,
     pub discover_project_requirements: bool,
     pub save_manifest_dependency: bool,
-    pub save_dev_dependency: bool,
+    pub save_dependency_kind: ManifestDependencyKind,
 }
 
 impl LinkOptions {
@@ -611,7 +640,7 @@ impl LinkOptions {
             include_dev_dependencies: true,
             discover_project_requirements: true,
             save_manifest_dependency: true,
-            save_dev_dependency: false,
+            save_dependency_kind: ManifestDependencyKind::Production,
         }
     }
 }
@@ -866,7 +895,7 @@ pub fn add_package_graph(spec: &PackageSpec, options: &LinkOptions) -> Result<Ve
             &options.project_dir,
             &spec,
             &root.locked.version,
-            options.save_dev_dependency,
+            options.save_dependency_kind,
         )?;
     }
 
@@ -885,6 +914,14 @@ pub fn remove_manifest_dependency(
     let removed = manifest.dependencies.remove(&spec.package_key()).is_some()
         || manifest
             .dev_dependencies
+            .remove(&spec.package_key())
+            .is_some()
+        || manifest
+            .optional_dependencies
+            .remove(&spec.package_key())
+            .is_some()
+        || manifest
+            .peer_dependencies
             .remove(&spec.package_key())
             .is_some();
     fs::write(&manifest_path, toml::to_string_pretty(&manifest)?)?;
@@ -954,29 +991,33 @@ fn pypi_requirement_label(spec: &PackageSpec) -> String {
 pub fn add_manifest_npm_local_paths(
     project_dir: impl AsRef<Path>,
     paths: &[PathBuf],
-    dev_dependency: bool,
+    kind: ManifestDependencyKind,
 ) -> Result<Vec<String>> {
     let project_dir = project_dir.as_ref();
     init_project(project_dir, None)?;
 
     let manifest_path = project_dir.join(MANIFEST);
     let mut manifest = read_manifest(&manifest_path)?;
-    let (target, other) = if dev_dependency {
-        (
-            &mut manifest.npm_dev_local_paths,
-            &mut manifest.npm_local_paths,
-        )
-    } else {
-        (
-            &mut manifest.npm_local_paths,
-            &mut manifest.npm_dev_local_paths,
-        )
-    };
+    for path in paths {
+        let path = path.to_string_lossy();
+        manifest
+            .npm_local_paths
+            .retain(|existing| existing != &path);
+        manifest
+            .npm_dev_local_paths
+            .retain(|existing| existing != &path);
+        manifest
+            .npm_optional_local_paths
+            .retain(|existing| existing != &path);
+        manifest
+            .npm_peer_local_paths
+            .retain(|existing| existing != &path);
+    }
+    let target = manifest_npm_local_paths_mut(&mut manifest, kind);
     let mut existing = target.iter().cloned().collect::<BTreeSet<_>>();
     let mut added = Vec::new();
     for path in paths {
         let path = path.to_string_lossy().into_owned();
-        other.retain(|existing| existing != &path);
         if existing.insert(path.clone()) {
             added.push(path);
         }
@@ -984,6 +1025,18 @@ pub fn add_manifest_npm_local_paths(
     *target = existing.into_iter().collect();
     fs::write(&manifest_path, toml::to_string_pretty(&manifest)?)?;
     Ok(added)
+}
+
+fn manifest_npm_local_paths_mut(
+    manifest: &mut OmcManifest,
+    kind: ManifestDependencyKind,
+) -> &mut Vec<String> {
+    match kind {
+        ManifestDependencyKind::Production => &mut manifest.npm_local_paths,
+        ManifestDependencyKind::Dev => &mut manifest.npm_dev_local_paths,
+        ManifestDependencyKind::Optional => &mut manifest.npm_optional_local_paths,
+        ManifestDependencyKind::Peer => &mut manifest.npm_peer_local_paths,
+    }
 }
 
 pub fn add_manifest_policy_grants(
@@ -1124,6 +1177,12 @@ fn project_requested_specs(options: &mut LinkOptions, locked: bool) -> Result<Ve
     apply_manifest_config(&manifest, options)?;
     let mut specs = Vec::new();
     for (key, requirement) in manifest.dependencies {
+        specs.push(parse_manifest_dependency(&key, &requirement)?);
+    }
+    for (key, requirement) in manifest.optional_dependencies {
+        specs.push(parse_manifest_dependency(&key, &requirement)?);
+    }
+    for (key, requirement) in manifest.peer_dependencies {
         specs.push(parse_manifest_dependency(&key, &requirement)?);
     }
     if options.include_dev_dependencies {
@@ -2335,7 +2394,7 @@ fn link_package_inner(
             &options.project_dir,
             &spec,
             &resolved.version,
-            options.save_dev_dependency,
+            options.save_dependency_kind,
         )?;
     }
 
@@ -2360,7 +2419,7 @@ fn write_manifest_dependency(
     project_dir: &Path,
     spec: &PackageSpec,
     version: &str,
-    dev_dependency: bool,
+    kind: ManifestDependencyKind,
 ) -> Result<()> {
     let manifest_path = project_dir.join(MANIFEST);
     let mut manifest = read_manifest(&manifest_path)?;
@@ -2369,19 +2428,30 @@ fn write_manifest_dependency(
         .as_ref()
         .cloned()
         .unwrap_or_else(|| version.to_owned());
-    if dev_dependency {
-        manifest.dependencies.remove(&spec.package_key());
-        manifest
-            .dev_dependencies
-            .insert(spec.package_key(), requirement);
-    } else {
-        manifest.dev_dependencies.remove(&spec.package_key());
-        manifest
-            .dependencies
-            .insert(spec.package_key(), requirement);
-    }
+    let key = spec.package_key();
+    remove_manifest_dependency_entry(&mut manifest, &key);
+    manifest_dependency_map_mut(&mut manifest, kind).insert(key, requirement);
     fs::write(&manifest_path, toml::to_string_pretty(&manifest)?)?;
     Ok(())
+}
+
+fn remove_manifest_dependency_entry(manifest: &mut OmcManifest, key: &str) {
+    manifest.dependencies.remove(key);
+    manifest.dev_dependencies.remove(key);
+    manifest.optional_dependencies.remove(key);
+    manifest.peer_dependencies.remove(key);
+}
+
+fn manifest_dependency_map_mut(
+    manifest: &mut OmcManifest,
+    kind: ManifestDependencyKind,
+) -> &mut BTreeMap<String, String> {
+    match kind {
+        ManifestDependencyKind::Production => &mut manifest.dependencies,
+        ManifestDependencyKind::Dev => &mut manifest.dev_dependencies,
+        ManifestDependencyKind::Optional => &mut manifest.optional_dependencies,
+        ManifestDependencyKind::Peer => &mut manifest.peer_dependencies,
+    }
 }
 
 fn manifest_spec_for_locked_root(spec: &PackageSpec, locked: &LockedPackage) -> PackageSpec {
@@ -2424,6 +2494,16 @@ fn apply_manifest_config(manifest: &OmcManifest, options: &mut LinkOptions) -> R
     }
     let project_dir = options.project_dir.clone();
     for path in &manifest.npm_local_paths {
+        options
+            .npm_local_paths
+            .push(resolve_manifest_path(&project_dir, path));
+    }
+    for path in &manifest.npm_optional_local_paths {
+        options
+            .npm_local_paths
+            .push(resolve_manifest_path(&project_dir, path));
+    }
+    for path in &manifest.npm_peer_local_paths {
         options
             .npm_local_paths
             .push(resolve_manifest_path(&project_dir, path));
@@ -15479,8 +15559,12 @@ mod tests {
         )
         .unwrap();
 
-        add_manifest_npm_local_paths(dir.path(), &[PathBuf::from("vendor/direct-pkg")], false)
-            .unwrap();
+        add_manifest_npm_local_paths(
+            dir.path(),
+            &[PathBuf::from("vendor/direct-pkg")],
+            ManifestDependencyKind::Production,
+        )
+        .unwrap();
         let report = install_project(&LinkOptions::new(dir.path())).unwrap();
 
         assert_eq!(report.npm_bins, 1);
@@ -15503,7 +15587,12 @@ mod tests {
         )
         .unwrap();
 
-        add_manifest_npm_local_paths(dir.path(), &[PathBuf::from("vendor/dev-pkg")], true).unwrap();
+        add_manifest_npm_local_paths(
+            dir.path(),
+            &[PathBuf::from("vendor/dev-pkg")],
+            ManifestDependencyKind::Dev,
+        )
+        .unwrap();
 
         let mut options = LinkOptions::new(dir.path());
         options.include_dev_dependencies = false;
@@ -15515,6 +15604,36 @@ mod tests {
         assert!(dir.path().join("node_modules/dev-pkg").exists());
         let manifest = read_manifest(dir.path().join("omc.toml")).unwrap();
         assert_eq!(manifest.npm_dev_local_paths, vec!["vendor/dev-pkg"]);
+    }
+
+    #[test]
+    fn manifest_npm_local_paths_preserve_dependency_kinds() {
+        let dir = tempfile::tempdir().unwrap();
+
+        add_manifest_npm_local_paths(
+            dir.path(),
+            &[PathBuf::from("vendor/optional-pkg")],
+            ManifestDependencyKind::Optional,
+        )
+        .unwrap();
+        add_manifest_npm_local_paths(
+            dir.path(),
+            &[PathBuf::from("vendor/peer-pkg")],
+            ManifestDependencyKind::Peer,
+        )
+        .unwrap();
+        add_manifest_npm_local_paths(
+            dir.path(),
+            &[PathBuf::from("vendor/optional-pkg")],
+            ManifestDependencyKind::Dev,
+        )
+        .unwrap();
+
+        let manifest = read_manifest(dir.path().join("omc.toml")).unwrap();
+        assert!(manifest.npm_local_paths.is_empty());
+        assert_eq!(manifest.npm_dev_local_paths, vec!["vendor/optional-pkg"]);
+        assert!(manifest.npm_optional_local_paths.is_empty());
+        assert_eq!(manifest.npm_peer_local_paths, vec!["vendor/peer-pkg"]);
     }
 
     #[test]
@@ -15606,8 +15725,15 @@ mod tests {
             },
             dependencies: BTreeMap::from([("npm:left-pad".to_owned(), "1.3.0".to_owned())]),
             dev_dependencies: BTreeMap::from([("npm:is-odd".to_owned(), "3.0.1".to_owned())]),
+            optional_dependencies: BTreeMap::from([(
+                "npm:optional-left".to_owned(),
+                "1.0.0".to_owned(),
+            )]),
+            peer_dependencies: BTreeMap::from([("npm:react".to_owned(), "18.2.0".to_owned())]),
             npm_local_paths: Vec::new(),
             npm_dev_local_paths: Vec::new(),
+            npm_optional_local_paths: Vec::new(),
+            npm_peer_local_paths: Vec::new(),
             policy: ManifestPolicy {
                 allow: vec!["http:api.example.com".to_owned()],
             },
@@ -15630,14 +15756,22 @@ mod tests {
             manifest.dev_dependencies,
             BTreeMap::from([("npm:is-odd".to_owned(), "3.0.1".to_owned())])
         );
+        assert_eq!(
+            manifest.optional_dependencies,
+            BTreeMap::from([("npm:optional-left".to_owned(), "1.0.0".to_owned())])
+        );
+        assert_eq!(
+            manifest.peer_dependencies,
+            BTreeMap::from([("npm:react".to_owned(), "18.2.0".to_owned())])
+        );
         assert_eq!(manifest.policy.allow, vec!["http:api.example.com"]);
     }
 
     #[test]
-    fn writes_manifest_dev_dependencies() {
+    fn writes_manifest_dependency_kinds() {
         let dir = tempfile::tempdir().unwrap();
         let spec = PackageSpec::parse("npm:is-odd@3.0.1").unwrap();
-        write_manifest_dependency(dir.path(), &spec, "3.0.1", true).unwrap();
+        write_manifest_dependency(dir.path(), &spec, "3.0.1", ManifestDependencyKind::Dev).unwrap();
         let manifest = read_manifest(dir.path().join("omc.toml")).unwrap();
 
         assert!(manifest.dependencies.is_empty());
@@ -15646,13 +15780,87 @@ mod tests {
             BTreeMap::from([("npm:is-odd".to_owned(), "3.0.1".to_owned())])
         );
 
-        write_manifest_dependency(dir.path(), &spec, "3.0.1", false).unwrap();
+        write_manifest_dependency(dir.path(), &spec, "3.0.1", ManifestDependencyKind::Optional)
+            .unwrap();
+        let manifest = read_manifest(dir.path().join("omc.toml")).unwrap();
+        assert!(manifest.dependencies.is_empty());
+        assert!(manifest.dev_dependencies.is_empty());
+        assert_eq!(
+            manifest.optional_dependencies,
+            BTreeMap::from([("npm:is-odd".to_owned(), "3.0.1".to_owned())])
+        );
+        assert!(manifest.peer_dependencies.is_empty());
+
+        write_manifest_dependency(dir.path(), &spec, "3.0.1", ManifestDependencyKind::Peer)
+            .unwrap();
+        let manifest = read_manifest(dir.path().join("omc.toml")).unwrap();
+        assert!(manifest.dependencies.is_empty());
+        assert!(manifest.dev_dependencies.is_empty());
+        assert!(manifest.optional_dependencies.is_empty());
+        assert_eq!(
+            manifest.peer_dependencies,
+            BTreeMap::from([("npm:is-odd".to_owned(), "3.0.1".to_owned())])
+        );
+
+        write_manifest_dependency(
+            dir.path(),
+            &spec,
+            "3.0.1",
+            ManifestDependencyKind::Production,
+        )
+        .unwrap();
         let manifest = read_manifest(dir.path().join("omc.toml")).unwrap();
         assert_eq!(
             manifest.dependencies,
             BTreeMap::from([("npm:is-odd".to_owned(), "3.0.1".to_owned())])
         );
         assert!(manifest.dev_dependencies.is_empty());
+        assert!(manifest.optional_dependencies.is_empty());
+        assert!(manifest.peer_dependencies.is_empty());
+    }
+
+    #[test]
+    fn manifest_optional_and_peer_dependencies_are_runtime_inputs() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifest = OmcManifest {
+            project: ProjectInfo {
+                name: "dependency-kind-demo".to_owned(),
+                version: "0.1.0".to_owned(),
+            },
+            dependencies: BTreeMap::from([("npm:prod-pkg".to_owned(), "1.0.0".to_owned())]),
+            dev_dependencies: BTreeMap::from([("npm:dev-pkg".to_owned(), "2.0.0".to_owned())]),
+            optional_dependencies: BTreeMap::from([(
+                "npm:optional-pkg".to_owned(),
+                "3.0.0".to_owned(),
+            )]),
+            peer_dependencies: BTreeMap::from([("npm:peer-pkg".to_owned(), "4.0.0".to_owned())]),
+            npm_local_paths: Vec::new(),
+            npm_dev_local_paths: Vec::new(),
+            npm_optional_local_paths: Vec::new(),
+            npm_peer_local_paths: Vec::new(),
+            policy: ManifestPolicy::default(),
+            registries: ManifestRegistries::default(),
+        };
+        fs::write(
+            dir.path().join("omc.toml"),
+            toml::to_string_pretty(&manifest).unwrap(),
+        )
+        .unwrap();
+
+        let mut production_options = LinkOptions::new(dir.path());
+        production_options.include_dev_dependencies = false;
+        production_options.discover_project_requirements = false;
+        let production_specs = project_requested_specs(&mut production_options, false).unwrap();
+        assert!(has_spec(&production_specs, "prod-pkg", "1.0.0"));
+        assert!(has_spec(&production_specs, "optional-pkg", "3.0.0"));
+        assert!(has_spec(&production_specs, "peer-pkg", "4.0.0"));
+        assert!(!has_spec(&production_specs, "dev-pkg", "2.0.0"));
+
+        let mut dev_options = LinkOptions::new(dir.path());
+        dev_options.include_dev_dependencies = true;
+        dev_options.discover_project_requirements = false;
+        let dev_specs = project_requested_specs(&mut dev_options, false).unwrap();
+        assert!(has_spec(&dev_specs, "dev-pkg", "2.0.0"));
     }
 
     #[test]

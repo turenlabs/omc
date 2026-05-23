@@ -29,16 +29,16 @@ use omc_registry::{
     remove_npm_dist_tag, remove_npm_org_user, remove_npm_team_user, revoke_npm_access,
     revoke_npm_token, set_npm_access_mfa, set_npm_access_status, set_npm_org_user,
     set_npm_profile_property, unpublish_npm_package, upload_pypi_distribution, Behavior, Ecosystem,
-    InstallReport, LinkOptions, LockedPackage, LockedPythonVcsDependency, NpmAccessMapResult,
-    NpmAccessMutationResult, NpmAccessStatusResult, NpmAccessToken, NpmDeprecateResult,
-    NpmDistTagMutationResult, NpmOrgListResult, NpmOrgMutationResult, NpmOwnerListResult,
-    NpmOwnerMutationResult, NpmPackageTarball, NpmPingResult, NpmProfileMutationResult,
-    NpmProfileResult, NpmPublishPackage, NpmPublishResult, NpmSearchPackage, NpmStarMutationResult,
-    NpmStarsResult, NpmTeamListResult, NpmTeamMutationResult, NpmTokenCreateOptions,
-    NpmTokenCreateResult, NpmTokenListResult, NpmTokenRevokeResult, NpmUnpublishResult,
-    NpmWhoamiResult, NpmWorkspacePackage, OmcRegistryError, PackageSpec, ProjectRequirements,
-    PypiBinaryMode, PypiCheckIssue, PypiUploadOptions, PypiUploadResult, PythonLocalRequirement,
-    PythonVcsRequirement, Verdict,
+    InstallReport, LinkOptions, LockedPackage, LockedPythonVcsDependency, ManifestDependencyKind,
+    NpmAccessMapResult, NpmAccessMutationResult, NpmAccessStatusResult, NpmAccessToken,
+    NpmDeprecateResult, NpmDistTagMutationResult, NpmOrgListResult, NpmOrgMutationResult,
+    NpmOwnerListResult, NpmOwnerMutationResult, NpmPackageTarball, NpmPingResult,
+    NpmProfileMutationResult, NpmProfileResult, NpmPublishPackage, NpmPublishResult,
+    NpmSearchPackage, NpmStarMutationResult, NpmStarsResult, NpmTeamListResult,
+    NpmTeamMutationResult, NpmTokenCreateOptions, NpmTokenCreateResult, NpmTokenListResult,
+    NpmTokenRevokeResult, NpmUnpublishResult, NpmWhoamiResult, NpmWorkspacePackage,
+    OmcRegistryError, PackageSpec, ProjectRequirements, PypiBinaryMode, PypiCheckIssue,
+    PypiUploadOptions, PypiUploadResult, PythonLocalRequirement, PythonVcsRequirement, Verdict,
 };
 use sha2::{Digest, Sha256, Sha384, Sha512};
 
@@ -98,6 +98,18 @@ enum Command {
         specs: Vec<String>,
         #[arg(long, help = "Save the package as a development dependency")]
         dev: bool,
+        #[arg(
+            long,
+            conflicts_with_all = ["dev", "peer"],
+            help = "Save the package as an optional dependency"
+        )]
+        optional: bool,
+        #[arg(
+            long,
+            conflicts_with_all = ["dev", "optional"],
+            help = "Save the package as a peer dependency"
+        )]
+        peer: bool,
         #[arg(long, help = "Write blocked packages into omc.lock for review")]
         record_blocked: bool,
         #[arg(
@@ -288,7 +300,7 @@ enum NpmCompatAction {
         archive_references: Vec<String>,
         local_paths: Vec<PathBuf>,
         save: bool,
-        dev: bool,
+        dependency_kind: ManifestDependencyKind,
         omit_dev: bool,
         lock_only: bool,
         dry_run: bool,
@@ -303,7 +315,7 @@ enum NpmCompatAction {
         archive_references: Vec<String>,
         local_paths: Vec<PathBuf>,
         save: bool,
-        dev: bool,
+        dependency_kind: ManifestDependencyKind,
         omit_dev: bool,
         lock_only: bool,
         dry_run: bool,
@@ -1307,6 +1319,8 @@ fn run() -> Result<ExitCode, OmcRegistryError> {
             pypi,
             specs,
             dev,
+            optional,
+            peer,
             record_blocked,
             allow,
             allow_all_host,
@@ -1315,7 +1329,7 @@ fn run() -> Result<ExitCode, OmcRegistryError> {
             let mut options = LinkOptions::new(&cli.project_dir);
             options.record_blocked = record_blocked;
             options.allowed_capabilities = parse_grants(&allow, allow_all_host)?;
-            options.save_dev_dependency = dev;
+            options.save_dependency_kind = dependency_kind_from_booleans(dev, optional, peer);
 
             let mut all_reports = Vec::new();
             for spec in &specs {
@@ -2094,7 +2108,7 @@ struct NpmInstallCompatRequest {
     archive_references: Vec<String>,
     local_paths: Vec<PathBuf>,
     save: bool,
-    dev: bool,
+    dependency_kind: ManifestDependencyKind,
     omit_dev: bool,
     lock_only: bool,
     dry_run: bool,
@@ -2112,7 +2126,7 @@ enum NpmLinkAction {
         names: Vec<String>,
         local_paths: Vec<PathBuf>,
         save: bool,
-        dev: bool,
+        dependency_kind: ManifestDependencyKind,
         omit_dev: bool,
         lock_only: bool,
         dry_run: bool,
@@ -2131,7 +2145,7 @@ fn run_npm_install_compat(
         archive_references,
         local_paths,
         save,
-        dev,
+        dependency_kind,
         omit_dev,
         lock_only,
         dry_run,
@@ -2147,7 +2161,7 @@ fn run_npm_install_compat(
                 archive_references,
                 local_paths,
                 save,
-                dev,
+                dependency_kind,
                 omit_dev,
                 lock_only,
                 dry_run,
@@ -2165,7 +2179,7 @@ fn run_npm_install_compat(
         options.include_dev_dependencies = !omit_dev;
         options.npm_local_paths = absolutize_paths(project_dir, local_paths.clone());
         if save && !local_paths.is_empty() {
-            add_manifest_npm_local_paths(project_dir, &local_paths, dev)?;
+            add_manifest_npm_local_paths(project_dir, &local_paths, dependency_kind)?;
         }
         if lock_only {
             let reports = lock_project(&options)?;
@@ -2180,11 +2194,11 @@ fn run_npm_install_compat(
         options.allowed_capabilities = allowed_capabilities;
         options.npm_registry_url = npm_registry.clone();
         options.save_manifest_dependency = save;
-        options.save_dev_dependency = dev;
+        options.save_dependency_kind = dependency_kind;
         options.include_dev_dependencies = !omit_dev;
         options.npm_local_paths = absolutize_paths(project_dir, local_paths.clone());
         if save && !local_paths.is_empty() {
-            add_manifest_npm_local_paths(project_dir, &local_paths, dev)?;
+            add_manifest_npm_local_paths(project_dir, &local_paths, dependency_kind)?;
         }
         let mut specs = parse_package_specs(&specs, Some(Ecosystem::Npm))?;
         specs.extend(parse_npm_archive_references(
@@ -2236,7 +2250,7 @@ fn run_npm_link_compat(
             names,
             mut local_paths,
             save,
-            dev,
+            dependency_kind,
             omit_dev,
             lock_only,
             dry_run,
@@ -2267,7 +2281,7 @@ fn run_npm_link_compat(
                     archive_references: Vec::new(),
                     local_paths,
                     save,
-                    dev,
+                    dependency_kind,
                     omit_dev,
                     lock_only,
                     dry_run,
@@ -2390,7 +2404,7 @@ fn run_npm_install_dry_run(
         archive_references,
         local_paths,
         save: _,
-        dev: _,
+        dependency_kind: _,
         omit_dev,
         lock_only,
         dry_run: _,
@@ -2489,7 +2503,7 @@ fn run_npm_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
             archive_references,
             local_paths,
             save,
-            dev,
+            dependency_kind,
             omit_dev,
             lock_only,
             dry_run,
@@ -2504,7 +2518,7 @@ fn run_npm_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
                     archive_references,
                     local_paths,
                     save,
-                    dev,
+                    dependency_kind,
                     omit_dev,
                     lock_only,
                     dry_run,
@@ -2521,7 +2535,7 @@ fn run_npm_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
             archive_references,
             local_paths,
             save,
-            dev,
+            dependency_kind,
             omit_dev,
             lock_only,
             dry_run,
@@ -2540,7 +2554,7 @@ fn run_npm_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
                         archive_references,
                         local_paths,
                         save,
-                        dev,
+                        dependency_kind,
                         omit_dev,
                         lock_only,
                         dry_run,
@@ -3345,7 +3359,7 @@ fn npm_help_text(topic: Option<&str>) -> String {
             &[
                 "Resolve, verify, lock, and install npm packages with OMC.",
                 "Aliases: i, add, update, up, upgrade.",
-                "Common flags: --save, --no-save, --save-dev, --omit=dev, --include=dev, --package-lock-only, --dry-run, --registry, --allow, --allow-all-host.",
+                "Common flags: --save, --no-save, --save-dev, --save-optional, --save-peer, --omit=dev, --include=dev, --package-lock-only, --dry-run, --registry, --allow, --allow-all-host.",
                 "Direct local inputs are supported for .tgz archives and local package directories.",
             ],
         ),
@@ -3354,7 +3368,7 @@ fn npm_help_text(topic: Option<&str>) -> String {
             &[
                 "Register or install local npm package links through OMC's link store.",
                 "`npm link` registers the current package; `npm link ../pkg` registers and links a local directory; `npm link <name>` links a previously registered package.",
-                "Links are not saved by default. Use --save or --save-dev to record a local path in omc.toml.",
+                "Links are not saved by default. Use --save, --save-dev, --save-optional, or --save-peer to record a local path in omc.toml.",
                 "Supports --dry-run, --package-lock-only, omit/include flags, --registry for dependency refreshes, --allow, and --allow-all-host.",
             ],
         ),
@@ -11787,7 +11801,7 @@ fn parse_npm_compat_action(args: &[String]) -> Result<NpmCompatAction, OmcRegist
             archive_references: Vec::new(),
             local_paths: Vec::new(),
             save: true,
-            dev: false,
+            dependency_kind: ManifestDependencyKind::Production,
             omit_dev: false,
             lock_only: false,
             dry_run: false,
@@ -12182,7 +12196,17 @@ fn npm_global_arg_supported_by_command(command: &str, arg: &str) -> bool {
     }
     if matches!(
         arg,
-        "--save" | "-S" | "--save-prod" | "-D" | "--save-dev" | "--dev" | "--no-save"
+        "--save"
+            | "-S"
+            | "--save-prod"
+            | "-P"
+            | "-D"
+            | "--save-dev"
+            | "--dev"
+            | "--save-optional"
+            | "-O"
+            | "--save-peer"
+            | "--no-save"
     ) {
         return matches!(
             command,
@@ -12474,8 +12498,12 @@ fn npm_global_preserved_bool_flag(arg: &str) -> bool {
             | "--save"
             | "-S"
             | "--save-prod"
+            | "-P"
             | "--save-dev"
             | "--dev"
+            | "--save-optional"
+            | "-O"
+            | "--save-peer"
             | "--no-save"
             | "--packages-all"
             | "--no-packages-all"
@@ -13020,7 +13048,7 @@ fn parse_npm_install_args(args: &[String]) -> Result<NpmCompatAction, OmcRegistr
     }
 
     let CommonCompatFlags {
-        dev,
+        dependency_kind,
         omit_dev,
         save,
         lock_only,
@@ -13035,7 +13063,7 @@ fn parse_npm_install_args(args: &[String]) -> Result<NpmCompatAction, OmcRegistr
         archive_references,
         local_paths,
         save,
-        dev,
+        dependency_kind,
         omit_dev,
         lock_only,
         dry_run,
@@ -13078,7 +13106,7 @@ fn parse_npm_link_args(args: &[String]) -> Result<NpmCompatAction, OmcRegistryEr
     }
 
     let CommonCompatFlags {
-        dev,
+        dependency_kind,
         omit_dev,
         save,
         lock_only,
@@ -13099,7 +13127,7 @@ fn parse_npm_link_args(args: &[String]) -> Result<NpmCompatAction, OmcRegistryEr
             names: positionals,
             local_paths,
             save: explicit_save && save,
-            dev,
+            dependency_kind,
             omit_dev,
             lock_only,
             dry_run,
@@ -13114,7 +13142,16 @@ fn npm_link_explicit_save(args: &[String]) -> bool {
     args.iter().any(|arg| {
         matches!(
             arg.as_str(),
-            "--save" | "-S" | "--save-prod" | "-D" | "--save-dev" | "--dev"
+            "--save"
+                | "-S"
+                | "--save-prod"
+                | "-P"
+                | "-D"
+                | "--save-dev"
+                | "--dev"
+                | "--save-optional"
+                | "-O"
+                | "--save-peer"
         )
     })
 }
@@ -13155,7 +13192,7 @@ fn parse_npm_install_test_args(
             archive_references: Vec::new(),
             local_paths: Vec::new(),
             save: true,
-            dev: false,
+            dependency_kind: ManifestDependencyKind::Production,
             omit_dev,
             lock_only: false,
             dry_run: false,
@@ -13172,7 +13209,7 @@ fn parse_npm_install_test_args(
         archive_references,
         local_paths,
         save,
-        dev,
+        dependency_kind,
         omit_dev,
         lock_only,
         dry_run,
@@ -13190,7 +13227,7 @@ fn parse_npm_install_test_args(
         archive_references,
         local_paths,
         save,
-        dev,
+        dependency_kind,
         omit_dev,
         lock_only,
         dry_run,
@@ -18569,7 +18606,7 @@ fn is_pip_wheel_archive_arg(value: &str) -> bool {
 
 #[derive(Debug)]
 struct CommonCompatFlags {
-    dev: bool,
+    dependency_kind: ManifestDependencyKind,
     omit_dev: bool,
     save: bool,
     lock_only: bool,
@@ -18582,7 +18619,7 @@ struct CommonCompatFlags {
 impl Default for CommonCompatFlags {
     fn default() -> Self {
         Self {
-            dev: false,
+            dependency_kind: ManifestDependencyKind::Production,
             omit_dev: false,
             save: true,
             lock_only: false,
@@ -18618,11 +18655,18 @@ fn parse_common_compat_flags(
         } else if arg == "--allow-all-host" {
             parsed.allow_all_host = true;
         } else if npm_mode && matches!(arg.as_str(), "-D" | "--save-dev" | "--dev") {
-            parsed.dev = true;
+            parsed.dependency_kind = ManifestDependencyKind::Dev;
+            parsed.save = true;
+        } else if npm_mode && matches!(arg.as_str(), "--save-optional" | "-O") {
+            parsed.dependency_kind = ManifestDependencyKind::Optional;
+            parsed.save = true;
+        } else if npm_mode && arg == "--save-peer" {
+            parsed.dependency_kind = ManifestDependencyKind::Peer;
             parsed.save = true;
         } else if npm_mode && arg == "--no-save" {
             parsed.save = false;
-        } else if npm_mode && matches!(arg.as_str(), "--save" | "-S" | "--save-prod") {
+        } else if npm_mode && matches!(arg.as_str(), "--save" | "-S" | "--save-prod" | "-P") {
+            parsed.dependency_kind = ManifestDependencyKind::Production;
             parsed.save = true;
         } else if npm_mode && arg == "--package-lock-only" {
             parsed.lock_only = true;
@@ -18709,9 +18753,6 @@ fn ignored_compat_flag(npm_mode: bool, arg: &str) -> bool {
             "--ignore-scripts"
                 | "--ignore-scripts=false"
                 | "--save-exact"
-                | "--save-optional"
-                | "--save-peer"
-                | "-O"
                 | "--no-fund"
                 | "--fund"
                 | "--fund=false"
@@ -19170,6 +19211,18 @@ fn ecosystem_hint(npm: bool, pypi: bool) -> Option<Ecosystem> {
     }
 }
 
+fn dependency_kind_from_booleans(dev: bool, optional: bool, peer: bool) -> ManifestDependencyKind {
+    if dev {
+        ManifestDependencyKind::Dev
+    } else if optional {
+        ManifestDependencyKind::Optional
+    } else if peer {
+        ManifestDependencyKind::Peer
+    } else {
+        ManifestDependencyKind::Production
+    }
+}
+
 fn normalize_extra(extra: &str) -> String {
     extra.trim().replace('_', "-").to_ascii_lowercase()
 }
@@ -19429,7 +19482,7 @@ mod tests {
                 archive_references: Vec::new(),
                 local_paths: Vec::new(),
                 save: true,
-                dev: false,
+                dependency_kind: ManifestDependencyKind::Production,
                 omit_dev: false,
                 lock_only: false,
                 dry_run: false,
@@ -19619,13 +19672,47 @@ mod tests {
                 archive_references: Vec::new(),
                 local_paths: Vec::new(),
                 save: true,
-                dev: true,
+                dependency_kind: ManifestDependencyKind::Dev,
                 omit_dev: true,
                 lock_only: false,
                 dry_run: true,
                 npm_registry: Some("https://registry.example.invalid/npm".to_owned()),
                 allow: Vec::new(),
                 allow_all_host: true,
+            }
+        );
+
+        assert_eq!(
+            parse_npm_compat_action(&args(&["install", "--save-optional", "fsevents"])).unwrap(),
+            NpmCompatAction::Install {
+                specs: vec!["fsevents".to_owned()],
+                archive_references: Vec::new(),
+                local_paths: Vec::new(),
+                save: true,
+                dependency_kind: ManifestDependencyKind::Optional,
+                omit_dev: false,
+                lock_only: false,
+                dry_run: false,
+                npm_registry: None,
+                allow: Vec::new(),
+                allow_all_host: false,
+            }
+        );
+
+        assert_eq!(
+            parse_npm_compat_action(&args(&["install", "--save-peer", "react"])).unwrap(),
+            NpmCompatAction::Install {
+                specs: vec!["react".to_owned()],
+                archive_references: Vec::new(),
+                local_paths: Vec::new(),
+                save: true,
+                dependency_kind: ManifestDependencyKind::Peer,
+                omit_dev: false,
+                lock_only: false,
+                dry_run: false,
+                npm_registry: None,
+                allow: Vec::new(),
+                allow_all_host: false,
             }
         );
 
@@ -19645,7 +19732,7 @@ mod tests {
                 archive_references: vec!["./pkg.tgz".to_owned(), "file:../other.tgz".to_owned()],
                 local_paths: vec![PathBuf::from("../local-pkg")],
                 save: true,
-                dev: false,
+                dependency_kind: ManifestDependencyKind::Production,
                 omit_dev: false,
                 lock_only: false,
                 dry_run: false,
@@ -19668,7 +19755,7 @@ mod tests {
                     names: Vec::new(),
                     local_paths: vec![PathBuf::from("../local-pkg")],
                     save: false,
-                    dev: false,
+                    dependency_kind: ManifestDependencyKind::Production,
                     omit_dev: false,
                     lock_only: false,
                     dry_run: true,
@@ -19692,7 +19779,7 @@ mod tests {
                     names: vec!["@scope/local-pkg".to_owned()],
                     local_paths: Vec::new(),
                     save: true,
-                    dev: true,
+                    dependency_kind: ManifestDependencyKind::Dev,
                     omit_dev: true,
                     lock_only: false,
                     dry_run: false,
@@ -19721,7 +19808,7 @@ mod tests {
                 archive_references: Vec::new(),
                 local_paths: Vec::new(),
                 save: false,
-                dev: false,
+                dependency_kind: ManifestDependencyKind::Production,
                 omit_dev: false,
                 lock_only: false,
                 dry_run: false,
@@ -19742,7 +19829,7 @@ mod tests {
                 archive_references: Vec::new(),
                 local_paths: Vec::new(),
                 save: true,
-                dev: false,
+                dependency_kind: ManifestDependencyKind::Production,
                 omit_dev: false,
                 lock_only: true,
                 dry_run: false,
@@ -19769,7 +19856,7 @@ mod tests {
                 archive_references: Vec::new(),
                 local_paths: Vec::new(),
                 save: true,
-                dev: false,
+                dependency_kind: ManifestDependencyKind::Production,
                 omit_dev: true,
                 lock_only: false,
                 dry_run: false,
@@ -19789,7 +19876,7 @@ mod tests {
                 archive_references: Vec::new(),
                 local_paths: Vec::new(),
                 save: true,
-                dev: false,
+                dependency_kind: ManifestDependencyKind::Production,
                 omit_dev: true,
                 lock_only: false,
                 dry_run: false,
@@ -19816,7 +19903,7 @@ mod tests {
                 archive_references: Vec::new(),
                 local_paths: Vec::new(),
                 save: true,
-                dev: false,
+                dependency_kind: ManifestDependencyKind::Production,
                 omit_dev: true,
                 lock_only: true,
                 dry_run: false,
