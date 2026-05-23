@@ -1,11 +1,11 @@
 use std::collections::{BTreeMap, BTreeSet};
-use std::fmt;
 use std::fs;
 use std::io::{Cursor, Read};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::str::FromStr;
 use std::sync::OnceLock;
+use std::{env, fmt};
 
 use flate2::read::GzDecoder;
 use omc_cap::{Capability, Policy};
@@ -314,6 +314,8 @@ pub struct LockedPackage {
     #[serde(default)]
     pub dependencies: Vec<String>,
     #[serde(default)]
+    pub optional_dependencies: Vec<String>,
+    #[serde(default)]
     pub grants: Vec<String>,
     #[serde(default)]
     pub capabilities: Vec<CapabilityFinding>,
@@ -378,6 +380,8 @@ pub struct OmcArtifact {
     pub verdict: Verdict,
     pub grants: Vec<String>,
     pub dependencies: Vec<String>,
+    #[serde(default)]
+    pub optional_dependencies: Vec<String>,
     pub files_scanned: usize,
     pub capabilities: Vec<CapabilityFinding>,
     pub verifier_findings: Vec<String>,
@@ -451,7 +455,14 @@ struct ResolvedPackage {
     filename: String,
     expected_sha256: Option<String>,
     npm_scripts: BTreeMap<String, String>,
-    dependencies: Vec<PackageSpec>,
+    platform_compatible: bool,
+    dependencies: Vec<PackageDependency>,
+}
+
+#[derive(Debug, Clone)]
+struct PackageDependency {
+    spec: PackageSpec,
+    optional: bool,
 }
 
 pub fn init_project(project_dir: impl AsRef<Path>, name: Option<&str>) -> Result<PathBuf> {
@@ -484,7 +495,8 @@ pub fn link_package(spec: &PackageSpec, options: &LinkOptions) -> Result<LinkRep
     let options = options_with_manifest_policy(options)?;
 
     let client = Client::builder().user_agent("omc-prototype/0.1").build()?;
-    let (report, _) = link_package_inner(&client, spec, &options, true)?;
+    let (report, _) = link_package_inner(&client, spec, false, &options, true)?
+        .ok_or_else(|| OmcRegistryError::UnsupportedSpec(spec.requested()))?;
     Ok(report)
 }
 
@@ -604,6 +616,14 @@ fn collect_locked_dependencies(
                 .ok_or_else(|| OmcRegistryError::LockfileOutOfDate(spec.requested()))?;
         collect_locked_dependencies(lock, dependency, retained)?;
     }
+    for dependency in &package.optional_dependencies {
+        let spec = PackageSpec::parse(dependency)?;
+        if let Some(dependency) =
+            find_locked_package_for_spec(lock, &spec, &BTreeMap::new(), &BTreeMap::new())
+        {
+            collect_locked_dependencies(lock, dependency, retained)?;
+        }
+    }
 
     Ok(())
 }
@@ -692,7 +712,7 @@ fn resolve_package_graph(
 ) -> Result<Vec<LinkReport>> {
     let mut reports = Vec::new();
     let mut seen = BTreeSet::new();
-    add_package_graph_inner(client, spec, options, &mut seen, &mut reports)?;
+    add_package_graph_inner(client, spec, false, options, &mut seen, &mut reports)?;
     Ok(reports)
 }
 
@@ -739,11 +759,16 @@ fn discover_project_requirements_with_options(
 fn add_package_graph_inner(
     client: &Client,
     spec: &PackageSpec,
+    optional_dependency: bool,
     options: &LinkOptions,
     seen: &mut BTreeSet<String>,
     reports: &mut Vec<LinkReport>,
 ) -> Result<()> {
-    let (report, dependencies) = link_package_inner(client, spec, options, false)?;
+    let Some((report, dependencies)) =
+        link_package_inner(client, spec, optional_dependency, options, false)?
+    else {
+        return Ok(());
+    };
     let resolved_key = format!(
         "{}:{}@{}",
         report.locked.ecosystem,
@@ -758,7 +783,14 @@ fn add_package_graph_inner(
     reports.push(report);
 
     for dependency in dependencies {
-        add_package_graph_inner(client, &dependency, options, seen, reports)?;
+        add_package_graph_inner(
+            client,
+            &dependency.spec,
+            dependency.optional,
+            options,
+            seen,
+            reports,
+        )?;
     }
 
     Ok(())
@@ -767,10 +799,22 @@ fn add_package_graph_inner(
 fn link_package_inner(
     client: &Client,
     spec: &PackageSpec,
+    optional_dependency: bool,
     options: &LinkOptions,
     update_manifest: bool,
-) -> Result<(LinkReport, Vec<PackageSpec>)> {
+) -> Result<Option<(LinkReport, Vec<PackageDependency>)>> {
     let resolved = resolve_package(client, spec, options)?;
+    if !resolved.platform_compatible {
+        if optional_dependency {
+            return Ok(None);
+        }
+
+        return Err(OmcRegistryError::UnsupportedSpec(format!(
+            "{} is not compatible with this platform",
+            spec.requested()
+        )));
+    }
+
     let archive_bytes = download_artifact(client, &resolved)?;
     let sha256 = sha256_hex(&archive_bytes);
 
@@ -843,7 +887,14 @@ fn link_package_inner(
         dependencies: resolved
             .dependencies
             .iter()
-            .map(PackageSpec::requested)
+            .filter(|dependency| !dependency.optional)
+            .map(|dependency| dependency.spec.requested())
+            .collect(),
+        optional_dependencies: resolved
+            .dependencies
+            .iter()
+            .filter(|dependency| dependency.optional)
+            .map(|dependency| dependency.spec.requested())
             .collect(),
         files_scanned: profile.files_scanned,
         capabilities: profile.capabilities,
@@ -862,6 +913,7 @@ fn link_package_inner(
         behavior,
         verdict,
         dependencies: artifact.dependencies.clone(),
+        optional_dependencies: artifact.optional_dependencies.clone(),
         grants: artifact.grants.clone(),
         capabilities: artifact.capabilities.clone(),
         verifier_findings,
@@ -883,7 +935,7 @@ fn link_package_inner(
     fs::write(&lockfile, toml::to_string_pretty(&lock)?)?;
 
     let manifest_path = options.project_dir.join(MANIFEST);
-    Ok((
+    Ok(Some((
         LinkReport {
             locked,
             artifact,
@@ -891,7 +943,7 @@ fn link_package_inner(
             manifest: manifest_path,
         },
         resolved.dependencies,
-    ))
+    )))
 }
 
 fn write_manifest_dependency(project_dir: &Path, spec: &PackageSpec, version: &str) -> Result<()> {
@@ -1461,7 +1513,11 @@ fn install_nested_npm_dependencies_for_package(
     stack.push(key);
 
     let nested_node_modules = installed_dir.join("node_modules");
-    for dependency in &package.dependencies {
+    for dependency in package
+        .dependencies
+        .iter()
+        .chain(package.optional_dependencies.iter())
+    {
         let Ok(spec) = PackageSpec::parse(dependency) else {
             continue;
         };
@@ -1819,6 +1875,7 @@ fn resolve_npm(
         return Err(OmcRegistryError::PackageNotFound(spec.requested()));
     }
     let version_doc = response.error_for_status()?.json::<NpmVersion>()?;
+    let platform_compatible = npm_platform_compatible(&version_doc);
     let dependencies = npm_runtime_dependencies(&version_doc);
     let filename = version_doc
         .dist
@@ -1836,6 +1893,7 @@ fn resolve_npm(
         filename,
         expected_sha256: None,
         npm_scripts: version_doc.scripts.unwrap_or_default(),
+        platform_compatible,
         dependencies,
     })
 }
@@ -1851,28 +1909,122 @@ fn npm_registry_name_and_requirement(spec: &PackageSpec) -> Result<(String, Opti
     Ok((alias_spec.name, alias_spec.version))
 }
 
-fn npm_runtime_dependencies(version_doc: &NpmVersion) -> Vec<PackageSpec> {
-    let mut dependencies = BTreeMap::new();
+fn npm_runtime_dependencies(version_doc: &NpmVersion) -> Vec<PackageDependency> {
+    let mut dependencies = Vec::new();
 
-    dependencies.extend(version_doc.dependencies.clone().unwrap_or_default());
+    dependencies.extend(
+        version_doc
+            .dependencies
+            .clone()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|(name, requirement)| npm_dependency(name, requirement, false)),
+    );
     dependencies.extend(
         version_doc
             .optional_dependencies
             .clone()
-            .unwrap_or_default(),
+            .unwrap_or_default()
+            .into_iter()
+            .map(|(name, requirement)| npm_dependency(name, requirement, true)),
     );
-    dependencies.extend(required_peer_dependencies(
-        version_doc.peer_dependencies.clone().unwrap_or_default(),
-        version_doc
-            .peer_dependencies_meta
-            .clone()
-            .unwrap_or_default(),
-    ));
-
-    dependencies
+    dependencies.extend(
+        required_peer_dependencies(
+            version_doc.peer_dependencies.clone().unwrap_or_default(),
+            version_doc
+                .peer_dependencies_meta
+                .clone()
+                .unwrap_or_default(),
+        )
         .into_iter()
-        .map(|(name, requirement)| PackageSpec::new(Ecosystem::Npm, name, Some(requirement)))
-        .collect()
+        .map(|(name, requirement)| npm_dependency(name, requirement, false)),
+    );
+
+    dependencies.sort_by(|left, right| {
+        left.spec
+            .name
+            .cmp(&right.spec.name)
+            .then_with(|| left.spec.version.cmp(&right.spec.version))
+            .then_with(|| left.optional.cmp(&right.optional))
+    });
+    dependencies.dedup_by(|left, right| {
+        left.spec.name == right.spec.name && left.spec.version == right.spec.version
+    });
+    dependencies
+}
+
+fn npm_dependency(name: String, requirement: String, optional: bool) -> PackageDependency {
+    PackageDependency {
+        spec: PackageSpec::new(Ecosystem::Npm, name, Some(requirement)),
+        optional,
+    }
+}
+
+fn npm_platform_compatible(version_doc: &NpmVersion) -> bool {
+    npm_string_list_allows(version_doc.os.as_ref(), Some(current_npm_os()))
+        && npm_string_list_allows(version_doc.cpu.as_ref(), Some(current_npm_cpu()))
+        && npm_string_list_allows(version_doc.libc.as_ref(), current_npm_libc())
+}
+
+fn npm_string_list_allows(list: Option<&NpmStringList>, current: Option<&str>) -> bool {
+    let Some(list) = list else {
+        return true;
+    };
+    let values = list.values();
+    let Some(current) = current else {
+        return values.iter().all(|value| value.strip_prefix('!').is_some());
+    };
+
+    if values
+        .iter()
+        .any(|value| value.strip_prefix('!') == Some(current))
+    {
+        return false;
+    }
+
+    let positive = values
+        .iter()
+        .filter(|value| !value.starts_with('!'))
+        .collect::<Vec<_>>();
+    positive.is_empty() || positive.iter().any(|value| value.as_str() == current)
+}
+
+fn current_npm_os() -> &'static str {
+    match env::consts::OS {
+        "macos" => "darwin",
+        "windows" => "win32",
+        other => other,
+    }
+}
+
+fn current_npm_cpu() -> &'static str {
+    match env::consts::ARCH {
+        "x86_64" => "x64",
+        "x86" | "i386" | "i586" | "i686" => "ia32",
+        "aarch64" => "arm64",
+        "arm" => "arm",
+        "powerpc64" => "ppc64",
+        "s390x" => "s390x",
+        other => other,
+    }
+}
+
+fn current_npm_libc() -> Option<&'static str> {
+    #[cfg(all(target_os = "linux", target_env = "musl"))]
+    {
+        Some("musl")
+    }
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    {
+        Some("glibc")
+    }
+    #[cfg(not(any(
+        all(target_os = "linux", target_env = "musl"),
+        all(target_os = "linux", target_env = "gnu")
+    )))]
+    {
+        None
+    }
 }
 
 fn resolve_pypi(
@@ -1921,6 +2073,10 @@ fn resolve_pypi(
         .unwrap_or_default()
         .into_iter()
         .filter_map(|requirement| parse_pypi_requirement_with_extras(&requirement, &spec.extras))
+        .map(|spec| PackageDependency {
+            spec,
+            optional: false,
+        })
         .collect::<Vec<_>>();
 
     Ok(ResolvedPackage {
@@ -1931,6 +2087,7 @@ fn resolve_pypi(
         filename,
         expected_sha256: Some(expected_sha256),
         npm_scripts: BTreeMap::new(),
+        platform_compatible: true,
         dependencies,
     })
 }
@@ -3218,6 +3375,12 @@ struct NpmVersion {
     version: String,
     dist: NpmDist,
     #[serde(default)]
+    os: Option<NpmStringList>,
+    #[serde(default)]
+    cpu: Option<NpmStringList>,
+    #[serde(default)]
+    libc: Option<NpmStringList>,
+    #[serde(default)]
     scripts: Option<BTreeMap<String, String>>,
     #[serde(default)]
     dependencies: Option<BTreeMap<String, String>>,
@@ -3227,6 +3390,22 @@ struct NpmVersion {
     peer_dependencies: Option<BTreeMap<String, String>>,
     #[serde(default, rename = "peerDependenciesMeta")]
     peer_dependencies_meta: Option<BTreeMap<String, NpmPeerDependencyMeta>>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+enum NpmStringList {
+    One(String),
+    Many(Vec<String>),
+}
+
+impl NpmStringList {
+    fn values(&self) -> Vec<String> {
+        match self {
+            Self::One(value) => vec![value.clone()],
+            Self::Many(values) => values.clone(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -3426,6 +3605,9 @@ mod tests {
             dist: NpmDist {
                 tarball: "https://example.invalid/package.tgz".to_owned(),
             },
+            os: None,
+            cpu: None,
+            libc: None,
             scripts: None,
             dependencies: Some(BTreeMap::from([(
                 "runtime".to_owned(),
@@ -3448,14 +3630,46 @@ mod tests {
         let dependencies = npm_runtime_dependencies(&version_doc);
         assert!(dependencies
             .iter()
-            .any(|spec| spec.name == "runtime" && spec.version.as_deref() == Some("^1.0.0")));
-        assert!(dependencies.iter().any(
-            |spec| spec.name == "optional-runtime" && spec.version.as_deref() == Some("^2.0.0")
-        ));
+            .any(|dependency| dependency.spec.name == "runtime"
+                && dependency.spec.version.as_deref() == Some("^1.0.0")
+                && !dependency.optional));
         assert!(dependencies
             .iter()
-            .any(|spec| spec.name == "required-peer" && spec.version.as_deref() == Some("^3.0.0")));
-        assert!(!dependencies.iter().any(|spec| spec.name == "optional-peer"));
+            .any(|dependency| dependency.spec.name == "optional-runtime"
+                && dependency.spec.version.as_deref() == Some("^2.0.0")
+                && dependency.optional));
+        assert!(dependencies
+            .iter()
+            .any(|dependency| dependency.spec.name == "required-peer"
+                && dependency.spec.version.as_deref() == Some("^3.0.0")
+                && !dependency.optional));
+        assert!(!dependencies
+            .iter()
+            .any(|dependency| dependency.spec.name == "optional-peer"));
+    }
+
+    #[test]
+    fn evaluates_npm_platform_lists() {
+        assert!(npm_string_list_allows(
+            Some(&NpmStringList::Many(vec![current_npm_os().to_owned()])),
+            Some(current_npm_os())
+        ));
+        assert!(!npm_string_list_allows(
+            Some(&NpmStringList::Many(vec![format!("!{}", current_npm_os())])),
+            Some(current_npm_os())
+        ));
+        assert!(npm_string_list_allows(
+            Some(&NpmStringList::Many(vec![
+                "!definitely-not-this-os".to_owned()
+            ])),
+            Some(current_npm_os())
+        ));
+        assert!(!npm_string_list_allows(
+            Some(&NpmStringList::Many(vec![
+                "definitely-not-this-os".to_owned()
+            ])),
+            Some(current_npm_os())
+        ));
     }
 
     #[test]
@@ -3532,6 +3746,28 @@ mod tests {
 
         assert!(retained.contains("npm:is-odd@3.0.1"));
         assert!(retained.contains("npm:is-number@6.0.0"));
+    }
+
+    #[test]
+    fn locked_reachable_packages_allow_missing_optional_dependencies() {
+        let mut root = locked_package_for_test(Ecosystem::Npm, "has-optional", "1.0.0");
+        root.optional_dependencies = vec!["npm:optional-platform@1.0.0".to_owned()];
+        let lock = OmcLock {
+            version: 1,
+            packages: vec![root],
+        };
+        let options = LinkOptions::new(".");
+        let retained = locked_reachable_package_keys(
+            &lock,
+            &[PackageSpec::parse("npm:has-optional@1.0.0").unwrap()],
+            &options,
+        )
+        .unwrap();
+
+        assert_eq!(
+            retained,
+            BTreeSet::from(["npm:has-optional@1.0.0".to_owned()])
+        );
     }
 
     #[test]
@@ -3959,6 +4195,7 @@ mod tests {
             filename: "date-helper.tgz".to_owned(),
             expected_sha256: None,
             npm_scripts: BTreeMap::new(),
+            platform_compatible: true,
             dependencies: Vec::new(),
         };
         let findings = vec![CapabilityFinding {
@@ -3987,6 +4224,7 @@ mod tests {
             behavior: Behavior::Pure,
             verdict: Verdict::Accepted,
             dependencies: Vec::new(),
+            optional_dependencies: Vec::new(),
             grants: Vec::new(),
             capabilities: Vec::new(),
             verifier_findings: Vec::new(),

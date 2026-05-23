@@ -408,6 +408,12 @@ fn print_link_reports(reports: &[omc_registry::LinkReport]) {
         if !report.artifact.dependencies.is_empty() {
             println!("dependencies: {}", report.artifact.dependencies.join(", "));
         }
+        if !report.artifact.optional_dependencies.is_empty() {
+            println!(
+                "optional dependencies: {}",
+                report.artifact.optional_dependencies.join(", ")
+            );
+        }
 
         if !report.artifact.capabilities.is_empty() {
             println!("capabilities:");
