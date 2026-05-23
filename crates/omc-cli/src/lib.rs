@@ -185,6 +185,10 @@ enum Command {
             help = "Skip dev dependency inputs across npm and Python project files"
         )]
         omit_dev: bool,
+        #[arg(long = "omit-optional", help = "Skip npm optional dependency inputs")]
+        omit_optional: bool,
+        #[arg(long = "omit-peer", help = "Skip npm peer dependency inputs")]
+        omit_peer: bool,
         #[arg(long, help = "Install from omc.lock without registry resolution")]
         locked: bool,
         #[arg(long, help = "Grant all host capabilities for compatibility testing")]
@@ -222,6 +226,10 @@ enum Command {
             help = "Skip dev dependency inputs across npm and Python project files"
         )]
         omit_dev: bool,
+        #[arg(long = "omit-optional", help = "Skip npm optional dependency inputs")]
+        omit_optional: bool,
+        #[arg(long = "omit-peer", help = "Skip npm peer dependency inputs")]
+        omit_peer: bool,
         #[arg(long, help = "Grant all host capabilities for compatibility testing")]
         allow_all_host: bool,
     },
@@ -302,6 +310,8 @@ enum NpmCompatAction {
         save: bool,
         dependency_kind: ManifestDependencyKind,
         omit_dev: bool,
+        omit_optional: bool,
+        omit_peer: bool,
         lock_only: bool,
         dry_run: bool,
         npm_registry: Option<String>,
@@ -317,6 +327,8 @@ enum NpmCompatAction {
         save: bool,
         dependency_kind: ManifestDependencyKind,
         omit_dev: bool,
+        omit_optional: bool,
+        omit_peer: bool,
         lock_only: bool,
         dry_run: bool,
         npm_registry: Option<String>,
@@ -326,6 +338,8 @@ enum NpmCompatAction {
     },
     Ci {
         omit_dev: bool,
+        omit_optional: bool,
+        omit_peer: bool,
         allow: Vec<String>,
         allow_all_host: bool,
     },
@@ -338,6 +352,8 @@ enum NpmCompatAction {
         command: NpmMaintenanceCommand,
         packages: Vec<String>,
         omit_dev: bool,
+        omit_optional: bool,
+        omit_peer: bool,
         allow: Vec<String>,
         allow_all_host: bool,
     },
@@ -1392,6 +1408,8 @@ fn run() -> Result<ExitCode, OmcRegistryError> {
             requirements,
             constraints,
             omit_dev,
+            omit_optional,
+            omit_peer,
             locked,
             allow_all_host,
         } => {
@@ -1401,7 +1419,11 @@ fn run() -> Result<ExitCode, OmcRegistryError> {
                 extra,
                 requirements,
                 constraints,
-                omit_dev,
+                DependencyOmit {
+                    dev: omit_dev,
+                    optional: omit_optional,
+                    peer: omit_peer,
+                },
                 allow_all_host,
             )?;
             let install = if locked {
@@ -1417,6 +1439,8 @@ fn run() -> Result<ExitCode, OmcRegistryError> {
             requirements,
             constraints,
             omit_dev,
+            omit_optional,
+            omit_peer,
             allow_all_host,
         } => {
             let options = install_options(
@@ -1425,7 +1449,11 @@ fn run() -> Result<ExitCode, OmcRegistryError> {
                 extra,
                 requirements,
                 constraints,
-                omit_dev,
+                DependencyOmit {
+                    dev: omit_dev,
+                    optional: omit_optional,
+                    peer: omit_peer,
+                },
                 allow_all_host,
             )?;
             let install = install_locked_project(&options)?;
@@ -1473,7 +1501,7 @@ fn install_options(
     extra: Vec<String>,
     requirements: Vec<PathBuf>,
     constraints: Vec<PathBuf>,
-    omit_dev: bool,
+    omit: DependencyOmit,
     allow_all_host: bool,
 ) -> Result<LinkOptions, OmcRegistryError> {
     let mut options = LinkOptions::new(project_dir);
@@ -1490,8 +1518,26 @@ fn install_options(
         .into_iter()
         .map(|path| absolutize_path(project_dir, path))
         .collect();
-    options.include_dev_dependencies = !omit_dev;
+    apply_dependency_omit_flags(&mut options, omit.dev, omit.optional, omit.peer);
     Ok(options)
+}
+
+#[derive(Debug, Clone, Copy)]
+struct DependencyOmit {
+    dev: bool,
+    optional: bool,
+    peer: bool,
+}
+
+fn apply_dependency_omit_flags(
+    options: &mut LinkOptions,
+    omit_dev: bool,
+    omit_optional: bool,
+    omit_peer: bool,
+) {
+    options.include_dev_dependencies = !omit_dev;
+    options.include_optional_dependencies = !omit_optional;
+    options.include_peer_dependencies = !omit_peer;
 }
 
 fn print_install_report(install: &InstallReport) {
@@ -2110,6 +2156,8 @@ struct NpmInstallCompatRequest {
     save: bool,
     dependency_kind: ManifestDependencyKind,
     omit_dev: bool,
+    omit_optional: bool,
+    omit_peer: bool,
     lock_only: bool,
     dry_run: bool,
     npm_registry: Option<String>,
@@ -2128,6 +2176,8 @@ enum NpmLinkAction {
         save: bool,
         dependency_kind: ManifestDependencyKind,
         omit_dev: bool,
+        omit_optional: bool,
+        omit_peer: bool,
         lock_only: bool,
         dry_run: bool,
         npm_registry: Option<String>,
@@ -2147,6 +2197,8 @@ fn run_npm_install_compat(
         save,
         dependency_kind,
         omit_dev,
+        omit_optional,
+        omit_peer,
         lock_only,
         dry_run,
         npm_registry,
@@ -2163,6 +2215,8 @@ fn run_npm_install_compat(
                 save,
                 dependency_kind,
                 omit_dev,
+                omit_optional,
+                omit_peer,
                 lock_only,
                 dry_run,
                 npm_registry,
@@ -2176,7 +2230,7 @@ fn run_npm_install_compat(
         let mut options = LinkOptions::new(project_dir);
         options.allowed_capabilities = allowed_capabilities;
         options.npm_registry_url = npm_registry.clone();
-        options.include_dev_dependencies = !omit_dev;
+        apply_dependency_omit_flags(&mut options, omit_dev, omit_optional, omit_peer);
         options.npm_local_paths = absolutize_paths(project_dir, local_paths.clone());
         if save && !local_paths.is_empty() {
             add_manifest_npm_local_paths(project_dir, &local_paths, dependency_kind)?;
@@ -2195,7 +2249,7 @@ fn run_npm_install_compat(
         options.npm_registry_url = npm_registry.clone();
         options.save_manifest_dependency = save;
         options.save_dependency_kind = dependency_kind;
-        options.include_dev_dependencies = !omit_dev;
+        apply_dependency_omit_flags(&mut options, omit_dev, omit_optional, omit_peer);
         options.npm_local_paths = absolutize_paths(project_dir, local_paths.clone());
         if save && !local_paths.is_empty() {
             add_manifest_npm_local_paths(project_dir, &local_paths, dependency_kind)?;
@@ -2252,6 +2306,8 @@ fn run_npm_link_compat(
             save,
             dependency_kind,
             omit_dev,
+            omit_optional,
+            omit_peer,
             lock_only,
             dry_run,
             npm_registry,
@@ -2283,6 +2339,8 @@ fn run_npm_link_compat(
                     save,
                     dependency_kind,
                     omit_dev,
+                    omit_optional,
+                    omit_peer,
                     lock_only,
                     dry_run,
                     npm_registry,
@@ -2406,6 +2464,8 @@ fn run_npm_install_dry_run(
         save: _,
         dependency_kind: _,
         omit_dev,
+        omit_optional,
+        omit_peer,
         lock_only,
         dry_run: _,
         npm_registry,
@@ -2419,7 +2479,7 @@ fn run_npm_install_dry_run(
     options.discover_project_requirements = specs.is_empty() && archive_references.is_empty();
     options.allowed_capabilities = parse_grants(&allow, allow_all_host)?;
     options.npm_registry_url = npm_registry.clone();
-    options.include_dev_dependencies = !omit_dev;
+    apply_dependency_omit_flags(&mut options, omit_dev, omit_optional, omit_peer);
 
     let mut reports = Vec::new();
     if specs.is_empty() && archive_references.is_empty() {
@@ -2478,12 +2538,14 @@ fn run_npm_install_dry_run(
 fn run_npm_ci_compat(
     project_dir: &Path,
     omit_dev: bool,
+    omit_optional: bool,
+    omit_peer: bool,
     allow: Vec<String>,
     allow_all_host: bool,
 ) -> Result<ExitCode, OmcRegistryError> {
     let mut options = LinkOptions::new(project_dir);
     options.allowed_capabilities = parse_grants(&allow, allow_all_host)?;
-    options.include_dev_dependencies = !omit_dev;
+    apply_dependency_omit_flags(&mut options, omit_dev, omit_optional, omit_peer);
     let install = install_locked_project(&options)?;
     print_install_report(&install);
     Ok(ExitCode::SUCCESS)
@@ -2505,6 +2567,8 @@ fn run_npm_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
             save,
             dependency_kind,
             omit_dev,
+            omit_optional,
+            omit_peer,
             lock_only,
             dry_run,
             npm_registry,
@@ -2520,6 +2584,8 @@ fn run_npm_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
                     save,
                     dependency_kind,
                     omit_dev,
+                    omit_optional,
+                    omit_peer,
                     lock_only,
                     dry_run,
                     npm_registry,
@@ -2537,6 +2603,8 @@ fn run_npm_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
             save,
             dependency_kind,
             omit_dev,
+            omit_optional,
+            omit_peer,
             lock_only,
             dry_run,
             npm_registry,
@@ -2545,7 +2613,14 @@ fn run_npm_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
             test_args,
         } => {
             let status = if use_ci {
-                run_npm_ci_compat(project_dir, omit_dev, allow, allow_all_host)?
+                run_npm_ci_compat(
+                    project_dir,
+                    omit_dev,
+                    omit_optional,
+                    omit_peer,
+                    allow,
+                    allow_all_host,
+                )?
             } else {
                 run_npm_install_compat(
                     project_dir,
@@ -2556,6 +2631,8 @@ fn run_npm_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
                         save,
                         dependency_kind,
                         omit_dev,
+                        omit_optional,
+                        omit_peer,
                         lock_only,
                         dry_run,
                         npm_registry,
@@ -2582,9 +2659,20 @@ fn run_npm_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
         }
         NpmCompatAction::Ci {
             omit_dev,
+            omit_optional,
+            omit_peer,
             allow,
             allow_all_host,
-        } => return run_npm_ci_compat(project_dir, omit_dev, allow, allow_all_host),
+        } => {
+            return run_npm_ci_compat(
+                project_dir,
+                omit_dev,
+                omit_optional,
+                omit_peer,
+                allow,
+                allow_all_host,
+            )
+        }
         NpmCompatAction::Remove {
             specs,
             allow,
@@ -2602,12 +2690,14 @@ fn run_npm_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
             command,
             packages,
             omit_dev,
+            omit_optional,
+            omit_peer,
             allow,
             allow_all_host,
         } => {
             let mut options = LinkOptions::new(project_dir);
             options.allowed_capabilities = parse_grants(&allow, allow_all_host)?;
-            options.include_dev_dependencies = !omit_dev;
+            apply_dependency_omit_flags(&mut options, omit_dev, omit_optional, omit_peer);
             let install = install_locked_project(&options)?;
             print_npm_maintenance_report(command, &packages, &install);
         }
@@ -3359,7 +3449,7 @@ fn npm_help_text(topic: Option<&str>) -> String {
             &[
                 "Resolve, verify, lock, and install npm packages with OMC.",
                 "Aliases: i, add, update, up, upgrade.",
-                "Common flags: --save, --no-save, --save-dev, --save-optional, --save-peer, --omit=dev, --include=dev, --package-lock-only, --dry-run, --registry, --allow, --allow-all-host.",
+                "Common flags: --save, --no-save, --save-dev, --save-optional, --save-peer, --omit=dev|optional|peer, --include=dev|optional|peer, --package-lock-only, --dry-run, --registry, --allow, --allow-all-host.",
                 "Direct local inputs are supported for .tgz archives and local package directories.",
             ],
         ),
@@ -3369,14 +3459,14 @@ fn npm_help_text(topic: Option<&str>) -> String {
                 "Register or install local npm package links through OMC's link store.",
                 "`npm link` registers the current package; `npm link ../pkg` registers and links a local directory; `npm link <name>` links a previously registered package.",
                 "Links are not saved by default. Use --save, --save-dev, --save-optional, or --save-peer to record a local path in omc.toml.",
-                "Supports --dry-run, --package-lock-only, omit/include flags, --registry for dependency refreshes, --allow, and --allow-all-host.",
+                "Supports --dry-run, --package-lock-only, omit/include flags for dev/optional/peer dependencies, --registry for dependency refreshes, --allow, and --allow-all-host.",
             ],
         ),
         Some("ci") => npm_command_help(
             "npm ci",
             &[
                 "Install the exact OMC lockfile state.",
-                "Common flags: --omit=dev, --include=dev, --allow, --allow-all-host.",
+                "Common flags: --omit=dev|optional|peer, --include=dev|optional|peer, --allow, --allow-all-host.",
             ],
         ),
         Some("install-test") => npm_command_help(
@@ -11755,6 +11845,12 @@ fn print_link_reports(reports: &[omc_registry::LinkReport]) {
                 report.artifact.optional_dependencies.join(", ")
             );
         }
+        if !report.artifact.peer_dependencies.is_empty() {
+            println!(
+                "peer dependencies: {}",
+                report.artifact.peer_dependencies.join(", ")
+            );
+        }
 
         if !report.artifact.capabilities.is_empty() {
             println!("capabilities:");
@@ -11803,6 +11899,8 @@ fn parse_npm_compat_action(args: &[String]) -> Result<NpmCompatAction, OmcRegist
             save: true,
             dependency_kind: ManifestDependencyKind::Production,
             omit_dev: false,
+            omit_optional: false,
+            omit_peer: false,
             lock_only: false,
             dry_run: false,
             npm_registry: None,
@@ -11823,6 +11921,8 @@ fn parse_npm_compat_action(args: &[String]) -> Result<NpmCompatAction, OmcRegist
         "ci" => {
             let CommonCompatFlags {
                 omit_dev,
+                omit_optional,
+                omit_peer,
                 allow,
                 allow_all_host,
                 positionals,
@@ -11833,6 +11933,8 @@ fn parse_npm_compat_action(args: &[String]) -> Result<NpmCompatAction, OmcRegist
             }
             Ok(NpmCompatAction::Ci {
                 omit_dev,
+                omit_optional,
+                omit_peer,
                 allow,
                 allow_all_host,
             })
@@ -12681,6 +12783,8 @@ fn parse_npm_maintenance_args(
 
     let CommonCompatFlags {
         omit_dev,
+        omit_optional,
+        omit_peer,
         allow,
         allow_all_host,
         positionals,
@@ -12693,6 +12797,8 @@ fn parse_npm_maintenance_args(
         command: maintenance,
         packages: Vec::new(),
         omit_dev,
+        omit_optional,
+        omit_peer,
         allow,
         allow_all_host,
     })
@@ -12748,6 +12854,8 @@ fn parse_npm_rebuild_args(args: &[String]) -> Result<NpmCompatAction, OmcRegistr
 
     let CommonCompatFlags {
         omit_dev,
+        omit_optional,
+        omit_peer,
         allow,
         allow_all_host,
         positionals,
@@ -12758,6 +12866,8 @@ fn parse_npm_rebuild_args(args: &[String]) -> Result<NpmCompatAction, OmcRegistr
         command: NpmMaintenanceCommand::Rebuild,
         packages: positionals,
         omit_dev,
+        omit_optional,
+        omit_peer,
         allow,
         allow_all_host,
     })
@@ -13050,6 +13160,8 @@ fn parse_npm_install_args(args: &[String]) -> Result<NpmCompatAction, OmcRegistr
     let CommonCompatFlags {
         dependency_kind,
         omit_dev,
+        omit_optional,
+        omit_peer,
         save,
         lock_only,
         npm_registry,
@@ -13065,6 +13177,8 @@ fn parse_npm_install_args(args: &[String]) -> Result<NpmCompatAction, OmcRegistr
         save,
         dependency_kind,
         omit_dev,
+        omit_optional,
+        omit_peer,
         lock_only,
         dry_run,
         npm_registry,
@@ -13108,6 +13222,8 @@ fn parse_npm_link_args(args: &[String]) -> Result<NpmCompatAction, OmcRegistryEr
     let CommonCompatFlags {
         dependency_kind,
         omit_dev,
+        omit_optional,
+        omit_peer,
         save,
         lock_only,
         npm_registry,
@@ -13129,6 +13245,8 @@ fn parse_npm_link_args(args: &[String]) -> Result<NpmCompatAction, OmcRegistryEr
             save: explicit_save && save,
             dependency_kind,
             omit_dev,
+            omit_optional,
+            omit_peer,
             lock_only,
             dry_run,
             npm_registry,
@@ -13177,6 +13295,8 @@ fn parse_npm_install_test_args(
     if use_ci {
         let CommonCompatFlags {
             omit_dev,
+            omit_optional,
+            omit_peer,
             allow,
             allow_all_host,
             positionals,
@@ -13194,6 +13314,8 @@ fn parse_npm_install_test_args(
             save: true,
             dependency_kind: ManifestDependencyKind::Production,
             omit_dev,
+            omit_optional,
+            omit_peer,
             lock_only: false,
             dry_run: false,
             npm_registry: None,
@@ -13211,6 +13333,8 @@ fn parse_npm_install_test_args(
         save,
         dependency_kind,
         omit_dev,
+        omit_optional,
+        omit_peer,
         lock_only,
         dry_run,
         npm_registry,
@@ -13229,6 +13353,8 @@ fn parse_npm_install_test_args(
         save,
         dependency_kind,
         omit_dev,
+        omit_optional,
+        omit_peer,
         lock_only,
         dry_run,
         npm_registry,
@@ -18608,6 +18734,8 @@ fn is_pip_wheel_archive_arg(value: &str) -> bool {
 struct CommonCompatFlags {
     dependency_kind: ManifestDependencyKind,
     omit_dev: bool,
+    omit_optional: bool,
+    omit_peer: bool,
     save: bool,
     lock_only: bool,
     npm_registry: Option<String>,
@@ -18621,6 +18749,8 @@ impl Default for CommonCompatFlags {
         Self {
             dependency_kind: ManifestDependencyKind::Production,
             omit_dev: false,
+            omit_optional: false,
+            omit_peer: false,
             save: true,
             lock_only: false,
             npm_registry: None,
@@ -18693,9 +18823,17 @@ fn parse_common_compat_flags(
                 parsed.omit_dev = false;
             } else if let Some(value) = arg.strip_prefix("--omit=") {
                 parsed.omit_dev |= npm_dependency_set_contains(value, "dev");
+                parsed.omit_optional |= npm_dependency_set_contains(value, "optional");
+                parsed.omit_peer |= npm_dependency_set_contains(value, "peer");
             } else if let Some(value) = arg.strip_prefix("--include=") {
                 if npm_dependency_set_contains(value, "dev") {
                     parsed.omit_dev = false;
+                }
+                if npm_dependency_set_contains(value, "optional") {
+                    parsed.omit_optional = false;
+                }
+                if npm_dependency_set_contains(value, "peer") {
+                    parsed.omit_peer = false;
                 }
             } else if arg == "--omit" {
                 index += 1;
@@ -18705,6 +18843,8 @@ fn parse_common_compat_flags(
                     ));
                 };
                 parsed.omit_dev |= npm_dependency_set_contains(value, "dev");
+                parsed.omit_optional |= npm_dependency_set_contains(value, "optional");
+                parsed.omit_peer |= npm_dependency_set_contains(value, "peer");
             } else if arg == "--include" {
                 index += 1;
                 let Some(value) = args.get(index) else {
@@ -18714,6 +18854,12 @@ fn parse_common_compat_flags(
                 };
                 if npm_dependency_set_contains(value, "dev") {
                     parsed.omit_dev = false;
+                }
+                if npm_dependency_set_contains(value, "optional") {
+                    parsed.omit_optional = false;
+                }
+                if npm_dependency_set_contains(value, "peer") {
+                    parsed.omit_peer = false;
                 }
             } else if ignored_npm_value_flag(arg) {
                 index += 1;
@@ -19484,6 +19630,8 @@ mod tests {
                 save: true,
                 dependency_kind: ManifestDependencyKind::Production,
                 omit_dev: false,
+                omit_optional: false,
+                omit_peer: false,
                 lock_only: false,
                 dry_run: false,
                 npm_registry: Some("https://registry.example.invalid/npm".to_owned()),
@@ -19674,6 +19822,8 @@ mod tests {
                 save: true,
                 dependency_kind: ManifestDependencyKind::Dev,
                 omit_dev: true,
+                omit_optional: false,
+                omit_peer: false,
                 lock_only: false,
                 dry_run: true,
                 npm_registry: Some("https://registry.example.invalid/npm".to_owned()),
@@ -19691,6 +19841,8 @@ mod tests {
                 save: true,
                 dependency_kind: ManifestDependencyKind::Optional,
                 omit_dev: false,
+                omit_optional: false,
+                omit_peer: false,
                 lock_only: false,
                 dry_run: false,
                 npm_registry: None,
@@ -19708,6 +19860,8 @@ mod tests {
                 save: true,
                 dependency_kind: ManifestDependencyKind::Peer,
                 omit_dev: false,
+                omit_optional: false,
+                omit_peer: false,
                 lock_only: false,
                 dry_run: false,
                 npm_registry: None,
@@ -19734,6 +19888,8 @@ mod tests {
                 save: true,
                 dependency_kind: ManifestDependencyKind::Production,
                 omit_dev: false,
+                omit_optional: false,
+                omit_peer: false,
                 lock_only: false,
                 dry_run: false,
                 npm_registry: None,
@@ -19757,6 +19913,8 @@ mod tests {
                     save: false,
                     dependency_kind: ManifestDependencyKind::Production,
                     omit_dev: false,
+                    omit_optional: false,
+                    omit_peer: false,
                     lock_only: false,
                     dry_run: true,
                     npm_registry: None,
@@ -19781,6 +19939,8 @@ mod tests {
                     save: true,
                     dependency_kind: ManifestDependencyKind::Dev,
                     omit_dev: true,
+                    omit_optional: false,
+                    omit_peer: false,
                     lock_only: false,
                     dry_run: false,
                     npm_registry: Some("https://registry.example.invalid/npm".to_owned()),
@@ -19810,6 +19970,8 @@ mod tests {
                 save: false,
                 dependency_kind: ManifestDependencyKind::Production,
                 omit_dev: false,
+                omit_optional: true,
+                omit_peer: true,
                 lock_only: false,
                 dry_run: false,
                 npm_registry: None,
@@ -19831,6 +19993,8 @@ mod tests {
                 save: true,
                 dependency_kind: ManifestDependencyKind::Production,
                 omit_dev: false,
+                omit_optional: false,
+                omit_peer: false,
                 lock_only: true,
                 dry_run: false,
                 npm_registry: None,
@@ -19858,6 +20022,8 @@ mod tests {
                 save: true,
                 dependency_kind: ManifestDependencyKind::Production,
                 omit_dev: true,
+                omit_optional: false,
+                omit_peer: false,
                 lock_only: false,
                 dry_run: false,
                 npm_registry: Some("https://registry.example.invalid/npm".to_owned()),
@@ -19878,6 +20044,8 @@ mod tests {
                 save: true,
                 dependency_kind: ManifestDependencyKind::Production,
                 omit_dev: true,
+                omit_optional: false,
+                omit_peer: false,
                 lock_only: false,
                 dry_run: false,
                 npm_registry: None,
@@ -19905,6 +20073,8 @@ mod tests {
                 save: true,
                 dependency_kind: ManifestDependencyKind::Production,
                 omit_dev: true,
+                omit_optional: false,
+                omit_peer: false,
                 lock_only: true,
                 dry_run: false,
                 npm_registry: Some("https://registry.example.invalid/npm".to_owned()),
@@ -20300,6 +20470,8 @@ mod tests {
                 command: NpmMaintenanceCommand::Prune,
                 packages: Vec::new(),
                 omit_dev: true,
+                omit_optional: false,
+                omit_peer: false,
                 allow: Vec::new(),
                 allow_all_host: true,
             }
@@ -20311,6 +20483,8 @@ mod tests {
                 command: NpmMaintenanceCommand::Dedupe,
                 packages: Vec::new(),
                 omit_dev: false,
+                omit_optional: false,
+                omit_peer: false,
                 allow: Vec::new(),
                 allow_all_host: false,
             }
@@ -20328,6 +20502,8 @@ mod tests {
                 command: NpmMaintenanceCommand::Rebuild,
                 packages: vec!["node-sass".to_owned()],
                 omit_dev: true,
+                omit_optional: false,
+                omit_peer: false,
                 allow: Vec::new(),
                 allow_all_host: false,
             }
@@ -23545,6 +23721,7 @@ verdict = "accepted"
             verdict: Verdict::Accepted,
             dependencies,
             optional_dependencies: Vec::new(),
+            peer_dependencies: Vec::new(),
             grants: Vec::new(),
             capabilities: Vec::new(),
             verifier_findings: Vec::new(),
@@ -23564,6 +23741,7 @@ verdict = "accepted"
             verdict: Verdict::Accepted,
             dependencies,
             optional_dependencies: Vec::new(),
+            peer_dependencies: Vec::new(),
             grants: Vec::new(),
             capabilities: Vec::new(),
             verifier_findings: Vec::new(),

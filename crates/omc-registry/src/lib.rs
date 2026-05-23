@@ -370,6 +370,31 @@ pub enum ManifestDependencyKind {
     Peer,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct DependencySelection {
+    dev: bool,
+    optional: bool,
+    peer: bool,
+}
+
+impl DependencySelection {
+    fn with_dev(dev: bool) -> Self {
+        Self {
+            dev,
+            optional: true,
+            peer: true,
+        }
+    }
+
+    fn from_options(options: &LinkOptions) -> Self {
+        Self {
+            dev: options.include_dev_dependencies,
+            optional: options.include_optional_dependencies,
+            peer: options.include_peer_dependencies,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct OmcLock {
     pub version: u32,
@@ -452,6 +477,8 @@ pub struct LockedPackage {
     pub dependencies: Vec<String>,
     #[serde(default)]
     pub optional_dependencies: Vec<String>,
+    #[serde(default)]
+    pub peer_dependencies: Vec<String>,
     #[serde(default)]
     pub grants: Vec<String>,
     #[serde(default)]
@@ -553,6 +580,8 @@ pub struct OmcArtifact {
     pub dependencies: Vec<String>,
     #[serde(default)]
     pub optional_dependencies: Vec<String>,
+    #[serde(default)]
+    pub peer_dependencies: Vec<String>,
     pub files_scanned: usize,
     pub capabilities: Vec<CapabilityFinding>,
     pub verifier_findings: Vec<String>,
@@ -604,6 +633,8 @@ pub struct LinkOptions {
     pub constraint_files: Vec<PathBuf>,
     pub project_extras: BTreeSet<String>,
     pub include_dev_dependencies: bool,
+    pub include_optional_dependencies: bool,
+    pub include_peer_dependencies: bool,
     pub discover_project_requirements: bool,
     pub save_manifest_dependency: bool,
     pub save_dependency_kind: ManifestDependencyKind,
@@ -638,6 +669,8 @@ impl LinkOptions {
             constraint_files: Vec::new(),
             project_extras: BTreeSet::new(),
             include_dev_dependencies: true,
+            include_optional_dependencies: true,
+            include_peer_dependencies: true,
             discover_project_requirements: true,
             save_manifest_dependency: true,
             save_dependency_kind: ManifestDependencyKind::Production,
@@ -842,6 +875,7 @@ struct ResolvedPackage {
 struct PackageDependency {
     spec: PackageSpec,
     optional: bool,
+    peer: bool,
 }
 
 pub fn init_project(project_dir: impl AsRef<Path>, name: Option<&str>) -> Result<PathBuf> {
@@ -1179,11 +1213,15 @@ fn project_requested_specs(options: &mut LinkOptions, locked: bool) -> Result<Ve
     for (key, requirement) in manifest.dependencies {
         specs.push(parse_manifest_dependency(&key, &requirement)?);
     }
-    for (key, requirement) in manifest.optional_dependencies {
-        specs.push(parse_manifest_dependency(&key, &requirement)?);
+    if options.include_optional_dependencies {
+        for (key, requirement) in manifest.optional_dependencies {
+            specs.push(parse_manifest_dependency(&key, &requirement)?);
+        }
     }
-    for (key, requirement) in manifest.peer_dependencies {
-        specs.push(parse_manifest_dependency(&key, &requirement)?);
+    if options.include_peer_dependencies {
+        for (key, requirement) in manifest.peer_dependencies {
+            specs.push(parse_manifest_dependency(&key, &requirement)?);
+        }
     }
     if options.include_dev_dependencies {
         for (key, requirement) in manifest.dev_dependencies {
@@ -1191,10 +1229,10 @@ fn project_requested_specs(options: &mut LinkOptions, locked: bool) -> Result<Ve
         }
     }
     if options.discover_project_requirements {
-        let discovered = discover_project_requirements_with_options(
+        let discovered = discover_project_requirements_with_selection(
             &options.project_dir,
             &options.project_extras,
-            options.include_dev_dependencies,
+            DependencySelection::from_options(options),
         )?;
         apply_project_requirements_to_options(options, &mut specs, discovered);
     }
@@ -1779,11 +1817,22 @@ fn collect_locked_dependencies(
                 .ok_or_else(|| OmcRegistryError::LockfileOutOfDate(spec.requested()))?;
         collect_locked_dependencies(lock, dependency, options, retained)?;
     }
-    for dependency in &package.optional_dependencies {
-        let spec = PackageSpec::parse(dependency)?;
-        if let Some(dependency) =
-            find_locked_package_for_spec(lock, &spec, &BTreeMap::new(), &BTreeMap::new())
-        {
+    if options.include_optional_dependencies {
+        for dependency in &package.optional_dependencies {
+            let spec = PackageSpec::parse(dependency)?;
+            if let Some(dependency) =
+                find_locked_package_for_spec(lock, &spec, &BTreeMap::new(), &BTreeMap::new())
+            {
+                collect_locked_dependencies(lock, dependency, options, retained)?;
+            }
+        }
+    }
+    if options.include_peer_dependencies {
+        for dependency in &package.peer_dependencies {
+            let spec = PackageSpec::parse(dependency)?;
+            let dependency =
+                find_locked_package_for_spec(lock, &spec, &BTreeMap::new(), &BTreeMap::new())
+                    .ok_or_else(|| OmcRegistryError::LockfileOutOfDate(spec.requested()))?;
             collect_locked_dependencies(lock, dependency, options, retained)?;
         }
     }
@@ -2047,12 +2096,24 @@ fn discover_project_requirements_with_options(
     project_extras: &BTreeSet<String>,
     include_dev_dependencies: bool,
 ) -> Result<ProjectRequirements> {
+    discover_project_requirements_with_selection(
+        project_dir,
+        project_extras,
+        DependencySelection::with_dev(include_dev_dependencies),
+    )
+}
+
+fn discover_project_requirements_with_selection(
+    project_dir: impl AsRef<Path>,
+    project_extras: &BTreeSet<String>,
+    selection: DependencySelection,
+) -> Result<ProjectRequirements> {
     let project_dir = project_dir.as_ref();
     let mut project = ProjectRequirements::default();
 
     let package_json = project_dir.join("package.json");
     if package_json.exists() {
-        let requirements = read_package_json_requirements(&package_json, include_dev_dependencies)?;
+        let requirements = read_package_json_requirements(&package_json, selection)?;
         extend_project_requirements(&mut project, requirements);
     }
 
@@ -2072,11 +2133,11 @@ fn discover_project_requirements_with_options(
 
     let pnpm_lock = project_dir.join("pnpm-lock.yaml");
     if pnpm_lock.exists() {
-        let lock_requirements = read_pnpm_lock_requirements(&pnpm_lock, include_dev_dependencies)?;
+        let lock_requirements = read_pnpm_lock_requirements(&pnpm_lock, selection)?;
         extend_project_requirements(&mut project, lock_requirements);
     }
 
-    let requirements_files = project_requirements_files(project_dir, include_dev_dependencies);
+    let requirements_files = project_requirements_files(project_dir, selection.dev);
     if !requirements_files.is_empty() {
         let requirements = read_requirements_files(&requirements_files)?;
         extend_project_requirements(&mut project, requirements);
@@ -2084,19 +2145,19 @@ fn discover_project_requirements_with_options(
 
     let pipfile_lock = project_dir.join("Pipfile.lock");
     if pipfile_lock.exists() {
-        let requirements = read_pipfile_lock_requirements(&pipfile_lock, include_dev_dependencies)?;
+        let requirements = read_pipfile_lock_requirements(&pipfile_lock, selection.dev)?;
         extend_project_requirements(&mut project, requirements);
     }
 
     let pipfile = project_dir.join("Pipfile");
     if pipfile.exists() && !pipfile_lock.exists() {
-        let requirements = read_pipfile_requirements(&pipfile, include_dev_dependencies)?;
+        let requirements = read_pipfile_requirements(&pipfile, selection.dev)?;
         extend_project_requirements(&mut project, requirements);
     }
 
     let uv_lock = project_dir.join("uv.lock");
     if uv_lock.exists() {
-        let requirements = read_uv_lock_requirements(&uv_lock, include_dev_dependencies)?;
+        let requirements = read_uv_lock_requirements(&uv_lock, selection.dev)?;
         extend_project_requirements(&mut project, requirements);
     }
 
@@ -2112,7 +2173,7 @@ fn discover_project_requirements_with_options(
     let pyproject_toml = project_dir.join("pyproject.toml");
     if pyproject_toml.exists() {
         let requirements =
-            read_pyproject_requirements(&pyproject_toml, project_extras, include_dev_dependencies)?;
+            read_pyproject_requirements(&pyproject_toml, project_extras, selection.dev)?;
         extend_project_requirements(&mut project, requirements);
     }
 
@@ -2196,6 +2257,12 @@ fn add_package_graph_inner(
 
     if follow_dependencies {
         for dependency in dependencies {
+            if dependency.optional && !options.include_optional_dependencies {
+                continue;
+            }
+            if dependency.peer && !options.include_peer_dependencies {
+                continue;
+            }
             add_package_graph_inner(
                 client,
                 &dependency.spec,
@@ -2349,12 +2416,17 @@ fn link_package_inner(
             .collect(),
         dependencies: dependencies
             .iter()
-            .filter(|dependency| !dependency.optional)
+            .filter(|dependency| !dependency.optional && !dependency.peer)
             .map(|dependency| dependency.spec.requested())
             .collect(),
         optional_dependencies: dependencies
             .iter()
             .filter(|dependency| dependency.optional)
+            .map(|dependency| dependency.spec.requested())
+            .collect(),
+        peer_dependencies: dependencies
+            .iter()
+            .filter(|dependency| dependency.peer)
             .map(|dependency| dependency.spec.requested())
             .collect(),
         files_scanned: profile.files_scanned,
@@ -2377,6 +2449,7 @@ fn link_package_inner(
         verdict,
         dependencies: artifact.dependencies.clone(),
         optional_dependencies: artifact.optional_dependencies.clone(),
+        peer_dependencies: artifact.peer_dependencies.clone(),
         grants: artifact.grants.clone(),
         capabilities: artifact.capabilities.clone(),
         verifier_findings,
@@ -2498,15 +2571,19 @@ fn apply_manifest_config(manifest: &OmcManifest, options: &mut LinkOptions) -> R
             .npm_local_paths
             .push(resolve_manifest_path(&project_dir, path));
     }
-    for path in &manifest.npm_optional_local_paths {
-        options
-            .npm_local_paths
-            .push(resolve_manifest_path(&project_dir, path));
+    if options.include_optional_dependencies {
+        for path in &manifest.npm_optional_local_paths {
+            options
+                .npm_local_paths
+                .push(resolve_manifest_path(&project_dir, path));
+        }
     }
-    for path in &manifest.npm_peer_local_paths {
-        options
-            .npm_local_paths
-            .push(resolve_manifest_path(&project_dir, path));
+    if options.include_peer_dependencies {
+        for path in &manifest.npm_peer_local_paths {
+            options
+                .npm_local_paths
+                .push(resolve_manifest_path(&project_dir, path));
+        }
     }
     if options.include_dev_dependencies {
         for path in &manifest.npm_dev_local_paths {
@@ -2948,23 +3025,25 @@ fn read_package_json_specs(
     path: &Path,
     include_dev_dependencies: bool,
 ) -> Result<Vec<PackageSpec>> {
-    Ok(read_package_json_requirements(path, include_dev_dependencies)?.specs)
+    Ok(read_package_json_requirements(
+        path,
+        DependencySelection::with_dev(include_dev_dependencies),
+    )?
+    .specs)
 }
 
 fn read_package_json_requirements(
     path: &Path,
-    include_dev_dependencies: bool,
+    selection: DependencySelection,
 ) -> Result<ProjectRequirements> {
     let package = serde_json::from_str::<ProjectPackageJson>(&fs::read_to_string(path)?)?;
     let base_dir = path.parent().unwrap_or_else(|| Path::new("."));
     let workspaces = package.workspaces.clone();
     let mut requirements = ProjectRequirements::default();
     collect_package_json_constraints(&package, &mut requirements.constraints);
-    requirements.specs.extend(package_json_dependency_specs(
-        package,
-        include_dev_dependencies,
-        base_dir,
-    )?);
+    requirements
+        .specs
+        .extend(package_json_dependency_specs(package, selection, base_dir)?);
 
     if let Some(workspaces) = workspaces {
         for package_json in workspace_package_json_paths(base_dir, &workspaces) {
@@ -2974,7 +3053,7 @@ fn read_package_json_requirements(
             collect_package_json_constraints(&package, &mut requirements.constraints);
             requirements.specs.extend(package_json_dependency_specs(
                 package,
-                include_dev_dependencies,
+                selection,
                 workspace_base_dir,
             )?);
         }
@@ -2985,12 +3064,22 @@ fn read_package_json_requirements(
 
 fn package_json_dependency_specs(
     package: ProjectPackageJson,
-    include_dev_dependencies: bool,
+    selection: DependencySelection,
     base_dir: &Path,
 ) -> Result<Vec<PackageSpec>> {
     let mut specs = Vec::new();
-    let dev_dependencies = if include_dev_dependencies {
+    let dev_dependencies = if selection.dev {
         package.dev_dependencies
+    } else {
+        BTreeMap::new()
+    };
+    let optional_dependencies = if selection.optional {
+        package.optional_dependencies
+    } else {
+        BTreeMap::new()
+    };
+    let peer_dependencies = if selection.peer {
+        required_peer_dependencies(package.peer_dependencies, package.peer_dependencies_meta)
     } else {
         BTreeMap::new()
     };
@@ -2998,8 +3087,8 @@ fn package_json_dependency_specs(
     for dependencies in [
         package.dependencies,
         dev_dependencies,
-        package.optional_dependencies,
-        required_peer_dependencies(package.peer_dependencies, package.peer_dependencies_meta),
+        optional_dependencies,
+        peer_dependencies,
     ] {
         for (name, requirement) in dependencies {
             if let Some(spec) = npm_package_json_dependency_spec(name, requirement, base_dir)? {
@@ -3556,7 +3645,7 @@ fn read_yarn_lock_requirements(path: &Path) -> Result<ProjectRequirements> {
 
 fn read_pnpm_lock_requirements(
     path: &Path,
-    include_dev_dependencies: bool,
+    selection: DependencySelection,
 ) -> Result<ProjectRequirements> {
     let lock = serde_yaml::from_str::<PnpmLock>(&fs::read_to_string(path)?)
         .map_err(|error| OmcRegistryError::UnsupportedRequirement(error.to_string()))?;
@@ -3567,12 +3656,14 @@ fn read_pnpm_lock_requirements(
 
     for importer in lock.importers.into_values() {
         collect_pnpm_importer_dependencies(importer.dependencies, &mut requirements, &mut versions);
-        collect_pnpm_importer_dependencies(
-            importer.optional_dependencies,
-            &mut requirements,
-            &mut versions,
-        );
-        if include_dev_dependencies {
+        if selection.optional {
+            collect_pnpm_importer_dependencies(
+                importer.optional_dependencies,
+                &mut requirements,
+                &mut versions,
+            );
+        }
+        if selection.dev {
             collect_pnpm_importer_dependencies(
                 importer.dev_dependencies,
                 &mut requirements,
@@ -6975,6 +7066,7 @@ fn pypi_metadata_dependencies(
                 PackageDependency {
                     spec,
                     optional: false,
+                    peer: false,
                 }
             })
         })
@@ -11314,14 +11406,14 @@ fn npm_dependency_fields(
             .unwrap_or_default()
             .into_iter()
             .filter(|(name, _)| !bundled.contains(name))
-            .map(|(name, requirement)| npm_dependency(name, requirement, false)),
+            .map(|(name, requirement)| npm_dependency(name, requirement, false, false)),
     );
     dependencies.extend(
         optional_dependencies_field
             .unwrap_or_default()
             .into_iter()
             .filter(|(name, _)| !bundled.contains(name))
-            .map(|(name, requirement)| npm_dependency(name, requirement, true)),
+            .map(|(name, requirement)| npm_dependency(name, requirement, true, false)),
     );
     dependencies.extend(
         required_peer_dependencies(
@@ -11330,7 +11422,7 @@ fn npm_dependency_fields(
         )
         .into_iter()
         .filter(|(name, _)| !bundled.contains(name))
-        .map(|(name, requirement)| npm_dependency(name, requirement, false)),
+        .map(|(name, requirement)| npm_dependency(name, requirement, false, true)),
     );
 
     dependencies.sort_by(|left, right| {
@@ -11339,6 +11431,7 @@ fn npm_dependency_fields(
             .cmp(&right.spec.name)
             .then_with(|| left.spec.version.cmp(&right.spec.version))
             .then_with(|| left.optional.cmp(&right.optional))
+            .then_with(|| left.peer.cmp(&right.peer))
     });
     dependencies.dedup_by(|left, right| {
         left.spec.name == right.spec.name && left.spec.version == right.spec.version
@@ -11375,10 +11468,16 @@ fn npm_bundled_dependency_names(
     }
 }
 
-fn npm_dependency(name: String, requirement: String, optional: bool) -> PackageDependency {
+fn npm_dependency(
+    name: String,
+    requirement: String,
+    optional: bool,
+    peer: bool,
+) -> PackageDependency {
     PackageDependency {
         spec: PackageSpec::new(Ecosystem::Npm, name, Some(requirement)),
         optional,
+        peer,
     }
 }
 
@@ -11559,6 +11658,7 @@ fn resolve_pypi(
         .map(|spec| PackageDependency {
             spec,
             optional: false,
+            peer: false,
         })
         .collect::<Vec<_>>();
 
@@ -15308,7 +15408,9 @@ mod tests {
         )
         .unwrap();
 
-        let requirements = read_package_json_requirements(&package_json, true).unwrap();
+        let requirements =
+            read_package_json_requirements(&package_json, DependencySelection::with_dev(true))
+                .unwrap();
         assert_eq!(
             requirements
                 .constraints
@@ -15861,6 +15963,16 @@ mod tests {
         dev_options.discover_project_requirements = false;
         let dev_specs = project_requested_specs(&mut dev_options, false).unwrap();
         assert!(has_spec(&dev_specs, "dev-pkg", "2.0.0"));
+
+        let mut omit_options = LinkOptions::new(dir.path());
+        omit_options.include_dev_dependencies = false;
+        omit_options.include_optional_dependencies = false;
+        omit_options.include_peer_dependencies = false;
+        omit_options.discover_project_requirements = false;
+        let omit_specs = project_requested_specs(&mut omit_options, false).unwrap();
+        assert!(has_spec(&omit_specs, "prod-pkg", "1.0.0"));
+        assert!(!has_spec(&omit_specs, "optional-pkg", "3.0.0"));
+        assert!(!has_spec(&omit_specs, "peer-pkg", "4.0.0"));
     }
 
     #[test]
@@ -15931,17 +16043,20 @@ mod tests {
             .iter()
             .any(|dependency| dependency.spec.name == "runtime"
                 && dependency.spec.version.as_deref() == Some("^1.0.0")
-                && !dependency.optional));
+                && !dependency.optional
+                && !dependency.peer));
         assert!(dependencies
             .iter()
             .any(|dependency| dependency.spec.name == "optional-runtime"
                 && dependency.spec.version.as_deref() == Some("^2.0.0")
-                && dependency.optional));
+                && dependency.optional
+                && !dependency.peer));
         assert!(dependencies
             .iter()
             .any(|dependency| dependency.spec.name == "required-peer"
                 && dependency.spec.version.as_deref() == Some("^3.0.0")
-                && !dependency.optional));
+                && !dependency.optional
+                && dependency.peer));
         assert!(!dependencies
             .iter()
             .any(|dependency| dependency.spec.name == "optional-peer"));
@@ -16333,7 +16448,8 @@ packages:
         )
         .unwrap();
 
-        let production = read_pnpm_lock_requirements(&pnpm_lock, false).unwrap();
+        let production =
+            read_pnpm_lock_requirements(&pnpm_lock, DependencySelection::with_dev(false)).unwrap();
         assert!(has_spec(&production.specs, "left-pad", "1.1.3"));
         assert!(has_spec(&production.specs, "is-even", "1.0.0"));
         assert!(!production.specs.iter().any(|spec| spec.name == "which"));
@@ -16361,7 +16477,8 @@ packages:
         );
         assert!(!production.constraints.contains_key("npm:dup"));
 
-        let dev = read_pnpm_lock_requirements(&pnpm_lock, true).unwrap();
+        let dev =
+            read_pnpm_lock_requirements(&pnpm_lock, DependencySelection::with_dev(true)).unwrap();
         assert!(has_spec(&dev.specs, "which", "2.0.2"));
     }
 
@@ -16644,6 +16761,37 @@ packages:
             retained,
             BTreeSet::from(["npm:has-optional@1.0.0".to_owned()])
         );
+    }
+
+    #[test]
+    fn locked_reachable_packages_respect_optional_and_peer_omits() {
+        let mut root = locked_package_for_test(Ecosystem::Npm, "root", "1.0.0");
+        root.dependencies = vec!["npm:runtime@1.0.0".to_owned()];
+        root.optional_dependencies = vec!["npm:optional-runtime@1.0.0".to_owned()];
+        root.peer_dependencies = vec!["npm:peer-runtime@1.0.0".to_owned()];
+        let runtime = locked_package_for_test(Ecosystem::Npm, "runtime", "1.0.0");
+        let optional = locked_package_for_test(Ecosystem::Npm, "optional-runtime", "1.0.0");
+        let peer = locked_package_for_test(Ecosystem::Npm, "peer-runtime", "1.0.0");
+        let lock = OmcLock {
+            version: 1,
+            packages: vec![root, runtime, optional, peer],
+            python_vcs: Vec::new(),
+        };
+        let mut options = LinkOptions::new(".");
+        options.include_optional_dependencies = false;
+        options.include_peer_dependencies = false;
+
+        let retained = locked_reachable_package_keys(
+            &lock,
+            &[PackageSpec::parse("npm:root@1.0.0").unwrap()],
+            &options,
+        )
+        .unwrap();
+
+        assert!(retained.contains("npm:root@1.0.0"));
+        assert!(retained.contains("npm:runtime@1.0.0"));
+        assert!(!retained.contains("npm:optional-runtime@1.0.0"));
+        assert!(!retained.contains("npm:peer-runtime@1.0.0"));
     }
 
     #[test]
@@ -22272,6 +22420,7 @@ wheels = [
             grants: Vec::new(),
             dependencies: Vec::new(),
             optional_dependencies: Vec::new(),
+            peer_dependencies: Vec::new(),
             files_scanned: 1,
             capabilities: findings,
             verifier_findings: vec!["denied".to_owned()],
@@ -22326,6 +22475,7 @@ wheels = [
             grants: Vec::new(),
             dependencies: Vec::new(),
             optional_dependencies: Vec::new(),
+            peer_dependencies: Vec::new(),
             files_scanned: 0,
             capabilities: Vec::new(),
             verifier_findings: Vec::new(),
@@ -22501,6 +22651,7 @@ wheels = [
             verdict: Verdict::Accepted,
             dependencies: Vec::new(),
             optional_dependencies: Vec::new(),
+            peer_dependencies: Vec::new(),
             grants: Vec::new(),
             capabilities: Vec::new(),
             verifier_findings: Vec::new(),
@@ -22545,6 +22696,7 @@ wheels = [
             grants: package.grants.clone(),
             dependencies: package.dependencies.clone(),
             optional_dependencies: package.optional_dependencies.clone(),
+            peer_dependencies: package.peer_dependencies.clone(),
             files_scanned: 0,
             capabilities: package.capabilities.clone(),
             verifier_findings: package.verifier_findings.clone(),

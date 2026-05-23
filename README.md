@@ -120,6 +120,7 @@ cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm help install
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm install left-pad@1.3.0
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm install --save-optional fsevents
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm install --save-peer react
+cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm ci --omit=optional --omit=peer
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm install --registry https://registry.npmjs.org left-pad@1.3.0
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm install --dry-run left-pad@1.3.0
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/local-util npm link
@@ -396,6 +397,8 @@ Supported now:
   are omitted by `--omit-dev`
 - npm save-location flags for OMC manifests: `--save-prod`/`-P`,
   `--save-dev`/`-D`, `--save-optional`/`-O`, and `--save-peer`
+- npm omit/include flags for install selection:
+  `--omit=dev|optional|peer` and `--include=dev|optional|peer`
 - production-style `omc install --omit-dev` installs
 - explicit `omc install -r FILE` and `omc ci -r FILE` requirements-file inputs
 - npm `optionalDependencies` and required `peerDependencies` ingestion
@@ -461,6 +464,7 @@ Supported now:
   `--pypi` shorthands for unprefixed specs
 - `[dev-dependencies]`, `[optional-dependencies]`, and `[peer-dependencies]`
   support in `omc.toml`, including `omc install --omit-dev`
+- `omc install` / `omc ci` support for `--omit-optional` and `--omit-peer`
 - install-time pruning so `omc.lock`, `node_modules`, and Python site-packages
   converge to current project manifests
 - locked/offline `omc install --locked` installs that validate `omc.lock`
