@@ -7,7 +7,7 @@ use omc_cap::Capability;
 use omc_registry::{
     add_package_graph, init_project, install_locked_packages, install_locked_project,
     install_project, parse_capability_grant, read_lockfile, read_package_scripts,
-    remove_manifest_dependency, LinkOptions, OmcRegistryError, PackageSpec, Verdict,
+    remove_manifest_dependency, Behavior, LinkOptions, OmcRegistryError, PackageSpec, Verdict,
 };
 
 #[derive(Debug, Parser)]
@@ -79,6 +79,11 @@ enum Command {
     },
     #[command(about = "Summarize locked packages and fail if any are blocked")]
     Audit {
+        #[arg(long, help = "Emit machine-readable JSON")]
+        json: bool,
+    },
+    #[command(about = "List locked packages without changing install state")]
+    List {
         #[arg(long, help = "Emit machine-readable JSON")]
         json: bool,
     },
@@ -249,6 +254,25 @@ fn run() -> Result<ExitCode, OmcRegistryError> {
                 });
             }
         }
+        Command::List { json } => {
+            let lock = read_lockfile(cli.project_dir.join("omc.lock"))?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&lock.packages)?);
+            } else if lock.packages.is_empty() {
+                println!("packages: 0");
+            } else {
+                for package in lock.packages {
+                    println!(
+                        "{}:{}@{} {} {}",
+                        package.ecosystem,
+                        package.name,
+                        package.version,
+                        verdict_label(package.verdict),
+                        behavior_label(package.behavior)
+                    );
+                }
+            }
+        }
         Command::Node { args } => return run_node(&cli.project_dir, &args),
         Command::Python { args } => return run_python(&cli.project_dir, &args),
         Command::Script { name, args } => {
@@ -408,6 +432,13 @@ fn verdict_label(verdict: Verdict) -> &'static str {
     match verdict {
         Verdict::Accepted => "accepted",
         Verdict::Blocked => "blocked",
+    }
+}
+
+fn behavior_label(behavior: Behavior) -> &'static str {
+    match behavior {
+        Behavior::Pure => "pure",
+        Behavior::HostCapability => "host-capability",
     }
 }
 

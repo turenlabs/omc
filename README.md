@@ -106,6 +106,8 @@ cargo run -p omc-cli -- --project-dir /tmp/omc-demo python -c "import requests; 
 cargo run -p omc-cli -- --project-dir /tmp/omc-demo install --omit-dev
 cargo run -p omc-cli -- --project-dir /tmp/omc-demo install --locked
 cargo run -p omc-cli -- --project-dir /tmp/omc-demo run normalizer --version
+cargo run -p omc-cli -- --project-dir /tmp/omc-demo list
+cargo run -p omc-cli -- --project-dir /tmp/omc-demo list --json
 cargo run -p omc-cli -- --project-dir /tmp/omc-demo audit
 cargo run -p omc-cli -- --project-dir /tmp/omc-demo audit --json
 cargo run -p omc-cli -- --project-dir /tmp/omc-demo remove npm:is-odd
@@ -212,6 +214,7 @@ Supported now:
   converge to current project manifests
 - locked/offline `omc install --locked` installs that validate `omc.lock`
   against current project manifests without registry resolution
+- text and JSON `omc list` output for locked packages
 - text and JSON audit output for locked package verdicts
 - `node_modules` installation for npm tarballs
 - nested `node_modules` installation for conflicting npm dependency versions
