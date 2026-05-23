@@ -142,6 +142,7 @@ cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip list --format=
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip list --outdated --format=json
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip index versions requests
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip hash ./dist/local_pkg-1.0.0-py3-none-any.whl
+cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip cache list
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip config get global.index-url
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip uninstall -r requirements.txt -y
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo list
@@ -426,8 +427,9 @@ Supported now:
   such as `--if-present`, `--silent`, `-s`, and `--loglevel=silent` are
   understood
 - `omc pip` compatibility commands for common `install`, `uninstall`, `freeze`,
-  `check`, `show`, `hash`, `index versions`, `config get`, `config list`, and
-  `list --format=columns|freeze|json` flows, including `pip list --outdated`,
+  `check`, `show`, `hash`, `cache dir/list/remove/purge`, `index versions`,
+  `config get`, `config list`, and `list --format=columns|freeze|json` flows,
+  including `pip list --outdated`,
   `-r`, index URL,
   constraints, extra-index, find-links, no-index,
   require-hashes, no-deps, target-directory, trusted-host, retry/timeout,

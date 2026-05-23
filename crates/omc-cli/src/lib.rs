@@ -322,6 +322,9 @@ enum PipCompatAction {
         algorithm: PipHashAlgorithm,
         paths: Vec<PathBuf>,
     },
+    Cache {
+        action: PipCacheAction,
+    },
     Check,
     Freeze,
     List {
@@ -343,6 +346,15 @@ enum PipCompatAction {
     Config {
         action: PipConfigAction,
     },
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum PipCacheAction {
+    Dir,
+    Info,
+    List { pattern: Option<String> },
+    Remove { pattern: String },
+    Purge,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1161,6 +1173,7 @@ fn run_pip_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
         PipCompatAction::Hash { algorithm, paths } => {
             print_pip_hash(project_dir, algorithm, paths)?
         }
+        PipCompatAction::Cache { action } => print_pip_cache(project_dir, action)?,
         PipCompatAction::Check => return print_locked_pip_check(project_dir),
         PipCompatAction::Freeze => print_locked_freeze(project_dir)?,
         PipCompatAction::List {
@@ -1633,6 +1646,159 @@ fn pip_hash_digest(algorithm: PipHashAlgorithm, bytes: &[u8]) -> String {
         .into_iter()
         .map(|byte| format!("{byte:02x}"))
         .collect::<String>()
+}
+
+fn print_pip_cache(project_dir: &Path, action: PipCacheAction) -> Result<(), OmcRegistryError> {
+    let cache_dir = pip_cache_dir(project_dir);
+    match action {
+        PipCacheAction::Dir => println!("{}", cache_dir.display()),
+        PipCacheAction::Info => {
+            let files = pip_cache_files(&cache_dir)?;
+            let bytes = cache_files_size(&files)?;
+            println!("Package index page cache location: {}", cache_dir.display());
+            println!("Number of files: {}", files.len());
+            println!("Size: {bytes} bytes");
+        }
+        PipCacheAction::List { pattern } => {
+            let mut files = pip_cache_files(&cache_dir)?;
+            if let Some(pattern) = pattern {
+                files.retain(|path| pip_cache_pattern_matches(path, &cache_dir, &pattern));
+            }
+            files.sort();
+            for path in files {
+                println!("{}", pip_cache_display_path(&path, &cache_dir));
+            }
+        }
+        PipCacheAction::Remove { pattern } => {
+            let mut files = pip_cache_files(&cache_dir)?;
+            files.retain(|path| pip_cache_pattern_matches(path, &cache_dir, &pattern));
+            let count = remove_cache_files(&files)?;
+            prune_empty_cache_dirs(&cache_dir)?;
+            println!("Files removed: {count}");
+        }
+        PipCacheAction::Purge => {
+            let count = pip_cache_files(&cache_dir)?.len();
+            if cache_dir.exists() {
+                fs::remove_dir_all(&cache_dir)?;
+            }
+            println!("Files removed: {count}");
+        }
+    }
+    Ok(())
+}
+
+fn pip_cache_dir(project_dir: &Path) -> PathBuf {
+    project_dir.join(".omc").join("cache").join("pypi")
+}
+
+fn pip_cache_files(cache_dir: &Path) -> Result<Vec<PathBuf>, OmcRegistryError> {
+    let mut files = Vec::new();
+    collect_cache_files(cache_dir, &mut files)?;
+    Ok(files)
+}
+
+fn collect_cache_files(path: &Path, files: &mut Vec<PathBuf>) -> Result<(), OmcRegistryError> {
+    if !path.exists() {
+        return Ok(());
+    }
+    for entry in fs::read_dir(path)? {
+        let path = entry?.path();
+        if path.is_dir() {
+            collect_cache_files(&path, files)?;
+        } else if path.is_file() {
+            files.push(path);
+        }
+    }
+    Ok(())
+}
+
+fn cache_files_size(files: &[PathBuf]) -> Result<u64, OmcRegistryError> {
+    let mut bytes = 0;
+    for path in files {
+        bytes += fs::metadata(path)?.len();
+    }
+    Ok(bytes)
+}
+
+fn remove_cache_files(files: &[PathBuf]) -> Result<usize, OmcRegistryError> {
+    let mut count = 0;
+    for path in files {
+        fs::remove_file(path)?;
+        count += 1;
+    }
+    Ok(count)
+}
+
+fn prune_empty_cache_dirs(root: &Path) -> Result<(), OmcRegistryError> {
+    if !root.is_dir() {
+        return Ok(());
+    }
+    for entry in fs::read_dir(root)? {
+        let path = entry?.path();
+        if path.is_dir() {
+            prune_empty_cache_dirs(&path)?;
+            if fs::read_dir(&path)?.next().is_none() {
+                fs::remove_dir(path)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn pip_cache_pattern_matches(path: &Path, cache_dir: &Path, pattern: &str) -> bool {
+    let display = pip_cache_display_path(path, cache_dir);
+    wildcard_match(&display, pattern)
+        || path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .map(|name| wildcard_match(name, pattern))
+            .unwrap_or(false)
+}
+
+fn pip_cache_display_path(path: &Path, cache_dir: &Path) -> String {
+    path.strip_prefix(cache_dir)
+        .unwrap_or(path)
+        .to_string_lossy()
+        .trim_start_matches(std::path::MAIN_SEPARATOR)
+        .to_owned()
+}
+
+fn wildcard_match(value: &str, pattern: &str) -> bool {
+    if pattern == "*" {
+        return true;
+    }
+    if !pattern.contains('*') {
+        return value.contains(pattern);
+    }
+    let mut rest = value;
+    let starts_with_wildcard = pattern.starts_with('*');
+    let ends_with_wildcard = pattern.ends_with('*');
+    let parts = pattern
+        .split('*')
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>();
+    if parts.is_empty() {
+        return true;
+    }
+    if !starts_with_wildcard {
+        let Some(first) = parts.first() else {
+            return true;
+        };
+        if !rest.starts_with(first) {
+            return false;
+        }
+        rest = &rest[first.len()..];
+    }
+    for (index, part) in parts.iter().enumerate() {
+        if index == 0 && !starts_with_wildcard {
+            continue;
+        }
+        let Some(found) = rest.find(part) else {
+            return false;
+        };
+        rest = &rest[found + part.len()..];
+    }
+    ends_with_wildcard || rest.is_empty()
 }
 
 fn print_pip_config(project_dir: &Path, action: PipConfigAction) -> Result<(), OmcRegistryError> {
@@ -3205,6 +3371,7 @@ fn parse_pip_compat_action(args: &[String]) -> Result<PipCompatAction, OmcRegist
         "uninstall" | "remove" => parse_pip_uninstall_args(&args[1..]),
         "show" => parse_pip_show_args(&args[1..]),
         "hash" => parse_pip_hash_args(&args[1..]),
+        "cache" => parse_pip_cache_args(&args[1..]),
         "check" => {
             parse_pip_check_args(&args[1..])?;
             Ok(PipCompatAction::Check)
@@ -3572,6 +3739,72 @@ fn parse_pip_hash_algorithm(value: &str) -> Result<PipHashAlgorithm, OmcRegistry
             "unsupported pip hash algorithm `{other}`"
         ))),
     }
+}
+
+fn parse_pip_cache_args(args: &[String]) -> Result<PipCompatAction, OmcRegistryError> {
+    let mut filtered = Vec::new();
+    for arg in args {
+        if matches!(
+            arg.as_str(),
+            "--disable-pip-version-check" | "-v" | "--verbose" | "-q" | "--quiet"
+        ) {
+            continue;
+        }
+        if arg.starts_with('-') {
+            return Err(unsupported_compat_arg("pip cache", arg));
+        }
+        filtered.push(arg.clone());
+    }
+    let Some(command) = filtered.first().map(String::as_str) else {
+        return Err(OmcRegistryError::UnsupportedSpec(
+            "pip cache needs a command such as dir, list, remove, or purge".to_owned(),
+        ));
+    };
+    let rest = &filtered[1..];
+    let action = match command {
+        "dir" => {
+            if !rest.is_empty() {
+                return Err(unsupported_compat_arg("pip cache dir", &rest[0]));
+            }
+            PipCacheAction::Dir
+        }
+        "info" => {
+            if !rest.is_empty() {
+                return Err(unsupported_compat_arg("pip cache info", &rest[0]));
+            }
+            PipCacheAction::Info
+        }
+        "list" => {
+            if rest.len() > 1 {
+                return Err(unsupported_compat_arg("pip cache list", &rest[1]));
+            }
+            PipCacheAction::List {
+                pattern: rest.first().cloned(),
+            }
+        }
+        "remove" | "rm" => {
+            if rest.len() != 1 {
+                return Err(OmcRegistryError::UnsupportedSpec(
+                    "pip cache remove needs exactly one pattern".to_owned(),
+                ));
+            }
+            PipCacheAction::Remove {
+                pattern: rest[0].clone(),
+            }
+        }
+        "purge" => {
+            if !rest.is_empty() {
+                return Err(unsupported_compat_arg("pip cache purge", &rest[0]));
+            }
+            PipCacheAction::Purge
+        }
+        other => {
+            return Err(OmcRegistryError::UnsupportedSpec(format!(
+                "unsupported pip cache command `{other}`"
+            )))
+        }
+    };
+    Ok(PipCompatAction::Cache { action })
 }
 
 fn parse_pip_check_args(args: &[String]) -> Result<(), OmcRegistryError> {
@@ -5234,6 +5467,35 @@ mod tests {
         );
         assert!(
             parse_pip_compat_action(&args(&["hash", "--algorithm", "md5", "pkg.whl"])).is_err()
+        );
+        assert_eq!(
+            parse_pip_compat_action(&args(&["cache", "dir"])).unwrap(),
+            PipCompatAction::Cache {
+                action: PipCacheAction::Dir,
+            }
+        );
+        assert_eq!(
+            parse_pip_compat_action(&args(&["cache", "list", "idna"])).unwrap(),
+            PipCompatAction::Cache {
+                action: PipCacheAction::List {
+                    pattern: Some("idna".to_owned()),
+                },
+            }
+        );
+        assert_eq!(
+            parse_pip_compat_action(&args(&["cache", "remove", "idna"])).unwrap(),
+            PipCompatAction::Cache {
+                action: PipCacheAction::Remove {
+                    pattern: "idna".to_owned(),
+                },
+            }
+        );
+        assert_eq!(
+            parse_pip_compat_action(&args(&["cache", "purge", "--disable-pip-version-check"]))
+                .unwrap(),
+            PipCompatAction::Cache {
+                action: PipCacheAction::Purge,
+            }
         );
     }
 
