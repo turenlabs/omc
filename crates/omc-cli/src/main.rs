@@ -54,6 +54,12 @@ enum Command {
             help = "Install a pyproject.toml optional dependency group"
         )]
         extra: Vec<String>,
+        #[arg(
+            long = "omit-dev",
+            alias = "production",
+            help = "Skip package.json devDependencies"
+        )]
+        omit_dev: bool,
         #[arg(long, help = "Grant all host capabilities for compatibility testing")]
         allow_all_host: bool,
     },
@@ -139,6 +145,7 @@ fn run() -> Result<ExitCode, OmcRegistryError> {
         Command::Install {
             allow,
             extra,
+            omit_dev,
             allow_all_host,
         } => {
             let mut options = LinkOptions::new(&cli.project_dir);
@@ -147,6 +154,7 @@ fn run() -> Result<ExitCode, OmcRegistryError> {
                 .into_iter()
                 .map(|extra| normalize_extra(&extra))
                 .collect();
+            options.include_dev_dependencies = !omit_dev;
             let install = install_project(&options)?;
             println!(
                 "installed npm={} pypi={} npm_bins={} python_scripts={} node_modules={} python_site_packages={}",

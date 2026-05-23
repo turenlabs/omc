@@ -375,6 +375,7 @@ pub struct LinkOptions {
     pub constraints: BTreeMap<String, String>,
     pub hashes: BTreeMap<String, BTreeSet<String>>,
     pub project_extras: BTreeSet<String>,
+    pub include_dev_dependencies: bool,
 }
 
 impl LinkOptions {
@@ -386,6 +387,7 @@ impl LinkOptions {
             constraints: BTreeMap::new(),
             hashes: BTreeMap::new(),
             project_extras: BTreeSet::new(),
+            include_dev_dependencies: true,
         }
     }
 }
@@ -486,8 +488,11 @@ pub fn install_project(options: &LinkOptions) -> Result<InstallReport> {
     for (key, version) in manifest.dependencies {
         specs.push(PackageSpec::parse(&format!("{key}@{version}"))?);
     }
-    let discovered =
-        discover_project_requirements_with_extras(&options.project_dir, &options.project_extras)?;
+    let discovered = discover_project_requirements_with_options(
+        &options.project_dir,
+        &options.project_extras,
+        options.include_dev_dependencies,
+    )?;
     specs.extend(discovered.specs);
     options.constraints.extend(discovered.constraints);
     options.hashes.extend(discovered.hashes);
@@ -525,14 +530,23 @@ pub fn discover_project_requirements_with_extras(
     project_dir: impl AsRef<Path>,
     project_extras: &BTreeSet<String>,
 ) -> Result<ProjectRequirements> {
+    discover_project_requirements_with_options(project_dir, project_extras, true)
+}
+
+fn discover_project_requirements_with_options(
+    project_dir: impl AsRef<Path>,
+    project_extras: &BTreeSet<String>,
+    include_dev_dependencies: bool,
+) -> Result<ProjectRequirements> {
     let project_dir = project_dir.as_ref();
     let mut project = ProjectRequirements::default();
 
     let package_json = project_dir.join("package.json");
     if package_json.exists() {
-        project
-            .specs
-            .extend(read_package_json_specs(&package_json)?);
+        project.specs.extend(read_package_json_specs(
+            &package_json,
+            include_dev_dependencies,
+        )?);
     }
 
     let package_lock_json = project_dir.join("package-lock.json");
@@ -743,13 +757,21 @@ pub fn read_manifest(path: impl AsRef<Path>) -> Result<OmcManifest> {
     Ok(toml::from_str(&fs::read_to_string(path)?)?)
 }
 
-fn read_package_json_specs(path: &Path) -> Result<Vec<PackageSpec>> {
+fn read_package_json_specs(
+    path: &Path,
+    include_dev_dependencies: bool,
+) -> Result<Vec<PackageSpec>> {
     let package = serde_json::from_str::<ProjectPackageJson>(&fs::read_to_string(path)?)?;
     let mut specs = Vec::new();
+    let dev_dependencies = if include_dev_dependencies {
+        package.dev_dependencies
+    } else {
+        BTreeMap::new()
+    };
 
     for dependencies in [
         package.dependencies,
-        package.dev_dependencies,
+        dev_dependencies,
         package.optional_dependencies,
         required_peer_dependencies(package.peer_dependencies, package.peer_dependencies_meta),
     ] {
@@ -3151,7 +3173,7 @@ mod tests {
             }"#,
         )
         .unwrap();
-        let specs = read_package_json_specs(&package_json).unwrap();
+        let specs = read_package_json_specs(&package_json, true).unwrap();
         assert!(specs
             .iter()
             .any(|spec| spec.name == "is-odd" && spec.version.as_deref() == Some("3.0.1")));
@@ -3171,6 +3193,12 @@ mod tests {
             scripts.get("check").map(String::as_str),
             Some("node -e \"console.log('ok')\"")
         );
+
+        let production_specs = read_package_json_specs(&package_json, false).unwrap();
+        assert!(production_specs
+            .iter()
+            .any(|spec| spec.name == "is-odd" && spec.version.as_deref() == Some("3.0.1")));
+        assert!(!production_specs.iter().any(|spec| spec.name == "which"));
     }
 
     #[test]

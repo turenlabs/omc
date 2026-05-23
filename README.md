@@ -103,6 +103,7 @@ cargo run -p omc-cli -- --project-dir /tmp/omc-demo node -e "console.log(require
 cargo run -p omc-cli -- --project-dir /tmp/omc-demo script test
 cargo run -p omc-cli -- --project-dir /tmp/omc-demo add pypi:requests==2.32.3 --allow-all-host
 cargo run -p omc-cli -- --project-dir /tmp/omc-demo python -c "import requests; print(requests.__version__)"
+cargo run -p omc-cli -- --project-dir /tmp/omc-demo install --omit-dev
 cargo run -p omc-cli -- --project-dir /tmp/omc-demo run normalizer --version
 cargo run -p omc-cli -- --project-dir /tmp/omc-demo audit
 ```
@@ -110,7 +111,7 @@ cargo run -p omc-cli -- --project-dir /tmp/omc-demo audit
 For existing projects, `install` reads normal project files:
 
 ```text
-package.json       dependencies, devDependencies, optionalDependencies, peers
+package.json       dependencies, devDependencies, optionalDependencies, peers; use --omit-dev for production installs
 package-lock.json  exact version constraints for uniquely locked npm packages
 requirements.txt  PyPI requirements, hashes, extras, -r includes, -c constraints, markers
 pyproject.toml    PEP 621 project dependencies, selected optional groups
@@ -180,6 +181,7 @@ Supported now:
   filtering
 - recursive runtime dependency locking
 - `package.json` dependency/devDependency ingestion
+- production-style `omc install --omit-dev` installs
 - npm `optionalDependencies` and required `peerDependencies` ingestion
 - npm registry `optionalDependencies` and required `peerDependencies` resolution
 - `package-lock.json` exact-version constraints for uniquely locked npm packages
