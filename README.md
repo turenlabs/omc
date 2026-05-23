@@ -312,7 +312,7 @@ Supported now:
   `--extra-index-url` simple indexes, `--find-links` / `-f` local wheel/sdist
   archives or HTML pages, `--no-index`, `--trusted-host`, `--only-binary`,
   `--no-binary`, `--prefer-binary`, enforced `--require-hashes`, local editable/direct/bare
-  directory paths, and common Python environment markers
+  directory paths with selected extras, and common Python environment markers
 - unsupported requirements entries and unsupported direct archive formats fail
   closed instead of being silently ignored
 - `Pipfile` ingestion for Pipenv packages/dev-packages, source indexes, extras,
@@ -400,7 +400,8 @@ Supported now:
   require-hashes, no-deps, target-directory, trusted-host, retry/timeout,
   reinstall, warning, build-isolation, and binary-policy install flags without
   delegating to pip; direct `pip install -e PATH` and `pip install ./path`
-  local directory installs; direct
+  local directory installs, including selected extras such as
+  `pip install -e '.[dev]'`; direct
   `pip install ./archive.whl`, `./archive.tar.gz`, and HTTPS archive URL
   installs; `omc python -m pip ...` dispatches to the same compatibility path;
   and a direct `pip` compatibility binary

@@ -563,6 +563,7 @@ pub struct LinkOptions {
     pub python_target_dir: Option<PathBuf>,
     pub npm_local_paths: Vec<PathBuf>,
     pub python_local_paths: Vec<PathBuf>,
+    pub python_local_requirements: Vec<PythonLocalRequirement>,
     pub python_vcs_requirements: Vec<PythonVcsRequirement>,
     pub python_vcs_locks: Vec<LockedPythonVcsDependency>,
     pub requirement_files: Vec<PathBuf>,
@@ -595,6 +596,7 @@ impl LinkOptions {
             python_target_dir: None,
             npm_local_paths: Vec::new(),
             python_local_paths: Vec::new(),
+            python_local_requirements: Vec::new(),
             python_vcs_requirements: Vec::new(),
             python_vcs_locks: Vec::new(),
             requirement_files: Vec::new(),
@@ -675,7 +677,20 @@ pub struct ProjectRequirements {
     pub pypi_require_hashes: bool,
     pub pypi_no_deps: bool,
     pub python_local_paths: Vec<PathBuf>,
+    pub python_local_requirements: Vec<PythonLocalRequirement>,
     pub python_vcs_requirements: Vec<PythonVcsRequirement>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct PythonLocalRequirement {
+    pub path: PathBuf,
+    pub extras: BTreeSet<String>,
+}
+
+impl PythonLocalRequirement {
+    pub fn new(path: PathBuf, extras: BTreeSet<String>) -> Self {
+        Self { path, extras }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -722,6 +737,9 @@ fn extend_project_requirements(
         .python_local_paths
         .extend(requirements.python_local_paths);
     target
+        .python_local_requirements
+        .extend(requirements.python_local_requirements);
+    target
         .python_vcs_requirements
         .extend(requirements.python_vcs_requirements);
 }
@@ -757,6 +775,9 @@ fn apply_project_requirements_to_options(
     options
         .python_local_paths
         .extend(requirements.python_local_paths);
+    options
+        .python_local_requirements
+        .extend(requirements.python_local_requirements);
     options
         .python_vcs_requirements
         .extend(requirements.python_vcs_requirements);
@@ -1008,7 +1029,7 @@ pub fn install_project(options: &LinkOptions) -> Result<InstallReport> {
         &report.npm_bin_dir,
     )?;
     report.python_scripts += install_python_local_paths(
-        &options.python_local_paths,
+        &python_install_local_paths(&options),
         &report.python_site_packages,
         &report.python_bin_dir,
     )?;
@@ -1073,11 +1094,22 @@ pub fn install_locked_project(options: &LinkOptions) -> Result<InstallReport> {
         &report.npm_bin_dir,
     )?;
     report.python_scripts += install_python_local_paths(
-        &options.python_local_paths,
+        &python_install_local_paths(&options),
         &report.python_site_packages,
         &report.python_bin_dir,
     )?;
     Ok(report)
+}
+
+fn python_install_local_paths(options: &LinkOptions) -> Vec<PathBuf> {
+    let mut paths = options.python_local_paths.clone();
+    paths.extend(
+        options
+            .python_local_requirements
+            .iter()
+            .map(|requirement| requirement.path.clone()),
+    );
+    paths
 }
 
 fn project_requested_specs(options: &mut LinkOptions, locked: bool) -> Result<Vec<PackageSpec>> {
@@ -1108,6 +1140,14 @@ fn project_requested_specs(options: &mut LinkOptions, locked: bool) -> Result<Ve
         apply_project_requirements_to_options(options, &mut specs, requirements);
     }
 
+    if !options.python_local_requirements.is_empty() {
+        let requirements = resolve_python_local_requirements(
+            &options.python_local_requirements,
+            options.pypi_include_dependencies,
+        )?;
+        apply_project_requirements_to_options(options, &mut specs, requirements);
+    }
+
     if !options.python_vcs_requirements.is_empty() {
         let lock = if locked {
             Some(read_lockfile(options.project_dir.join(LOCKFILE))?)
@@ -1130,6 +1170,45 @@ fn project_requested_specs(options: &mut LinkOptions, locked: bool) -> Result<Ve
     let mut seen = BTreeSet::new();
     specs.retain(|spec| seen.insert(spec.requested()));
     Ok(specs)
+}
+
+fn resolve_python_local_requirements(
+    requirements: &[PythonLocalRequirement],
+    include_dependencies: bool,
+) -> Result<ProjectRequirements> {
+    let mut resolved = ProjectRequirements::default();
+    let mut queue = requirements.to_vec();
+    let mut seen = BTreeSet::new();
+
+    while let Some(requirement) = queue.pop() {
+        let path = fs::canonicalize(&requirement.path).map_err(|error| {
+            OmcRegistryError::UnsupportedRequirement(format!(
+                "editable path `{}` could not be resolved: {error}",
+                requirement.path.display()
+            ))
+        })?;
+        if !path.is_dir() {
+            return Err(OmcRegistryError::UnsupportedRequirement(format!(
+                "editable path `{}` must be a directory",
+                path.display()
+            )));
+        }
+        let requirement = PythonLocalRequirement::new(path.clone(), requirement.extras);
+        if !seen.insert(requirement.clone()) {
+            continue;
+        }
+
+        if include_dependencies {
+            let mut source_requirements =
+                read_python_source_requirements(&path, &requirement.extras)?;
+            queue.extend(source_requirements.python_local_requirements.clone());
+            source_requirements.python_local_requirements.clear();
+            extend_project_requirements(&mut resolved, source_requirements);
+        }
+        push_python_local_path(&mut resolved, path);
+    }
+
+    Ok(resolved)
 }
 
 fn parse_manifest_dependency(key: &str, requirement: &str) -> Result<PackageSpec> {
@@ -3531,6 +3610,7 @@ fn npm_requirements_from_lock_maps(
         pypi_require_hashes: false,
         pypi_no_deps: false,
         python_local_paths: Vec::new(),
+        python_local_requirements: Vec::new(),
         python_vcs_requirements: Vec::new(),
     }
 }
@@ -3684,8 +3764,8 @@ fn collect_pipfile_packages(
                     }
                     requirements.specs.push(spec);
                 }
-                PypiProjectRequirement::LocalPath(path) => {
-                    requirements.python_local_paths.push(path);
+                PypiProjectRequirement::LocalPath(requirement) => {
+                    push_python_local_requirement(requirements, requirement);
                 }
                 PypiProjectRequirement::Vcs(vcs) => {
                     requirements.python_vcs_requirements.push(vcs);
@@ -3760,7 +3840,9 @@ fn pipfile_table_requirement(
     if let Some(path) = table.path.as_deref() {
         let path = resolved_local_path(path, base_dir);
         if path.is_dir() {
-            return Ok(Some(PypiProjectRequirement::LocalPath(path)));
+            return Ok(Some(PypiProjectRequirement::LocalPath(
+                PythonLocalRequirement::new(path, normalized_pypi_extras(table.extras)),
+            )));
         }
         if path
             .file_name()
@@ -4092,6 +4174,19 @@ fn read_uv_lock_requirements(
 fn push_python_local_path(requirements: &mut ProjectRequirements, path: PathBuf) {
     if !requirements.python_local_paths.contains(&path) {
         requirements.python_local_paths.push(path);
+    }
+}
+
+fn push_python_local_requirement(
+    requirements: &mut ProjectRequirements,
+    requirement: PythonLocalRequirement,
+) {
+    push_python_local_path(requirements, requirement.path.clone());
+    if !requirements
+        .python_local_requirements
+        .contains(&requirement)
+    {
+        requirements.python_local_requirements.push(requirement);
     }
 }
 
@@ -5450,7 +5545,7 @@ fn read_requirements_file_inner(
                 continue;
             }
             discovered
-                .python_local_paths
+                .python_local_requirements
                 .push(normalize_requirements_editable_path(&editable, base_dir)?);
             continue;
         }
@@ -5495,7 +5590,10 @@ fn read_requirements_file_inner(
                 if !parsed.hashes.is_empty() || !hashes.is_empty() {
                     return Err(OmcRegistryError::UnsupportedRequirement(line.to_owned()));
                 }
-                discovered.python_local_paths.push(path);
+                push_python_local_requirement(
+                    discovered,
+                    PythonLocalRequirement::new(path, spec.extras),
+                );
                 continue;
             }
             if !parsed.hashes.is_empty() || !hashes.is_empty() {
@@ -5509,7 +5607,7 @@ fn read_requirements_file_inner(
             continue;
         }
 
-        if let Some(path) = parse_pypi_local_direct_path_requirement(
+        if let Some(requirement) = parse_pypi_local_direct_path_requirement(
             &parsed.requirement,
             &BTreeSet::new(),
             base_dir,
@@ -5520,11 +5618,11 @@ fn read_requirements_file_inner(
             if !parsed.hashes.is_empty() {
                 return Err(OmcRegistryError::UnsupportedRequirement(line.to_owned()));
             }
-            discovered.python_local_paths.push(path);
+            push_python_local_requirement(discovered, requirement);
             continue;
         }
 
-        if let Some(path) =
+        if let Some(requirement) =
             parse_pypi_local_path_requirement(&parsed.requirement, &BTreeSet::new(), base_dir)?
         {
             if mode == RequirementsMode::Constraint {
@@ -5533,7 +5631,7 @@ fn read_requirements_file_inner(
             if !parsed.hashes.is_empty() {
                 return Err(OmcRegistryError::UnsupportedRequirement(line.to_owned()));
             }
-            discovered.python_local_paths.push(path);
+            push_python_local_requirement(discovered, requirement);
             continue;
         }
 
@@ -9011,7 +9109,7 @@ fn parse_pypi_local_direct_requirement(
 
 enum PypiProjectRequirement {
     Spec(PackageSpec, BTreeSet<String>),
-    LocalPath(PathBuf),
+    LocalPath(PythonLocalRequirement),
     Vcs(PythonVcsRequirement),
 }
 
@@ -9039,8 +9137,8 @@ fn collect_pypi_project_requirement(
             }
             requirements.specs.push(spec);
         }
-        PypiProjectRequirement::LocalPath(path) => {
-            requirements.python_local_paths.push(path);
+        PypiProjectRequirement::LocalPath(requirement) => {
+            push_python_local_requirement(requirements, requirement);
         }
         PypiProjectRequirement::Vcs(vcs) => {
             requirements.python_vcs_requirements.push(vcs);
@@ -9065,15 +9163,17 @@ fn parse_pypi_project_requirement(
     );
     if let Some((spec, hashes)) = direct_requirement {
         if let Some(path) = pypi_direct_file_url_local_directory(spec.direct_url.as_deref())? {
-            return Ok(Some(PypiProjectRequirement::LocalPath(path)));
+            return Ok(Some(PypiProjectRequirement::LocalPath(
+                PythonLocalRequirement::new(path, spec.extras.clone()),
+            )));
         }
         return Ok(Some(PypiProjectRequirement::Spec(spec, hashes)));
     }
 
-    if let Some(path) =
+    if let Some(requirement) =
         parse_pypi_local_direct_path_requirement(requirement, active_extras, base_dir)?
     {
-        return Ok(Some(PypiProjectRequirement::LocalPath(path)));
+        return Ok(Some(PypiProjectRequirement::LocalPath(requirement)));
     }
 
     if pypi_direct_reference_applies(requirement, active_extras) {
@@ -9092,7 +9192,9 @@ fn parse_pypi_project_requirement(
                 path.display()
             )));
         }
-        return Ok(Some(PypiProjectRequirement::LocalPath(path.clone())));
+        return Ok(Some(PypiProjectRequirement::LocalPath(
+            PythonLocalRequirement::new(path.clone(), spec.extras.clone()),
+        )));
     }
 
     Ok(Some(PypiProjectRequirement::Spec(spec, BTreeSet::new())))
@@ -9258,7 +9360,7 @@ fn parse_pypi_local_direct_path_requirement(
     requirement: &str,
     active_extras: &BTreeSet<String>,
     base_dir: &Path,
-) -> Result<Option<PathBuf>> {
+) -> Result<Option<PythonLocalRequirement>> {
     let mut parts = requirement.splitn(2, ';');
     let requirement_body = parts.next().unwrap_or_default().trim();
     if let Some(marker) = parts.next() {
@@ -9270,7 +9372,7 @@ fn parse_pypi_local_direct_path_requirement(
     let Some((name, path)) = requirement_body.split_once(" @ ") else {
         return Ok(None);
     };
-    let (name, _) = parse_pypi_name_and_extras(name.trim());
+    let (name, extras) = parse_pypi_name_and_extras(name.trim());
     if name.is_empty() {
         return Ok(None);
     }
@@ -9279,14 +9381,16 @@ fn parse_pypi_local_direct_path_requirement(
         return Ok(None);
     }
     let path = resolved_local_path(&path, base_dir);
-    Ok(path.is_dir().then_some(path))
+    Ok(path
+        .is_dir()
+        .then(|| PythonLocalRequirement::new(path, extras)))
 }
 
 fn parse_pypi_local_path_requirement(
     requirement: &str,
     active_extras: &BTreeSet<String>,
     base_dir: &Path,
-) -> Result<Option<PathBuf>> {
+) -> Result<Option<PythonLocalRequirement>> {
     let mut parts = requirement.splitn(2, ';');
     let requirement_body = parts.next().unwrap_or_default().trim();
     if let Some(marker) = parts.next() {
@@ -9302,13 +9406,13 @@ fn parse_pypi_local_path_requirement(
         return Ok(None);
     }
 
-    let path = normalize_requirements_editable_path(requirement_body, base_dir)?;
-    if !path.is_dir() {
+    let local = normalize_requirements_editable_path(requirement_body, base_dir)?;
+    if !local.path.is_dir() {
         return Err(OmcRegistryError::UnsupportedRequirement(
             requirement.to_owned(),
         ));
     }
-    Ok(Some(path))
+    Ok(Some(local))
 }
 
 fn looks_like_local_path_requirement(value: &str) -> bool {
@@ -9587,19 +9691,36 @@ fn parse_requirements_editable_value(line: &str) -> Option<String> {
     parse_requirements_option_value(line, &["--editable=", "--editable", "-e"])
 }
 
-fn normalize_requirements_editable_path(value: &str, base_dir: &Path) -> Result<PathBuf> {
-    let path = value.split_once('[').map(|(path, _)| path).unwrap_or(value);
+fn normalize_requirements_editable_path(
+    value: &str,
+    base_dir: &Path,
+) -> Result<PythonLocalRequirement> {
+    let (path, extras) = split_python_local_path_extras(value);
     if path.contains("://") || path.starts_with("git+") {
         return Err(OmcRegistryError::UnsupportedRequirement(format!(
             "editable requirement `{value}` must be a local path"
         )));
     }
     let path = PathBuf::from(path);
-    if path.is_absolute() {
-        Ok(path)
+    let path = if path.is_absolute() {
+        path
     } else {
-        Ok(base_dir.join(path))
-    }
+        base_dir.join(path)
+    };
+    Ok(PythonLocalRequirement::new(path, extras))
+}
+
+fn split_python_local_path_extras(value: &str) -> (&str, BTreeSet<String>) {
+    let Some((path, extras)) = value.split_once('[') else {
+        return (value, BTreeSet::new());
+    };
+    let extras = extras
+        .trim_end_matches(']')
+        .split(',')
+        .map(normalize_pypi_extra)
+        .filter(|extra| !extra.is_empty())
+        .collect();
+    (path, extras)
 }
 
 fn parse_requirements_option_value(line: &str, prefixes: &[&str]) -> Option<String> {
@@ -13265,12 +13386,21 @@ packages:
 
         let discovered = read_requirements_file(&requirements).unwrap();
         assert_eq!(
-            discovered.python_local_paths,
-            vec![dir.path().join("."), dir.path().join("./vendor/pkg")]
+            discovered.python_local_requirements,
+            vec![
+                PythonLocalRequirement::new(dir.path().join("."), BTreeSet::new()),
+                PythonLocalRequirement::new(
+                    dir.path().join("./vendor/pkg"),
+                    BTreeSet::from(["dev".to_owned()])
+                )
+            ]
         );
 
         let project = discover_project_requirements(dir.path()).unwrap();
-        assert_eq!(project.python_local_paths, discovered.python_local_paths);
+        assert_eq!(
+            project.python_local_requirements,
+            discovered.python_local_requirements
+        );
     }
 
     #[test]
@@ -13296,12 +13426,19 @@ packages:
 
         let discovered = read_requirements_file(&requirements).unwrap();
         assert_eq!(
-            discovered.python_local_paths,
-            vec![local_pkg, file_url_pkg, bare_pkg]
+            discovered.python_local_requirements,
+            vec![
+                PythonLocalRequirement::new(local_pkg, BTreeSet::new()),
+                PythonLocalRequirement::new(file_url_pkg, BTreeSet::new()),
+                PythonLocalRequirement::new(bare_pkg, BTreeSet::from(["dev".to_owned()]))
+            ]
         );
 
         let project = discover_project_requirements(dir.path()).unwrap();
-        assert_eq!(project.python_local_paths, discovered.python_local_paths);
+        assert_eq!(
+            project.python_local_requirements,
+            discovered.python_local_requirements
+        );
     }
 
     #[test]
@@ -13573,6 +13710,58 @@ packages:
             String::from_utf8_lossy(&output.stdout).trim(),
             "local-cli-ok"
         );
+    }
+
+    #[test]
+    fn local_python_install_extras_resolve_optional_local_dependencies() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path().join("project");
+        let local = dir.path().join("localpkg");
+        let dep = dir.path().join("deppkg");
+        fs::create_dir_all(&project).unwrap();
+        fs::create_dir_all(local.join("src/localpkg")).unwrap();
+        fs::create_dir_all(dep.join("src/deppkg")).unwrap();
+        fs::write(
+            local.join("pyproject.toml"),
+            format!(
+                r#"
+                [project]
+                name = "localpkg"
+                version = "0.1.0"
+
+                [project.optional-dependencies]
+                dev = ["deppkg @ {}"]
+                "#,
+                dep.display()
+            ),
+        )
+        .unwrap();
+        fs::write(local.join("src/localpkg/__init__.py"), "VALUE = 'local'\n").unwrap();
+        fs::write(
+            dep.join("pyproject.toml"),
+            r#"
+            [project]
+            name = "deppkg"
+            version = "0.1.0"
+            "#,
+        )
+        .unwrap();
+        fs::write(dep.join("src/deppkg/__init__.py"), "VALUE = 'dep'\n").unwrap();
+
+        let mut options = LinkOptions::new(&project);
+        options
+            .python_local_requirements
+            .push(PythonLocalRequirement::new(
+                local.clone(),
+                BTreeSet::from(["dev".to_owned()]),
+            ));
+        let report = install_project(&options).unwrap();
+
+        let local_paths =
+            fs::read_to_string(project.join(".omc").join("python").join("local-paths")).unwrap();
+        assert!(local_paths.contains(&local.join("src").to_string_lossy().to_string()));
+        assert!(local_paths.contains(&dep.join("src").to_string_lossy().to_string()));
+        assert_eq!(report.pypi_packages, 0);
     }
 
     #[test]

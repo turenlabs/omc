@@ -12,7 +12,7 @@ use omc_registry::{
     parse_npm_direct_archive_reference, parse_pypi_direct_archive_reference, read_lockfile,
     read_package_scripts, remove_manifest_dependency, Behavior, Ecosystem, InstallReport,
     LinkOptions, LockedPackage, OmcRegistryError, PackageSpec, PypiBinaryMode, PypiCheckIssue,
-    Verdict,
+    PythonLocalRequirement, Verdict,
 };
 
 #[derive(Debug, Parser)]
@@ -289,7 +289,7 @@ struct PipInstallAction {
     requirements: Vec<PathBuf>,
     constraints: Vec<PathBuf>,
     archive_references: Vec<String>,
-    local_paths: Vec<PathBuf>,
+    local_paths: Vec<PythonLocalRequirement>,
     index_url: Option<String>,
     extra_index_urls: Vec<String>,
     find_links: Vec<String>,
@@ -922,7 +922,8 @@ fn run_pip_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
                 options.allowed_capabilities = allowed_capabilities;
                 options.requirement_files = absolutize_paths(project_dir, requirements);
                 options.constraint_files = absolutize_paths(project_dir, constraints);
-                options.python_local_paths = absolutize_paths(project_dir, local_paths);
+                options.python_local_requirements =
+                    absolutize_python_local_requirements(project_dir, local_paths);
                 apply_pip_compat_index_options(
                     &mut options,
                     index_url,
@@ -942,7 +943,8 @@ fn run_pip_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
                 options.allowed_capabilities = allowed_capabilities;
                 options.requirement_files = absolutize_paths(project_dir, requirements);
                 options.constraint_files = absolutize_paths(project_dir, constraints);
-                options.python_local_paths = absolutize_paths(project_dir, local_paths);
+                options.python_local_requirements =
+                    absolutize_python_local_requirements(project_dir, local_paths);
                 apply_pip_compat_index_options(
                     &mut options,
                     index_url,
@@ -969,6 +971,7 @@ fn run_pip_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
                 let install = if options.requirement_files.is_empty()
                     && options.constraint_files.is_empty()
                     && options.python_local_paths.is_empty()
+                    && options.python_local_requirements.is_empty()
                     && options.python_target_dir.is_none()
                     && options.pypi_include_dependencies
                 {
@@ -976,6 +979,7 @@ fn run_pip_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
                 } else if options.requirement_files.is_empty()
                     && options.constraint_files.is_empty()
                     && options.python_local_paths.is_empty()
+                    && options.python_local_requirements.is_empty()
                 {
                     install_locked_project(&options)?
                 } else {
@@ -1373,6 +1377,21 @@ fn absolutize_paths(project_dir: &Path, paths: Vec<PathBuf>) -> Vec<PathBuf> {
     paths
         .into_iter()
         .map(|path| absolutize_path(project_dir, path))
+        .collect()
+}
+
+fn absolutize_python_local_requirements(
+    project_dir: &Path,
+    requirements: Vec<PythonLocalRequirement>,
+) -> Vec<PythonLocalRequirement> {
+    requirements
+        .into_iter()
+        .map(|requirement| {
+            PythonLocalRequirement::new(
+                absolutize_path(project_dir, requirement.path),
+                requirement.extras,
+            )
+        })
         .collect()
 }
 
@@ -2212,32 +2231,46 @@ fn is_npm_archive_arg(value: &str) -> bool {
             || path.contains('\\'))
 }
 
-fn pip_local_path_arg(value: &str) -> Result<PathBuf, OmcRegistryError> {
+fn pip_local_path_arg(value: &str) -> Result<PythonLocalRequirement, OmcRegistryError> {
     if value.contains("://") || value.starts_with("git+") || is_pip_archive_arg(value) {
         return Err(OmcRegistryError::UnsupportedSpec(format!(
             "pip editable path `{value}` must be a local directory"
         )));
     }
-    let path = value.split_once('[').map(|(path, _)| path).unwrap_or(value);
+    let (path, extras) = pip_local_path_and_extras(value);
     if path.trim().is_empty() {
         return Err(OmcRegistryError::UnsupportedSpec(
             "pip editable path cannot be empty".to_owned(),
         ));
     }
-    Ok(PathBuf::from(path))
+    Ok(PythonLocalRequirement::new(PathBuf::from(path), extras))
 }
 
 fn is_pip_local_directory_arg(value: &str) -> bool {
     if value.contains("://") || value.starts_with("git+") || is_pip_archive_arg(value) {
         return false;
     }
-    value == "."
-        || value.starts_with("./")
-        || value.starts_with("../")
-        || value.starts_with('/')
-        || value.starts_with("~/")
-        || value.contains('/')
-        || value.contains('\\')
+    let (path, _) = pip_local_path_and_extras(value);
+    path == "."
+        || path.starts_with("./")
+        || path.starts_with("../")
+        || path.starts_with('/')
+        || path.starts_with("~/")
+        || path.contains('/')
+        || path.contains('\\')
+}
+
+fn pip_local_path_and_extras(value: &str) -> (&str, BTreeSet<String>) {
+    let Some((path, extras)) = value.split_once('[') else {
+        return (value, BTreeSet::new());
+    };
+    let extras = extras
+        .trim_end_matches(']')
+        .split(',')
+        .map(normalize_extra)
+        .filter(|extra| !extra.is_empty())
+        .collect();
+    (path, extras)
 }
 
 fn is_pip_archive_arg(value: &str) -> bool {
@@ -2993,9 +3026,12 @@ mod tests {
                 constraints: Vec::new(),
                 archive_references: Vec::new(),
                 local_paths: vec![
-                    PathBuf::from("../editable_pkg"),
-                    PathBuf::from("./another_pkg"),
-                    PathBuf::from("./local_pkg"),
+                    PythonLocalRequirement::new(
+                        PathBuf::from("../editable_pkg"),
+                        BTreeSet::from(["dev".to_owned()]),
+                    ),
+                    PythonLocalRequirement::new(PathBuf::from("./another_pkg"), BTreeSet::new()),
+                    PythonLocalRequirement::new(PathBuf::from("./local_pkg"), BTreeSet::new()),
                 ],
                 index_url: None,
                 extra_index_urls: Vec::new(),
