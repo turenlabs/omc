@@ -2270,6 +2270,7 @@ enum NpmLinkAction {
     },
     Install {
         names: Vec<String>,
+        archive_references: Vec<String>,
         local_paths: Vec<PathBuf>,
         save: bool,
         dependency_kind: ManifestDependencyKind,
@@ -2535,6 +2536,7 @@ fn run_npm_link_compat(
         }
         NpmLinkAction::Install {
             names,
+            archive_references,
             mut local_paths,
             save,
             dependency_kind,
@@ -2567,7 +2569,7 @@ fn run_npm_link_compat(
                 project_dir,
                 NpmInstallCompatRequest {
                     specs: Vec::new(),
-                    archive_references: Vec::new(),
+                    archive_references,
                     local_paths,
                     save,
                     dependency_kind,
@@ -3755,11 +3757,11 @@ fn npm_help_text(topic: Option<&str>) -> String {
             ],
         ),
         Some("link") => npm_command_help(
-            "npm link [<package-name>|<local-dir>...]",
+            "npm link [<package-name>|<local-dir>|<tarball>...]",
             &[
                 "Register or install local npm package links through OMC's link store.",
-                "`npm link` registers the current package; `npm link ../pkg` registers and links a local directory; `npm link <name>` links a previously registered package.",
-                "Links are not saved by default. Use --save, --save-dev, --save-optional, or --save-peer to record a local path in omc.toml.",
+                "`npm link` registers the current package; `npm link ../pkg` registers and links a local directory; `npm link <name>` links a previously registered package; `npm link ./pkg.tgz` installs a local tarball through OMC's archive verifier.",
+                "Links are not saved by default. Use --save, --save-dev, --save-optional, or --save-peer to record a local path or tarball dependency.",
                 "Supports --dry-run, --package-lock-only, omit/include flags for dev/optional/peer dependencies, --registry for dependency refreshes, --allow, and --allow-all-host.",
             ],
         ),
@@ -13855,6 +13857,7 @@ fn parse_npm_install_args(args: &[String]) -> Result<NpmCompatAction, OmcRegistr
 
 fn parse_npm_link_args(args: &[String]) -> Result<NpmCompatAction, OmcRegistryError> {
     let explicit_save = npm_link_explicit_save(args);
+    let mut archive_references = Vec::new();
     let mut local_paths = Vec::new();
     let mut dry_run = false;
     let mut filtered = Vec::new();
@@ -13865,9 +13868,7 @@ fn parse_npm_link_args(args: &[String]) -> Result<NpmCompatAction, OmcRegistryEr
             dry_run = true;
         } else if matches!(arg.as_str(), "--global" | "-g") {
         } else if is_npm_archive_arg(arg) {
-            return Err(OmcRegistryError::UnsupportedSpec(
-                "npm link local tarballs are not supported; use npm install <tarball>".to_owned(),
-            ));
+            archive_references.push(arg.clone());
         } else if ignored_npm_value_flag(arg) {
             filtered.push(arg.clone());
             index += 1;
@@ -13899,7 +13900,7 @@ fn parse_npm_link_args(args: &[String]) -> Result<NpmCompatAction, OmcRegistryEr
         ..
     } = parse_common_compat_flags(&filtered, true)?;
 
-    if positionals.is_empty() && local_paths.is_empty() {
+    if positionals.is_empty() && archive_references.is_empty() && local_paths.is_empty() {
         return Ok(NpmCompatAction::Link {
             action: NpmLinkAction::Register { dry_run },
         });
@@ -13908,6 +13909,7 @@ fn parse_npm_link_args(args: &[String]) -> Result<NpmCompatAction, OmcRegistryEr
     Ok(NpmCompatAction::Link {
         action: NpmLinkAction::Install {
             names: positionals,
+            archive_references,
             local_paths,
             save: explicit_save && save,
             dependency_kind,
@@ -20299,6 +20301,45 @@ mod tests {
     }
 
     #[test]
+    fn npm_link_installs_local_tarball() {
+        let project = test_dir("npm-link-tarball-project");
+        fs::write(
+            project.join("package.json"),
+            r#"{"name":"root","version":"1.0.0"}"#,
+        )
+        .unwrap();
+
+        let package = test_dir("npm-link-tarball-package");
+        fs::write(
+            package.join("package.json"),
+            r#"{"name":"local-tarball","version":"1.2.3","bin":{"local-bin":"cli.js"}}"#,
+        )
+        .unwrap();
+        fs::write(package.join("index.js"), "module.exports = 42;\n").unwrap();
+        fs::write(package.join("cli.js"), "#!/usr/bin/env node\n").unwrap();
+
+        let tarball = project.join("local-tarball-1.2.3.tgz");
+        let files = collect_npm_pack_files(&package).unwrap();
+        write_npm_pack_tarball(&tarball, &files).unwrap();
+
+        let status = run_npm_compat(&project, &args(&["link", tarball.to_str().unwrap()])).unwrap();
+
+        assert_eq!(status, ExitCode::SUCCESS);
+        assert_eq!(
+            fs::read_to_string(project.join("node_modules/local-tarball/index.js")).unwrap(),
+            "module.exports = 42;\n"
+        );
+        assert!(project.join("node_modules/.bin/local-bin").exists());
+
+        let lock = read_lockfile(project.join("omc.lock")).unwrap();
+        assert!(lock
+            .packages
+            .iter()
+            .any(|package| package.name == "local-tarball"
+                && package.source_url.starts_with("file://")));
+    }
+
+    #[test]
     fn parses_direct_compat_project_dir_prefix() {
         assert_eq!(
             parse_direct_compat_invocation(
@@ -20746,6 +20787,7 @@ mod tests {
             NpmCompatAction::Link {
                 action: NpmLinkAction::Install {
                     names: Vec::new(),
+                    archive_references: Vec::new(),
                     local_paths: vec![PathBuf::from("../local-pkg")],
                     save: false,
                     dependency_kind: ManifestDependencyKind::Production,
@@ -20772,6 +20814,7 @@ mod tests {
             NpmCompatAction::Link {
                 action: NpmLinkAction::Install {
                     names: vec!["@scope/local-pkg".to_owned()],
+                    archive_references: Vec::new(),
                     local_paths: Vec::new(),
                     save: true,
                     dependency_kind: ManifestDependencyKind::Dev,
@@ -20781,6 +20824,36 @@ mod tests {
                     lock_only: false,
                     dry_run: false,
                     npm_registry: Some("https://registry.example.invalid/npm".to_owned()),
+                    allow: Vec::new(),
+                    allow_all_host: false,
+                },
+            }
+        );
+
+        assert_eq!(
+            parse_npm_compat_action(&args(&[
+                "link",
+                "--dry-run",
+                "./pkg.tgz",
+                "file:../other.tgz",
+            ]))
+            .unwrap(),
+            NpmCompatAction::Link {
+                action: NpmLinkAction::Install {
+                    names: Vec::new(),
+                    archive_references: vec![
+                        "./pkg.tgz".to_owned(),
+                        "file:../other.tgz".to_owned()
+                    ],
+                    local_paths: Vec::new(),
+                    save: false,
+                    dependency_kind: ManifestDependencyKind::Production,
+                    omit_dev: false,
+                    omit_optional: false,
+                    omit_peer: false,
+                    lock_only: false,
+                    dry_run: true,
+                    npm_registry: None,
                     allow: Vec::new(),
                     allow_all_host: false,
                 },

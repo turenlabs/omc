@@ -127,6 +127,7 @@ cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm install --dry-
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/local-util npm link
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm link local-util
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm link ../local-util --save-dev
+cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm link ./dist/local-util-1.0.0.tgz
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm update --package-lock-only
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm install-test -- --watch
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm ci --omit=dev
