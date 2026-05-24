@@ -283,7 +283,9 @@ host interpreter with OMC's isolated import path; set `OMC_HOST_PYTHON` if the
 host `python3` is not discoverable outside the OMC shim directory. The Node shim
 uses the same model; set `OMC_HOST_NODE` if needed. Direct `pip` and
 `python -m pip` commands keep resolving relative CLI paths from the invocation
-directory while using the discovered project for OMC state.
+directory while using the discovered project for OMC state. Direct `twine` and
+`python -m twine` use the same rule for distribution, config, and certificate
+paths.
 
 For existing projects, `install` reads normal project files:
 

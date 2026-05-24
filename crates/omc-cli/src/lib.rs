@@ -1429,7 +1429,11 @@ fn run_entry() -> Result<ExitCode, OmcRegistryError> {
             DirectCompatMode::Python => {
                 run_python_in_cwd(&invocation.project_dir, &invocation.cwd, &invocation.args)
             }
-            DirectCompatMode::Twine => run_twine_compat(&invocation.project_dir, &invocation.args),
+            DirectCompatMode::Twine => run_twine_compat_with_cwd(
+                &invocation.project_dir,
+                &invocation.args,
+                &invocation.cwd,
+            ),
         };
     }
 
@@ -2248,7 +2252,7 @@ fn run_python_in_cwd(
         return run_pip_compat_with_cwd(project_dir, pip_args, cwd);
     }
     if let Some(twine_args) = python_twine_module_args(args) {
-        return run_twine_compat(project_dir, twine_args);
+        return run_twine_compat_with_cwd(project_dir, twine_args, cwd);
     }
 
     let mut command = ProcessCommand::new(host_python_program()?);
@@ -5564,6 +5568,14 @@ fn absolutize_pip_find_links(base_dir: &Path, find_links: Vec<String>) -> Vec<St
 }
 
 fn run_twine_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRegistryError> {
+    run_twine_compat_with_cwd(project_dir, args, project_dir)
+}
+
+fn run_twine_compat_with_cwd(
+    project_dir: &Path,
+    args: &[String],
+    invocation_cwd: &Path,
+) -> Result<ExitCode, OmcRegistryError> {
     match parse_twine_compat_action(args)? {
         TwineCompatAction::Help { topic } => {
             print_twine_help(topic.as_deref());
@@ -5573,7 +5585,8 @@ fn run_twine_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, Omc
             println!("twine {} from OMC", env!("CARGO_PKG_VERSION"));
             Ok(ExitCode::SUCCESS)
         }
-        TwineCompatAction::Check(action) => {
+        TwineCompatAction::Check(mut action) => {
+            absolutize_twine_check_action_paths(invocation_cwd, &mut action);
             let failed = print_twine_check(project_dir, action)?;
             Ok(if failed {
                 ExitCode::FAILURE
@@ -5581,11 +5594,32 @@ fn run_twine_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, Omc
                 ExitCode::SUCCESS
             })
         }
-        TwineCompatAction::Upload(action) => {
+        TwineCompatAction::Upload(mut action) => {
+            absolutize_twine_upload_action_paths(invocation_cwd, &mut action);
             print_twine_upload(project_dir, *action)?;
             Ok(ExitCode::SUCCESS)
         }
     }
+}
+
+fn absolutize_twine_check_action_paths(base_dir: &Path, action: &mut TwineCheckAction) {
+    action.paths = absolutize_paths(base_dir, std::mem::take(&mut action.paths));
+}
+
+fn absolutize_twine_upload_action_paths(base_dir: &Path, action: &mut TwineUploadAction) {
+    action.paths = absolutize_paths(base_dir, std::mem::take(&mut action.paths));
+    action.config_file = action
+        .config_file
+        .take()
+        .map(|path| absolutize_path(base_dir, path));
+    action.cert = action
+        .cert
+        .take()
+        .map(|path| absolutize_path(base_dir, path));
+    action.client_cert = action
+        .client_cert
+        .take()
+        .map(|path| absolutize_path(base_dir, path));
 }
 
 fn print_twine_check(
@@ -37907,6 +37941,61 @@ verdict = "accepted"
             .contains("has no associated attestations"));
 
         fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn direct_twine_upload_paths_resolve_from_invocation_cwd() {
+        let project = test_dir("direct-twine-project");
+        let invocation_cwd = project.join("packages").join("publisher");
+        let dist = invocation_cwd.join("dist/demo-1.0.0-py3-none-any.whl");
+        let attestation =
+            invocation_cwd.join("dist/demo-1.0.0-py3-none-any.whl.publish.attestation");
+        fs::create_dir_all(dist.parent().unwrap()).unwrap();
+        fs::create_dir_all(invocation_cwd.join("certs")).unwrap();
+        fs::write(&dist, b"wheel").unwrap();
+        fs::write(
+            &attestation,
+            r#"{"predicateType":"https://example.invalid/build"}"#,
+        )
+        .unwrap();
+
+        let mut action = TwineUploadAction {
+            paths: vec![
+                PathBuf::from("dist/demo-1.0.0-py3-none-any.whl"),
+                PathBuf::from("dist/demo-1.0.0-py3-none-any.whl.publish.attestation"),
+            ],
+            repository: None,
+            repository_url: Some("https://private.example/legacy/".to_owned()),
+            username: None,
+            password: None,
+            config_file: Some(PathBuf::from("release.pypirc")),
+            cert: Some(PathBuf::from("certs/ca.pem")),
+            client_cert: Some(PathBuf::from("certs/client.pem")),
+            skip_existing: false,
+            comment: None,
+            sign: false,
+            sign_with: None,
+            identity: None,
+            attestations: true,
+        };
+
+        absolutize_twine_upload_action_paths(&invocation_cwd, &mut action);
+
+        let inputs = twine_upload_inputs(&project, &action).unwrap();
+        assert_eq!(inputs.len(), 1);
+        assert_eq!(inputs[0].path, dist);
+        assert_eq!(inputs[0].attestation_paths, vec![attestation]);
+        assert_eq!(
+            action.config_file,
+            Some(invocation_cwd.join("release.pypirc"))
+        );
+        assert_eq!(action.cert, Some(invocation_cwd.join("certs/ca.pem")));
+        assert_eq!(
+            action.client_cert,
+            Some(invocation_cwd.join("certs/client.pem"))
+        );
+
+        fs::remove_dir_all(project).unwrap();
     }
 
     #[test]
