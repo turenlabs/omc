@@ -12916,15 +12916,29 @@ fn print_pip_show_package(
         .join(".omc")
         .join("python")
         .join("site-packages");
+    let metadata = read_pip_show_metadata(&site_packages, package)?;
+    let requires = if metadata.requires.is_empty() {
+        pip_dependency_names(package)
+    } else {
+        metadata.requires
+    };
     println!("Name: {}", package.name);
     println!("Version: {}", package.version);
-    println!("Summary:");
-    println!("Home-page: {}", package.source_url);
-    println!("Author:");
-    println!("Author-email:");
-    println!("License:");
+    println!("Summary: {}", metadata.summary.unwrap_or_default());
+    println!(
+        "Home-page: {}",
+        metadata
+            .home_page
+            .unwrap_or_else(|| package.source_url.clone())
+    );
+    println!("Author: {}", metadata.author.unwrap_or_default());
+    println!(
+        "Author-email: {}",
+        metadata.author_email.unwrap_or_default()
+    );
+    println!("License: {}", metadata.license.unwrap_or_default());
     println!("Location: {}", site_packages.display());
-    println!("Requires: {}", pip_dependency_names(package).join(", "));
+    println!("Requires: {}", requires.join(", "));
     println!(
         "Required-by: {}",
         pip_required_by_names(package, packages).join(", ")
@@ -12936,6 +12950,56 @@ fn print_pip_show_package(
         }
     }
     Ok(())
+}
+
+#[derive(Debug, Default, PartialEq, Eq)]
+struct PipShowMetadata {
+    summary: Option<String>,
+    home_page: Option<String>,
+    author: Option<String>,
+    author_email: Option<String>,
+    license: Option<String>,
+    requires: Vec<String>,
+}
+
+fn read_pip_show_metadata(
+    site_packages: &Path,
+    package: &LockedPackage,
+) -> Result<PipShowMetadata, OmcRegistryError> {
+    let Some(dist_info) = match_dist_info_dir(site_packages, package)? else {
+        return Ok(PipShowMetadata::default());
+    };
+    let metadata = dist_info.join("METADATA");
+    if !metadata.exists() {
+        return Ok(PipShowMetadata::default());
+    }
+
+    let mut output = PipShowMetadata::default();
+    for line in pip_metadata_lines(&fs::read_to_string(metadata)?) {
+        if let Some(value) = line.strip_prefix("Summary:") {
+            output.summary = Some(value.trim().to_owned());
+        } else if let Some(value) = line.strip_prefix("Home-page:") {
+            output.home_page = Some(value.trim().to_owned());
+        } else if let Some(value) = line.strip_prefix("Author:") {
+            output.author = Some(value.trim().to_owned());
+        } else if let Some(value) = line.strip_prefix("Author-email:") {
+            output.author_email = Some(value.trim().to_owned());
+        } else if let Some(value) = line.strip_prefix("License:") {
+            output.license = Some(value.trim().to_owned());
+        } else if output.license.is_none() {
+            if let Some(value) = line.strip_prefix("License-Expression:") {
+                output.license = Some(value.trim().to_owned());
+            }
+        }
+        if let Some(value) = line.strip_prefix("Requires-Dist:") {
+            if let Some(name) = pip_requires_dist_name(value.trim()) {
+                output.requires.push(name);
+            }
+        }
+    }
+    output.requires.sort();
+    output.requires.dedup();
+    Ok(output)
 }
 
 fn pip_dependency_names(package: &LockedPackage) -> Vec<String> {
@@ -12971,6 +13035,19 @@ fn pip_dependency_name(dependency: &str) -> Option<String> {
         .ok()
         .filter(|spec| spec.ecosystem == Ecosystem::Pypi)
         .map(|spec| spec.name)
+}
+
+fn pip_requires_dist_name(requirement: &str) -> Option<String> {
+    let requirement = requirement
+        .split_once(';')
+        .map(|(requirement, _)| requirement)
+        .unwrap_or(requirement)
+        .trim();
+    let name = requirement
+        .chars()
+        .take_while(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.'))
+        .collect::<String>();
+    (!name.is_empty()).then(|| normalize_pip_show_name(&name))
 }
 
 fn pip_installed_files(
@@ -26686,6 +26763,11 @@ resolved_commit = "0123456789abcdef0123456789abcdef01234567"
         let dist_info = site_packages.join("charset_normalizer-3.4.0.dist-info");
         fs::create_dir_all(&dist_info).unwrap();
         fs::write(
+            dist_info.join("METADATA"),
+            "Metadata-Version: 2.1\nName: charset-normalizer\nVersion: 3.4.0\nSummary: Character encoding detector\nHome-page: https://example.invalid/charset\nAuthor: Example Maintainers\nAuthor-email: dev@example.invalid\nLicense-Expression: MIT\nRequires-Dist: idna>=3\nRequires-Dist: PySocks>=1.5.6; extra == 'socks'\n",
+        )
+        .unwrap();
+        fs::write(
             dist_info.join("RECORD"),
             "charset_normalizer/__init__.py,,\ncharset_normalizer-3.4.0.dist-info/METADATA,,\n",
         )
@@ -26697,6 +26779,17 @@ resolved_commit = "0123456789abcdef0123456789abcdef01234567"
                 "charset_normalizer-3.4.0.dist-info/METADATA".to_owned(),
                 "charset_normalizer/__init__.py".to_owned(),
             ]
+        );
+        assert_eq!(
+            read_pip_show_metadata(&site_packages, &package).unwrap(),
+            PipShowMetadata {
+                summary: Some("Character encoding detector".to_owned()),
+                home_page: Some("https://example.invalid/charset".to_owned()),
+                author: Some("Example Maintainers".to_owned()),
+                author_email: Some("dev@example.invalid".to_owned()),
+                license: Some("MIT".to_owned()),
+                requires: vec!["idna".to_owned(), "pysocks".to_owned()],
+            }
         );
         fs::remove_dir_all(site_packages.parent().unwrap()).unwrap();
     }

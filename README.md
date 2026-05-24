@@ -578,7 +578,8 @@ Supported now:
   lockfile; read-only `pip freeze --path DIR`, `pip list --path DIR`, and
   `pip inspect --path DIR` inspect target-directory `.dist-info` metadata,
   including `Requires-Dist` dependency metadata; generated pure-sdist
-  `.dist-info/RECORD` files support `pip show -f`; scope flags
+  `.dist-info/RECORD` files support `pip show -f`, and `pip show` reads
+  installed summary, homepage, author, license, and requirement metadata; scope flags
   such as `--all`, `--local`, `--user`, `--exclude`, and
   `--exclude-editable` are accepted;
   direct `pip install -e PATH` and `pip install ./path` local directory
