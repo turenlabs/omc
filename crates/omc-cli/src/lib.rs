@@ -1557,6 +1557,7 @@ fn run() -> Result<ExitCode, OmcRegistryError> {
                 CliPolicyArgs::new(&allow, &allow_flow, allow_all_host),
                 true,
                 false,
+                false,
             )?;
         }
         Command::Allow { flows, grants } => {
@@ -2967,6 +2968,7 @@ fn run_npm_global_remove_compat(
         CliPolicyArgs::new(allow, allow_flow, allow_all_host),
         true,
         false,
+        false,
     )?;
     sync_npm_global_bins(&prefix, &global_project_dir)
 }
@@ -3771,6 +3773,7 @@ fn run_npm_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
                 Some(Ecosystem::Npm),
                 CliPolicyArgs::new(&allow, &allow_flow, allow_all_host),
                 true,
+                false,
                 false,
             )?;
         }
@@ -4907,6 +4910,7 @@ fn run_pip_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
                 Some(Ecosystem::Pypi),
                 CliPolicyArgs::new(&allow, &allow_flow, allow_all_host),
                 false,
+                true,
                 true,
             )?;
         }
@@ -6260,12 +6264,13 @@ fn run_pip_uninstall_user(
         let removed_from_editable =
             editable_removal.removed(&spec.name) && spec.ecosystem == Ecosystem::Pypi;
         if !removed_from_manifest && locked_removals.is_empty() && !removed_from_editable {
-            return Err(OmcRegistryError::UnsupportedSpec(format!(
-                "dependency `{}` is not in OMC pip user state",
-                spec.package_key(),
-            )));
+            eprintln!("WARNING: Skipping {} as it is not installed.", spec.name);
+            continue;
         }
         removed.push(spec.package_key());
+    }
+    if removed.is_empty() {
+        return Ok(ExitCode::SUCCESS);
     }
 
     clean_pip_user_site_before_reinstall(&user_paths, previous_lock.as_ref())?;
@@ -15391,6 +15396,7 @@ fn remove_specs(
     policy: CliPolicyArgs<'_>,
     update_npm_package_json: bool,
     allow_locked_pypi_removal: bool,
+    missing_ok: bool,
 ) -> Result<(), OmcRegistryError> {
     let specs = parse_package_specs(specs, ecosystem_hint)?;
     let update_npm_package_json =
@@ -15406,7 +15412,11 @@ fn remove_specs(
     let mut removed_locked = false;
     let mut removed_manifest = false;
     for spec in &specs {
-        let removed_from_manifest = remove_manifest_dependency(project_dir, spec)?;
+        let removed_from_manifest = if missing_ok && !project_dir.join("omc.toml").exists() {
+            false
+        } else {
+            remove_manifest_dependency(project_dir, spec)?
+        };
         removed_manifest |= removed_from_manifest;
         let removed_from_package_json =
             if update_npm_package_json && spec.ecosystem == Ecosystem::Npm {
@@ -15431,6 +15441,10 @@ fn remove_specs(
             && locked_removals.is_empty()
             && !removed_from_editable
         {
+            if missing_ok {
+                eprintln!("WARNING: Skipping {} as it is not installed.", spec.name);
+                continue;
+            }
             let sources = if update_npm_package_json && spec.ecosystem == Ecosystem::Npm {
                 "omc.toml or package.json"
             } else if allow_locked_pypi_removal && spec.ecosystem == Ecosystem::Pypi {
@@ -15444,6 +15458,9 @@ fn remove_specs(
             )));
         }
         removed.push(spec.package_key());
+    }
+    if removed.is_empty() {
+        return Ok(());
     }
 
     let mut install = if (removed_locked || !editable_removal.removed_names.is_empty())
@@ -24830,6 +24847,7 @@ fn pip_global_ignored_bool_flag(arg: &str) -> bool {
                 | "--require-virtualenv"
                 | "--no-color"
                 | "--no-input"
+                | "--no-python-version-warning"
         )
 }
 
@@ -24862,6 +24880,8 @@ fn pip_global_ignored_value_flag(arg: &str) -> bool {
             | "--cert"
             | "--client-cert"
             | "--cache-dir"
+            | "--use-feature"
+            | "--use-deprecated"
     )
 }
 
@@ -24876,6 +24896,8 @@ fn pip_global_ignored_equals_flag(arg: &str) -> bool {
         "--cert=",
         "--client-cert=",
         "--cache-dir=",
+        "--use-feature=",
+        "--use-deprecated=",
     ]
     .iter()
     .any(|prefix| arg.starts_with(prefix))
@@ -25229,9 +25251,17 @@ fn parse_pip_uninstall_args(args: &[String]) -> Result<PipCompatAction, OmcRegis
             user = true;
         } else if arg == "--user=false" {
             user = false;
-        } else if matches!(arg.as_str(), "-y" | "--yes" | "--disable-pip-version-check")
-            || pip_ignored_verbosity_flag(arg)
+        } else if matches!(arg.as_str(), "-y" | "--yes" | "--break-system-packages")
+            || pip_global_ignored_bool_flag(arg)
         {
+        } else if pip_global_ignored_value_flag(arg) {
+            index += 1;
+            if args.get(index).is_none() {
+                return Err(OmcRegistryError::UnsupportedSpec(format!(
+                    "{arg} needs a value"
+                )));
+            }
+        } else if pip_global_ignored_equals_flag(arg) {
         } else {
             filtered.push(arg.clone());
         }
@@ -35399,6 +35429,28 @@ version = "0.2.0"
                 "requirements.txt",
                 "--requirement=dev-requirements.txt",
                 "--disable-pip-version-check",
+                "--no-input",
+                "--no-color",
+                "--no-cache-dir",
+                "--no-python-version-warning",
+                "--log",
+                "pip.log",
+                "--proxy=http://proxy.invalid",
+                "--retries",
+                "1",
+                "--timeout=5",
+                "--exists-action",
+                "i",
+                "--trusted-host=mirror.example",
+                "--cert",
+                "cert.pem",
+                "--client-cert=client.pem",
+                "--cache-dir",
+                ".pip-cache",
+                "--use-feature",
+                "fast-deps",
+                "--use-deprecated=legacy-resolver",
+                "--break-system-packages",
                 "pytest",
             ]))
             .unwrap(),
@@ -35627,6 +35679,44 @@ resolved_commit = "0123456789abcdef0123456789abcdef01234567"
             .join("site-packages")
             .join("requests-2.32.3.dist-info")
             .exists());
+
+        let _ = fs::remove_dir_all(project);
+    }
+
+    #[test]
+    fn pip_uninstall_skips_missing_packages_like_pip() {
+        let project = test_dir("pip-uninstall-missing-package");
+
+        let status = run_pip_compat(
+            &project,
+            &args(&[
+                "uninstall",
+                "--no-input",
+                "--no-color",
+                "--log",
+                "pip.log",
+                "--proxy=http://proxy.invalid",
+                "--retries",
+                "1",
+                "--timeout=5",
+                "--exists-action",
+                "i",
+                "--trusted-host=mirror.example",
+                "--cert",
+                "cert.pem",
+                "--client-cert=client.pem",
+                "--cache-dir",
+                ".pip-cache",
+                "-y",
+                "definitely-not-installed",
+            ]),
+        )
+        .unwrap();
+
+        assert_eq!(status, ExitCode::SUCCESS);
+        assert!(!project.join("omc.toml").exists());
+        assert!(!project.join("omc.lock").exists());
+        assert!(!project.join(".omc").exists());
 
         let _ = fs::remove_dir_all(project);
     }
