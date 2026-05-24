@@ -316,11 +316,11 @@ walk runtime dependencies recursively
 download the registry artifact without executing it
 use global/project/user `.npmrc` registry, scoped registry, auth token settings,
 npm globalconfig/userconfig env vars, npm registry env vars, and npm
-install-mode `.npmrc`/env defaults such as `production`, `omit`, `include`,
-`global`, `dry-run`, `package-lock-only`, `save`, `save-prod`, `save-dev`,
-`save-optional`, `save-peer`, `save-exact`, `save-bundle`, `save-prefix`,
-`NODE_ENV=production`, `NPM_CONFIG_PRODUCTION`, `NPM_CONFIG_OMIT`, and
-`NPM_CONFIG_INCLUDE`
+install-mode `.npmrc`/env defaults such as `production`, `optional`, `omit`,
+`include`, `global`, `dry-run`, `package-lock-only`, `save`, `save-prod`,
+`save-dev`, `save-optional`, `save-peer`, `save-exact`, `save-bundle`,
+`save-prefix`, `NODE_ENV=production`, `NPM_CONFIG_PRODUCTION`,
+`NPM_CONFIG_OPTIONAL`, `NPM_CONFIG_OMIT`, and `NPM_CONFIG_INCLUDE`
 use `omc.toml` PyPI simple-index settings for OMC-managed PyPI adds
 use project/user `pip.conf` PyPI simple-index settings when no project index is set
 use `PIP_INDEX_URL` / `PIP_EXTRA_INDEX_URL` when no project PyPI index is set
@@ -446,7 +446,7 @@ Supported now:
   `npm_config_globalconfig` global `.npmrc` path selection, and
   `NPM_CONFIG_USERCONFIG` / `npm_config_userconfig` user `.npmrc` path selection
 - global, project, and user `.npmrc` install defaults for `production`, `only`,
-  `omit`, `include`, `global`, `dry-run`, `package-lock-only`, `save`,
+  `optional`, `omit`, `include`, `global`, `dry-run`, `package-lock-only`, `save`,
   `save-prod`, `save-dev`, `save-optional`, `save-peer`, `save-exact`,
   `save-bundle`, and `save-prefix`
 - project `omc.toml` PyPI simple-index support for `pypi-index-url` and
@@ -492,10 +492,11 @@ Supported now:
 - npm bundled-save flags for package metadata: `--save-bundle`,
   `--save-bundled`, `-B`, `--no-save-bundle`, and `--no-save-bundled`
 - npm omit/include flags for install selection:
-  `--omit=dev|optional|peer` and `--include=dev|optional|peer`
+  `--no-optional`, `--optional=false`, `--omit=dev|optional|peer`, and
+  `--include=dev|optional|peer`
 - npm install-mode environment defaults for `NODE_ENV=production`,
-  `NPM_CONFIG_PRODUCTION`, `NPM_CONFIG_OMIT`, `NPM_CONFIG_INCLUDE`,
-  `NPM_CONFIG_GLOBAL`, `NPM_CONFIG_DRY_RUN`,
+  `NPM_CONFIG_PRODUCTION`, `NPM_CONFIG_OPTIONAL`, `NPM_CONFIG_OMIT`,
+  `NPM_CONFIG_INCLUDE`, `NPM_CONFIG_GLOBAL`, `NPM_CONFIG_DRY_RUN`,
   `NPM_CONFIG_PACKAGE_LOCK_ONLY`, `NPM_CONFIG_SAVE`,
   `NPM_CONFIG_SAVE_PROD`, `NPM_CONFIG_SAVE_DEV`,
   `NPM_CONFIG_SAVE_OPTIONAL`, `NPM_CONFIG_SAVE_PEER`,
@@ -631,8 +632,8 @@ Supported now:
   package specs and explicit `--package` specs are installed into a temporary
   verified OMC project before dispatching to the requested executable; `--no-save`,
   `--save-exact`, `--save-bundle`, `--save-prefix`, `--package-lock-only`,
-  `--package-lock=false`, `--dry-run`, `--registry`, `--omit=...`,
-  `--include=...`, and common audit/fund/peer/install-strategy flags are
+  `--package-lock=false`, `--dry-run`, `--registry`, `--no-optional`,
+  `--optional=false`, `--omit=...`, `--include=...`, and common audit/fund/peer/install-strategy flags are
   understood for install/ci compatibility; `npm install <pkg>` saves into the
   root `package.json` when one exists, `npm update`/`npm up`/`npm upgrade`
   default to no `package.json` save unless an explicit save flag is passed,

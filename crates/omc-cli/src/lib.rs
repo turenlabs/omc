@@ -4081,6 +4081,14 @@ fn npm_environment_default_args() -> Vec<String> {
         }
     }
 
+    if let Some(optional) = npm_config_env("optional") {
+        if config_false(&optional) {
+            args.push("--omit=optional".to_owned());
+        } else if config_bool(&optional) {
+            args.push("--include=optional".to_owned());
+        }
+    }
+
     if let Some(omit) = npm_config_env("omit") {
         args.push("--include=dev,optional,peer".to_owned());
         args.push(format!("--omit={omit}"));
@@ -4230,6 +4238,7 @@ fn npm_cli_default_config_key(key: &str) -> bool {
         key,
         "production"
             | "only"
+            | "optional"
             | "omit"
             | "include"
             | "global"
@@ -4279,6 +4288,14 @@ fn append_npm_default_args_from_config(values: &BTreeMap<String, String>, args: 
         .unwrap_or(false)
     {
         args.push("--include=dev".to_owned());
+    }
+
+    if let Some(optional) = values.get("optional") {
+        if config_false(optional) {
+            args.push("--omit=optional".to_owned());
+        } else if config_bool(optional) {
+            args.push("--include=optional".to_owned());
+        }
     }
 
     if let Some(omit) = values.get("omit").filter(|value| !value.trim().is_empty()) {
@@ -27387,6 +27404,10 @@ fn parse_common_compat_flags(
                 parsed.omit_dev = true;
             } else if matches!(arg.as_str(), "--production=false" | "--prod=false") {
                 parsed.omit_dev = false;
+            } else if matches!(arg.as_str(), "--no-optional" | "--optional=false") {
+                parsed.omit_optional = true;
+            } else if matches!(arg.as_str(), "--optional" | "--optional=true") {
+                parsed.omit_optional = false;
             } else if let Some(value) = arg.strip_prefix("--omit=") {
                 parsed.omit_dev |= npm_dependency_set_contains(value, "dev");
                 parsed.omit_optional |= npm_dependency_set_contains(value, "optional");
@@ -28192,6 +28213,8 @@ mod tests {
                 ("NODE_ENV", Some("production")),
                 ("NPM_CONFIG_PRODUCTION", None),
                 ("npm_config_production", None),
+                ("NPM_CONFIG_OPTIONAL", None),
+                ("npm_config_optional", None),
                 ("NPM_CONFIG_OMIT", None),
                 ("npm_config_omit", None),
                 ("NPM_CONFIG_INCLUDE", None),
@@ -28244,6 +28267,8 @@ mod tests {
                 ("NODE_ENV", Some("production")),
                 ("NPM_CONFIG_PRODUCTION", Some("false")),
                 ("npm_config_production", None),
+                ("NPM_CONFIG_OPTIONAL", None),
+                ("npm_config_optional", None),
                 ("NPM_CONFIG_OMIT", None),
                 ("npm_config_omit", None),
                 ("NPM_CONFIG_INCLUDE", None),
@@ -28290,9 +28315,73 @@ mod tests {
 
         with_env_values(
             &[
+                ("NODE_ENV", None),
+                ("NPM_CONFIG_PRODUCTION", None),
+                ("npm_config_production", None),
+                ("NPM_CONFIG_OPTIONAL", Some("false")),
+                ("npm_config_optional", None),
+                ("NPM_CONFIG_OMIT", None),
+                ("npm_config_omit", None),
+                ("NPM_CONFIG_INCLUDE", None),
+                ("npm_config_include", None),
+                ("NPM_CONFIG_GLOBAL", None),
+                ("npm_config_global", None),
+                ("NPM_CONFIG_DRY_RUN", None),
+                ("npm_config_dry_run", None),
+                ("NPM_CONFIG_PACKAGE_LOCK_ONLY", None),
+                ("npm_config_package_lock_only", None),
+                ("NPM_CONFIG_PACKAGE_LOCK", None),
+                ("npm_config_package_lock", None),
+                ("NPM_CONFIG_SAVE", None),
+                ("npm_config_save", None),
+                ("NPM_CONFIG_SAVE_PROD", None),
+                ("npm_config_save_prod", None),
+                ("NPM_CONFIG_SAVE_DEV", None),
+                ("npm_config_save_dev", None),
+                ("NPM_CONFIG_SAVE_OPTIONAL", None),
+                ("npm_config_save_optional", None),
+                ("NPM_CONFIG_SAVE_PEER", None),
+                ("npm_config_save_peer", None),
+                ("NPM_CONFIG_SAVE_EXACT", None),
+                ("npm_config_save_exact", None),
+                ("NPM_CONFIG_SAVE_BUNDLE", None),
+                ("npm_config_save_bundle", None),
+                ("NPM_CONFIG_SAVE_PREFIX", None),
+                ("npm_config_save_prefix", None),
+            ],
+            || {
+                assert_eq!(
+                    npm_args_with_environment_defaults(&args(&[
+                        "install",
+                        "--include=optional",
+                        "left-pad",
+                    ])),
+                    args(&[
+                        "--omit=optional",
+                        "install",
+                        "--include=optional",
+                        "left-pad",
+                    ])
+                );
+                let action =
+                    parse_npm_compat_action(&npm_args_with_environment_defaults(&args(&[
+                        "install", "left-pad",
+                    ])))
+                    .unwrap();
+                let NpmCompatAction::Install { omit_optional, .. } = action else {
+                    panic!("expected npm install action");
+                };
+                assert!(omit_optional);
+            },
+        );
+
+        with_env_values(
+            &[
                 ("NODE_ENV", Some("production")),
                 ("NPM_CONFIG_PRODUCTION", None),
                 ("npm_config_production", None),
+                ("NPM_CONFIG_OPTIONAL", None),
+                ("npm_config_optional", None),
                 ("NPM_CONFIG_OMIT", Some("optional,peer")),
                 ("npm_config_omit", None),
                 ("NPM_CONFIG_INCLUDE", Some("peer")),
@@ -28377,6 +28466,8 @@ mod tests {
                 ("NODE_ENV", None),
                 ("NPM_CONFIG_PRODUCTION", None),
                 ("npm_config_production", None),
+                ("NPM_CONFIG_OPTIONAL", None),
+                ("npm_config_optional", None),
                 ("NPM_CONFIG_OMIT", None),
                 ("npm_config_omit", None),
                 ("NPM_CONFIG_INCLUDE", None),
@@ -28432,6 +28523,8 @@ mod tests {
                 ("NODE_ENV", None),
                 ("NPM_CONFIG_PRODUCTION", None),
                 ("npm_config_production", None),
+                ("NPM_CONFIG_OPTIONAL", None),
+                ("npm_config_optional", None),
                 ("NPM_CONFIG_OMIT", None),
                 ("npm_config_omit", None),
                 ("NPM_CONFIG_INCLUDE", None),
@@ -28526,6 +28619,8 @@ mod tests {
                 ("npm_config_userconfig", None),
                 ("NPM_CONFIG_PRODUCTION", None),
                 ("npm_config_production", None),
+                ("NPM_CONFIG_OPTIONAL", None),
+                ("npm_config_optional", None),
                 ("NPM_CONFIG_OMIT", None),
                 ("npm_config_omit", None),
                 ("NPM_CONFIG_INCLUDE", None),
@@ -28618,6 +28713,79 @@ mod tests {
     }
 
     #[test]
+    fn npm_config_file_defaults_support_optional_omit() {
+        let project = test_dir("npm-config-file-optional-default");
+        let user_config = project.join("user.npmrc");
+        let global_config = project.join("global.npmrc");
+        fs::write(&user_config, "").unwrap();
+        fs::write(&global_config, "").unwrap();
+        fs::write(project.join(".npmrc"), "optional=false\n").unwrap();
+
+        with_env_values(
+            &[
+                ("NODE_ENV", None),
+                (
+                    "NPM_CONFIG_GLOBALCONFIG",
+                    Some(global_config.to_str().unwrap()),
+                ),
+                ("npm_config_globalconfig", None),
+                ("NPM_CONFIG_USERCONFIG", Some(user_config.to_str().unwrap())),
+                ("npm_config_userconfig", None),
+                ("NPM_CONFIG_PRODUCTION", None),
+                ("npm_config_production", None),
+                ("NPM_CONFIG_OPTIONAL", None),
+                ("npm_config_optional", None),
+                ("NPM_CONFIG_OMIT", None),
+                ("npm_config_omit", None),
+                ("NPM_CONFIG_INCLUDE", None),
+                ("npm_config_include", None),
+                ("NPM_CONFIG_GLOBAL", None),
+                ("npm_config_global", None),
+                ("NPM_CONFIG_DRY_RUN", None),
+                ("npm_config_dry_run", None),
+                ("NPM_CONFIG_PACKAGE_LOCK_ONLY", None),
+                ("npm_config_package_lock_only", None),
+                ("NPM_CONFIG_PACKAGE_LOCK", None),
+                ("npm_config_package_lock", None),
+                ("NPM_CONFIG_SAVE", None),
+                ("npm_config_save", None),
+                ("NPM_CONFIG_SAVE_PROD", None),
+                ("npm_config_save_prod", None),
+                ("NPM_CONFIG_SAVE_DEV", None),
+                ("npm_config_save_dev", None),
+                ("NPM_CONFIG_SAVE_OPTIONAL", None),
+                ("npm_config_save_optional", None),
+                ("NPM_CONFIG_SAVE_PEER", None),
+                ("npm_config_save_peer", None),
+                ("NPM_CONFIG_SAVE_EXACT", None),
+                ("npm_config_save_exact", None),
+                ("NPM_CONFIG_SAVE_BUNDLE", None),
+                ("npm_config_save_bundle", None),
+                ("NPM_CONFIG_SAVE_PREFIX", None),
+                ("npm_config_save_prefix", None),
+            ],
+            || {
+                assert_eq!(
+                    npm_args_with_config_defaults(&project, &args(&["install", "left-pad"]))
+                        .unwrap(),
+                    args(&["--omit=optional", "install", "left-pad"])
+                );
+                let action = parse_npm_compat_action(
+                    &npm_args_with_config_defaults(&project, &args(&["install", "left-pad"]))
+                        .unwrap(),
+                )
+                .unwrap();
+                let NpmCompatAction::Install { omit_optional, .. } = action else {
+                    panic!("expected npm install action");
+                };
+                assert!(omit_optional);
+            },
+        );
+
+        let _ = fs::remove_dir_all(project);
+    }
+
+    #[test]
     fn npm_config_file_defaults_support_save_bundle() {
         let project = test_dir("npm-config-file-save-bundle-default");
         let user_config = project.join("user.npmrc");
@@ -28638,6 +28806,8 @@ mod tests {
                 ("npm_config_userconfig", None),
                 ("NPM_CONFIG_PRODUCTION", None),
                 ("npm_config_production", None),
+                ("NPM_CONFIG_OPTIONAL", None),
+                ("npm_config_optional", None),
                 ("NPM_CONFIG_OMIT", None),
                 ("npm_config_omit", None),
                 ("NPM_CONFIG_INCLUDE", None),
@@ -28713,6 +28883,8 @@ mod tests {
                 ("npm_config_userconfig", None),
                 ("NPM_CONFIG_PRODUCTION", None),
                 ("npm_config_production", None),
+                ("NPM_CONFIG_OPTIONAL", None),
+                ("npm_config_optional", None),
                 ("NPM_CONFIG_OMIT", None),
                 ("npm_config_omit", None),
                 ("NPM_CONFIG_INCLUDE", None),
@@ -29880,7 +30052,7 @@ mod tests {
 
         let status = run_npm_compat(
             &project,
-            &args(&["install", "--omit=dev", "--omit=optional", "--omit=peer"]),
+            &args(&["install", "--omit=dev", "--no-optional", "--omit=peer"]),
         )
         .unwrap();
 
@@ -31309,6 +31481,25 @@ verdict = "accepted"
                 include_workspace_root: false,
             }
         );
+
+        let action =
+            parse_npm_compat_action(&args(&["install", "--no-optional", "left-pad"])).unwrap();
+        let NpmCompatAction::Install { omit_optional, .. } = action else {
+            panic!("expected npm install action");
+        };
+        assert!(omit_optional);
+
+        let action = parse_npm_compat_action(&args(&[
+            "install",
+            "--optional=false",
+            "--include=optional",
+            "left-pad",
+        ]))
+        .unwrap();
+        let NpmCompatAction::Install { omit_optional, .. } = action else {
+            panic!("expected npm install action");
+        };
+        assert!(!omit_optional);
 
         let action =
             parse_npm_compat_action(&args(&["install", "--package-lock-only", "left-pad"]))
