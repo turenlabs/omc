@@ -538,7 +538,8 @@ Supported now:
   verified OMC project before dispatching to the requested executable; `--no-save`,
   `--package-lock-only`, `--package-lock=false`, `--dry-run`, `--registry`,
   `--omit=...`, `--include=...`, and common audit/fund/peer/install-strategy flags are
-  understood for install/ci compatibility; `npm install --workspace ...`
+  understood for install/ci compatibility; `npm install <pkg>` saves into the
+  root `package.json` when one exists, and `npm install --workspace ...`
   saves into selected workspace `package.json` files while installing the root
   OMC graph; common global npm flags such as
   `--silent`, `--loglevel`, and `--cache` are accepted before the subcommand,

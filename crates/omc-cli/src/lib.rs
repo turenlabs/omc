@@ -2382,6 +2382,12 @@ fn run_npm_install_compat(
         options.npm_local_paths = absolutize_paths(project_dir, local_paths.clone());
         if save && !local_paths.is_empty() {
             add_manifest_npm_local_paths(project_dir, &local_paths, dependency_kind)?;
+            save_root_npm_package_json_dependencies(
+                project_dir,
+                &[],
+                &local_paths,
+                dependency_kind,
+            )?;
         }
         if lock_only {
             let reports = lock_project(&options)?;
@@ -2408,10 +2414,23 @@ fn run_npm_install_compat(
             &archive_references,
         )?);
         let mut all_reports = Vec::new();
+        let mut root_dependencies = Vec::new();
         for spec in &specs {
-            all_reports.extend(add_package_graph(spec, &options)?);
+            let reports = add_package_graph(spec, &options)?;
+            if let Some(root) = reports.first() {
+                root_dependencies.push(npm_package_json_requirement_for_link_root(spec, root));
+            }
+            all_reports.extend(reports);
         }
         print_link_reports(&all_reports);
+        if save {
+            save_root_npm_package_json_dependencies(
+                project_dir,
+                &root_dependencies,
+                &local_paths,
+                dependency_kind,
+            )?;
+        }
         if lock_only {
             print_lock_only_report(project_dir);
             return Ok(ExitCode::SUCCESS);
@@ -2425,6 +2444,40 @@ fn run_npm_install_compat(
         print_install_report(&install);
     }
     Ok(ExitCode::SUCCESS)
+}
+
+fn npm_package_json_requirement_for_link_root(
+    spec: &PackageSpec,
+    report: &omc_registry::LinkReport,
+) -> (String, String) {
+    let requirement = spec
+        .direct_url
+        .clone()
+        .unwrap_or_else(|| report.locked.version.clone());
+    (report.locked.name.clone(), requirement)
+}
+
+fn save_root_npm_package_json_dependencies(
+    project_dir: &Path,
+    dependencies: &[(String, String)],
+    local_paths: &[PathBuf],
+    dependency_kind: ManifestDependencyKind,
+) -> Result<(), OmcRegistryError> {
+    if !project_dir.join("package.json").exists() {
+        return Ok(());
+    }
+    for (name, requirement) in dependencies {
+        save_npm_package_json_dependency(project_dir, name, requirement, dependency_kind)?;
+    }
+    for local_path in local_paths {
+        save_npm_package_json_local_dependency(
+            project_dir,
+            project_dir,
+            local_path,
+            dependency_kind,
+        )?;
+    }
+    Ok(())
 }
 
 fn run_npm_install_workspace_compat(
@@ -20707,6 +20760,97 @@ mod tests {
             .iter()
             .any(|package| package.name == "local-tarball"
                 && package.source_url.starts_with("file://")));
+    }
+
+    #[test]
+    fn npm_install_saves_root_package_json_dependencies() {
+        let project = test_dir("npm-install-root-package-json-project");
+        fs::write(
+            project.join("package.json"),
+            r#"{"name":"root","version":"1.0.0","dependencies":{"local-tarball":"0.0.1"}}"#,
+        )
+        .unwrap();
+
+        let package = test_dir("npm-install-root-package-json-package");
+        fs::write(
+            package.join("package.json"),
+            r#"{"name":"local-tarball","version":"1.2.3"}"#,
+        )
+        .unwrap();
+        fs::write(package.join("index.js"), "module.exports = 42;\n").unwrap();
+
+        let tarball = project.join("local-tarball-1.2.3.tgz");
+        let files = collect_npm_pack_files(&package).unwrap();
+        write_npm_pack_tarball(&tarball, &files).unwrap();
+
+        let status = run_npm_compat(
+            &project,
+            &args(&[
+                "install",
+                "--package-lock-only",
+                "--save-dev",
+                tarball.to_str().unwrap(),
+            ]),
+        )
+        .unwrap();
+
+        assert_eq!(status, ExitCode::SUCCESS);
+        let package_json = read_npm_pkg_json(&project.join("package.json")).unwrap();
+        assert!(package_json
+            .get("dependencies")
+            .and_then(serde_json::Value::as_object)
+            .is_some_and(|dependencies| !dependencies.contains_key("local-tarball")));
+        let saved = package_json
+            .get("devDependencies")
+            .and_then(serde_json::Value::as_object)
+            .and_then(|dependencies| dependencies.get("local-tarball"))
+            .and_then(serde_json::Value::as_str)
+            .unwrap();
+        assert!(saved.starts_with("file://"));
+        assert!(saved.ends_with("local-tarball-1.2.3.tgz"));
+
+        let manifest = read_manifest(project.join("omc.toml")).unwrap();
+        assert!(manifest.dependencies.is_empty());
+        assert!(manifest
+            .dev_dependencies
+            .get("npm:local-tarball")
+            .is_some_and(|requirement| requirement.starts_with("file://")));
+
+        let transient = test_dir("npm-install-root-package-json-transient");
+        fs::write(
+            transient.join("package.json"),
+            r#"{"name":"transient-tarball","version":"9.9.9"}"#,
+        )
+        .unwrap();
+        fs::write(transient.join("index.js"), "module.exports = 99;\n").unwrap();
+        let transient_tarball = project.join("transient-tarball-9.9.9.tgz");
+        let files = collect_npm_pack_files(&transient).unwrap();
+        write_npm_pack_tarball(&transient_tarball, &files).unwrap();
+
+        run_npm_compat(
+            &project,
+            &args(&[
+                "install",
+                "--package-lock-only",
+                "--no-save",
+                transient_tarball.to_str().unwrap(),
+            ]),
+        )
+        .unwrap();
+
+        let package_json = read_npm_pkg_json(&project.join("package.json")).unwrap();
+        assert!(package_json
+            .get("dependencies")
+            .and_then(serde_json::Value::as_object)
+            .is_none_or(|dependencies| !dependencies.contains_key("transient-tarball")));
+        assert!(package_json
+            .get("devDependencies")
+            .and_then(serde_json::Value::as_object)
+            .is_none_or(|dependencies| !dependencies.contains_key("transient-tarball")));
+
+        let _ = fs::remove_dir_all(project);
+        let _ = fs::remove_dir_all(package);
+        let _ = fs::remove_dir_all(transient);
     }
 
     #[test]
