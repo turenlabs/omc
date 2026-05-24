@@ -1425,23 +1425,14 @@ fn run() -> Result<ExitCode, OmcRegistryError> {
             allow,
             allow_all_host,
         } => {
-            let specs = parse_package_specs(&specs, ecosystem_hint(npm, pypi))?;
-            let mut removed = Vec::new();
-            for spec in &specs {
-                if !remove_manifest_dependency(&cli.project_dir, spec)? {
-                    return Err(OmcRegistryError::UnsupportedSpec(format!(
-                        "dependency `{}` is not in omc.toml",
-                        spec.package_key()
-                    )));
-                }
-                removed.push(spec.package_key());
-            }
-
-            let mut options = LinkOptions::new(&cli.project_dir);
-            options.allowed_capabilities = parse_grants(&allow, allow_all_host)?;
-            let install = install_project(&options)?;
-            println!("removed {}", removed.join(", "));
-            print_install_report(&install);
+            remove_specs(
+                &cli.project_dir,
+                &specs,
+                ecosystem_hint(npm, pypi),
+                &allow,
+                allow_all_host,
+                true,
+            )?;
         }
         Command::Allow { grants } => {
             if grants.is_empty() {
@@ -3011,6 +3002,7 @@ fn run_npm_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
                 Some(Ecosystem::Npm),
                 &allow,
                 allow_all_host,
+                true,
             )?;
         }
         NpmCompatAction::Maintenance {
@@ -3285,6 +3277,7 @@ fn run_pip_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
                 Some(Ecosystem::Pypi),
                 &allow,
                 allow_all_host,
+                false,
             )?;
         }
         PipCompatAction::Show { specs, files } => {
@@ -10374,6 +10367,11 @@ fn npm_package_json_dependency_field(kind: ManifestDependencyKind) -> &'static s
 }
 
 fn remove_npm_package_json_dependency(package: &mut serde_json::Value, name: &str) {
+    let _ = remove_npm_package_json_dependency_entry(package, name);
+}
+
+fn remove_npm_package_json_dependency_entry(package: &mut serde_json::Value, name: &str) -> bool {
+    let mut removed = false;
     for field in [
         "dependencies",
         "devDependencies",
@@ -10384,9 +10382,26 @@ fn remove_npm_package_json_dependency(package: &mut serde_json::Value, name: &st
             .get_mut(field)
             .and_then(serde_json::Value::as_object_mut)
         {
-            dependencies.remove(name);
+            removed |= dependencies.remove(name).is_some();
         }
     }
+    removed
+}
+
+fn remove_root_npm_package_json_dependency(
+    project_dir: &Path,
+    name: &str,
+) -> Result<bool, OmcRegistryError> {
+    let package_json = project_dir.join("package.json");
+    if !package_json.exists() {
+        return Ok(false);
+    }
+    let mut package = read_npm_pkg_json(&package_json)?;
+    let removed = remove_npm_package_json_dependency_entry(&mut package, name);
+    if removed {
+        write_npm_pkg_json(&package_json, &package)?;
+    }
+    Ok(removed)
 }
 
 fn npm_package_json_dependency_map_mut<'a>(
@@ -11181,14 +11196,29 @@ fn remove_specs(
     ecosystem_hint: Option<Ecosystem>,
     allow: &[String],
     allow_all_host: bool,
+    update_npm_package_json: bool,
 ) -> Result<(), OmcRegistryError> {
     let specs = parse_package_specs(specs, ecosystem_hint)?;
+    let update_npm_package_json =
+        update_npm_package_json && specs.iter().any(|spec| spec.ecosystem == Ecosystem::Npm);
     let mut removed = Vec::new();
     for spec in &specs {
-        if !remove_manifest_dependency(project_dir, spec)? {
+        let removed_from_manifest = remove_manifest_dependency(project_dir, spec)?;
+        let removed_from_package_json =
+            if update_npm_package_json && spec.ecosystem == Ecosystem::Npm {
+                remove_root_npm_package_json_dependency(project_dir, &spec.name)?
+            } else {
+                false
+            };
+        if !removed_from_manifest && !removed_from_package_json {
+            let sources = if update_npm_package_json && spec.ecosystem == Ecosystem::Npm {
+                "omc.toml or package.json"
+            } else {
+                "omc.toml"
+            };
             return Err(OmcRegistryError::UnsupportedSpec(format!(
-                "dependency `{}` is not in omc.toml",
-                spec.package_key()
+                "dependency `{}` is not in {sources}",
+                spec.package_key(),
             )));
         }
         removed.push(spec.package_key());
@@ -11196,7 +11226,7 @@ fn remove_specs(
 
     let mut options = LinkOptions::new(project_dir);
     options.allowed_capabilities = parse_grants(allow, allow_all_host)?;
-    options.discover_project_requirements = false;
+    options.discover_project_requirements = update_npm_package_json;
     let install = install_project(&options)?;
     println!("removed {}", removed.join(", "));
     print_install_report(&install);
@@ -20851,6 +20881,44 @@ mod tests {
         let _ = fs::remove_dir_all(project);
         let _ = fs::remove_dir_all(package);
         let _ = fs::remove_dir_all(transient);
+    }
+
+    #[test]
+    fn npm_remove_updates_root_package_json_dependencies() {
+        let project = test_dir("npm-remove-root-package-json-project");
+        fs::write(
+            project.join("package.json"),
+            r#"{"name":"root","version":"1.0.0","dependencies":{"left-pad":"1.3.0"},"devDependencies":{"is-odd":"3.0.1"},"optionalDependencies":{"fsevents":"2.0.0"},"peerDependencies":{"react":"18.0.0"}}"#,
+        )
+        .unwrap();
+
+        let status = run_npm_compat(
+            &project,
+            &args(&["remove", "left-pad", "is-odd", "fsevents", "react"]),
+        )
+        .unwrap();
+
+        assert_eq!(status, ExitCode::SUCCESS);
+        let package_json = read_npm_pkg_json(&project.join("package.json")).unwrap();
+        for (field, name) in [
+            ("dependencies", "left-pad"),
+            ("devDependencies", "is-odd"),
+            ("optionalDependencies", "fsevents"),
+            ("peerDependencies", "react"),
+        ] {
+            assert!(package_json
+                .get(field)
+                .and_then(serde_json::Value::as_object)
+                .is_none_or(|dependencies| !dependencies.contains_key(name)));
+        }
+
+        let manifest = read_manifest(project.join("omc.toml")).unwrap();
+        assert!(manifest.dependencies.is_empty());
+        assert!(manifest.dev_dependencies.is_empty());
+        assert!(manifest.optional_dependencies.is_empty());
+        assert!(manifest.peer_dependencies.is_empty());
+
+        let _ = fs::remove_dir_all(project);
     }
 
     #[test]
