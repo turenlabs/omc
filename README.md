@@ -363,6 +363,10 @@ postinstall script and host access, is blocked:
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo add npm:esbuild@0.19.12
 ```
 
+For Node CLI compatibility, OMC treats `NODE_DEBUG` as a public diagnostic env
+read by default. Arbitrary environment variables, including package manager
+tokens and cloud credentials, remain denied unless granted explicitly.
+
 Intentional grants are explicit and recorded in the generated artifact and
 lockfile:
 

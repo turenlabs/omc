@@ -32,6 +32,7 @@ const MANIFEST: &str = "omc.toml";
 const ARTIFACT_SCHEMA: u32 = 1;
 const ARTIFACT_SIGNING_KEY: &str = "artifact-ed25519.key";
 const MAX_FILE_BYTES: u64 = 2 * 1024 * 1024;
+const DEFAULT_PUBLIC_ENV_READS: &[&str] = &["NODE_DEBUG"];
 const NPM_DIRECT_TARBALL_PLACEHOLDER: &str = "__omc_direct_tarball__";
 const NPM_PROFILE_WRITABLE_KEYS: &[&str] = &[
     "email", "password", "fullname", "homepage", "freenode", "twitter", "github",
@@ -2549,17 +2550,14 @@ fn link_package_inner(
     let archive_path = cache_archive(&options.project_dir, &resolved, &sha256, &archive_bytes)?;
     let profile = profile_archive(&resolved, &archive_bytes)?;
     let module = module_from_profile(&resolved, &profile.capabilities);
-    let policy = options
-        .allowed_capabilities
-        .iter()
-        .cloned()
-        .fold(Policy::pure(), Policy::allow_capability);
+    let explicit_grants_all_host = grants_all_host_capabilities(&options.allowed_capabilities);
+    let policy = policy_from_link_options(options);
     let policy = options
         .allowed_flows
         .iter()
         .cloned()
         .fold(policy, Policy::allow_flow_rule);
-    let policy = if grants_all_host_capabilities(&options.allowed_capabilities) {
+    let policy = if explicit_grants_all_host {
         policy.allow_all_flows()
     } else {
         policy
@@ -2747,6 +2745,20 @@ fn options_with_manifest_policy(options: &LinkOptions) -> Result<LinkOptions> {
     let manifest = read_manifest(options.project_dir.join(MANIFEST))?;
     apply_manifest_config(&manifest, &mut options)?;
     Ok(options)
+}
+
+fn policy_from_link_options(options: &LinkOptions) -> Policy {
+    default_public_capabilities()
+        .into_iter()
+        .chain(options.allowed_capabilities.iter().cloned())
+        .fold(Policy::pure(), Policy::allow_capability)
+}
+
+fn default_public_capabilities() -> Vec<Capability> {
+    DEFAULT_PUBLIC_ENV_READS
+        .iter()
+        .map(|name| Capability::EnvRead((*name).to_owned()))
+        .collect()
 }
 
 fn apply_manifest_config(manifest: &OmcManifest, options: &mut LinkOptions) -> Result<()> {
@@ -15252,10 +15264,8 @@ impl SourceProfiler {
             }
         }
 
-        for pattern in ["eval(", "new function", "exec("] {
-            if lower.contains(pattern) {
-                self.add(CapabilityKind::DynamicEval, "*", path, pattern);
-            }
+        if contains_dynamic_eval(content) {
+            self.add(CapabilityKind::DynamicEval, "*", path, "dynamic eval");
         }
     }
 
@@ -15382,6 +15392,75 @@ fn parse_quoted_literal(content: &str) -> Option<(String, usize)> {
         literal.push(*byte);
     }
     None
+}
+
+fn contains_dynamic_eval(content: &str) -> bool {
+    let lower = content.to_ascii_lowercase();
+    contains_standalone_call(&lower, "eval")
+        || contains_standalone_call(&lower, "exec")
+        || contains_new_function(&lower)
+}
+
+fn contains_new_function(lower: &str) -> bool {
+    let mut offset = 0;
+    while let Some(index) = lower[offset..].find("new") {
+        let start = offset + index;
+        let after_new = start + "new".len();
+        if is_identifier_boundary(lower, start)
+            && lower[after_new..]
+                .chars()
+                .next()
+                .is_some_and(|ch| ch.is_ascii_whitespace())
+        {
+            let rest = lower[after_new..].trim_start();
+            if rest.starts_with("function")
+                && is_identifier_boundary(rest, 0)
+                && rest["function".len()..]
+                    .chars()
+                    .next()
+                    .is_none_or(|ch| !is_identifier_char(ch))
+            {
+                return true;
+            }
+        }
+        offset = after_new;
+    }
+    false
+}
+
+fn contains_standalone_call(lower: &str, name: &str) -> bool {
+    let mut offset = 0;
+    while let Some(index) = lower[offset..].find(name) {
+        let start = offset + index;
+        let after_name = start + name.len();
+        if is_identifier_boundary(lower, start)
+            && lower[after_name..]
+                .chars()
+                .next()
+                .is_none_or(|ch| !is_identifier_char(ch))
+        {
+            let rest = lower[after_name..].trim_start();
+            if rest.starts_with('(') {
+                return true;
+            }
+        }
+        offset = after_name;
+    }
+    false
+}
+
+fn is_identifier_boundary(content: &str, index: usize) -> bool {
+    if index == 0 {
+        return true;
+    }
+    content[..index]
+        .chars()
+        .next_back()
+        .is_none_or(|ch| !is_identifier_char(ch) && ch != '.')
+}
+
+fn is_identifier_char(ch: char) -> bool {
+    ch.is_ascii_alphanumeric() || ch == '_' || ch == '$'
 }
 
 fn module_from_profile(package: &ResolvedPackage, capabilities: &[CapabilityFinding]) -> Module {
@@ -21582,6 +21661,34 @@ wheels = [
     }
 
     #[test]
+    fn profiler_distinguishes_regex_exec_from_dynamic_eval() {
+        let mut profiler = SourceProfiler::default();
+        profiler.scan_file(
+            "package/functions/coerce.js",
+            "while ((next = coerceRtlRegex.exec(version))) { match = next }",
+        );
+        profiler.scan_file("package/runtime.js", "eval(source); new Function(source);");
+        profiler.scan_file("package/tool.py", "exec(code)\n");
+        let profile = profiler.finish();
+
+        let dynamic_eval_findings = profile
+            .capabilities
+            .iter()
+            .filter(|finding| finding.kind == CapabilityKind::DynamicEval)
+            .collect::<Vec<_>>();
+        assert_eq!(dynamic_eval_findings.len(), 2);
+        assert!(dynamic_eval_findings
+            .iter()
+            .any(|finding| finding.source == "package/runtime.js"));
+        assert!(dynamic_eval_findings
+            .iter()
+            .any(|finding| finding.source == "package/tool.py"));
+        assert!(!dynamic_eval_findings
+            .iter()
+            .any(|finding| finding.source == "package/functions/coerce.js"));
+    }
+
+    #[test]
     fn detects_all_host_grants_for_flow_escape_hatch() {
         let grants = vec![
             Capability::EnvRead("*".to_owned()),
@@ -24277,6 +24384,53 @@ wheels = [
         }];
         let module = module_from_profile(&package, &findings);
         let error = verify_module(&module, &Policy::pure()).unwrap_err();
+        assert!(error
+            .findings
+            .iter()
+            .any(|finding| finding.message.contains("env.read:NPM_TOKEN not granted")));
+    }
+
+    #[test]
+    fn link_policy_allows_public_node_debug_env_read_only() {
+        let package = ResolvedPackage {
+            ecosystem: Ecosystem::Npm,
+            name: "semver".to_owned(),
+            version: "7.8.1".to_owned(),
+            source_url: "https://example.invalid/semver.tgz".to_owned(),
+            download_url: None,
+            local_path: None,
+            filename: "semver.tgz".to_owned(),
+            expected_sha256: None,
+            expected_sha1: None,
+            expected_integrity: None,
+            npm_direct_tarball: false,
+            pypi_direct_wheel: false,
+            npm_scripts: BTreeMap::new(),
+            platform_compatible: true,
+            dependencies: Vec::new(),
+        };
+        let policy = policy_from_link_options(&LinkOptions::new("."));
+        let node_debug_module = module_from_profile(
+            &package,
+            &[CapabilityFinding {
+                kind: CapabilityKind::EnvRead,
+                target: "NODE_DEBUG".to_owned(),
+                source: "package/internal/debug.js".to_owned(),
+                evidence: "process.env".to_owned(),
+            }],
+        );
+        assert!(verify_module(&node_debug_module, &policy).is_ok());
+
+        let secret_module = module_from_profile(
+            &package,
+            &[CapabilityFinding {
+                kind: CapabilityKind::EnvRead,
+                target: "NPM_TOKEN".to_owned(),
+                source: "package/index.js".to_owned(),
+                evidence: "process.env".to_owned(),
+            }],
+        );
+        let error = verify_module(&secret_module, &policy).unwrap_err();
         assert!(error
             .findings
             .iter()
