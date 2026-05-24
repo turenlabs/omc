@@ -27633,6 +27633,14 @@ fn ignored_compat_flag(npm_mode: bool, arg: &str) -> bool {
             arg,
             "--ignore-scripts"
                 | "--ignore-scripts=false"
+                | "--silent"
+                | "-s"
+                | "--quiet"
+                | "-q"
+                | "--no-progress"
+                | "--progress=false"
+                | "--no-color"
+                | "--color=false"
                 | "--save-exact"
                 | "--no-fund"
                 | "--fund"
@@ -27655,13 +27663,22 @@ fn ignored_compat_flag(npm_mode: bool, arg: &str) -> bool {
 }
 
 fn ignored_npm_value_flag(arg: &str) -> bool {
-    matches!(arg, "--install-strategy" | "--cache" | "--registry")
+    matches!(
+        arg,
+        "--install-strategy" | "--cache" | "--registry" | "--loglevel" | "--progress" | "--color"
+    )
 }
 
 fn ignored_npm_equals_flag(arg: &str) -> bool {
-    ["--install-strategy=", "--cache="]
-        .iter()
-        .any(|prefix| arg.starts_with(prefix))
+    [
+        "--install-strategy=",
+        "--cache=",
+        "--loglevel=",
+        "--progress=",
+        "--color=",
+    ]
+    .iter()
+    .any(|prefix| arg.starts_with(prefix))
 }
 
 fn parse_npm_list_args(args: &[String]) -> Result<NpmCompatAction, OmcRegistryError> {
@@ -31388,6 +31405,13 @@ verdict = "accepted"
             "https://registry.example.invalid/npm",
             "--package-lock=false",
             "--no-fund",
+            "--silent",
+            "--loglevel",
+            "warn",
+            "--no-progress",
+            "--progress=false",
+            "--color",
+            "false",
             "--legacy-peer-deps=true",
             "--strict-peer-deps=false",
             "--prefer-offline",
