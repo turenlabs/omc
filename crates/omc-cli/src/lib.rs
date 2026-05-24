@@ -10819,6 +10819,9 @@ fn download_pip_packages(
                 .to_owned(),
         ));
     }
+    if command == PipArtifactCommand::Wheel && options.pypi_include_dependencies {
+        resolved_specs.extend(pip_local_wheel_dependency_specs(project_dir, &local_paths)?);
+    }
 
     if !resolved_specs.is_empty() {
         let mut reports = Vec::new();
@@ -11014,19 +11017,7 @@ fn build_pip_local_wheels(
     let mut built = 0usize;
     let mut seen = BTreeSet::new();
     for requirement in requirements {
-        let package_dir = absolutize_path(project_dir, requirement.path.clone());
-        let package_dir = fs::canonicalize(&package_dir).map_err(|error| {
-            OmcRegistryError::UnsupportedRequirement(format!(
-                "local wheel path `{}` could not be resolved: {error}",
-                requirement.path.display()
-            ))
-        })?;
-        if !package_dir.is_dir() {
-            return Err(OmcRegistryError::UnsupportedRequirement(format!(
-                "local wheel path `{}` must be a directory",
-                package_dir.display()
-            )));
-        }
+        let package_dir = resolve_pip_local_wheel_path(project_dir, requirement)?;
         if !seen.insert(package_dir.clone()) {
             continue;
         }
@@ -11040,6 +11031,50 @@ fn build_pip_local_wheels(
     }
     println!("Successfully built {built} local wheel(s)");
     Ok(())
+}
+
+fn pip_local_wheel_dependency_specs(
+    project_dir: &Path,
+    requirements: &[PythonLocalRequirement],
+) -> Result<Vec<PackageSpec>, OmcRegistryError> {
+    let mut specs = Vec::new();
+    let mut seen_paths = BTreeSet::new();
+    let mut seen_specs = BTreeSet::new();
+    for requirement in requirements {
+        let package_dir = resolve_pip_local_wheel_path(project_dir, requirement)?;
+        if !seen_paths.insert((package_dir.clone(), requirement.extras.clone())) {
+            continue;
+        }
+
+        let metadata = read_pip_local_wheel_metadata(&package_dir, &requirement.extras)?;
+        for dependency in metadata.requires_dist {
+            let spec = parse_package_spec(&dependency, Some(Ecosystem::Pypi))?;
+            if seen_specs.insert(spec.requested()) {
+                specs.push(spec);
+            }
+        }
+    }
+    Ok(specs)
+}
+
+fn resolve_pip_local_wheel_path(
+    project_dir: &Path,
+    requirement: &PythonLocalRequirement,
+) -> Result<PathBuf, OmcRegistryError> {
+    let package_dir = absolutize_path(project_dir, requirement.path.clone());
+    let package_dir = fs::canonicalize(&package_dir).map_err(|error| {
+        OmcRegistryError::UnsupportedRequirement(format!(
+            "local wheel path `{}` could not be resolved: {error}",
+            requirement.path.display()
+        ))
+    })?;
+    if !package_dir.is_dir() {
+        return Err(OmcRegistryError::UnsupportedRequirement(format!(
+            "local wheel path `{}` must be a directory",
+            package_dir.display()
+        )));
+    }
+    Ok(package_dir)
 }
 
 fn read_pip_local_wheel_metadata(
@@ -31837,10 +31872,25 @@ verdict = "accepted"
     fn pip_wheel_builds_and_installs_local_directory_wheel() {
         let project = test_dir("pip-wheel-local-project");
         let local = test_dir("pip-wheel-local-package");
+        let vendor = project.join("vendor");
+        let idna_src = test_dir("pip-wheel-local-idna-source");
         fs::create_dir_all(local.join("src").join("local_pkg")).unwrap();
+        fs::create_dir_all(idna_src.join("src").join("idna")).unwrap();
         fs::write(
             local.join("src").join("local_pkg").join("__init__.py"),
             "VALUE = 7\n\ndef main():\n    print(VALUE)\n",
+        )
+        .unwrap();
+        fs::write(idna_src.join("src").join("idna").join("__init__.py"), "").unwrap();
+        write_pip_local_wheel(
+            &idna_src,
+            &PipLocalWheelMetadata {
+                name: "idna".to_owned(),
+                version: "3.7".to_owned(),
+                requires_dist: Vec::new(),
+                entry_points: Vec::new(),
+            },
+            &vendor.join("idna-3.7-py3-none-any.whl"),
         )
         .unwrap();
         fs::write(
@@ -31849,6 +31899,7 @@ verdict = "accepted"
 [project]
 name = "local-pkg"
 version = "0.1.0"
+dependencies = ["idna==3.7"]
 
 [project.scripts]
 local-cli = "local_pkg:main"
@@ -31874,13 +31925,25 @@ local-cli = "local_pkg:main"
             || {
                 let status = run_pip_compat(
                     &project,
-                    &args(&["wheel", local.to_str().unwrap(), "-w", "wheelhouse"]),
+                    &args(&[
+                        "wheel",
+                        local.to_str().unwrap(),
+                        "-w",
+                        "wheelhouse",
+                        "--no-index",
+                        "--find-links",
+                        "vendor",
+                    ]),
                 )
                 .unwrap();
                 assert_eq!(status, ExitCode::SUCCESS);
                 assert!(project
                     .join("wheelhouse")
                     .join("local_pkg-0.1.0-py3-none-any.whl")
+                    .exists());
+                assert!(project
+                    .join("wheelhouse")
+                    .join("idna-3.7-py3-none-any.whl")
                     .exists());
 
                 let status = run_pip_compat(
@@ -31908,12 +31971,20 @@ local-cli = "local_pkg:main"
         assert!(project
             .join(".omc")
             .join("python")
+            .join("site-packages")
+            .join("idna")
+            .join("__init__.py")
+            .exists());
+        assert!(project
+            .join(".omc")
+            .join("python")
             .join("bin")
             .join("local-cli")
             .exists());
 
         let _ = fs::remove_dir_all(project);
         let _ = fs::remove_dir_all(local);
+        let _ = fs::remove_dir_all(idna_src);
     }
 
     #[test]
