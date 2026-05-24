@@ -3607,7 +3607,9 @@ fn npm_project_has_npm_lockfile(project_dir: &Path) -> bool {
 }
 
 fn run_npm_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRegistryError> {
-    let args = npm_args_with_config_defaults(project_dir, args)?;
+    let (project_dir, args) = npm_project_dir_from_prefix_args(project_dir, args)?;
+    let project_dir = project_dir.as_path();
+    let args = npm_args_with_config_defaults(project_dir, &args)?;
     match parse_npm_compat_action(&args)? {
         NpmCompatAction::Help { topic } => print_npm_help(topic.as_deref()),
         NpmCompatAction::Version => println!("{}", env!("CARGO_PKG_VERSION")),
@@ -3961,6 +3963,38 @@ fn run_npm_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
     }
 
     Ok(ExitCode::SUCCESS)
+}
+
+fn npm_project_dir_from_prefix_args(
+    project_dir: &Path,
+    args: &[String],
+) -> Result<(PathBuf, Vec<String>), OmcRegistryError> {
+    let base_project_dir = absolute_project_dir(project_dir);
+    let mut selected_project_dir = base_project_dir.clone();
+    let mut stripped = Vec::with_capacity(args.len());
+    let mut index = 0;
+    while index < args.len() {
+        let arg = &args[index];
+        if arg == "--" {
+            stripped.extend(args[index..].iter().cloned());
+            break;
+        }
+        if arg == "--prefix" {
+            index += 1;
+            let Some(path) = args.get(index) else {
+                return Err(OmcRegistryError::UnsupportedSpec(
+                    "--prefix needs a path".to_owned(),
+                ));
+            };
+            selected_project_dir = absolutize_path(&base_project_dir, PathBuf::from(path));
+        } else if let Some(path) = arg.strip_prefix("--prefix=") {
+            selected_project_dir = absolutize_path(&base_project_dir, PathBuf::from(path));
+        } else {
+            stripped.push(arg.clone());
+        }
+        index += 1;
+    }
+    Ok((selected_project_dir, stripped))
 }
 
 fn npm_args_with_config_defaults(
@@ -29014,6 +29048,49 @@ mod tests {
     }
 
     #[test]
+    fn npm_install_prefix_uses_selected_project_directory() {
+        let project = test_dir("npm-install-prefix-project");
+        let workspace = project.join("packages").join("app");
+        fs::create_dir_all(&workspace).unwrap();
+        fs::write(
+            project.join("package.json"),
+            r#"{"name":"root","version":"1.0.0"}"#,
+        )
+        .unwrap();
+        fs::write(
+            workspace.join("package.json"),
+            r#"{"name":"app","version":"1.0.0"}"#,
+        )
+        .unwrap();
+        write_npm_fixture_tarball(&workspace, "prod-pkg", "1.0.0");
+
+        let status = run_npm_compat(
+            &project,
+            &args(&[
+                "install",
+                "--prefix",
+                "packages/app",
+                "./prod-pkg-1.0.0.tgz",
+            ]),
+        )
+        .unwrap();
+
+        assert_eq!(status, ExitCode::SUCCESS);
+        let package_json = read_npm_pkg_json(&workspace.join("package.json")).unwrap();
+        let saved = package_json["dependencies"]["prod-pkg"].as_str().unwrap();
+        assert!(saved.starts_with("file:"));
+        assert!(saved.ends_with("prod-pkg-1.0.0.tgz"));
+        assert!(workspace.join("node_modules/prod-pkg/index.js").exists());
+        assert!(workspace.join("package-lock.json").exists());
+        assert!(workspace.join("omc.lock").exists());
+        assert!(!project.join("node_modules").exists());
+        assert!(!project.join("package-lock.json").exists());
+        assert!(!project.join("omc.lock").exists());
+
+        let _ = fs::remove_dir_all(project);
+    }
+
+    #[test]
     fn npm_install_no_save_skips_package_lock_file() {
         let project = test_dir("npm-install-no-save-skips-package-lock");
         let tarball = write_npm_fixture_tarball(&project, "prod-pkg", "1.0.0");
@@ -29633,6 +29710,28 @@ verdict = "accepted"
         assert_eq!(
             npx_compat_args(args(&["eslint", "--", "."])),
             args(&["npx", "eslint", "--", "."])
+        );
+        assert_eq!(
+            npm_project_dir_from_prefix_args(
+                Path::new("/tmp/root"),
+                &args(&["install", "--prefix=packages/app", "left-pad"])
+            )
+            .unwrap(),
+            (
+                PathBuf::from("/tmp/root/packages/app"),
+                args(&["install", "left-pad"]),
+            )
+        );
+        assert_eq!(
+            npm_project_dir_from_prefix_args(
+                Path::new("/tmp/root"),
+                &args(&["run", "build", "--", "--prefix", "script-arg"])
+            )
+            .unwrap(),
+            (
+                PathBuf::from("/tmp/root"),
+                args(&["run", "build", "--", "--prefix", "script-arg"]),
+            )
         );
         assert_eq!(
             parse_direct_compat_invocation(

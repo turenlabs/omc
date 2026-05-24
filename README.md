@@ -637,7 +637,9 @@ Supported now:
   `npm remove <pkg>` removes root `package.json` entries when present, and
   workspace-scoped `npm install`/`npm remove` update selected workspace
   `package.json` files while installing the root OMC graph; common global npm flags such as
-  `--silent`, `--loglevel`, and `--cache` are accepted before the subcommand,
+  `--silent`, `--loglevel`, `--cache`, and `--prefix` are accepted before the subcommand,
+  and `--prefix PATH` / `--prefix=PATH` on `omc npm` commands switches the effective project directory
+  before parsing the command,
   while `--registry`, `--userconfig`, and `--json` are forwarded to subcommands
   that support them; package scripts receive npm-style
   lifecycle/package environment variables such as `npm_lifecycle_event`,
