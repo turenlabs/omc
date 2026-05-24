@@ -28495,7 +28495,8 @@ fn parse_npm_exec_args(
             } else {
                 workspaces.push(workspace.to_owned());
             }
-        } else if matches!(arg.as_str(), "--cache" | "--userconfig") {
+        } else if ignored_npm_install_preference_flag(arg) {
+        } else if matches!(arg.as_str(), "--cache" | "--userconfig" | "--loglevel") {
             index += 1;
             if args.get(index).is_none() {
                 return Err(OmcRegistryError::UnsupportedSpec(format!(
@@ -28558,9 +28559,10 @@ fn npm_exec_call_command(call: String) -> (String, Vec<String>) {
 }
 
 fn npm_exec_equals_value_flag(arg: &str) -> bool {
-    ["--cache=", "--userconfig="]
+    ["--cache=", "--userconfig=", "--loglevel="]
         .iter()
         .any(|prefix| arg.starts_with(prefix))
+        || ignored_npm_install_preference_equals_flag(arg)
 }
 
 fn npm_exec_should_infer_package(command: &str) -> bool {
@@ -36833,6 +36835,13 @@ verdict = "accepted"
                 "--package",
                 "eslint",
                 "--cache=/tmp/npm-cache",
+                "--loglevel=warn",
+                "--ignore-scripts=true",
+                "--prefer-offline",
+                "--prefer-dedupe",
+                "--bin-links=false",
+                "--audit=false",
+                "--fund=false",
                 "eslint",
                 "--",
                 ".",
