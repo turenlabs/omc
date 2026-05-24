@@ -16,15 +16,15 @@ use omc_registry::{
     add_package_graph, apply_pypi_binary_option, check_pypi_distribution, compare_npm_versions,
     compare_pypi_versions, create_npm_team, create_npm_token, deprecate_npm_package,
     destroy_npm_team, download_npm_package_tarball, grant_npm_access, init_project,
-    install_locked_packages, install_locked_project, install_project, lock_project,
-    mutate_npm_package_owner, mutate_npm_package_star, parse_capability_grant,
-    parse_npm_direct_archive_reference, parse_pypi_direct_archive_reference,
-    parse_pypi_vcs_requirement, publish_npm_package, read_constraint_files, read_lockfile,
-    read_manifest, read_npm_access_collaborators, read_npm_access_packages, read_npm_access_status,
-    read_npm_config_snapshot_with_globalconfig, read_npm_org_users, read_npm_package_metadata,
-    read_npm_package_metadata_with_userconfig, read_npm_package_owners,
-    read_npm_ping_with_userconfig, read_npm_profile, read_npm_search, read_npm_stars,
-    read_npm_team_users, read_npm_teams, read_npm_token_list, read_npm_whoami,
+    install_locked_packages, install_locked_project, install_project,
+    install_python_project_local_import_paths, lock_project, mutate_npm_package_owner,
+    mutate_npm_package_star, parse_capability_grant, parse_npm_direct_archive_reference,
+    parse_pypi_direct_archive_reference, parse_pypi_vcs_requirement, publish_npm_package,
+    read_constraint_files, read_lockfile, read_manifest, read_npm_access_collaborators,
+    read_npm_access_packages, read_npm_access_status, read_npm_config_snapshot_with_globalconfig,
+    read_npm_org_users, read_npm_package_metadata, read_npm_package_metadata_with_userconfig,
+    read_npm_package_owners, read_npm_ping_with_userconfig, read_npm_profile, read_npm_search,
+    read_npm_stars, read_npm_team_users, read_npm_teams, read_npm_token_list, read_npm_whoami,
     read_npm_workspace_packages, read_package_scripts, read_pip_config_snapshot,
     read_pypi_available_versions, read_requirements_files, remove_locked_packages,
     remove_manifest_dependency, remove_npm_dist_tag, remove_npm_org_user, remove_npm_team_user,
@@ -11619,6 +11619,11 @@ fn remove_specs(
         update_npm_package_json && specs.iter().any(|spec| spec.ecosystem == Ecosystem::Npm);
     let allow_locked_pypi_removal =
         allow_locked_pypi_removal && specs.iter().any(|spec| spec.ecosystem == Ecosystem::Pypi);
+    let editable_removal = if allow_locked_pypi_removal {
+        remove_pip_editable_local_paths(project_dir, &specs)?
+    } else {
+        PipEditableLocalPathRemoval::default()
+    };
     let mut removed = Vec::new();
     let mut removed_locked = false;
     let mut removed_manifest = false;
@@ -11640,12 +11645,18 @@ fn remove_specs(
         } else {
             Vec::new()
         };
+        let removed_from_editable =
+            editable_removal.removed(&spec.name) && spec.ecosystem == Ecosystem::Pypi;
         removed_locked |= !locked_removals.is_empty();
-        if !removed_from_manifest && !removed_from_package_json && locked_removals.is_empty() {
+        if !removed_from_manifest
+            && !removed_from_package_json
+            && locked_removals.is_empty()
+            && !removed_from_editable
+        {
             let sources = if update_npm_package_json && spec.ecosystem == Ecosystem::Npm {
                 "omc.toml or package.json"
             } else if allow_locked_pypi_removal && spec.ecosystem == Ecosystem::Pypi {
-                "omc.toml or omc.lock"
+                "omc.toml, omc.lock, or OMC editable local paths"
             } else {
                 "omc.toml"
             };
@@ -11657,7 +11668,10 @@ fn remove_specs(
         removed.push(spec.package_key());
     }
 
-    let install = if removed_locked && !removed_manifest && !update_npm_package_json {
+    let mut install = if (removed_locked || !editable_removal.removed_names.is_empty())
+        && !removed_manifest
+        && !update_npm_package_json
+    {
         install_locked_packages(project_dir)?
     } else {
         let mut options = LinkOptions::new(project_dir);
@@ -11665,9 +11679,97 @@ fn remove_specs(
         options.discover_project_requirements = update_npm_package_json;
         install_project(&options)?
     };
+    install.python_scripts += install_python_project_local_import_paths(
+        project_dir,
+        &editable_removal.remaining_import_paths,
+    )?;
     println!("removed {}", removed.join(", "));
     print_install_report(&install);
     Ok(())
+}
+
+#[derive(Default)]
+struct PipEditableLocalPathRemoval {
+    removed_names: BTreeSet<String>,
+    remaining_import_paths: Vec<PathBuf>,
+}
+
+impl PipEditableLocalPathRemoval {
+    fn removed(&self, name: &str) -> bool {
+        self.removed_names.contains(&normalize_pip_show_name(name))
+    }
+}
+
+fn remove_pip_editable_local_paths(
+    project_dir: &Path,
+    specs: &[PackageSpec],
+) -> Result<PipEditableLocalPathRemoval, OmcRegistryError> {
+    let requested_names = specs
+        .iter()
+        .filter(|spec| spec.ecosystem == Ecosystem::Pypi)
+        .map(|spec| normalize_pip_show_name(&spec.name))
+        .collect::<BTreeSet<_>>();
+    if requested_names.is_empty() {
+        return Ok(PipEditableLocalPathRemoval::default());
+    }
+
+    let local_paths_file = project_dir.join(".omc").join("python").join("local-paths");
+    let content = match fs::read_to_string(&local_paths_file) {
+        Ok(content) => content,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            return Ok(PipEditableLocalPathRemoval::default())
+        }
+        Err(error) => return Err(error.into()),
+    };
+
+    let mut removal = PipEditableLocalPathRemoval::default();
+    let mut remaining_lines = Vec::new();
+    let mut seen_remaining_lines = BTreeSet::new();
+    for line in content
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+    {
+        let import_path = PathBuf::from(line);
+        let package = pip_local_editable_package(&import_path)?;
+        let remove = package
+            .as_ref()
+            .map(|package| normalize_pip_show_name(&package.name))
+            .is_some_and(|name| {
+                if requested_names.contains(&name) {
+                    removal.removed_names.insert(name);
+                    true
+                } else {
+                    false
+                }
+            });
+        if remove {
+            continue;
+        }
+        if seen_remaining_lines.insert(line.to_owned()) {
+            remaining_lines.push(line.to_owned());
+            removal.remaining_import_paths.push(import_path);
+        }
+    }
+
+    if removal.removed_names.is_empty() {
+        return Ok(removal);
+    }
+
+    if remaining_lines.is_empty() {
+        match fs::remove_file(&local_paths_file) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+    } else {
+        fs::write(
+            &local_paths_file,
+            format!("{}\n", remaining_lines.join("\n")),
+        )?;
+    }
+
+    Ok(removal)
 }
 
 fn parse_pip_archive_references(
@@ -27472,6 +27574,122 @@ version = "0.1.2"
 
         fs::remove_dir_all(project).unwrap();
         fs::remove_dir_all(local).unwrap();
+    }
+
+    #[test]
+    fn pip_uninstall_prunes_editable_local_paths_by_name() {
+        let project = test_dir("pip-uninstall-editable-prune-project");
+        let local = test_dir("pip-uninstall-editable-prune-local");
+        let keep = test_dir("pip-uninstall-editable-prune-keep");
+        let src = local.join("src");
+        let keep_src = keep.join("src");
+        fs::create_dir_all(src.join("demoedit")).unwrap();
+        fs::create_dir_all(keep_src.join("keepedit")).unwrap();
+        fs::write(
+            local.join("setup.cfg"),
+            "[metadata]\nname = demo-edit\nversion = 0.1.0\n",
+        )
+        .unwrap();
+        fs::write(
+            keep.join("setup.cfg"),
+            "[metadata]\nname = keepedit\nversion = 0.2.0\n",
+        )
+        .unwrap();
+        fs::create_dir_all(project.join(".omc").join("python")).unwrap();
+        fs::write(
+            project.join(".omc").join("python").join("local-paths"),
+            format!(
+                "{}\n{}\n{}\n",
+                src.display(),
+                keep_src.display(),
+                src.display()
+            ),
+        )
+        .unwrap();
+
+        let specs = parse_package_specs(&["demo_edit".to_owned()], Some(Ecosystem::Pypi)).unwrap();
+        let removal = remove_pip_editable_local_paths(&project, &specs).unwrap();
+
+        assert!(removal.removed("demo-edit"));
+        assert_eq!(removal.remaining_import_paths, vec![keep_src.clone()]);
+        assert_eq!(
+            fs::read_to_string(project.join(".omc").join("python").join("local-paths")).unwrap(),
+            format!("{}\n", keep_src.display())
+        );
+
+        fs::remove_dir_all(project).unwrap();
+        fs::remove_dir_all(local).unwrap();
+        fs::remove_dir_all(keep).unwrap();
+    }
+
+    #[test]
+    fn pip_uninstall_removes_editable_and_restores_remaining_scripts() {
+        let project = test_dir("pip-uninstall-editable-project");
+        let local = test_dir("pip-uninstall-editable-local");
+        let keep = test_dir("pip-uninstall-editable-keep");
+        let src = local.join("src");
+        let keep_src = keep.join("src");
+        fs::create_dir_all(src.join("demoedit")).unwrap();
+        fs::create_dir_all(keep_src.join("keepedit")).unwrap();
+        fs::write(src.join("demoedit").join("__init__.py"), "").unwrap();
+        fs::write(keep_src.join("keepedit").join("__init__.py"), "").unwrap();
+        fs::write(
+            keep_src.join("keepedit").join("cli.py"),
+            "def main():\n    print('keep')\n",
+        )
+        .unwrap();
+        fs::write(
+            local.join("setup.cfg"),
+            "[metadata]\nname = demoedit\nversion = 0.1.0\n[options.entry_points]\nconsole_scripts =\n    demo-cli = demoedit:main\n",
+        )
+        .unwrap();
+        fs::write(
+            keep.join("setup.cfg"),
+            "[metadata]\nname = keepedit\nversion = 0.2.0\n[options.entry_points]\nconsole_scripts =\n    keep-cli = keepedit.cli:main\n",
+        )
+        .unwrap();
+        fs::create_dir_all(project.join(".omc").join("python").join("bin")).unwrap();
+        fs::write(project.join("omc.lock"), "version = 1\n").unwrap();
+        fs::write(
+            project.join(".omc").join("python").join("local-paths"),
+            format!("{}\n{}\n", src.display(), keep_src.display()),
+        )
+        .unwrap();
+        fs::write(
+            project
+                .join(".omc")
+                .join("python")
+                .join("bin")
+                .join("demo-cli"),
+            "stale",
+        )
+        .unwrap();
+
+        let status = run_pip_compat(&project, &args(&["uninstall", "-y", "demoedit"])).unwrap();
+
+        assert_eq!(status, ExitCode::SUCCESS);
+        let local_paths =
+            fs::read_to_string(project.join(".omc").join("python").join("local-paths")).unwrap();
+        assert_eq!(
+            local_paths,
+            format!("{}\n", fs::canonicalize(&keep_src).unwrap().display())
+        );
+        assert!(project
+            .join(".omc")
+            .join("python")
+            .join("bin")
+            .join("keep-cli")
+            .exists());
+        assert!(!project
+            .join(".omc")
+            .join("python")
+            .join("bin")
+            .join("demo-cli")
+            .exists());
+
+        fs::remove_dir_all(project).unwrap();
+        fs::remove_dir_all(local).unwrap();
+        fs::remove_dir_all(keep).unwrap();
     }
 
     #[test]

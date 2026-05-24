@@ -6457,6 +6457,40 @@ fn install_python_local_paths(
     install_python_entry_point_scripts(&entry_points, bin_dir)
 }
 
+pub fn install_python_project_local_import_paths(
+    project_dir: impl AsRef<Path>,
+    import_paths: &[PathBuf],
+) -> Result<usize> {
+    if import_paths.is_empty() {
+        return Ok(0);
+    }
+
+    let python_dir = project_dir.as_ref().join(".omc").join("python");
+    let site_packages = python_dir.join("site-packages");
+    let bin_dir = python_dir.join("bin");
+    fs::create_dir_all(&site_packages)?;
+    fs::create_dir_all(&bin_dir)?;
+    let project_roots = import_paths
+        .iter()
+        .map(|path| python_local_import_project_root(path))
+        .collect::<Vec<_>>();
+    install_python_local_paths(&project_roots, &site_packages, &bin_dir)
+}
+
+fn python_local_import_project_root(import_path: &Path) -> PathBuf {
+    if import_path.file_name().and_then(|name| name.to_str()) == Some("src") {
+        if let Some(parent) = import_path.parent() {
+            if parent.join("pyproject.toml").exists()
+                || parent.join("setup.cfg").exists()
+                || parent.join("setup.py").exists()
+            {
+                return parent.to_path_buf();
+            }
+        }
+    }
+    import_path.to_path_buf()
+}
+
 fn python_local_paths_file_for_site_packages(site_packages: &Path) -> Result<PathBuf> {
     let parent = site_packages.parent().ok_or_else(|| {
         OmcRegistryError::UnsupportedSpec("missing python install directory".to_owned())
