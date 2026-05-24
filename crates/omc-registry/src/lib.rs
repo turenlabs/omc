@@ -15493,6 +15493,13 @@ fn is_source_like(path: &str) -> bool {
         .and_then(|name| name.to_str())
         .unwrap_or_default();
 
+    if file_name.ends_with(".d.ts")
+        || file_name.ends_with(".d.mts")
+        || file_name.ends_with(".d.cts")
+    {
+        return false;
+    }
+
     if matches!(
         file_name,
         "package.json"
@@ -15516,7 +15523,7 @@ fn is_source_like(path: &str) -> bool {
 
     matches!(
         Path::new(&path).extension().and_then(|ext| ext.to_str()),
-        Some("js" | "mjs" | "cjs" | "ts" | "tsx" | "jsx" | "py" | "json" | "toml" | "cfg" | "ini")
+        Some("js" | "mjs" | "cjs" | "ts" | "tsx" | "jsx" | "py")
     )
 }
 
@@ -21551,6 +21558,27 @@ wheels = [
             .iter()
             .any(|finding| finding.kind == CapabilityKind::HttpRequest
                 && finding.target == "evil.example"));
+    }
+
+    #[test]
+    fn profiler_ignores_non_executable_assets() {
+        let mut profiler = SourceProfiler::default();
+        profiler.scan_file(
+            "package/lib/lib.dom.d.ts",
+            "declare function fetch(input: RequestInfo): Promise<Response>;",
+        );
+        profiler.scan_file(
+            "package/lib/typesMap.json",
+            r#"{ "axios": "not executable source", "url": "https://example.invalid" }"#,
+        );
+        profiler.scan_file(
+            "package/pyproject.toml",
+            r#"[project.scripts]\nrun = "tool:main""#,
+        );
+        let profile = profiler.finish();
+
+        assert_eq!(profile.files_scanned, 0);
+        assert!(profile.capabilities.is_empty());
     }
 
     #[test]
