@@ -399,6 +399,8 @@ enum NpmCompatAction {
     Remove {
         specs: Vec<String>,
         global: bool,
+        package_lock: bool,
+        lock_only: bool,
         allow: Vec<String>,
         allow_flow: Vec<String>,
         allow_all_host: bool,
@@ -1557,6 +1559,8 @@ fn run() -> Result<ExitCode, OmcRegistryError> {
                 CliPolicyArgs::new(&allow, &allow_flow, allow_all_host),
                 true,
                 false,
+                false,
+                true,
                 false,
                 false,
             )?;
@@ -2969,6 +2973,8 @@ fn run_npm_global_remove_compat(
         CliPolicyArgs::new(allow, allow_flow, allow_all_host),
         true,
         false,
+        false,
+        true,
         true,
         false,
     )?;
@@ -3172,6 +3178,8 @@ fn run_npm_remove_workspace_compat(
     workspaces: &[String],
     all_workspaces: bool,
     include_workspace_root: bool,
+    package_lock: bool,
+    lock_only: bool,
 ) -> Result<ExitCode, OmcRegistryError> {
     let targets = npm_script_target_dirs(
         project_dir,
@@ -3215,6 +3223,15 @@ fn run_npm_remove_workspace_compat(
         policy.allow_all_host,
     )?;
     options.discover_project_requirements = true;
+    if lock_only {
+        let reports = lock_npm_project_including_omitted(&options)?;
+        print_link_reports(&reports);
+        print_lock_only_report(project_dir);
+        if package_lock {
+            sync_npm_package_lock(project_dir)?;
+        }
+        return Ok(ExitCode::SUCCESS);
+    }
     let install = install_project(&options)?;
     println!("removed {}", removed.join(", "));
     print_install_report(&install);
@@ -3750,6 +3767,8 @@ fn run_npm_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
         NpmCompatAction::Remove {
             specs,
             global,
+            package_lock,
+            lock_only,
             allow,
             allow_flow,
             allow_all_host,
@@ -3758,6 +3777,11 @@ fn run_npm_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
             include_workspace_root,
         } => {
             if global {
+                if lock_only {
+                    return Err(OmcRegistryError::UnsupportedSpec(
+                        "npm global remove cannot generate lockfiles".to_owned(),
+                    ));
+                }
                 if !workspaces.is_empty() || all_workspaces || include_workspace_root {
                     return Err(OmcRegistryError::UnsupportedSpec(
                         "npm global remove does not support workspace selection".to_owned(),
@@ -3774,6 +3798,8 @@ fn run_npm_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
                     &workspaces,
                     all_workspaces,
                     include_workspace_root,
+                    package_lock,
+                    lock_only,
                 );
             }
             let _ = remove_specs(
@@ -3783,6 +3809,8 @@ fn run_npm_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
                 CliPolicyArgs::new(&allow, &allow_flow, allow_all_host),
                 true,
                 false,
+                lock_only,
+                package_lock,
                 true,
                 false,
             )?;
@@ -4938,6 +4966,8 @@ fn run_pip_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
                 &specs,
                 Some(Ecosystem::Pypi),
                 CliPolicyArgs::new(&allow, &allow_flow, allow_all_host),
+                false,
+                true,
                 false,
                 true,
                 true,
@@ -15426,6 +15456,8 @@ fn remove_specs(
     policy: CliPolicyArgs<'_>,
     update_npm_package_json: bool,
     allow_locked_pypi_removal: bool,
+    npm_lock_only: bool,
+    npm_package_lock: bool,
     missing_ok: bool,
     warn_missing: bool,
 ) -> Result<bool, OmcRegistryError> {
@@ -15494,6 +15526,24 @@ fn remove_specs(
     }
     if removed.is_empty() {
         return Ok(false);
+    }
+
+    if npm_lock_only && update_npm_package_json {
+        let mut options = LinkOptions::new(project_dir);
+        apply_cli_policy_options(
+            &mut options,
+            policy.allow,
+            policy.allow_flow,
+            policy.allow_all_host,
+        )?;
+        options.discover_project_requirements = true;
+        let reports = lock_npm_project_including_omitted(&options)?;
+        print_link_reports(&reports);
+        print_lock_only_report(project_dir);
+        if npm_package_lock {
+            sync_npm_package_lock(project_dir)?;
+        }
+        return Ok(true);
     }
 
     let mut install = if (removed_locked || !editable_removal.removed_names.is_empty())
@@ -19049,6 +19099,8 @@ fn parse_npm_compat_action(args: &[String]) -> Result<NpmCompatAction, OmcRegist
                 allow,
                 allow_flow,
                 allow_all_host,
+                package_lock,
+                lock_only,
                 workspaces,
                 all_workspaces,
                 include_workspace_root,
@@ -19063,6 +19115,8 @@ fn parse_npm_compat_action(args: &[String]) -> Result<NpmCompatAction, OmcRegist
             Ok(NpmCompatAction::Remove {
                 specs: positionals,
                 global,
+                package_lock,
+                lock_only,
                 allow,
                 allow_flow,
                 allow_all_host,
@@ -28258,6 +28312,31 @@ mod tests {
     }
 
     #[test]
+    fn npm_global_remove_rejects_package_lock_only_like_npm() {
+        let project = test_dir("npm-global-remove-package-lock-only-project");
+        let prefix = test_dir("npm-global-remove-package-lock-only-prefix");
+
+        with_env_var("NPM_CONFIG_PREFIX", &prefix, || {
+            let error = run_npm_compat(
+                &project,
+                &args(&[
+                    "uninstall",
+                    "--global",
+                    "--package-lock-only",
+                    "definitely-not-installed",
+                ]),
+            )
+            .expect_err("npm cannot generate global lockfiles");
+            assert!(error
+                .to_string()
+                .contains("global remove cannot generate lockfiles"));
+        });
+
+        let _ = fs::remove_dir_all(project);
+        let _ = fs::remove_dir_all(prefix);
+    }
+
+    #[test]
     fn npm_install_saves_root_package_json_dependencies() {
         let project = test_dir("npm-install-root-package-json-project");
         fs::write(
@@ -28825,6 +28904,53 @@ mod tests {
     }
 
     #[test]
+    fn npm_remove_package_lock_only_does_not_touch_install_state() {
+        let project = test_dir("npm-remove-package-lock-only-project");
+        fs::create_dir_all(project.join("node_modules").join("left-pad")).unwrap();
+        fs::write(
+            project
+                .join("node_modules")
+                .join("left-pad")
+                .join("index.js"),
+            "module.exports = 42;\n",
+        )
+        .unwrap();
+        fs::write(
+            project.join("package.json"),
+            r#"{"name":"root","version":"1.0.0","dependencies":{"left-pad":"1.3.0"}}"#,
+        )
+        .unwrap();
+        fs::write(
+            project.join("package-lock.json"),
+            r#"{"name":"root","version":"1.0.0","lockfileVersion":3,"requires":true,"packages":{"":{"name":"root","version":"1.0.0","dependencies":{"left-pad":"1.3.0"}},"node_modules/left-pad":{"version":"1.3.0"}}}"#,
+        )
+        .unwrap();
+
+        let status = run_npm_compat(
+            &project,
+            &args(&["uninstall", "--package-lock-only", "left-pad"]),
+        )
+        .unwrap();
+
+        assert_eq!(status, ExitCode::SUCCESS);
+        assert!(project.join("node_modules").join("left-pad").exists());
+        assert!(!project.join(".omc").join("python").exists());
+        let package_json = read_npm_pkg_json(&project.join("package.json")).unwrap();
+        assert!(package_json
+            .get("dependencies")
+            .and_then(serde_json::Value::as_object)
+            .is_some_and(|dependencies| !dependencies.contains_key("left-pad")));
+        let package_lock = read_npm_pkg_json(&project.join("package-lock.json")).unwrap();
+        let lock_packages = package_lock
+            .get("packages")
+            .and_then(serde_json::Value::as_object)
+            .unwrap();
+        assert!(!lock_packages.contains_key("node_modules/left-pad"));
+
+        let _ = fs::remove_dir_all(project);
+    }
+
+    #[test]
     fn npm_remove_updates_selected_workspace_package_json_dependencies() {
         let project = test_dir("npm-remove-workspace-package-json-project");
         fs::create_dir_all(project.join("packages/lib")).unwrap();
@@ -28858,6 +28984,65 @@ mod tests {
             .is_some_and(|dependencies| !dependencies.contains_key("left-pad")));
         let lock = read_lockfile(project.join("omc.lock")).unwrap();
         assert!(lock.packages.is_empty());
+        let package_lock = read_npm_pkg_json(&project.join("package-lock.json")).unwrap();
+        let lock_packages = package_lock
+            .get("packages")
+            .and_then(serde_json::Value::as_object)
+            .unwrap();
+        assert!(!lock_packages.contains_key("node_modules/left-pad"));
+
+        let _ = fs::remove_dir_all(project);
+    }
+
+    #[test]
+    fn npm_remove_workspace_package_lock_only_does_not_touch_install_state() {
+        let project = test_dir("npm-remove-workspace-package-lock-only-project");
+        fs::create_dir_all(project.join("packages/lib")).unwrap();
+        fs::create_dir_all(project.join("node_modules").join("left-pad")).unwrap();
+        fs::write(
+            project
+                .join("node_modules")
+                .join("left-pad")
+                .join("index.js"),
+            "module.exports = 42;\n",
+        )
+        .unwrap();
+        fs::write(
+            project.join("package.json"),
+            r#"{"name":"root","version":"1.0.0","workspaces":["packages/*"]}"#,
+        )
+        .unwrap();
+        fs::write(
+            project.join("packages/lib/package.json"),
+            r#"{"name":"@demo/lib","version":"1.0.0","dependencies":{"left-pad":"1.3.0"}}"#,
+        )
+        .unwrap();
+        fs::write(
+            project.join("package-lock.json"),
+            r#"{"name":"root","version":"1.0.0","lockfileVersion":3,"requires":true,"packages":{"":{"name":"root","version":"1.0.0","workspaces":["packages/*"]},"packages/lib":{"name":"@demo/lib","version":"1.0.0","dependencies":{"left-pad":"1.3.0"}},"node_modules/left-pad":{"version":"1.3.0"}}}"#,
+        )
+        .unwrap();
+
+        let status = run_npm_compat(
+            &project,
+            &args(&[
+                "remove",
+                "--package-lock-only",
+                "left-pad",
+                "--workspace",
+                "@demo/lib",
+            ]),
+        )
+        .unwrap();
+
+        assert_eq!(status, ExitCode::SUCCESS);
+        assert!(project.join("node_modules").join("left-pad").exists());
+        assert!(!project.join(".omc").join("python").exists());
+        let package_json = read_npm_pkg_json(&project.join("packages/lib/package.json")).unwrap();
+        assert!(package_json
+            .get("dependencies")
+            .and_then(serde_json::Value::as_object)
+            .is_some_and(|dependencies| !dependencies.contains_key("left-pad")));
         let package_lock = read_npm_pkg_json(&project.join("package-lock.json")).unwrap();
         let lock_packages = package_lock
             .get("packages")
@@ -29730,6 +29915,7 @@ mod tests {
         assert_eq!(
             parse_npm_compat_action(&args(&[
                 "remove",
+                "--package-lock-only",
                 "left-pad",
                 "--workspace",
                 "@demo/lib",
@@ -29739,6 +29925,8 @@ mod tests {
             NpmCompatAction::Remove {
                 specs: vec!["left-pad".to_owned()],
                 global: false,
+                package_lock: true,
+                lock_only: true,
                 allow: Vec::new(),
                 allow_flow: Vec::new(),
                 allow_all_host: false,
@@ -29759,6 +29947,8 @@ mod tests {
             NpmCompatAction::Remove {
                 specs: vec!["left-pad".to_owned()],
                 global: false,
+                package_lock: true,
+                lock_only: false,
                 allow: Vec::new(),
                 allow_flow: Vec::new(),
                 allow_all_host: false,
