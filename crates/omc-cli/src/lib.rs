@@ -1172,6 +1172,10 @@ enum PipCompatAction {
     Config {
         action: PipConfigAction,
     },
+    ConfigEdit {
+        location: PipConfigLocation,
+        editor: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -5567,6 +5571,9 @@ fn run_pip_compat_with_cwd(
         )?,
         PipCompatAction::Search { query } => return print_pip_search_deprecated(query),
         PipCompatAction::Config { action } => print_pip_config(project_dir, action)?,
+        PipCompatAction::ConfigEdit { location, editor } => {
+            return run_pip_config_edit(project_dir, invocation_cwd, location, editor);
+        }
     }
 
     Ok(ExitCode::SUCCESS)
@@ -8358,8 +8365,8 @@ fn pip_help_text(topic: Option<&str>) -> String {
             &["List available package versions from the configured index. Supports --json and index flags."],
         ),
         Some("config") => pip_command_help(
-            "pip config <get|set|unset|list|debug> ...",
-            &["Read, update, and debug pip config used by OMC. Supports --site, --user, --global, and --json where relevant."],
+            "pip config <get|set|unset|list|debug|edit> ...",
+            &["Read, update, debug, and edit pip config used by OMC. Supports --site, --user, --global, --editor, and --json where relevant."],
         ),
         Some(_) => pip_command_help(
             "pip help [command]",
@@ -16450,6 +16457,36 @@ fn unset_pip_config_keys(
         }
     }
     write_pip_config_lines(&path, &lines)
+}
+
+fn run_pip_config_edit(
+    project_dir: &Path,
+    invocation_cwd: &Path,
+    location: PipConfigLocation,
+    editor: Option<String>,
+) -> Result<ExitCode, OmcRegistryError> {
+    let path = pip_config_write_path(project_dir, location)?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    if !path.exists() {
+        fs::write(&path, "")?;
+    }
+
+    let editor = pip_config_editor(editor);
+    let mut command = package_script_command(&editor);
+    command.current_dir(invocation_cwd).arg(&path);
+    let status = command.status()?;
+    Ok(exit_code(status.code()))
+}
+
+fn pip_config_editor(editor: Option<String>) -> String {
+    editor
+        .or_else(|| env::var("VISUAL").ok())
+        .or_else(|| env::var("EDITOR").ok())
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "vi".to_owned())
 }
 
 fn pip_config_write_path(
@@ -26971,6 +27008,7 @@ fn pip_search_ignored_equals_flag(arg: &str) -> bool {
 
 fn parse_pip_config_args(args: &[String]) -> Result<PipCompatAction, OmcRegistryError> {
     let PipConfigArgs {
+        editor,
         json,
         location,
         mut positionals,
@@ -27010,6 +27048,12 @@ fn parse_pip_config_args(args: &[String]) -> Result<PipCompatAction, OmcRegistry
                 action: PipConfigAction::Debug,
             })
         }
+        "edit" => {
+            if !positionals.is_empty() {
+                return Err(unsupported_compat_arg("pip config edit", &positionals[0]));
+            }
+            Ok(PipCompatAction::ConfigEdit { location, editor })
+        }
         "set" => {
             let assignments = parse_pip_config_assignments(positionals)?;
             Ok(PipCompatAction::Config {
@@ -27040,12 +27084,14 @@ fn parse_pip_config_args(args: &[String]) -> Result<PipCompatAction, OmcRegistry
 
 #[derive(Debug)]
 struct PipConfigArgs {
+    editor: Option<String>,
     json: bool,
     location: PipConfigLocation,
     positionals: Vec<String>,
 }
 
 fn parse_pip_config_common_args(args: &[String]) -> Result<PipConfigArgs, OmcRegistryError> {
+    let mut editor = None;
     let mut json = false;
     let mut location = PipConfigLocation::Auto;
     let mut positionals = Vec::new();
@@ -27063,12 +27109,14 @@ fn parse_pip_config_common_args(args: &[String]) -> Result<PipConfigArgs, OmcReg
         } else if arg == "--isolated" || pip_ignored_verbosity_flag(arg) {
         } else if arg == "--editor" {
             index += 1;
-            if args.get(index).is_none() {
+            let Some(value) = args.get(index) else {
                 return Err(OmcRegistryError::UnsupportedSpec(
                     "--editor needs a value".to_owned(),
                 ));
-            }
+            };
+            editor = Some(value.clone());
         } else if arg.starts_with("--editor=") {
+            editor = Some(arg["--editor=".len()..].to_owned());
         } else if arg.starts_with('-') {
             return Err(unsupported_compat_arg("pip config", arg));
         } else {
@@ -27077,6 +27125,7 @@ fn parse_pip_config_common_args(args: &[String]) -> Result<PipConfigArgs, OmcReg
         index += 1;
     }
     Ok(PipConfigArgs {
+        editor,
         json,
         location,
         positionals,
@@ -40776,6 +40825,14 @@ resolved_commit = "0123456789abcdef0123456789abcdef01234567"
             }
         );
         assert_eq!(
+            parse_pip_compat_action(&args(&["config", "--user", "--editor", "true", "edit",]))
+                .unwrap(),
+            PipCompatAction::ConfigEdit {
+                location: PipConfigLocation::User,
+                editor: Some("true".to_owned()),
+            }
+        );
+        assert_eq!(
             parse_pip_compat_action(&args(&["config", "set", "global.index-url", "x"])).unwrap(),
             PipCompatAction::Config {
                 action: PipConfigAction::Set {
@@ -40907,6 +40964,30 @@ resolved_commit = "0123456789abcdef0123456789abcdef01234567"
             assert!(output.contains("site:"));
             assert!(output.contains("config_value:"));
             assert!(output.contains("global.index-url=https://debug.example.invalid/simple/"));
+        });
+    }
+
+    #[test]
+    fn edits_pip_site_config_with_editor() {
+        without_env_var("PIP_CONFIG_FILE", || {
+            let dir = test_dir("pip-config-edit");
+            let editor_script = dir.join("edit-pip-config.sh");
+            fs::write(
+                &editor_script,
+                "#!/bin/sh\nprintf '[global]\\nindex-url = https://edited.example.invalid/simple\\n' > \"$1\"\n",
+            )
+            .unwrap();
+            let editor = format!("sh {}", editor_script.display());
+
+            let status = run_pip_compat(
+                &dir,
+                &args(&["config", "--site", "--editor", editor.as_str(), "edit"]),
+            )
+            .unwrap();
+
+            assert_eq!(status, ExitCode::SUCCESS);
+            let config = fs::read_to_string(dir.join("pip.conf")).unwrap();
+            assert!(config.contains("index-url = https://edited.example.invalid/simple\n"));
         });
     }
 
