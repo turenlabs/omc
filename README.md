@@ -147,6 +147,7 @@ cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm explain left-p
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm query ':root > *'
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm ls --depth 0 left-pad --json
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm prune --omit=dev
+cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm prune --dry-run --json
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm dedupe
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm rebuild node-sass --ignore-scripts
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm config get registry
@@ -658,6 +659,8 @@ Supported now:
   `npm ci` treats an existing `package-lock.json` or `npm-shrinkwrap.json` as
   the source of truth for the OMC lock/install and falls back to strict
   `omc.lock` installs when no npm lockfile is present,
+  `npm prune`, `npm dedupe`, and `npm rebuild` honor `--dry-run` without
+  creating OMC state and can emit `--json` maintenance reports,
   `npm install -g <pkg>`, `npm install --location=global <pkg>`,
   `npm remove -g <pkg>`, and `npm remove --location=global <pkg>` use the
   configured npm prefix as an OMC-managed global project and mirror generated

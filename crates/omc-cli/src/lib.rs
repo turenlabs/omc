@@ -419,6 +419,8 @@ enum NpmCompatAction {
     Maintenance {
         command: NpmMaintenanceCommand,
         packages: Vec<String>,
+        dry_run: bool,
+        json: bool,
         omit_dev: bool,
         omit_optional: bool,
         omit_peer: bool,
@@ -4226,6 +4228,8 @@ fn run_npm_compat_with_cwd(
         NpmCompatAction::Maintenance {
             command,
             packages,
+            dry_run,
+            json,
             omit_dev,
             omit_optional,
             omit_peer,
@@ -4236,8 +4240,12 @@ fn run_npm_compat_with_cwd(
             let mut options = LinkOptions::new(project_dir);
             apply_cli_policy_options(&mut options, &allow, &allow_flow, allow_all_host)?;
             apply_dependency_omit_flags(&mut options, omit_dev, omit_optional, omit_peer);
-            let install = install_locked_project(&options)?;
-            print_npm_maintenance_report(command, &packages, &install);
+            let install = if dry_run {
+                npm_maintenance_dry_run_report(project_dir)?
+            } else {
+                install_locked_project(&options)?
+            };
+            print_npm_maintenance_report(command, &packages, &install, dry_run, json)?;
         }
         NpmCompatAction::RunScript {
             command,
@@ -17489,13 +17497,60 @@ fn print_npm_maintenance_report(
     command: NpmMaintenanceCommand,
     packages: &[String],
     install: &InstallReport,
-) {
+    dry_run: bool,
+    json: bool,
+) -> Result<(), OmcRegistryError> {
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "command": npm_maintenance_command_name(command),
+                "dryRun": dry_run,
+                "packages": packages,
+                "install": {
+                    "npm": install.npm_packages,
+                    "pypi": install.pypi_packages,
+                    "npmBins": install.npm_bins,
+                    "pythonScripts": install.python_scripts,
+                    "nodeModules": install.node_modules,
+                    "npmBinDir": install.npm_bin_dir,
+                    "pythonBinDir": install.python_bin_dir,
+                    "pythonSitePackages": install.python_site_packages,
+                }
+            }))?
+        );
+        return Ok(());
+    }
+
     match command {
-        NpmMaintenanceCommand::Prune => println!("pruned OMC npm install state"),
-        NpmMaintenanceCommand::Dedupe => println!("deduped OMC npm install state"),
+        NpmMaintenanceCommand::Prune => {
+            if dry_run {
+                println!("dry-run: would prune OMC npm install state");
+            } else {
+                println!("pruned OMC npm install state");
+            }
+        }
+        NpmMaintenanceCommand::Dedupe => {
+            if dry_run {
+                println!("dry-run: would dedupe OMC npm install state");
+            } else {
+                println!("deduped OMC npm install state");
+            }
+        }
         NpmMaintenanceCommand::Rebuild => {
             if packages.is_empty() {
-                println!("rebuilt OMC npm install state without package lifecycle scripts");
+                if dry_run {
+                    println!(
+                        "dry-run: would rebuild OMC npm install state without package lifecycle scripts"
+                    );
+                } else {
+                    println!("rebuilt OMC npm install state without package lifecycle scripts");
+                }
+            } else if dry_run {
+                println!(
+                    "dry-run: would rebuild OMC npm package request without package lifecycle scripts: {}",
+                    packages.join(", ")
+                );
             } else {
                 println!(
                     "rebuilt OMC npm package request without package lifecycle scripts: {}",
@@ -17505,6 +17560,44 @@ fn print_npm_maintenance_report(
         }
     }
     print_install_report(install);
+    Ok(())
+}
+
+fn npm_maintenance_command_name(command: NpmMaintenanceCommand) -> &'static str {
+    match command {
+        NpmMaintenanceCommand::Prune => "prune",
+        NpmMaintenanceCommand::Dedupe => "dedupe",
+        NpmMaintenanceCommand::Rebuild => "rebuild",
+    }
+}
+
+fn npm_maintenance_dry_run_report(project_dir: &Path) -> Result<InstallReport, OmcRegistryError> {
+    let packages = match read_lockfile(project_dir.join("omc.lock")) {
+        Ok(lock) => lock.packages,
+        Err(OmcRegistryError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
+            Vec::new()
+        }
+        Err(error) => return Err(error),
+    };
+    Ok(InstallReport {
+        npm_packages: packages
+            .iter()
+            .filter(|package| package.ecosystem == Ecosystem::Npm)
+            .count(),
+        pypi_packages: packages
+            .iter()
+            .filter(|package| package.ecosystem == Ecosystem::Pypi)
+            .count(),
+        npm_bins: 0,
+        python_scripts: 0,
+        node_modules: project_dir.join("node_modules"),
+        npm_bin_dir: project_dir.join("node_modules").join(".bin"),
+        python_bin_dir: project_dir.join(".omc").join("python").join("bin"),
+        python_site_packages: project_dir
+            .join(".omc")
+            .join("python")
+            .join("site-packages"),
+    })
 }
 
 fn remove_npm_installed_specs(
@@ -22571,10 +22664,18 @@ fn parse_npm_maintenance_args(
     args: &[String],
 ) -> Result<NpmCompatAction, OmcRegistryError> {
     let mut filtered = Vec::new();
+    let mut dry_run = false;
+    let mut json = false;
     let mut index = 0;
     while index < args.len() {
         let arg = &args[index];
-        if matches!(arg.as_str(), "--dry-run" | "--json" | "--silent" | "-s") {
+        if let Some(value) = npm_bool_flag_value(arg, "--dry-run") {
+            dry_run = value;
+        } else if arg == "--no-dry-run" {
+            dry_run = false;
+        } else if let Some(value) = npm_bool_flag_value(arg, "--json") {
+            json = value;
+        } else if matches!(arg.as_str(), "--silent" | "-s") {
         } else if matches!(arg.as_str(), "--loglevel" | "--cache") {
             index += 1;
             if args.get(index).is_none() {
@@ -22602,6 +22703,8 @@ fn parse_npm_maintenance_args(
     Ok(NpmCompatAction::Maintenance {
         command: maintenance,
         packages: positionals,
+        dry_run,
+        json,
         omit_dev,
         omit_optional,
         omit_peer,
@@ -22619,14 +22722,20 @@ fn npm_maintenance_equals_value_flag(arg: &str) -> bool {
 
 fn parse_npm_rebuild_args(args: &[String]) -> Result<NpmCompatAction, OmcRegistryError> {
     let mut filtered = Vec::new();
+    let mut dry_run = false;
+    let mut json = false;
     let mut index = 0;
     while index < args.len() {
         let arg = &args[index];
-        if matches!(
+        if let Some(value) = npm_bool_flag_value(arg, "--dry-run") {
+            dry_run = value;
+        } else if arg == "--no-dry-run" {
+            dry_run = false;
+        } else if let Some(value) = npm_bool_flag_value(arg, "--json") {
+            json = value;
+        } else if matches!(
             arg.as_str(),
-            "--dry-run"
-                | "--json"
-                | "--silent"
+            "--silent"
                 | "-s"
                 | "--force"
                 | "-f"
@@ -22673,6 +22782,8 @@ fn parse_npm_rebuild_args(args: &[String]) -> Result<NpmCompatAction, OmcRegistr
     Ok(NpmCompatAction::Maintenance {
         command: NpmMaintenanceCommand::Rebuild,
         packages: positionals,
+        dry_run,
+        json,
         omit_dev,
         omit_optional,
         omit_peer,
@@ -33887,6 +33998,26 @@ verdict = "accepted"
     }
 
     #[test]
+    fn npm_maintenance_dry_run_does_not_write_project_state() {
+        let project = test_dir("npm-maintenance-dry-run");
+        fs::write(
+            project.join("package.json"),
+            r#"{"name":"root","version":"1.0.0"}"#,
+        )
+        .unwrap();
+
+        let status = run_npm_compat(&project, &args(&["prune", "--dry-run", "--json"])).unwrap();
+
+        assert_eq!(status, ExitCode::SUCCESS);
+        assert!(!project.join("omc.toml").exists());
+        assert!(!project.join("omc.lock").exists());
+        assert!(!project.join("node_modules").exists());
+        assert!(!project.join(".omc").exists());
+
+        let _ = fs::remove_dir_all(project);
+    }
+
+    #[test]
     fn parses_direct_compat_project_dir_prefix() {
         let cwd = env::current_dir().unwrap();
         let npm_root = test_dir("direct-compat-npm-root");
@@ -35822,6 +35953,8 @@ verdict = "accepted"
             NpmCompatAction::Maintenance {
                 command: NpmMaintenanceCommand::Prune,
                 packages: vec!["left-pad".to_owned()],
+                dry_run: false,
+                json: false,
                 omit_dev: true,
                 omit_optional: false,
                 omit_peer: false,
@@ -35834,6 +35967,7 @@ verdict = "accepted"
             parse_npm_compat_action(&args(&[
                 "dedupe",
                 "--dry-run",
+                "--json",
                 "--cache",
                 "/tmp/npm-cache",
                 "left-pad",
@@ -35842,6 +35976,8 @@ verdict = "accepted"
             NpmCompatAction::Maintenance {
                 command: NpmMaintenanceCommand::Dedupe,
                 packages: vec!["left-pad".to_owned()],
+                dry_run: true,
+                json: true,
                 omit_dev: false,
                 omit_optional: false,
                 omit_peer: false,
@@ -35857,11 +35993,15 @@ verdict = "accepted"
                 "node-sass",
                 "--ignore-scripts",
                 "--build-from-source",
+                "--dry-run",
+                "--json",
             ]))
             .unwrap(),
             NpmCompatAction::Maintenance {
                 command: NpmMaintenanceCommand::Rebuild,
                 packages: vec!["node-sass".to_owned()],
+                dry_run: true,
+                json: true,
                 omit_dev: true,
                 omit_optional: false,
                 omit_peer: false,
