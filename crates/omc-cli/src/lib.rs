@@ -3287,7 +3287,8 @@ fn run_npm_ci_compat(
 }
 
 fn run_npm_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRegistryError> {
-    match parse_npm_compat_action(args)? {
+    let args = npm_args_with_environment_defaults(args);
+    match parse_npm_compat_action(&args)? {
         NpmCompatAction::Help { topic } => print_npm_help(topic.as_deref()),
         NpmCompatAction::Version => println!("{}", env!("CARGO_PKG_VERSION")),
         NpmCompatAction::Completion { words } => print_npm_completion(project_dir, words)?,
@@ -3601,6 +3602,79 @@ fn run_npm_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
     }
 
     Ok(ExitCode::SUCCESS)
+}
+
+fn npm_args_with_environment_defaults(args: &[String]) -> Vec<String> {
+    let mut defaults = npm_environment_default_args();
+    if defaults.is_empty() {
+        return args.to_vec();
+    }
+    defaults.extend(args.iter().cloned());
+    defaults
+}
+
+fn npm_environment_default_args() -> Vec<String> {
+    let mut args = Vec::new();
+    if env::var("NODE_ENV")
+        .ok()
+        .map(|value| value == "production")
+        .unwrap_or(false)
+    {
+        args.push("--omit=dev".to_owned());
+    }
+
+    if let Some(production) = npm_config_env("production") {
+        if config_bool(&production) {
+            args.push("--omit=dev".to_owned());
+        } else if config_false(&production) {
+            args.push("--include=dev".to_owned());
+        }
+    }
+
+    if let Some(omit) = npm_config_env("omit") {
+        args.push("--include=dev,optional,peer".to_owned());
+        args.push(format!("--omit={omit}"));
+    }
+    if let Some(include) = npm_config_env("include") {
+        args.push(format!("--include={include}"));
+    }
+    if let Some(save_exact) = npm_config_env("save-exact") {
+        if config_bool(&save_exact) {
+            args.push("--save-exact".to_owned());
+        } else if config_false(&save_exact) {
+            args.push("--save-exact=false".to_owned());
+        }
+    }
+    if let Some(save_prefix) = npm_config_env("save-prefix") {
+        args.push(format!("--save-prefix={save_prefix}"));
+    }
+
+    args
+}
+
+fn npm_config_env(name: &str) -> Option<String> {
+    let env_name = name.replace('-', "_");
+    let lower = format!("npm_config_{env_name}");
+    let upper = format!("NPM_CONFIG_{}", env_name.to_ascii_uppercase());
+    env::var(lower)
+        .ok()
+        .or_else(|| env::var(upper).ok())
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+}
+
+fn config_bool(value: &str) -> bool {
+    matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "1" | "yes" | "true" | "on"
+    )
+}
+
+fn config_false(value: &str) -> bool {
+    matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "0" | "no" | "false" | "off"
+    )
 }
 
 fn run_pip_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRegistryError> {
@@ -24449,6 +24523,147 @@ mod tests {
             }
             result
         })
+    }
+
+    fn with_env_values<T>(values: &[(&str, Option<&str>)], f: impl FnOnce() -> T) -> T {
+        with_env_lock(|| {
+            let old_values = values
+                .iter()
+                .map(|(key, _)| (*key, env::var_os(key)))
+                .collect::<Vec<_>>();
+            for (key, value) in values {
+                if let Some(value) = value {
+                    env::set_var(key, value);
+                } else {
+                    env::remove_var(key);
+                }
+            }
+            let result = f();
+            for (key, old) in old_values {
+                if let Some(old) = old {
+                    env::set_var(key, old);
+                } else {
+                    env::remove_var(key);
+                }
+            }
+            result
+        })
+    }
+
+    #[test]
+    fn npm_environment_defaults_behave_like_global_config_flags() {
+        with_env_values(
+            &[
+                ("NODE_ENV", Some("production")),
+                ("NPM_CONFIG_PRODUCTION", None),
+                ("npm_config_production", None),
+                ("NPM_CONFIG_OMIT", None),
+                ("npm_config_omit", None),
+                ("NPM_CONFIG_INCLUDE", None),
+                ("npm_config_include", None),
+                ("NPM_CONFIG_SAVE_EXACT", None),
+                ("npm_config_save_exact", None),
+                ("NPM_CONFIG_SAVE_PREFIX", None),
+                ("npm_config_save_prefix", None),
+            ],
+            || {
+                assert_eq!(
+                    npm_args_with_environment_defaults(&args(&["install", "--include=dev"])),
+                    args(&["--omit=dev", "install", "--include=dev"])
+                );
+                let action =
+                    parse_npm_compat_action(&npm_args_with_environment_defaults(&args(&[
+                        "install",
+                        "--include=dev",
+                    ])))
+                    .unwrap();
+                let NpmCompatAction::Install { omit_dev, .. } = action else {
+                    panic!("expected npm install action");
+                };
+                assert!(!omit_dev);
+            },
+        );
+
+        with_env_values(
+            &[
+                ("NODE_ENV", Some("production")),
+                ("NPM_CONFIG_PRODUCTION", Some("false")),
+                ("npm_config_production", None),
+                ("NPM_CONFIG_OMIT", None),
+                ("npm_config_omit", None),
+                ("NPM_CONFIG_INCLUDE", None),
+                ("npm_config_include", None),
+                ("NPM_CONFIG_SAVE_EXACT", None),
+                ("npm_config_save_exact", None),
+                ("NPM_CONFIG_SAVE_PREFIX", None),
+                ("npm_config_save_prefix", None),
+            ],
+            || {
+                assert_eq!(
+                    npm_args_with_environment_defaults(&args(&["ci"])),
+                    args(&["--omit=dev", "--include=dev", "ci"])
+                );
+                let action =
+                    parse_npm_compat_action(&npm_args_with_environment_defaults(&args(&["ci"])))
+                        .unwrap();
+                let NpmCompatAction::Ci { omit_dev, .. } = action else {
+                    panic!("expected npm ci action");
+                };
+                assert!(!omit_dev);
+            },
+        );
+
+        with_env_values(
+            &[
+                ("NODE_ENV", Some("production")),
+                ("NPM_CONFIG_PRODUCTION", None),
+                ("npm_config_production", None),
+                ("NPM_CONFIG_OMIT", Some("optional,peer")),
+                ("npm_config_omit", None),
+                ("NPM_CONFIG_INCLUDE", Some("peer")),
+                ("npm_config_include", None),
+                ("NPM_CONFIG_SAVE_EXACT", Some("true")),
+                ("npm_config_save_exact", None),
+                ("NPM_CONFIG_SAVE_PREFIX", Some("~")),
+                ("npm_config_save_prefix", None),
+            ],
+            || {
+                assert_eq!(
+                    npm_args_with_environment_defaults(&args(&["install", "left-pad"])),
+                    args(&[
+                        "--omit=dev",
+                        "--include=dev,optional,peer",
+                        "--omit=optional,peer",
+                        "--include=peer",
+                        "--save-exact",
+                        "--save-prefix=~",
+                        "install",
+                        "left-pad",
+                    ])
+                );
+                let action =
+                    parse_npm_compat_action(&npm_args_with_environment_defaults(&args(&[
+                        "install",
+                        "--save-exact=false",
+                        "left-pad",
+                    ])))
+                    .unwrap();
+                let NpmCompatAction::Install {
+                    omit_dev,
+                    omit_optional,
+                    omit_peer,
+                    save_prefix,
+                    ..
+                } = action
+                else {
+                    panic!("expected npm install action");
+                };
+                assert!(!omit_dev);
+                assert!(omit_optional);
+                assert!(!omit_peer);
+                assert_eq!(save_prefix, DEFAULT_NPM_SAVE_PREFIX);
+            },
+        );
     }
 
     #[test]

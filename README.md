@@ -310,7 +310,10 @@ What `add` does:
 resolve package version ranges from npm or PyPI
 walk runtime dependencies recursively
 download the registry artifact without executing it
-use global/project/user `.npmrc` registry, scoped registry, auth token settings, npm globalconfig/userconfig env vars, and npm registry env vars for npm
+use global/project/user `.npmrc` registry, scoped registry, auth token settings,
+npm globalconfig/userconfig env vars, npm registry env vars, and npm
+install-mode env defaults such as `NODE_ENV=production`,
+`NPM_CONFIG_PRODUCTION`, `NPM_CONFIG_OMIT`, and `NPM_CONFIG_INCLUDE`
 use `omc.toml` PyPI simple-index settings for OMC-managed PyPI adds
 use project/user `pip.conf` PyPI simple-index settings when no project index is set
 use `PIP_INDEX_URL` / `PIP_EXTRA_INDEX_URL` when no project PyPI index is set
@@ -439,6 +442,9 @@ Supported now:
   `--save-dev`/`-D`, `--save-optional`/`-O`, and `--save-peer`
 - npm omit/include flags for install selection:
   `--omit=dev|optional|peer` and `--include=dev|optional|peer`
+- npm install-mode environment defaults for `NODE_ENV=production`,
+  `NPM_CONFIG_PRODUCTION`, `NPM_CONFIG_OMIT`, `NPM_CONFIG_INCLUDE`,
+  `NPM_CONFIG_SAVE_EXACT`, and `NPM_CONFIG_SAVE_PREFIX`
 - production-style `omc install --omit-dev` installs
 - explicit `omc install -r FILE` and `omc ci -r FILE` requirements-file inputs
 - npm `optionalDependencies` and required `peerDependencies` ingestion
