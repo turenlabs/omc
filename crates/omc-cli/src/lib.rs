@@ -3120,6 +3120,7 @@ fn run_npm_remove_workspace_compat(
     let install = install_project(&options)?;
     println!("removed {}", removed.join(", "));
     print_install_report(&install);
+    sync_npm_package_lock(project_dir)?;
     Ok(ExitCode::SUCCESS)
 }
 
@@ -15100,6 +15101,9 @@ fn remove_specs(
         project_dir,
         &editable_removal.remaining_import_paths,
     )?;
+    if update_npm_package_json {
+        sync_npm_package_lock(project_dir)?;
+    }
     println!("removed {}", removed.join(", "));
     print_install_report(&install);
     Ok(())
@@ -27755,6 +27759,11 @@ mod tests {
             r#"{"name":"root","version":"1.0.0","dependencies":{"left-pad":"1.3.0"},"devDependencies":{"is-odd":"3.0.1"},"optionalDependencies":{"fsevents":"2.0.0"},"peerDependencies":{"react":"18.0.0"}}"#,
         )
         .unwrap();
+        fs::write(
+            project.join("package-lock.json"),
+            r#"{"name":"root","version":"1.0.0","lockfileVersion":3,"requires":true,"packages":{"":{"name":"root","version":"1.0.0","dependencies":{"left-pad":"1.3.0"},"devDependencies":{"is-odd":"3.0.1"},"optionalDependencies":{"fsevents":"2.0.0"},"peerDependencies":{"react":"18.0.0"}},"node_modules/left-pad":{"version":"1.3.0"},"node_modules/is-odd":{"version":"3.0.1"},"node_modules/fsevents":{"version":"2.0.0"},"node_modules/react":{"version":"18.0.0"}}}"#,
+        )
+        .unwrap();
 
         let status = run_npm_compat(
             &project,
@@ -27781,6 +27790,23 @@ mod tests {
         assert!(manifest.dev_dependencies.is_empty());
         assert!(manifest.optional_dependencies.is_empty());
         assert!(manifest.peer_dependencies.is_empty());
+        let package_lock = read_npm_pkg_json(&project.join("package-lock.json")).unwrap();
+        let lock_packages = package_lock
+            .get("packages")
+            .and_then(serde_json::Value::as_object)
+            .unwrap();
+        assert!(lock_packages
+            .get("")
+            .and_then(|root| root.get("dependencies"))
+            .is_none());
+        for path in [
+            "node_modules/left-pad",
+            "node_modules/is-odd",
+            "node_modules/fsevents",
+            "node_modules/react",
+        ] {
+            assert!(!lock_packages.contains_key(path));
+        }
 
         let _ = fs::remove_dir_all(project);
     }
@@ -27799,6 +27825,11 @@ mod tests {
             r#"{"name":"@demo/lib","version":"1.0.0","dependencies":{"left-pad":"1.3.0"}}"#,
         )
         .unwrap();
+        fs::write(
+            project.join("package-lock.json"),
+            r#"{"name":"root","version":"1.0.0","lockfileVersion":3,"requires":true,"packages":{"":{"name":"root","version":"1.0.0","workspaces":["packages/*"]},"node_modules/left-pad":{"version":"1.3.0"}}}"#,
+        )
+        .unwrap();
 
         let status = run_npm_compat(
             &project,
@@ -27814,6 +27845,12 @@ mod tests {
             .is_some_and(|dependencies| !dependencies.contains_key("left-pad")));
         let lock = read_lockfile(project.join("omc.lock")).unwrap();
         assert!(lock.packages.is_empty());
+        let package_lock = read_npm_pkg_json(&project.join("package-lock.json")).unwrap();
+        let lock_packages = package_lock
+            .get("packages")
+            .and_then(serde_json::Value::as_object)
+            .unwrap();
+        assert!(!lock_packages.contains_key("node_modules/left-pad"));
 
         let _ = fs::remove_dir_all(project);
     }
