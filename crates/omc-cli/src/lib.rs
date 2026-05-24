@@ -325,6 +325,10 @@ enum NpmCompatAction {
     Help {
         topic: Option<String>,
     },
+    HelpSearch {
+        query: Vec<String>,
+        long: bool,
+    },
     Version,
     Completion {
         words: Option<Vec<String>>,
@@ -3772,6 +3776,7 @@ fn run_npm_compat_with_cwd(
     let args = npm_args_with_config_defaults(project_dir, &args)?;
     match parse_npm_compat_action(&args)? {
         NpmCompatAction::Help { topic } => print_npm_help(topic.as_deref()),
+        NpmCompatAction::HelpSearch { query, long } => print_npm_help_search(&query, long)?,
         NpmCompatAction::Version => println!("{}", env!("CARGO_PKG_VERSION")),
         NpmCompatAction::Completion { words } => print_npm_completion(project_dir, words)?,
         NpmCompatAction::Init { action } => print_npm_init(project_dir, action)?,
@@ -7494,9 +7499,112 @@ fn print_npm_help(topic: Option<&str>) {
     print!("{}", npm_help_text(topic));
 }
 
+fn print_npm_help_search(query: &[String], long: bool) -> Result<(), OmcRegistryError> {
+    print!("{}", npm_help_search_text(query, long)?);
+    Ok(())
+}
+
+fn npm_help_search_text(query: &[String], long: bool) -> Result<String, OmcRegistryError> {
+    let terms = query
+        .iter()
+        .map(|term| term.trim())
+        .filter(|term| !term.is_empty())
+        .map(|term| term.to_ascii_lowercase())
+        .collect::<Vec<_>>();
+    if terms.is_empty() {
+        return Err(OmcRegistryError::UnsupportedSpec(
+            "npm help-search needs a search term".to_owned(),
+        ));
+    }
+
+    let mut topics = NPM_COMPLETION_COMMANDS
+        .iter()
+        .copied()
+        .collect::<BTreeSet<_>>();
+    topics.extend(["get", "help-search"]);
+
+    let mut hits = Vec::new();
+    for topic in topics {
+        let help = npm_help_text(Some(topic));
+        if help.contains("No focused OMC help is available") {
+            continue;
+        }
+        let topic_lower = topic.to_ascii_lowercase();
+        let help_lower = help.to_ascii_lowercase();
+        if !terms
+            .iter()
+            .all(|term| topic_lower.contains(term) || help_lower.contains(term))
+        {
+            continue;
+        }
+        let score = terms
+            .iter()
+            .map(|term| {
+                count_substrings(&topic_lower, term) * 5 + count_substrings(&help_lower, term)
+            })
+            .sum::<usize>();
+        let excerpts = if long {
+            npm_help_search_excerpts(&help, &terms)
+        } else {
+            Vec::new()
+        };
+        hits.push((topic.to_owned(), score, excerpts));
+    }
+    hits.sort_by(|left, right| right.1.cmp(&left.1).then_with(|| left.0.cmp(&right.0)));
+
+    let query_display = query.join(" ");
+    let mut output = String::new();
+    if hits.is_empty() {
+        output.push_str(&format!("No matches for \"{query_display}\"\n"));
+        return Ok(output);
+    }
+
+    output.push_str(&format!("Top hits for \"{query_display}\"\n"));
+    output.push_str("------------------------------------------------------------\n");
+    for (topic, _score, excerpts) in hits.into_iter().take(10) {
+        output.push_str(&format!("npm help {topic}\n"));
+        for excerpt in excerpts {
+            output.push_str("  ");
+            output.push_str(&excerpt);
+            output.push('\n');
+        }
+    }
+    if !long {
+        output.push_str("(run with -l or --long to see matching help text)\n");
+    }
+    Ok(output)
+}
+
+fn count_substrings(haystack: &str, needle: &str) -> usize {
+    if needle.is_empty() {
+        return 0;
+    }
+    haystack.match_indices(needle).count()
+}
+
+fn npm_help_search_excerpts(help: &str, terms: &[String]) -> Vec<String> {
+    help.lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .filter(|line| {
+            let lower = line.to_ascii_lowercase();
+            terms.iter().any(|term| lower.contains(term))
+        })
+        .take(3)
+        .map(str::to_owned)
+        .collect()
+}
+
 fn npm_help_text(topic: Option<&str>) -> String {
     match topic.and_then(npm_help_topic) {
         None => npm_general_help_text(),
+        Some("help-search") => npm_command_help(
+            "npm help-search <term...>",
+            &[
+                "Search OMC's npm compatibility help topics.",
+                "Supports -l and --long for matching help excerpts.",
+            ],
+        ),
         Some("install") => npm_command_help(
             "npm install [<package-spec>...]",
             &[
@@ -7835,7 +7943,7 @@ fn npm_general_help_text() -> String {
         "npm <command>",
         &[
             "OMC npm compatibility runs supported npm workflows through OMC's verifier, lockfile, cache, and project-local runtime paths.",
-            "Supported commands: install, link, install-test, ci, install-ci-test, remove, run, test, start, stop, restart, exec, explore, completion, list, query, explain, audit, outdated, fund, prune, dedupe, rebuild, cache, pkg, version, shrinkwrap, pack, publish, unpublish, deprecate, undeprecate, diff, search, star, unstar, stars, ping, whoami, login, adduser, logout, token, profile, owner, access, org, team, dist-tag, sbom, view, docs, repo, bugs, home, config, get, set, init, create, bin, root, prefix.",
+            "Supported commands: install, link, install-test, ci, install-ci-test, remove, run, test, start, stop, restart, exec, explore, completion, help-search, list, query, explain, audit, outdated, fund, prune, dedupe, rebuild, cache, pkg, version, shrinkwrap, pack, publish, unpublish, deprecate, undeprecate, diff, search, star, unstar, stars, ping, whoami, login, adduser, logout, token, profile, owner, access, org, team, dist-tag, sbom, view, docs, repo, bugs, home, config, get, set, init, create, bin, root, prefix.",
             "Use `npm help <command>` for focused OMC compatibility notes.",
         ],
     )
@@ -7865,6 +7973,7 @@ fn npm_help_topic(topic: &str) -> Option<&'static str> {
         "run" | "run-script" | "test" | "start" | "stop" | "restart" => Some("run"),
         "exec" | "x" | "npx" => Some("exec"),
         "completion" => Some("completion"),
+        "help-search" => Some("help-search"),
         "explore" => Some("explore"),
         "remove" | "uninstall" | "rm" | "un" => Some("remove"),
         "list" | "ls" | "ll" | "la" => Some("list"),
@@ -7930,7 +8039,9 @@ const NPM_COMPLETION_COMMANDS: &[&str] = &[
     "explain",
     "explore",
     "fund",
+    "get",
     "help",
+    "help-search",
     "home",
     "init",
     "install",
@@ -20194,6 +20305,7 @@ fn parse_npm_compat_action(args: &[String]) -> Result<NpmCompatAction, OmcRegist
     match command {
         "--version" | "-v" => Ok(NpmCompatAction::Version),
         "completion" => parse_npm_completion_args(&args[1..]),
+        "help-search" => parse_npm_help_search_args(&args[1..]),
         "init" | "create" | "innit" => parse_npm_init_args(command, &args[1..]),
         "version" => parse_npm_version_args(&args[1..]),
         "link" | "ln" => parse_npm_link_args(&args[1..]),
@@ -20805,6 +20917,9 @@ fn npm_global_arg_supported_by_command(command: &str, arg: &str) -> bool {
     if matches!(arg, "--force" | "-f") || arg.starts_with("--force=") {
         return matches!(command, "cache" | "unpublish");
     }
+    if matches!(arg, "--long" | "-l") || arg.starts_with("--long=") {
+        return matches!(command, "help-search" | "search" | "s" | "se" | "find");
+    }
     if matches!(arg, "--sbom-format" | "--sbom-type")
         || arg.starts_with("--sbom-format=")
         || arg.starts_with("--sbom-type=")
@@ -21101,6 +21216,8 @@ fn npm_global_preserved_bool_flag(arg: &str) -> bool {
             | "--workspaces"
             | "--include-workspace-root"
             | "--package-lock-only"
+            | "--long"
+            | "-l"
             | "--expect-results"
             | "--no-expect-results"
             | "--diff-name-only"
@@ -21183,6 +21300,7 @@ fn npm_global_preserved_equals_flag(arg: &str) -> bool {
         "--access=",
         "--dry-run=",
         "--force=",
+        "--long=",
         "--provenance=",
         "--provenance-file=",
         "--scope=",
@@ -21428,6 +21546,41 @@ fn parse_npm_completion_args(args: &[String]) -> Result<NpmCompatAction, OmcRegi
 }
 
 fn npm_completion_ignored_equals_flag(arg: &str) -> bool {
+    ["--loglevel=", "--cache="]
+        .iter()
+        .any(|prefix| arg.starts_with(prefix))
+}
+
+fn parse_npm_help_search_args(args: &[String]) -> Result<NpmCompatAction, OmcRegistryError> {
+    let mut long = false;
+    let mut query = Vec::new();
+    let mut index = 0;
+    while index < args.len() {
+        let arg = &args[index];
+        if let Some(value) = npm_bool_flag_value(arg, "--long") {
+            long = value;
+        } else if arg == "-l" {
+            long = true;
+        } else if matches!(arg.as_str(), "--silent" | "-s") {
+        } else if matches!(arg.as_str(), "--loglevel" | "--cache") {
+            index += 1;
+            if args.get(index).is_none() {
+                return Err(OmcRegistryError::UnsupportedSpec(format!(
+                    "{arg} needs a value"
+                )));
+            }
+        } else if npm_help_search_ignored_equals_flag(arg) {
+        } else if arg.starts_with('-') {
+            return Err(unsupported_compat_arg("npm help-search", arg));
+        } else {
+            query.push(arg.clone());
+        }
+        index += 1;
+    }
+    Ok(NpmCompatAction::HelpSearch { query, long })
+}
+
+fn npm_help_search_ignored_equals_flag(arg: &str) -> bool {
     ["--loglevel=", "--cache="]
         .iter()
         .any(|prefix| arg.starts_with(prefix))
@@ -31984,7 +32137,18 @@ verdict = "accepted"
                 words: Some(vec!["npm".to_owned(), "expl".to_owned()]),
             }
         );
+        assert_eq!(
+            parse_npm_compat_action(&args(&["help-search", "cache", "--long"])).unwrap(),
+            NpmCompatAction::HelpSearch {
+                query: vec!["cache".to_owned()],
+                long: true,
+            }
+        );
         assert!(npm_help_text(None).contains("Supported commands: install"));
+        assert!(npm_help_text(Some("help-search")).contains("npm help-search"));
+        let help_search = npm_help_search_text(&args(&["cache"]), false).unwrap();
+        assert!(help_search.contains("Top hits for \"cache\""));
+        assert!(help_search.contains("npm help cache"));
         assert!(npm_help_text(Some("fund")).contains("npm fund [<package-spec>]"));
         assert!(npm_help_text(Some("install-test")).contains("npm install-test"));
         assert_eq!(
