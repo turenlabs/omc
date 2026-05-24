@@ -26917,16 +26917,14 @@ fn parse_pip_artifact_args(
         } else if (command == PipArtifactCommand::Wheel && arg == "--no-verify")
             || matches!(
                 arg.as_str(),
-                "--disable-pip-version-check"
-                    | "--no-cache-dir"
-                    | "--ignore-requires-python"
+                "--ignore-requires-python"
                     | "--no-build-isolation"
                     | "--check-build-dependencies"
                     | "--use-pep517"
                     | "--no-use-pep517"
                     | "--no-clean"
             )
-            || pip_ignored_verbosity_flag(arg)
+            || pip_global_ignored_bool_flag(arg)
             || arg.starts_with("--trusted-host=")
         {
         } else if command == PipArtifactCommand::Wheel && pip_ignored_wheel_value_flag(arg) {
@@ -27150,6 +27148,8 @@ fn pip_ignored_download_value_flag(arg: &str) -> bool {
             | "--proxy"
             | "--cache-dir"
             | "--log"
+            | "--use-feature"
+            | "--use-deprecated"
     )
 }
 
@@ -27165,6 +27165,8 @@ fn pip_ignored_download_equals_flag(arg: &str) -> bool {
         "--proxy=",
         "--cache-dir=",
         "--log=",
+        "--use-feature=",
+        "--use-deprecated=",
     ]
     .iter()
     .any(|prefix| arg.starts_with(prefix))
@@ -35750,6 +35752,10 @@ verdict = "accepted"
 
         let action = parse_pip_compat_action(&args(&[
             "download",
+            "--isolated",
+            "--no-input",
+            "--no-color",
+            "--no-python-version-warning",
             "-qq",
             "--verbose",
             "-r",
@@ -35772,6 +35778,15 @@ verdict = "accepted"
             "--abi=cp311",
             "--trusted-host",
             "mirror.example",
+            "--proxy",
+            "https://proxy.example",
+            "--cert=certs/ca.pem",
+            "--client-cert",
+            "certs/client.pem",
+            "--cache-dir=.pip-cache",
+            "--use-feature",
+            "truststore",
+            "--use-deprecated=legacy-resolver",
             "--allow",
             "http:files.example",
             "requests==2.32.3",
@@ -35810,6 +35825,9 @@ verdict = "accepted"
 
         let action = parse_pip_compat_action(&args(&[
             "wheel",
+            "--require-virtualenv",
+            "--disable-pip-version-check",
+            "--no-cache-dir",
             "--quiet",
             "-r",
             "requirements.txt",
@@ -35831,6 +35849,10 @@ verdict = "accepted"
             "--global-option=egg_info",
             "--trusted-host",
             "mirror.example",
+            "--proxy=https://proxy.example",
+            "--use-feature",
+            "truststore",
+            "--use-deprecated=legacy-resolver",
             "--allow",
             "http:files.example",
             "requests==2.32.3",

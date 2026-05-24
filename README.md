@@ -680,8 +680,9 @@ Supported now:
   `--disable-pip-version-check`, `--quiet`, `--timeout`, `--retries`,
   `--trusted-host`, `--cert`, `--client-cert`, `--cache-dir`, `--proxy`,
   `--log`, `--use-feature`, and `--use-deprecated` are accepted before
-  `install` or after it; `pip uninstall` accepts those common global flags
-  after the subcommand too, skips missing packages with a pip-style warning,
+  `install`, `download`, or `wheel`, or after them; `pip uninstall` accepts
+  those common global flags after the subcommand too, skips missing packages
+  with a pip-style warning,
   and removes OMC manifest dependencies, OMC-recorded editable local paths,
   named editable paths from `-r` requirement files, or, when a package only
   exists in the current locked environment, removes the locked package and
