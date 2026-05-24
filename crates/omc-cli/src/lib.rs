@@ -21459,6 +21459,7 @@ fn parse_pip_install_args(args: &[String]) -> Result<PipCompatAction, OmcRegistr
                 | "--force-reinstall"
                 | "--ignore-installed"
                 | "--no-build-isolation"
+                | "--check-build-dependencies"
                 | "--use-pep517"
                 | "--no-use-pep517"
                 | "--compile"
@@ -21467,6 +21468,7 @@ fn parse_pip_install_args(args: &[String]) -> Result<PipCompatAction, OmcRegistr
                 | "--no-input"
                 | "--no-warn-script-location"
                 | "--no-warn-conflicts"
+                | "--no-clean"
         ) {
         } else if pip_ignored_install_value_flag(arg) {
             index += 1;
@@ -21681,20 +21683,32 @@ fn parse_pip_artifact_args(
                     "{arg} needs a value"
                 )));
             }
-        } else if matches!(
-            arg.as_str(),
-            "--disable-pip-version-check"
-                | "--no-cache-dir"
-                | "--ignore-requires-python"
-                | "--no-build-isolation"
-                | "--use-pep517"
-                | "--no-use-pep517"
-                | "-v"
-                | "--verbose"
-                | "-q"
-                | "--quiet"
-        ) || arg.starts_with("--trusted-host=")
+        } else if (command == PipArtifactCommand::Wheel && arg == "--no-verify")
+            || matches!(
+                arg.as_str(),
+                "--disable-pip-version-check"
+                    | "--no-cache-dir"
+                    | "--ignore-requires-python"
+                    | "--no-build-isolation"
+                    | "--check-build-dependencies"
+                    | "--use-pep517"
+                    | "--no-use-pep517"
+                    | "--no-clean"
+                    | "-v"
+                    | "--verbose"
+                    | "-q"
+                    | "--quiet"
+            )
+            || arg.starts_with("--trusted-host=")
         {
+        } else if command == PipArtifactCommand::Wheel && pip_ignored_wheel_value_flag(arg) {
+            index += 1;
+            if args.get(index).is_none() {
+                return Err(OmcRegistryError::UnsupportedSpec(format!(
+                    "{arg} needs a value"
+                )));
+            }
+        } else if command == PipArtifactCommand::Wheel && pip_ignored_wheel_equals_flag(arg) {
         } else if pip_ignored_download_value_flag(arg) {
             index += 1;
             if args.get(index).is_none() {
@@ -21756,6 +21770,10 @@ fn pip_ignored_install_value_flag(arg: &str) -> bool {
         "--progress-bar"
             | "--upgrade-strategy"
             | "--src"
+            | "-C"
+            | "--config-settings"
+            | "--global-option"
+            | "--install-option"
             | "--root-user-action"
             | "--retries"
             | "--timeout"
@@ -21769,11 +21787,33 @@ fn pip_ignored_install_equals_flag(arg: &str) -> bool {
         "--progress-bar=",
         "--upgrade-strategy=",
         "--src=",
+        "-C=",
+        "--config-settings=",
+        "--global-option=",
+        "--install-option=",
         "--root-user-action=",
         "--retries=",
         "--timeout=",
         "--exists-action=",
         "--keyring-provider=",
+    ]
+    .iter()
+    .any(|prefix| arg.starts_with(prefix))
+}
+
+fn pip_ignored_wheel_value_flag(arg: &str) -> bool {
+    matches!(
+        arg,
+        "-C" | "--config-settings" | "--build-option" | "--global-option"
+    )
+}
+
+fn pip_ignored_wheel_equals_flag(arg: &str) -> bool {
+    [
+        "-C=",
+        "--config-settings=",
+        "--build-option=",
+        "--global-option=",
     ]
     .iter()
     .any(|prefix| arg.starts_with(prefix))
@@ -26804,6 +26844,15 @@ verdict = "accepted"
             "--exists-action",
             "i",
             "--no-build-isolation",
+            "--check-build-dependencies",
+            "-C",
+            "editable_mode=strict",
+            "--config-settings=--build-option=build_ext",
+            "--global-option",
+            "egg_info",
+            "--install-option",
+            "--install-scripts=/tmp/bin",
+            "--no-clean",
             "--no-warn-script-location",
             "--no-compile",
             "--report",
@@ -26895,6 +26944,15 @@ verdict = "accepted"
             "--no-index",
             "--require-hashes",
             "--no-deps",
+            "--check-build-dependencies",
+            "--no-clean",
+            "--no-verify",
+            "-C",
+            "editable_mode=strict",
+            "--config-settings=--build-option=build_ext",
+            "--build-option",
+            "--plat-name=macosx",
+            "--global-option=egg_info",
             "--trusted-host",
             "mirror.example",
             "--allow",
