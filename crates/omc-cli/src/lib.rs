@@ -21067,7 +21067,7 @@ fn print_pip_show_editable_package(
     );
     if include_files {
         println!("Files:");
-        println!("Cannot locate RECORD or installed-files.txt");
+        print_pip_show_files_or_missing(pip_editable_project_files(&location)?);
     }
     Ok(())
 }
@@ -21124,6 +21124,8 @@ fn print_pip_show_installed_package(
             for file in pip_installed_files_from_dist_info(dist_info)? {
                 println!("  {file}");
             }
+        } else if let Some(location) = &package.editable_project_location {
+            print_pip_show_files_or_missing(pip_editable_project_files(location)?);
         } else {
             println!("Cannot locate RECORD or installed-files.txt");
         }
@@ -21299,6 +21301,27 @@ fn pip_installed_files_from_dist_info(dist_info: &Path) -> Result<Vec<String>, O
     }
     files.sort();
     Ok(files)
+}
+
+fn pip_editable_project_files(import_path: &Path) -> Result<Vec<String>, OmcRegistryError> {
+    if !import_path.is_dir() {
+        return Ok(Vec::new());
+    }
+    let files = pip_local_wheel_source_files(import_path)?
+        .into_iter()
+        .map(|(relative, _)| relative)
+        .collect();
+    Ok(files)
+}
+
+fn print_pip_show_files_or_missing(files: Vec<String>) {
+    if files.is_empty() {
+        println!("Cannot locate RECORD or installed-files.txt");
+        return;
+    }
+    for file in files {
+        println!("  {file}");
+    }
 }
 
 fn match_dist_info_dir(
@@ -43448,6 +43471,15 @@ version = "0.2.0"
         let src = local.join("src");
         fs::create_dir_all(src.join("demoedit")).unwrap();
         fs::write(src.join("demoedit").join("__init__.py"), "").unwrap();
+        fs::write(src.join("demoedit").join("core.py"), "VALUE = 1\n").unwrap();
+        fs::create_dir_all(src.join("demoedit").join("__pycache__")).unwrap();
+        fs::write(
+            src.join("demoedit")
+                .join("__pycache__")
+                .join("core.cpython-312.pyc"),
+            "",
+        )
+        .unwrap();
         fs::write(
             local.join("setup.cfg"),
             "[metadata]\nname = demoedit\nversion = 0.1.2\nsummary = Demo editable\nhome_page = https://example.invalid/demo\nauthor = Alice\nlicense = MIT\n[options]\ninstall_requires =\n    idna>=3\n",
@@ -43486,6 +43518,13 @@ version = "0.2.0"
                 metadata_location: None,
                 editable_project_location: Some(src.clone()),
             }]
+        );
+        assert_eq!(
+            pip_editable_project_files(&src).unwrap(),
+            vec![
+                "demoedit/__init__.py".to_owned(),
+                "demoedit/core.py".to_owned()
+            ]
         );
         let inspect = pip_path_inspect_entries(&project, &[PathBuf::from("vendor")]).unwrap();
         assert_eq!(inspect.len(), 1);
