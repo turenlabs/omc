@@ -1733,6 +1733,36 @@ fn apply_dependency_omit_flags(
     options.include_peer_dependencies = !omit_peer;
 }
 
+fn npm_lock_options_including_omitted(options: &LinkOptions) -> LinkOptions {
+    let mut lock_options = options.clone();
+    lock_options.include_dev_dependencies = true;
+    lock_options.include_optional_dependencies = true;
+    lock_options.include_peer_dependencies = true;
+    lock_options
+}
+
+fn lock_npm_project_including_omitted(
+    options: &LinkOptions,
+) -> Result<Vec<LinkReport>, OmcRegistryError> {
+    let lock_options = npm_lock_options_including_omitted(options);
+    lock_project(&lock_options)
+}
+
+fn install_npm_project_with_complete_lock(
+    options: &LinkOptions,
+) -> Result<InstallReport, OmcRegistryError> {
+    if options.include_dev_dependencies
+        && options.include_optional_dependencies
+        && options.include_peer_dependencies
+    {
+        return install_project(options);
+    }
+
+    let lock_options = npm_lock_options_including_omitted(options);
+    lock_project(&lock_options)?;
+    install_locked_project(options)
+}
+
 fn apply_pip_compatibility_target(options: &mut LinkOptions, target: PipCompatibilityTarget) {
     options.pypi_target_platforms = target.platforms;
     options.pypi_target_python = target.python_version;
@@ -2793,12 +2823,12 @@ fn run_npm_install_compat(
             )?;
         }
         if lock_only {
-            let reports = lock_project(&options)?;
+            let reports = lock_npm_project_including_omitted(&options)?;
             print_link_reports(&reports);
             print_lock_only_report(project_dir);
             sync_npm_package_lock(project_dir)?;
         } else {
-            let install = install_project(&options)?;
+            let install = install_npm_project_with_complete_lock(&options)?;
             print_install_report(&install);
             sync_npm_package_lock(project_dir)?;
         }
@@ -2825,10 +2855,11 @@ fn run_npm_install_compat(
             project_dir,
             &archive_references,
         )?);
+        let graph_options = npm_lock_options_including_omitted(&options);
         let mut all_reports = Vec::new();
         let mut root_dependencies = Vec::new();
         for spec in &specs {
-            let reports = add_package_graph(spec, &options)?;
+            let reports = add_package_graph(spec, &graph_options)?;
             if let Some(root) = reports.first() {
                 root_dependencies.push(npm_package_json_requirement_for_link_root(
                     spec,
@@ -2854,9 +2885,13 @@ fn run_npm_install_compat(
             return Ok(ExitCode::SUCCESS);
         }
         let install = if options.npm_local_paths.is_empty() {
-            install_locked_packages(project_dir)?
+            if save {
+                install_locked_project(&options)?
+            } else {
+                install_locked_packages(project_dir)?
+            }
         } else {
-            install_project(&options)?
+            install_npm_project_with_complete_lock(&options)?
         };
         println!();
         print_install_report(&install);
@@ -3020,13 +3055,13 @@ fn run_npm_install_workspace_compat(
 
     if specs.is_empty() && archive_references.is_empty() && local_paths.is_empty() {
         let install = if lock_only {
-            let reports = lock_project(&options)?;
+            let reports = lock_npm_project_including_omitted(&options)?;
             print_link_reports(&reports);
             print_lock_only_report(project_dir);
             sync_npm_package_lock(project_dir)?;
             return Ok(ExitCode::SUCCESS);
         } else {
-            install_project(&options)?
+            install_npm_project_with_complete_lock(&options)?
         };
         print_install_report(&install);
         sync_npm_package_lock(project_dir)?;
@@ -3043,11 +3078,12 @@ fn run_npm_install_workspace_compat(
         project_dir,
         &archive_references,
     )?);
+    let graph_options = npm_lock_options_including_omitted(&options);
 
     let mut all_reports = Vec::new();
     let mut root_dependencies = Vec::new();
     for spec in &specs {
-        let reports = add_package_graph(spec, &options)?;
+        let reports = add_package_graph(spec, &graph_options)?;
         if let Some(root) = reports.first() {
             root_dependencies.push(npm_package_json_requirement_for_link_root(
                 spec,
@@ -3082,7 +3118,7 @@ fn run_npm_install_workspace_compat(
         return Ok(ExitCode::SUCCESS);
     }
 
-    let install = install_project(&options)?;
+    let install = install_npm_project_with_complete_lock(&options)?;
     println!();
     print_install_report(&install);
     sync_npm_package_lock(project_dir)?;
@@ -3426,7 +3462,7 @@ fn run_npm_ci_compat(
     apply_dependency_omit_flags(&mut options, omit_dev, omit_optional, omit_peer);
     let install = match npm_ci_lock_source(project_dir)? {
         NpmCiLockSource::OmcLock => install_locked_project(&options)?,
-        NpmCiLockSource::ProjectLock => install_project(&options)?,
+        NpmCiLockSource::ProjectLock => install_npm_project_with_complete_lock(&options)?,
     };
     print_install_report(&install);
     Ok(ExitCode::SUCCESS)
@@ -12192,13 +12228,15 @@ fn sync_npm_package_lock(project_dir: &Path) -> Result<(), OmcRegistryError> {
 fn npm_package_lock_json(package: &serde_json::Value, lock: &OmcLock) -> serde_json::Value {
     let mut packages = serde_json::Map::new();
     packages.insert(String::new(), npm_package_lock_root_entry(package));
+    let package_kinds = npm_package_lock_dependency_kinds(package);
 
-    for package in lock.packages.iter().filter(|package| {
+    for locked in lock.packages.iter().filter(|package| {
         package.ecosystem == Ecosystem::Npm && package.verdict == Verdict::Accepted
     }) {
+        let kinds = package_kinds.get(&locked.name).copied().unwrap_or_default();
         packages.insert(
-            npm_package_lock_path(&package.name),
-            npm_package_lock_package_entry(package),
+            npm_package_lock_path(&locked.name),
+            npm_package_lock_package_entry(locked, kinds),
         );
     }
 
@@ -12222,6 +12260,58 @@ fn npm_package_lock_json(package: &serde_json::Value, lock: &OmcLock) -> serde_j
     root.insert("requires".to_owned(), serde_json::Value::Bool(true));
     root.insert("packages".to_owned(), serde_json::Value::Object(packages));
     serde_json::Value::Object(root)
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct NpmPackageLockKinds {
+    dev: bool,
+    optional: bool,
+    peer: bool,
+}
+
+fn npm_package_lock_dependency_kinds(
+    package: &serde_json::Value,
+) -> BTreeMap<String, NpmPackageLockKinds> {
+    let mut kinds = BTreeMap::new();
+    mark_npm_package_lock_dependency_kind(
+        package,
+        "devDependencies",
+        |kind| {
+            kind.dev = true;
+        },
+        &mut kinds,
+    );
+    mark_npm_package_lock_dependency_kind(
+        package,
+        "optionalDependencies",
+        |kind| {
+            kind.optional = true;
+        },
+        &mut kinds,
+    );
+    mark_npm_package_lock_dependency_kind(
+        package,
+        "peerDependencies",
+        |kind| {
+            kind.peer = true;
+        },
+        &mut kinds,
+    );
+    kinds
+}
+
+fn mark_npm_package_lock_dependency_kind(
+    package: &serde_json::Value,
+    field: &str,
+    mark: impl Fn(&mut NpmPackageLockKinds),
+    kinds: &mut BTreeMap<String, NpmPackageLockKinds>,
+) {
+    let Some(dependencies) = package.get(field).and_then(serde_json::Value::as_object) else {
+        return;
+    };
+    for name in dependencies.keys() {
+        mark(kinds.entry(name.clone()).or_default());
+    }
 }
 
 fn npm_package_lock_root_entry(package: &serde_json::Value) -> serde_json::Value {
@@ -12257,12 +12347,24 @@ fn npm_package_lock_root_entry(package: &serde_json::Value) -> serde_json::Value
     serde_json::Value::Object(root)
 }
 
-fn npm_package_lock_package_entry(package: &LockedPackage) -> serde_json::Value {
+fn npm_package_lock_package_entry(
+    package: &LockedPackage,
+    kinds: NpmPackageLockKinds,
+) -> serde_json::Value {
     let mut entry = serde_json::Map::new();
     entry.insert(
         "version".to_owned(),
         serde_json::Value::String(package.version.clone()),
     );
+    if kinds.dev {
+        entry.insert("dev".to_owned(), serde_json::Value::Bool(true));
+    }
+    if kinds.optional {
+        entry.insert("optional".to_owned(), serde_json::Value::Bool(true));
+    }
+    if kinds.peer {
+        entry.insert("peer".to_owned(), serde_json::Value::Bool(true));
+    }
     if !package.source_url.is_empty() {
         entry.insert(
             "resolved".to_owned(),
@@ -28063,6 +28165,113 @@ mod tests {
             vendor.file_name().and_then(|name| name.to_str()),
             Some("vendor")
         );
+    }
+
+    fn write_npm_fixture_tarball(project: &Path, name: &str, version: &str) -> PathBuf {
+        let source = project.join(format!("source-{name}"));
+        fs::create_dir_all(&source).unwrap();
+        fs::write(
+            source.join("package.json"),
+            format!(r#"{{"name":"{name}","version":"{version}"}}"#),
+        )
+        .unwrap();
+        fs::write(
+            source.join("index.js"),
+            format!("module.exports = '{name}';\n"),
+        )
+        .unwrap();
+        let tarball = project.join(format!("{name}-{version}.tgz"));
+        let files = collect_npm_pack_files(&source).unwrap();
+        write_npm_pack_tarball(&tarball, &files).unwrap();
+        tarball
+    }
+
+    #[test]
+    fn npm_install_omit_preserves_omitted_packages_in_locks() {
+        let project = test_dir("npm-install-omit-preserves-locks");
+        write_npm_fixture_tarball(&project, "prod-pkg", "1.0.0");
+        write_npm_fixture_tarball(&project, "dev-pkg", "2.0.0");
+        write_npm_fixture_tarball(&project, "optional-pkg", "3.0.0");
+        write_npm_fixture_tarball(&project, "peer-pkg", "4.0.0");
+        fs::write(
+            project.join("package.json"),
+            r#"{
+                "name": "root",
+                "version": "1.0.0",
+                "dependencies": { "prod-pkg": "file:prod-pkg-1.0.0.tgz" },
+                "devDependencies": { "dev-pkg": "file:dev-pkg-2.0.0.tgz" },
+                "optionalDependencies": { "optional-pkg": "file:optional-pkg-3.0.0.tgz" },
+                "peerDependencies": { "peer-pkg": "file:peer-pkg-4.0.0.tgz" }
+            }"#,
+        )
+        .unwrap();
+
+        let status = run_npm_compat(
+            &project,
+            &args(&["install", "--omit=dev", "--omit=optional", "--omit=peer"]),
+        )
+        .unwrap();
+
+        assert_eq!(status, ExitCode::SUCCESS);
+        assert!(project.join("node_modules/prod-pkg/index.js").exists());
+        assert!(!project.join("node_modules/dev-pkg/index.js").exists());
+        assert!(!project.join("node_modules/optional-pkg/index.js").exists());
+        assert!(!project.join("node_modules/peer-pkg/index.js").exists());
+
+        let package_lock = read_npm_pkg_json(&project.join("package-lock.json")).unwrap();
+        let packages = package_lock
+            .get("packages")
+            .and_then(serde_json::Value::as_object)
+            .unwrap();
+        for name in ["prod-pkg", "dev-pkg", "optional-pkg", "peer-pkg"] {
+            assert!(packages.contains_key(&format!("node_modules/{name}")));
+        }
+        assert_eq!(packages["node_modules/dev-pkg"]["dev"], true);
+        assert_eq!(packages["node_modules/optional-pkg"]["optional"], true);
+        assert_eq!(packages["node_modules/peer-pkg"]["peer"], true);
+
+        let lock = read_lockfile(project.join("omc.lock")).unwrap();
+        for name in ["prod-pkg", "dev-pkg", "optional-pkg", "peer-pkg"] {
+            assert!(lock.packages.iter().any(|package| package.name == name));
+        }
+
+        let _ = fs::remove_dir_all(project);
+    }
+
+    #[test]
+    fn npm_package_lock_only_omit_keeps_omitted_packages_in_lock() {
+        let project = test_dir("npm-lock-only-omit-preserves-lock");
+        write_npm_fixture_tarball(&project, "prod-pkg", "1.0.0");
+        write_npm_fixture_tarball(&project, "dev-pkg", "2.0.0");
+        fs::write(
+            project.join("package.json"),
+            r#"{
+                "name": "root",
+                "version": "1.0.0",
+                "dependencies": { "prod-pkg": "file:prod-pkg-1.0.0.tgz" },
+                "devDependencies": { "dev-pkg": "file:dev-pkg-2.0.0.tgz" }
+            }"#,
+        )
+        .unwrap();
+
+        let status = run_npm_compat(
+            &project,
+            &args(&["install", "--package-lock-only", "--omit=dev"]),
+        )
+        .unwrap();
+
+        assert_eq!(status, ExitCode::SUCCESS);
+        assert!(!project.join("node_modules").exists());
+        let package_lock = read_npm_pkg_json(&project.join("package-lock.json")).unwrap();
+        let packages = package_lock
+            .get("packages")
+            .and_then(serde_json::Value::as_object)
+            .unwrap();
+        assert!(packages.contains_key("node_modules/prod-pkg"));
+        assert!(packages.contains_key("node_modules/dev-pkg"));
+        assert_eq!(packages["node_modules/dev-pkg"]["dev"], true);
+
+        let _ = fs::remove_dir_all(project);
     }
 
     #[test]
