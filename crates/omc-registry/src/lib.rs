@@ -6945,18 +6945,23 @@ fn install_pypi_sdist_package(
     } else {
         source_dir.clone()
     };
-    copy_python_sdist_import_tree(&import_root, site_packages)?;
-    write_python_sdist_dist_info(site_packages, package)?;
+    let installed_files = copy_python_sdist_import_tree(&import_root, site_packages)?;
+    write_python_sdist_dist_info(site_packages, package, installed_files)?;
     let entry_points = read_python_local_entry_points(&source_dir)?;
     install_python_entry_point_scripts(&entry_points, bin_dir)
 }
 
-fn write_python_sdist_dist_info(site_packages: &Path, package: &LockedPackage) -> Result<()> {
-    let dist_info = site_packages.join(format!(
+fn write_python_sdist_dist_info(
+    site_packages: &Path,
+    package: &LockedPackage,
+    mut installed_files: Vec<String>,
+) -> Result<()> {
+    let dist_info_name = format!(
         "{}-{}.dist-info",
         python_dist_info_component(&package.name),
         package.version
-    ));
+    );
+    let dist_info = site_packages.join(&dist_info_name);
     fs::create_dir_all(&dist_info)?;
     let mut metadata = format!(
         "Metadata-Version: 2.1\nName: {}\nVersion: {}\n",
@@ -6971,6 +6976,15 @@ fn write_python_sdist_dist_info(site_packages: &Path, package: &LockedPackage) -
     }
     fs::write(dist_info.join("METADATA"), metadata)?;
     fs::write(dist_info.join("INSTALLER"), "omc\n")?;
+    installed_files.push(format!("{dist_info_name}/METADATA"));
+    installed_files.push(format!("{dist_info_name}/INSTALLER"));
+    installed_files.push(format!("{dist_info_name}/RECORD"));
+    installed_files.sort();
+    let record = installed_files
+        .into_iter()
+        .map(|file| format!("{file},,\n"))
+        .collect::<String>();
+    fs::write(dist_info.join("RECORD"), record)?;
     Ok(())
 }
 
@@ -7067,7 +7081,8 @@ fn unpack_python_zip_sdist(bytes: &[u8], target: &Path) -> Result<()> {
     Ok(())
 }
 
-fn copy_python_sdist_import_tree(source: &Path, site_packages: &Path) -> Result<()> {
+fn copy_python_sdist_import_tree(source: &Path, site_packages: &Path) -> Result<Vec<String>> {
+    let mut installed_files = Vec::new();
     for entry in WalkDir::new(source)
         .into_iter()
         .filter_map(|entry| entry.ok())
@@ -7084,8 +7099,10 @@ fn copy_python_sdist_import_tree(source: &Path, site_packages: &Path) -> Result<
             fs::create_dir_all(parent)?;
         }
         fs::copy(entry.path(), output)?;
+        installed_files.push(relative.to_string_lossy().replace('\\', "/"));
     }
-    Ok(())
+    installed_files.sort();
+    Ok(installed_files)
 }
 
 fn should_copy_python_sdist_path(path: &Path) -> bool {

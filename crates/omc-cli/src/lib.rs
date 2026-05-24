@@ -25654,6 +25654,14 @@ version = "0.1.0"
             .join("demo_pkg-1.0.0.dist-info")
             .join("METADATA")
             .exists());
+        let installed_files = pip_installed_files(
+            &project.join("vendor"),
+            &locked_pypi_package("demo-pkg", "1.0.0", Vec::new()),
+        )
+        .unwrap();
+        assert!(installed_files.contains(&"demo_pkg/__init__.py".to_owned()));
+        assert!(installed_files.contains(&"demo_pkg-1.0.0.dist-info/METADATA".to_owned()));
+        assert!(installed_files.contains(&"demo_pkg-1.0.0.dist-info/RECORD".to_owned()));
         assert_eq!(
             read_pip_path_packages(&project, &[PathBuf::from("vendor")], &[]).unwrap(),
             vec![InstalledPythonPackage {
