@@ -30208,6 +30208,8 @@ fn parse_pip_install_args(args: &[String]) -> Result<PipCompatAction, OmcRegistr
             archive_references.push(arg.clone());
         } else if let Some(requirement) = parse_pypi_vcs_requirement(arg)? {
             vcs_requirements.push(requirement);
+        } else if is_pip_pylock_requirements_arg(arg) {
+            requirements.push(PathBuf::from(arg));
         } else if is_pip_local_directory_arg(arg) {
             local_paths.push(pip_local_path_arg(arg)?);
         } else {
@@ -30542,6 +30544,8 @@ fn parse_pip_artifact_args(
         } else if pip_ignored_download_equals_flag(arg) {
         } else if is_pip_archive_arg(arg) {
             archive_references.push(arg.clone());
+        } else if is_pip_pylock_requirements_arg(arg) {
+            requirements.push(PathBuf::from(arg));
         } else if is_pip_local_directory_arg(arg) {
             local_paths.push(pip_local_path_arg(arg)?);
         } else {
@@ -30848,6 +30852,20 @@ fn is_pip_local_directory_arg(value: &str) -> bool {
         || path.starts_with("~/")
         || path.contains('/')
         || path.contains('\\')
+}
+
+fn is_pip_pylock_requirements_arg(value: &str) -> bool {
+    if value.contains("://") || value.starts_with("git+") {
+        return false;
+    }
+    let path = Path::new(value);
+    if !path.is_file() {
+        return false;
+    }
+    let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+    name == "pylock.toml" || (name.starts_with("pylock.") && name.ends_with(".toml"))
 }
 
 fn pip_local_path_and_extras(value: &str) -> (&str, BTreeSet<String>) {
@@ -41265,6 +41283,37 @@ verdict = "accepted"
             }))
         );
         assert!(parse_pip_compat_action(&args(&["download", "-e", "./local_pkg"])).is_err());
+    }
+
+    #[test]
+    fn parses_direct_pylock_files_as_requirements() {
+        let project = test_dir("pip-direct-pylock");
+        let pylock = project.join("pylock.toml");
+        let named_pylock = project.join("pylock.prod.toml");
+        fs::write(&pylock, "lock-version = \"1.0\"\n").unwrap();
+        fs::write(&named_pylock, "lock-version = \"1.0\"\n").unwrap();
+
+        match parse_pip_compat_action(&args(&["install", pylock.to_str().unwrap(), "--dry-run"]))
+            .unwrap()
+        {
+            PipCompatAction::Install(action) => {
+                assert_eq!(action.specs, Vec::<String>::new());
+                assert_eq!(action.requirements, vec![pylock.clone()]);
+                assert!(action.local_paths.is_empty());
+                assert!(action.dry_run);
+            }
+            other => panic!("expected pip install action, got {other:?}"),
+        }
+
+        match parse_pip_compat_action(&args(&["download", named_pylock.to_str().unwrap()])).unwrap()
+        {
+            PipCompatAction::Download(action) => {
+                assert_eq!(action.specs, Vec::<String>::new());
+                assert_eq!(action.requirements, vec![named_pylock]);
+                assert!(action.local_paths.is_empty());
+            }
+            other => panic!("expected pip download action, got {other:?}"),
+        }
     }
 
     #[test]
