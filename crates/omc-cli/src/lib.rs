@@ -1070,6 +1070,7 @@ enum PipCompatAction {
         paths: Vec<PathBuf>,
         exclude: Vec<String>,
         exclude_editable: bool,
+        not_required: bool,
         index_url: Option<String>,
         extra_index_urls: Vec<String>,
         find_links: Vec<String>,
@@ -3405,6 +3406,7 @@ fn run_pip_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
             paths,
             exclude,
             exclude_editable,
+            not_required,
             index_url,
             extra_index_urls,
             find_links,
@@ -3418,6 +3420,7 @@ fn run_pip_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
                         format,
                         paths: &paths,
                         exclude: &exclude,
+                        not_required,
                         index_url,
                         extra_index_urls,
                         find_links,
@@ -3426,14 +3429,33 @@ fn run_pip_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
                     },
                 )?;
             } else if !paths.is_empty() {
-                print_pip_path_list(project_dir, format, &paths, &exclude)?;
+                print_pip_path_list(project_dir, format, &paths, &exclude, not_required)?;
             } else {
                 match format {
-                    PipListFormat::Columns => print_locked_pip_list_columns(project_dir, &exclude)?,
+                    PipListFormat::Columns => print_locked_pip_list(
+                        project_dir,
+                        PipListFormat::Columns,
+                        &exclude,
+                        not_required,
+                    )?,
                     PipListFormat::Freeze => {
-                        print_locked_freeze(project_dir, &exclude, exclude_editable, &[])?
+                        if not_required {
+                            print_locked_pip_list(
+                                project_dir,
+                                PipListFormat::Freeze,
+                                &exclude,
+                                true,
+                            )?
+                        } else {
+                            print_locked_freeze(project_dir, &exclude, exclude_editable, &[])?
+                        }
                     }
-                    PipListFormat::Json => print_locked_pip_json(project_dir, &exclude)?,
+                    PipListFormat::Json => print_locked_pip_list(
+                        project_dir,
+                        PipListFormat::Json,
+                        &exclude,
+                        not_required,
+                    )?,
                 }
             }
         }
@@ -12687,31 +12709,17 @@ fn pip_freeze_vcs_requirement(dependency: &LockedPythonVcsDependency) -> String 
     format!("{name} @ {url}")
 }
 
-fn print_locked_pip_json(project_dir: &Path, exclude: &[String]) -> Result<(), OmcRegistryError> {
-    let excluded = pip_excluded_names(exclude);
-    let lock = read_lockfile(project_dir.join("omc.lock"))?;
-    let packages = lock
-        .packages
-        .into_iter()
-        .filter(|package| package.ecosystem == Ecosystem::Pypi)
-        .filter(|package| !pip_name_excluded(&package.name, &excluded))
-        .map(|package| {
-            serde_json::json!({
-                "name": package.name,
-                "version": package.version,
-            })
-        })
-        .collect::<Vec<_>>();
-    println!("{}", serde_json::to_string_pretty(&packages)?);
-    Ok(())
-}
-
-fn print_locked_pip_list_columns(
+fn print_locked_pip_list(
     project_dir: &Path,
+    format: PipListFormat,
     exclude: &[String],
+    not_required: bool,
 ) -> Result<(), OmcRegistryError> {
-    let packages = locked_pip_installed_packages(project_dir, exclude)?;
-    print_pip_installed_list(PipListFormat::Columns, &packages)
+    let mut packages = locked_pip_installed_packages(project_dir, exclude)?;
+    if not_required {
+        packages = pip_not_required_packages(packages);
+    }
+    print_pip_installed_list(format, &packages)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -12727,8 +12735,12 @@ fn print_pip_path_list(
     format: PipListFormat,
     paths: &[PathBuf],
     exclude: &[String],
+    not_required: bool,
 ) -> Result<(), OmcRegistryError> {
-    let packages = read_pip_path_packages(project_dir, paths, exclude)?;
+    let mut packages = read_pip_path_packages(project_dir, paths, exclude)?;
+    if not_required {
+        packages = pip_not_required_packages(packages);
+    }
     print_pip_installed_list(format, &packages)
 }
 
@@ -12782,6 +12794,22 @@ fn read_pip_path_packages(
         }
     }
     Ok(packages.into_values().collect())
+}
+
+fn pip_not_required_packages(packages: Vec<InstalledPythonPackage>) -> Vec<InstalledPythonPackage> {
+    let required = packages
+        .iter()
+        .flat_map(|package| package.dependencies.iter())
+        .filter_map(|dependency| pip_installed_dependency_name(dependency))
+        .collect::<BTreeSet<_>>();
+    packages
+        .into_iter()
+        .filter(|package| !required.contains(&normalize_pip_show_name(&package.name)))
+        .collect()
+}
+
+fn pip_installed_dependency_name(dependency: &str) -> Option<String> {
+    pip_dependency_name(dependency).or_else(|| pip_requires_dist_name(dependency))
 }
 
 fn read_site_packages_metadata(
@@ -12987,6 +13015,7 @@ struct PipOutdatedOptions<'a> {
     format: PipListFormat,
     paths: &'a [PathBuf],
     exclude: &'a [String],
+    not_required: bool,
     index_url: Option<String>,
     extra_index_urls: Vec<String>,
     find_links: Vec<String>,
@@ -13002,7 +13031,10 @@ fn print_pip_outdated(
         return print_locked_pip_outdated(project_dir, options);
     }
 
-    let packages = read_pip_path_packages(project_dir, options.paths, options.exclude)?;
+    let mut packages = read_pip_path_packages(project_dir, options.paths, options.exclude)?;
+    if options.not_required {
+        packages = pip_not_required_packages(packages);
+    }
     let mut rows = Vec::new();
     for package in packages {
         let listing = match read_pypi_available_versions(
@@ -13039,12 +13071,25 @@ fn print_locked_pip_outdated(
 ) -> Result<(), OmcRegistryError> {
     let excluded = pip_excluded_names(options.exclude);
     let lock = read_lockfile(project_dir.join("omc.lock"))?;
+    let required = if options.not_required {
+        lock.packages
+            .iter()
+            .filter(|package| package.ecosystem == Ecosystem::Pypi)
+            .flat_map(|package| package.dependencies.iter())
+            .filter_map(|dependency| pip_installed_dependency_name(dependency))
+            .collect::<BTreeSet<_>>()
+    } else {
+        BTreeSet::new()
+    };
     let mut rows = Vec::new();
     for package in lock
         .packages
         .into_iter()
         .filter(|package| package.ecosystem == Ecosystem::Pypi)
         .filter(|package| !pip_name_excluded(&package.name, &excluded))
+        .filter(|package| {
+            !options.not_required || !required.contains(&normalize_pip_show_name(&package.name))
+        })
     {
         let listing = match read_pypi_available_versions(
             project_dir,
@@ -13129,7 +13174,7 @@ fn locked_pip_installed_packages(
         .map(|package| InstalledPythonPackage {
             name: package.name,
             version: package.version,
-            dependencies: Vec::new(),
+            dependencies: package.dependencies,
             metadata_location: None,
         })
         .collect::<Vec<_>>();
@@ -21381,6 +21426,7 @@ fn parse_pip_list_args(args: &[String]) -> Result<PipCompatAction, OmcRegistryEr
     let mut paths = Vec::new();
     let mut exclude = Vec::new();
     let mut exclude_editable = false;
+    let mut not_required = false;
     let mut index = 0;
     while index < args.len() {
         let arg = &args[index];
@@ -21436,18 +21482,17 @@ fn parse_pip_list_args(args: &[String]) -> Result<PipCompatAction, OmcRegistryEr
                 | "--user"
                 | "--editable"
                 | "--include-editable"
-                | "--exclude-editable"
                 | "--disable-pip-version-check"
-                | "--not-required"
                 | "--ignore-requires-python"
                 | "-v"
                 | "--verbose"
                 | "-q"
                 | "--quiet"
         ) {
-            if arg == "--exclude-editable" {
-                exclude_editable = true;
-            }
+        } else if arg == "--exclude-editable" {
+            exclude_editable = true;
+        } else if arg == "--not-required" {
+            not_required = true;
         } else if matches!(arg.as_str(), "--path" | "--exclude") {
             index += 1;
             let Some(value) = args.get(index) else {
@@ -21483,6 +21528,7 @@ fn parse_pip_list_args(args: &[String]) -> Result<PipCompatAction, OmcRegistryEr
         paths,
         exclude,
         exclude_editable,
+        not_required,
         index_url,
         extra_index_urls,
         find_links,
@@ -26548,6 +26594,47 @@ version = "0.1.0"
     }
 
     #[test]
+    fn filters_pip_list_not_required_packages() {
+        let packages = vec![
+            InstalledPythonPackage {
+                name: "requests".to_owned(),
+                version: "2.32.3".to_owned(),
+                dependencies: vec![
+                    "pypi:idna>=3".to_owned(),
+                    "charset-normalizer>=2".to_owned(),
+                ],
+                metadata_location: None,
+            },
+            InstalledPythonPackage {
+                name: "idna".to_owned(),
+                version: "3.7".to_owned(),
+                dependencies: Vec::new(),
+                metadata_location: None,
+            },
+            InstalledPythonPackage {
+                name: "charset-normalizer".to_owned(),
+                version: "3.3.2".to_owned(),
+                dependencies: Vec::new(),
+                metadata_location: None,
+            },
+            InstalledPythonPackage {
+                name: "pytest".to_owned(),
+                version: "8.0.0".to_owned(),
+                dependencies: Vec::new(),
+                metadata_location: None,
+            },
+        ];
+
+        assert_eq!(
+            pip_not_required_packages(packages)
+                .into_iter()
+                .map(|package| package.name)
+                .collect::<Vec<_>>(),
+            vec!["requests", "pytest"]
+        );
+    }
+
+    #[test]
     fn parses_pip_uninstall_and_freeze() {
         assert_eq!(
             parse_pip_compat_action(&args(&["--version"])).unwrap(),
@@ -26870,6 +26957,7 @@ resolved_commit = "0123456789abcdef0123456789abcdef01234567"
                 paths: Vec::new(),
                 exclude: Vec::new(),
                 exclude_editable: false,
+                not_required: false,
                 index_url: None,
                 extra_index_urls: Vec::new(),
                 find_links: Vec::new(),
@@ -26878,13 +26966,15 @@ resolved_commit = "0123456789abcdef0123456789abcdef01234567"
             }
         );
         assert_eq!(
-            parse_pip_compat_action(&args(&["list", "--format", "json"])).unwrap(),
+            parse_pip_compat_action(&args(&["list", "--format", "json", "--not-required"]))
+                .unwrap(),
             PipCompatAction::List {
                 format: PipListFormat::Json,
                 outdated: false,
                 paths: Vec::new(),
                 exclude: Vec::new(),
                 exclude_editable: false,
+                not_required: true,
                 index_url: None,
                 extra_index_urls: Vec::new(),
                 find_links: Vec::new(),
@@ -26909,6 +26999,7 @@ resolved_commit = "0123456789abcdef0123456789abcdef01234567"
                 paths: vec![PathBuf::from("vendor")],
                 exclude: vec!["requests".to_owned()],
                 exclude_editable: true,
+                not_required: false,
                 index_url: None,
                 extra_index_urls: Vec::new(),
                 find_links: Vec::new(),
@@ -26933,6 +27024,7 @@ resolved_commit = "0123456789abcdef0123456789abcdef01234567"
                 paths: Vec::new(),
                 exclude: Vec::new(),
                 exclude_editable: false,
+                not_required: false,
                 index_url: None,
                 extra_index_urls: Vec::new(),
                 find_links: vec!["wheelhouse".to_owned()],
@@ -26949,6 +27041,7 @@ resolved_commit = "0123456789abcdef0123456789abcdef01234567"
                 paths: Vec::new(),
                 exclude: Vec::new(),
                 exclude_editable: false,
+                not_required: false,
                 index_url: None,
                 extra_index_urls: Vec::new(),
                 find_links: Vec::new(),
