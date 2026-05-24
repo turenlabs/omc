@@ -6413,6 +6413,34 @@ pub fn install_locked_packages(project_dir: impl AsRef<Path>) -> Result<InstallR
     Ok(report)
 }
 
+pub fn install_locked_packages_with_python_target(
+    project_dir: impl AsRef<Path>,
+    python_target_dir: impl AsRef<Path>,
+) -> Result<InstallReport> {
+    let project_dir = project_dir.as_ref();
+    let lock = read_lockfile(project_dir.join(LOCKFILE))?;
+    let mut project =
+        discover_project_requirements_with_options(project_dir, &BTreeSet::new(), true)?;
+    if !project.python_vcs_requirements.is_empty() {
+        let vcs_requirements = resolve_python_vcs_requirements(
+            project_dir,
+            &project.python_vcs_requirements,
+            Some(&lock.python_vcs),
+        )?;
+        extend_project_requirements(&mut project, vcs_requirements.requirements);
+    }
+    let mut report =
+        install_lock_with_python_target(project_dir, &lock, Some(python_target_dir.as_ref()))?;
+    report.npm_bins +=
+        install_npm_project_links(project_dir, &report.node_modules, &report.npm_bin_dir, true)?;
+    report.python_scripts += install_python_local_paths(
+        &project.python_local_paths,
+        &report.python_site_packages,
+        &report.python_bin_dir,
+    )?;
+    Ok(report)
+}
+
 fn install_lock(project_dir: &Path, lock: &OmcLock) -> Result<InstallReport> {
     install_lock_with_python_target(project_dir, lock, None)
 }

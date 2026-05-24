@@ -16,15 +16,16 @@ use omc_registry::{
     add_package_graph, apply_pypi_binary_option, check_pypi_distribution, compare_npm_versions,
     compare_pypi_versions, create_npm_team, create_npm_token, deprecate_npm_package,
     destroy_npm_team, download_npm_package_tarball, grant_npm_access, init_project,
-    install_locked_packages, install_locked_project, install_project,
-    install_python_project_local_import_paths, lock_project, mutate_npm_package_owner,
-    mutate_npm_package_star, parse_capability_grant, parse_npm_direct_archive_reference,
-    parse_pypi_direct_archive_reference, parse_pypi_vcs_requirement, publish_npm_package,
-    read_constraint_files, read_lockfile, read_manifest, read_npm_access_collaborators,
-    read_npm_access_packages, read_npm_access_status, read_npm_config_snapshot_with_globalconfig,
-    read_npm_org_users, read_npm_package_metadata, read_npm_package_metadata_with_userconfig,
-    read_npm_package_owners, read_npm_ping_with_userconfig, read_npm_profile, read_npm_search,
-    read_npm_stars, read_npm_team_users, read_npm_teams, read_npm_token_list, read_npm_whoami,
+    install_locked_packages, install_locked_packages_with_python_target, install_locked_project,
+    install_project, install_python_project_local_import_paths, lock_project,
+    mutate_npm_package_owner, mutate_npm_package_star, parse_capability_grant,
+    parse_npm_direct_archive_reference, parse_pypi_direct_archive_reference,
+    parse_pypi_vcs_requirement, publish_npm_package, read_constraint_files, read_lockfile,
+    read_manifest, read_npm_access_collaborators, read_npm_access_packages, read_npm_access_status,
+    read_npm_config_snapshot_with_globalconfig, read_npm_org_users, read_npm_package_metadata,
+    read_npm_package_metadata_with_userconfig, read_npm_package_owners,
+    read_npm_ping_with_userconfig, read_npm_profile, read_npm_search, read_npm_stars,
+    read_npm_team_users, read_npm_teams, read_npm_token_list, read_npm_whoami,
     read_npm_workspace_packages, read_package_scripts, read_pip_config_snapshot,
     read_pypi_available_versions, read_requirements_files, read_script_requirement_files,
     remove_locked_packages, remove_manifest_dependency, remove_npm_dist_tag, remove_npm_org_user,
@@ -1046,6 +1047,7 @@ enum PipCompatAction {
     Uninstall {
         specs: Vec<String>,
         requirements: Vec<PathBuf>,
+        user: bool,
         allow: Vec<String>,
         allow_all_host: bool,
     },
@@ -3533,6 +3535,7 @@ fn run_pip_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
         PipCompatAction::Uninstall {
             mut specs,
             requirements,
+            user,
             allow,
             allow_all_host,
         } => {
@@ -3540,6 +3543,9 @@ fn run_pip_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
                 project_dir,
                 requirements,
             )?);
+            if user {
+                return run_pip_uninstall_user(&specs, &allow, allow_all_host);
+            }
             remove_specs(
                 project_dir,
                 &specs,
@@ -4548,6 +4554,126 @@ fn run_pip_install_user(
     Ok(ExitCode::SUCCESS)
 }
 
+fn run_pip_uninstall_user(
+    specs: &[String],
+    allow: &[String],
+    allow_all_host: bool,
+) -> Result<ExitCode, OmcRegistryError> {
+    if specs.is_empty() {
+        return Err(OmcRegistryError::UnsupportedSpec(
+            "pip uninstall --user needs at least one package".to_owned(),
+        ));
+    }
+
+    let user_paths = pip_user_paths()?;
+    fs::create_dir_all(&user_paths.state_project)?;
+    let specs = parse_package_specs(specs, Some(Ecosystem::Pypi))?;
+    let previous_lock = read_lockfile(user_paths.state_project.join("omc.lock")).ok();
+    let local_paths_file = pip_user_install_local_paths_file(&user_paths)?;
+    let editable_removal = remove_pip_editable_local_paths_from_file(&local_paths_file, &specs)?;
+    sync_pip_user_script_local_paths(&user_paths)?;
+
+    let mut removed = Vec::new();
+    let mut removed_manifest = false;
+    let mut removed_locked = false;
+    for spec in &specs {
+        let removed_from_manifest = remove_manifest_dependency(&user_paths.state_project, spec)?;
+        removed_manifest |= removed_from_manifest;
+        let locked_removals = if user_paths.state_project.join("omc.lock").exists() {
+            remove_locked_packages(&user_paths.state_project, std::slice::from_ref(spec))?
+        } else {
+            Vec::new()
+        };
+        removed_locked |= !locked_removals.is_empty();
+        let removed_from_editable =
+            editable_removal.removed(&spec.name) && spec.ecosystem == Ecosystem::Pypi;
+        if !removed_from_manifest && locked_removals.is_empty() && !removed_from_editable {
+            return Err(OmcRegistryError::UnsupportedSpec(format!(
+                "dependency `{}` is not in OMC pip user state",
+                spec.package_key(),
+            )));
+        }
+        removed.push(spec.package_key());
+    }
+
+    clean_pip_user_site_before_reinstall(&user_paths, previous_lock.as_ref())?;
+    let install = if removed_manifest || !editable_removal.removed_names.is_empty() {
+        let mut options = LinkOptions::new(&user_paths.state_project);
+        options.allowed_capabilities = parse_grants(allow, allow_all_host)?;
+        options.python_target_dir = Some(user_paths.site_packages.clone());
+        install_project(&options)?
+    } else if removed_locked {
+        install_locked_packages_with_python_target(
+            &user_paths.state_project,
+            &user_paths.site_packages,
+        )?
+    } else {
+        InstallReport {
+            npm_packages: 0,
+            pypi_packages: 0,
+            npm_bins: 0,
+            python_scripts: 0,
+            node_modules: user_paths.state_project.join("node_modules"),
+            npm_bin_dir: user_paths.state_project.join("node_modules").join(".bin"),
+            python_site_packages: user_paths.site_packages.clone(),
+            python_bin_dir: user_paths.site_packages.join("bin"),
+        }
+    };
+    sync_pip_user_script_local_paths(&user_paths)?;
+    sync_pip_user_scripts(&user_paths)?;
+    println!("removed {}", removed.join(", "));
+    print_install_report(&install);
+    Ok(ExitCode::SUCCESS)
+}
+
+fn clean_pip_user_site_before_reinstall(
+    paths: &PipUserPaths,
+    previous_lock: Option<&OmcLock>,
+) -> Result<(), OmcRegistryError> {
+    if let Some(lock) = previous_lock {
+        for package in lock
+            .packages
+            .iter()
+            .filter(|package| package.ecosystem == Ecosystem::Pypi)
+        {
+            remove_pip_installed_package_files(&paths.site_packages, package)?;
+        }
+    }
+    remove_cli_path_if_exists(&paths.site_packages.join("bin"))?;
+    Ok(())
+}
+
+fn remove_pip_installed_package_files(
+    site_packages: &Path,
+    package: &LockedPackage,
+) -> Result<(), OmcRegistryError> {
+    for record_path in pip_installed_files(site_packages, package)? {
+        let Some(path) = safe_site_package_record_path(site_packages, &record_path) else {
+            continue;
+        };
+        remove_cli_path_if_exists(&path)?;
+    }
+    if let Some(dist_info) = match_dist_info_dir(site_packages, package)? {
+        remove_cli_path_if_exists(&dist_info)?;
+    }
+    Ok(())
+}
+
+fn safe_site_package_record_path(site_packages: &Path, record_path: &str) -> Option<PathBuf> {
+    let relative = Path::new(record_path);
+    if relative.is_absolute()
+        || relative.components().any(|component| {
+            !matches!(
+                component,
+                std::path::Component::Normal(_) | std::path::Component::CurDir
+            )
+        })
+    {
+        return None;
+    }
+    Some(site_packages.join(relative))
+}
+
 #[derive(Debug, Clone)]
 struct PipUserPaths {
     site_packages: PathBuf,
@@ -4655,19 +4781,7 @@ fn sync_pip_user_scripts(paths: &PipUserPaths) -> Result<(), OmcRegistryError> {
 
 fn sync_pip_user_script_local_paths(paths: &PipUserPaths) -> Result<(), OmcRegistryError> {
     let script_marker = paths.site_packages.join(".omc-local-paths");
-    let install_marker = if paths
-        .site_packages
-        .file_name()
-        .and_then(|name| name.to_str())
-        == Some("site-packages")
-    {
-        let parent = paths.site_packages.parent().ok_or_else(|| {
-            OmcRegistryError::UnsupportedSpec("missing python user site directory".to_owned())
-        })?;
-        parent.join("local-paths")
-    } else {
-        script_marker.clone()
-    };
+    let install_marker = pip_user_install_local_paths_file(paths)?;
     if install_marker == script_marker {
         return Ok(());
     }
@@ -4677,6 +4791,22 @@ fn sync_pip_user_script_local_paths(paths: &PipUserPaths) -> Result<(), OmcRegis
         remove_cli_path_if_exists(&script_marker)?;
     }
     Ok(())
+}
+
+fn pip_user_install_local_paths_file(paths: &PipUserPaths) -> Result<PathBuf, OmcRegistryError> {
+    if paths
+        .site_packages
+        .file_name()
+        .and_then(|name| name.to_str())
+        == Some("site-packages")
+    {
+        let parent = paths.site_packages.parent().ok_or_else(|| {
+            OmcRegistryError::UnsupportedSpec("missing python user site directory".to_owned())
+        })?;
+        Ok(parent.join("local-paths"))
+    } else {
+        Ok(paths.site_packages.join(".omc-local-paths"))
+    }
 }
 
 fn remove_stale_pip_user_scripts(
@@ -5443,7 +5573,7 @@ fn pip_help_text(topic: Option<&str>) -> String {
         ),
         Some("uninstall") => pip_command_help(
             "pip uninstall <package>...",
-            &["Remove OMC-managed PyPI dependencies and reinstall the remaining graph. Supports -r/--requirement."],
+            &["Remove OMC-managed PyPI dependencies and reinstall the remaining graph. Supports -r/--requirement and --user for OMC-managed Python user state."],
         ),
         Some("freeze") => pip_command_help(
             "pip freeze",
@@ -12401,6 +12531,16 @@ fn remove_pip_editable_local_paths(
     project_dir: &Path,
     specs: &[PackageSpec],
 ) -> Result<PipEditableLocalPathRemoval, OmcRegistryError> {
+    remove_pip_editable_local_paths_from_file(
+        &project_dir.join(".omc").join("python").join("local-paths"),
+        specs,
+    )
+}
+
+fn remove_pip_editable_local_paths_from_file(
+    local_paths_file: &Path,
+    specs: &[PackageSpec],
+) -> Result<PipEditableLocalPathRemoval, OmcRegistryError> {
     let requested_names = specs
         .iter()
         .filter(|spec| spec.ecosystem == Ecosystem::Pypi)
@@ -12410,8 +12550,7 @@ fn remove_pip_editable_local_paths(
         return Ok(PipEditableLocalPathRemoval::default());
     }
 
-    let local_paths_file = project_dir.join(".omc").join("python").join("local-paths");
-    let content = match fs::read_to_string(&local_paths_file) {
+    let content = match fs::read_to_string(local_paths_file) {
         Ok(content) => content,
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
             return Ok(PipEditableLocalPathRemoval::default())
@@ -12454,14 +12593,14 @@ fn remove_pip_editable_local_paths(
     }
 
     if remaining_lines.is_empty() {
-        match fs::remove_file(&local_paths_file) {
+        match fs::remove_file(local_paths_file) {
             Ok(()) => {}
             Err(error) if error.kind() == io::ErrorKind::NotFound => {}
             Err(error) => return Err(error.into()),
         }
     } else {
         fs::write(
-            &local_paths_file,
+            local_paths_file,
             format!("{}\n", remaining_lines.join("\n")),
         )?;
     }
@@ -21721,6 +21860,7 @@ fn pip_config_assignment(key: &str, value: &str) -> Result<(String, String), Omc
 
 fn parse_pip_uninstall_args(args: &[String]) -> Result<PipCompatAction, OmcRegistryError> {
     let mut requirements = Vec::new();
+    let mut user = false;
     let mut filtered = Vec::new();
     let mut index = 0;
     while index < args.len() {
@@ -21735,6 +21875,10 @@ fn parse_pip_uninstall_args(args: &[String]) -> Result<PipCompatAction, OmcRegis
             requirements.push(PathBuf::from(path));
         } else if let Some(path) = arg.strip_prefix("--requirement=") {
             requirements.push(PathBuf::from(path));
+        } else if matches!(arg.as_str(), "--user" | "--user=true") {
+            user = true;
+        } else if arg == "--user=false" {
+            user = false;
         } else if matches!(
             arg.as_str(),
             "-y" | "--yes" | "--disable-pip-version-check" | "-v" | "--verbose" | "-q" | "--quiet"
@@ -21759,6 +21903,7 @@ fn parse_pip_uninstall_args(args: &[String]) -> Result<PipCompatAction, OmcRegis
     Ok(PipCompatAction::Uninstall {
         specs: positionals,
         requirements,
+        user,
         allow,
         allow_all_host,
     })
@@ -28480,6 +28625,69 @@ print("ok")
                 assert!(shim.contains("OMC pip user script shim"));
                 assert!(shim.contains(&source_script.display().to_string()));
             }
+
+            let status =
+                run_pip_compat(&project, &args(&["uninstall", "--user", "-y", "demoedit"]))
+                    .unwrap();
+            assert_eq!(status, ExitCode::SUCCESS);
+            assert!(!local_paths_file.exists());
+            assert!(!paths.site_packages.join(".omc-local-paths").exists());
+            assert!(!source_script.exists());
+            assert!(!user_script.exists());
+            assert!(
+                read_pip_path_packages(&project, &scope_paths, &[], PipEditableMode::Include)
+                    .unwrap()
+                    .is_empty()
+            );
+            assert!(!project.join("omc.toml").exists());
+            assert!(!project.join("omc.lock").exists());
+            assert!(!project.join(".omc").exists());
+
+            fs::write(
+                paths.state_project.join("omc.lock"),
+                r#"version = 1
+
+[[packages]]
+ecosystem = "pypi"
+name = "requests"
+version = "2.32.3"
+source_url = ""
+archive = ""
+artifact = ""
+sha256 = ""
+behavior = "pure"
+verdict = "accepted"
+"#,
+            )
+            .unwrap();
+            fs::create_dir_all(paths.site_packages.join("requests")).unwrap();
+            fs::write(
+                paths.site_packages.join("requests").join("__init__.py"),
+                "VALUE = 'stale'\n",
+            )
+            .unwrap();
+            let dist_info = paths.site_packages.join("requests-2.32.3.dist-info");
+            fs::create_dir_all(&dist_info).unwrap();
+            fs::write(
+                dist_info.join("RECORD"),
+                "requests/__init__.py,,\nrequests-2.32.3.dist-info/RECORD,,\n",
+            )
+            .unwrap();
+
+            let status =
+                run_pip_compat(&project, &args(&["uninstall", "--user", "-y", "requests"]))
+                    .unwrap();
+            assert_eq!(status, ExitCode::SUCCESS);
+            assert!(!paths
+                .site_packages
+                .join("requests")
+                .join("__init__.py")
+                .exists());
+            assert!(!dist_info.exists());
+            assert!(read_lockfile(paths.state_project.join("omc.lock"))
+                .unwrap()
+                .packages
+                .is_empty());
         });
 
         fs::remove_dir_all(project).unwrap();
@@ -29383,6 +29591,7 @@ version = "0.2.0"
             PipCompatAction::Uninstall {
                 specs: vec!["requests".to_owned()],
                 requirements: Vec::new(),
+                user: false,
                 allow: Vec::new(),
                 allow_all_host: false,
             }
@@ -29404,6 +29613,17 @@ version = "0.2.0"
                     PathBuf::from("requirements.txt"),
                     PathBuf::from("dev-requirements.txt"),
                 ],
+                user: false,
+                allow: Vec::new(),
+                allow_all_host: false,
+            }
+        );
+        assert_eq!(
+            parse_pip_compat_action(&args(&["uninstall", "--user", "-y", "demoedit"])).unwrap(),
+            PipCompatAction::Uninstall {
+                specs: vec!["demoedit".to_owned()],
+                requirements: Vec::new(),
+                user: true,
                 allow: Vec::new(),
                 allow_all_host: false,
             }

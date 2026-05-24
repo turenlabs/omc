@@ -238,6 +238,7 @@ cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip cache list
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip config get global.index-url
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip config set global.index-url https://pypi.org/simple/
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip uninstall -r requirements.txt -y
+cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip uninstall --user -y local-package
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo twine check --strict dist/*
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo twine upload -r testpypi dist/*
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo twine upload --repository-url https://upload.pypi.org/legacy/ -u __token__ -p "$PYPI_API_TOKEN" --skip-existing dist/*
@@ -589,7 +590,9 @@ Supported now:
   OMC-recorded editable local paths, named editable paths from `-r`
   requirement files, or, when a package only exists in the current locked
   environment, removes the locked package and reinstalls the remaining
-  environment; `pip check` validates
+  environment; `pip uninstall --user` removes packages from OMC-managed
+  Python user state and cleans mirrored user scripts without writing the
+  current project; `pip check` validates
   both locked PyPI packages and OMC-recorded editable local paths; common
   `pip install --report path` JSON reports and registry/archive
   `pip install --dry-run` resolution, including local editable paths and VCS
