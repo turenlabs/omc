@@ -7882,6 +7882,7 @@ pub struct PypiUploadOptions<'a> {
     pub cert: Option<&'a Path>,
     pub client_cert: Option<&'a Path>,
     pub signature: Option<PypiUploadSignature<'a>>,
+    pub attestations: Option<&'a str>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -10856,7 +10857,12 @@ pub fn upload_pypi_distribution(
     }
 
     let distribution = prepare_pypi_upload_distribution(path)?;
-    let form = pypi_upload_form(&distribution, options.comment, options.signature)?;
+    let form = pypi_upload_form(
+        &distribution,
+        options.comment,
+        options.signature,
+        options.attestations,
+    )?;
     let client = pypi_upload_client(options.cert, options.client_cert)?;
     let mut request = client.post(repository_url);
     if !username.trim().is_empty() || !password.is_empty() {
@@ -11152,6 +11158,7 @@ fn pypi_upload_form(
     distribution: &PypiUploadDistribution,
     comment: Option<&str>,
     signature: Option<PypiUploadSignature<'_>>,
+    attestations: Option<&str>,
 ) -> Result<Form> {
     let metadata_version = pypi_upload_metadata_value(&distribution.metadata, "metadata_version")
         .unwrap_or("2.1")
@@ -11186,6 +11193,12 @@ fn pypi_upload_form(
     }
     if let Some(comment) = comment.map(str::trim).filter(|value| !value.is_empty()) {
         form = form.text("comment", comment.to_owned());
+    }
+    if let Some(attestations) = attestations
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        form = form.text("attestations", attestations.to_owned());
     }
 
     let content = Part::bytes(distribution.bytes.clone())
@@ -22149,6 +22162,9 @@ wheels = [
             assert!(body.contains(&server_expected_digest));
             assert!(body.contains(r#"name="comment""#));
             assert!(body.contains("release upload"));
+            assert!(body.contains(r#"name="attestations""#));
+            assert!(body.contains("predicateType"));
+            assert!(body.contains("https://example.invalid/build"));
             assert!(body.contains(r#"filename="demo_pkg-1.0.0-py3-none-any.whl""#));
             assert!(body.contains(r#"name="gpg_signature""#));
             assert!(body.contains(r#"filename="demo_pkg-1.0.0-py3-none-any.whl.asc""#));
@@ -22169,6 +22185,7 @@ wheels = [
                     filename: "demo_pkg-1.0.0-py3-none-any.whl.asc",
                     bytes: b"fake-signature",
                 }),
+                attestations: Some(r#"[{"predicateType":"https://example.invalid/build"}]"#),
                 ..PypiUploadOptions::default()
             },
         )

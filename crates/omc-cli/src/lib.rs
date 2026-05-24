@@ -1225,6 +1225,7 @@ struct TwineUploadAction {
     sign: bool,
     sign_with: Option<String>,
     identity: Option<String>,
+    attestations: bool,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -3352,9 +3353,10 @@ fn print_twine_upload(
     }
 
     let settings = resolve_twine_upload_settings(project_dir, &action)?;
+    let inputs = twine_upload_inputs(project_dir, &action)?;
     println!("Uploading distributions to {}", settings.repository_url);
-    for path in &action.paths {
-        let path = absolutize_path(project_dir, path.clone());
+    for input in inputs {
+        let path = input.path;
         let filename = path
             .file_name()
             .and_then(|name| name.to_str())
@@ -3365,6 +3367,14 @@ fn print_twine_upload(
                 &path,
                 action.sign_with.as_deref(),
                 action.identity.as_deref(),
+            )?)
+        } else {
+            None
+        };
+        let attestations = if action.attestations {
+            Some(twine_upload_attestations_json(
+                &path,
+                &input.attestation_paths,
             )?)
         } else {
             None
@@ -3383,6 +3393,7 @@ fn print_twine_upload(
                     filename: signature.filename.as_str(),
                     bytes: &signature.bytes,
                 }),
+                attestations: attestations.as_deref(),
             },
         )?;
         print_twine_upload_result(&result);
@@ -3399,6 +3410,103 @@ fn print_twine_upload_result(result: &PypiUploadResult) {
     } else {
         println!("Uploaded {}", result.filename);
     }
+}
+
+#[derive(Debug)]
+struct TwineUploadInput {
+    path: PathBuf,
+    attestation_paths: Vec<PathBuf>,
+}
+
+fn twine_upload_inputs(
+    project_dir: &Path,
+    action: &TwineUploadAction,
+) -> Result<Vec<TwineUploadInput>, OmcRegistryError> {
+    let paths = action
+        .paths
+        .iter()
+        .map(|path| absolutize_path(project_dir, path.clone()))
+        .collect::<Vec<_>>();
+    let attestations = paths
+        .iter()
+        .filter(|path| twine_attestation_path(path))
+        .cloned()
+        .collect::<Vec<_>>();
+    let mut inputs = Vec::new();
+    for path in paths {
+        if twine_attestation_path(&path) {
+            continue;
+        }
+        let basename = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(|| {
+                OmcRegistryError::UnsupportedSpec(format!(
+                    "twine upload path `{}` does not have a valid UTF-8 filename",
+                    path.display()
+                ))
+            })?;
+        let prefix = format!("{basename}.");
+        let attestation_paths = attestations
+            .iter()
+            .filter(|attestation| {
+                attestation
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .map(|name| name.starts_with(&prefix))
+                    .unwrap_or(false)
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        if action.attestations && attestation_paths.is_empty() {
+            return Err(OmcRegistryError::UnsupportedSpec(format!(
+                "twine upload --attestations requested, but `{}` has no associated attestations",
+                path.display()
+            )));
+        }
+        inputs.push(TwineUploadInput {
+            path,
+            attestation_paths,
+        });
+    }
+    if inputs.is_empty() {
+        return Err(OmcRegistryError::UnsupportedSpec(
+            "twine upload needs at least one distribution file".to_owned(),
+        ));
+    }
+    Ok(inputs)
+}
+
+fn twine_attestation_path(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .and_then(|name| name.strip_suffix(".attestation"))
+        .map(|stem| stem.contains('.'))
+        .unwrap_or(false)
+}
+
+fn twine_upload_attestations_json(
+    distribution: &Path,
+    attestations: &[PathBuf],
+) -> Result<String, OmcRegistryError> {
+    if attestations.is_empty() {
+        return Err(OmcRegistryError::UnsupportedSpec(format!(
+            "twine upload --attestations requested, but `{}` has no associated attestations",
+            distribution.display()
+        )));
+    }
+    let mut loaded = Vec::new();
+    for attestation in attestations {
+        let bytes = fs::read(attestation)?;
+        let value = serde_json::from_slice::<serde_json::Value>(&bytes).map_err(|error| {
+            OmcRegistryError::UnsupportedSpec(format!(
+                "invalid JSON in attestation `{}`: {error}",
+                attestation.display()
+            ))
+        })?;
+        loaded.push(value);
+    }
+    Ok(serde_json::to_string(&loaded)?)
 }
 
 struct TwineUploadSignature {
@@ -4756,7 +4864,7 @@ fn twine_help_text(topic: Option<&str>) -> String {
             "twine upload [options] dist [dist ...]",
             &[
                 "Upload one or more .whl, .tar.gz, .tgz, or .zip distributions.",
-                "Supports -r/--repository, --repository-url, -u/--username, -p/--password, --config-file, --cert, --client-cert, --skip-existing, --non-interactive, --comment, --sign, --sign-with, --identity, --verbose, and --disable-progress-bar.",
+                "Supports -r/--repository, --repository-url, -u/--username, -p/--password, --config-file, --cert, --client-cert, --skip-existing, --non-interactive, --comment, --sign, --sign-with, --identity, --attestations, --verbose, and --disable-progress-bar.",
             ],
         ),
         Some(_) => twine_command_help(
@@ -18200,6 +18308,7 @@ fn parse_twine_upload_args(args: &[String]) -> Result<TwineCompatAction, OmcRegi
     let mut sign = false;
     let mut sign_with = None;
     let mut identity = None;
+    let mut attestations = false;
     let mut index = 0;
     while index < args.len() {
         let arg = &args[index];
@@ -18266,9 +18375,7 @@ fn parse_twine_upload_args(args: &[String]) -> Result<TwineCompatAction, OmcRegi
         } else if let Some(value) = arg.strip_prefix("--identity=") {
             identity = Some(value.to_owned());
         } else if arg == "--attestations" {
-            return Err(OmcRegistryError::UnsupportedSpec(format!(
-                "twine upload {arg} is not implemented yet"
-            )));
+            attestations = true;
         } else if arg.starts_with('-') {
             return Err(unsupported_compat_arg("twine upload", arg));
         } else {
@@ -18290,6 +18397,7 @@ fn parse_twine_upload_args(args: &[String]) -> Result<TwineCompatAction, OmcRegi
         sign,
         sign_with,
         identity,
+        attestations,
     })))
 }
 
@@ -24685,6 +24793,7 @@ version = "0.1.0"
                 "--sign-with",
                 "gpg2",
                 "--identity=release@example.com",
+                "--attestations",
                 "--non-interactive",
                 "--disable-progress-bar",
                 "dist/demo-1.0.0.tar.gz",
@@ -24708,6 +24817,7 @@ version = "0.1.0"
                 sign: true,
                 sign_with: Some("gpg2".to_owned()),
                 identity: Some("release@example.com".to_owned()),
+                attestations: true,
             }))
         );
         assert!(print_twine_check(
@@ -24745,6 +24855,7 @@ version = "0.1.0"
                 sign: false,
                 sign_with: None,
                 identity: None,
+                attestations: false,
             },
         )
         .unwrap();
@@ -24770,6 +24881,7 @@ version = "0.1.0"
                 sign: false,
                 sign_with: None,
                 identity: None,
+                attestations: false,
             },
         )
         .unwrap();
@@ -24784,6 +24896,62 @@ version = "0.1.0"
             mtls_settings.client_cert,
             Some(dir.join("certs/client.pem"))
         );
+
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn groups_twine_attestations_with_matching_distribution() {
+        let dir = test_dir("twine-attestations");
+        let dist = dir.join("dist/demo-1.0.0-py3-none-any.whl");
+        let attestation = dir.join("dist/demo-1.0.0-py3-none-any.whl.publish.attestation");
+        fs::create_dir_all(dist.parent().unwrap()).unwrap();
+        fs::write(&dist, b"wheel").unwrap();
+        fs::write(
+            &attestation,
+            r#"{"predicateType":"https://example.invalid/build"}"#,
+        )
+        .unwrap();
+
+        let action = TwineUploadAction {
+            paths: vec![
+                PathBuf::from("dist/demo-1.0.0-py3-none-any.whl"),
+                PathBuf::from("dist/demo-1.0.0-py3-none-any.whl.publish.attestation"),
+            ],
+            repository: None,
+            repository_url: None,
+            username: None,
+            password: None,
+            config_file: None,
+            cert: None,
+            client_cert: None,
+            skip_existing: false,
+            comment: None,
+            sign: false,
+            sign_with: None,
+            identity: None,
+            attestations: true,
+        };
+
+        let inputs = twine_upload_inputs(&dir, &action).unwrap();
+        assert_eq!(inputs.len(), 1);
+        assert_eq!(inputs[0].path, dist);
+        assert_eq!(inputs[0].attestation_paths, vec![attestation.clone()]);
+        assert!(!twine_attestation_path(&dir.join("dist/demo.attestation")));
+        assert_eq!(
+            twine_upload_attestations_json(&inputs[0].path, &inputs[0].attestation_paths).unwrap(),
+            r#"[{"predicateType":"https://example.invalid/build"}]"#
+        );
+
+        let missing = TwineUploadAction {
+            paths: vec![PathBuf::from("dist/demo-1.0.0-py3-none-any.whl")],
+            attestations: true,
+            ..action
+        };
+        assert!(twine_upload_inputs(&dir, &missing)
+            .unwrap_err()
+            .to_string()
+            .contains("has no associated attestations"));
 
         fs::remove_dir_all(dir).unwrap();
     }
