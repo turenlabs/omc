@@ -1976,7 +1976,7 @@ fn write_pip_install_report_from(
     };
     let report = pip_install_report_json(lock_project_dir, install)?;
     let report = serde_json::to_string_pretty(&report)?;
-    if report_path == Path::new("-") {
+    if pip_install_report_to_stdout(Some(report_path)) {
         println!("{report}");
     } else {
         let report_path = absolutize_path(output_project_dir, report_path.to_path_buf());
@@ -1986,6 +1986,10 @@ fn write_pip_install_report_from(
         fs::write(report_path, format!("{report}\n"))?;
     }
     Ok(())
+}
+
+fn pip_install_report_to_stdout(report_path: Option<&Path>) -> bool {
+    report_path == Some(Path::new("-"))
 }
 
 fn locked_packages_from_reports(reports: &[LinkReport]) -> Vec<LockedPackage> {
@@ -5572,6 +5576,7 @@ fn run_pip_compat_with_cwd(
                 allow_flow,
                 allow_all_host,
             } = action;
+            let report_stdout = pip_install_report_to_stdout(report.as_deref());
             let requested_count = specs.len()
                 + requirements.len()
                 + script_requirements.len()
@@ -5612,7 +5617,9 @@ fn run_pip_compat_with_cwd(
                 options.python_target_dir = target.map(|path| absolutize_path(project_dir, path));
                 options.python_vcs_requirements = vcs_requirements;
                 let install = install_project(&options)?;
-                print_install_report(&install);
+                if !report_stdout {
+                    print_install_report(&install);
+                }
                 write_pip_install_report(project_dir, report.as_deref(), &install)?;
             } else {
                 let mut options = LinkOptions::new(project_dir);
@@ -5663,7 +5670,9 @@ fn run_pip_compat_with_cwd(
                     project_dir,
                     &locked_packages_from_reports(&all_reports),
                 )?;
-                print_link_reports(&all_reports);
+                if !report_stdout {
+                    print_link_reports(&all_reports);
+                }
                 let install = if options.requirement_files.is_empty()
                     && options.constraint_files.is_empty()
                     && options.python_local_paths.is_empty()
@@ -5682,8 +5691,10 @@ fn run_pip_compat_with_cwd(
                 } else {
                     install_project(&options)?
                 };
-                println!();
-                print_install_report(&install);
+                if !report_stdout {
+                    println!();
+                    print_install_report(&install);
+                }
                 write_pip_install_report(project_dir, report.as_deref(), &install)?;
             }
         }
@@ -6118,10 +6129,13 @@ fn absolutize_pip_install_action_paths(base_dir: &Path, action: &mut PipInstallA
     action.constraints = absolutize_paths(base_dir, std::mem::take(&mut action.constraints));
     action.script_requirements =
         absolutize_paths(base_dir, std::mem::take(&mut action.script_requirements));
-    action.report = action
-        .report
-        .take()
-        .map(|path| absolutize_path(base_dir, path));
+    action.report = action.report.take().map(|path| {
+        if path == Path::new("-") {
+            path
+        } else {
+            absolutize_path(base_dir, path)
+        }
+    });
     action.archive_references =
         absolutize_pip_archive_references(base_dir, std::mem::take(&mut action.archive_references));
     action.local_paths =
@@ -6718,6 +6732,7 @@ fn run_pip_install_dry_run(
         allow_flow,
         allow_all_host,
     } = action;
+    let report_stdout = pip_install_report_to_stdout(report.as_deref());
 
     let dry_run_project = TempOmcProject::new("pip-dry-run", project_dir)?;
     let (dry_run_target, dry_run_bin_dir) = if user {
@@ -6827,11 +6842,13 @@ fn run_pip_install_dry_run(
                 python_bin_dir: dry_run_bin_dir.unwrap_or_else(|| python_site_packages.join("bin")),
                 python_site_packages,
             };
-            println!();
-            println!(
-                "dry-run: would install pypi=0 python_site_packages={}",
-                install.python_site_packages.display()
-            );
+            if !report_stdout {
+                println!();
+                println!(
+                    "dry-run: would install pypi=0 python_site_packages={}",
+                    install.python_site_packages.display()
+                );
+            }
             write_pip_install_report_from(
                 dry_run_project.path(),
                 project_dir,
@@ -6853,7 +6870,9 @@ fn run_pip_install_dry_run(
         for spec in &resolved_specs {
             reports.extend(add_package_graph(spec, &manifest_options)?);
         }
-        print_link_reports(&reports);
+        if !report_stdout {
+            print_link_reports(&reports);
+        }
 
         let mut install = install_project(&manifest_options)?;
         rewrite_pip_dry_run_install_paths(
@@ -6862,15 +6881,17 @@ fn run_pip_install_dry_run(
             dry_run_bin_dir.as_deref(),
             &mut install,
         );
-        println!();
-        println!(
-            "dry-run: would install pypi={} local_paths={} vcs={} groups={} python_site_packages={}",
-            install.pypi_packages,
-            local_path_count,
-            vcs_count,
-            manifest_options.project_extras.len(),
-            install.python_site_packages.display()
-        );
+        if !report_stdout {
+            println!();
+            println!(
+                "dry-run: would install pypi={} local_paths={} vcs={} groups={} python_site_packages={}",
+                install.pypi_packages,
+                local_path_count,
+                vcs_count,
+                manifest_options.project_extras.len(),
+                install.python_site_packages.display()
+            );
+        }
         write_pip_install_report_from(
             dry_run_project.path(),
             project_dir,
@@ -6887,7 +6908,9 @@ fn run_pip_install_dry_run(
         for spec in &resolved_specs {
             reports.extend(add_package_graph(spec, &manifest_options)?);
         }
-        print_link_reports(&reports);
+        if !report_stdout {
+            print_link_reports(&reports);
+        }
 
         let mut install = install_project(&options)?;
         rewrite_pip_dry_run_install_paths(
@@ -6896,14 +6919,16 @@ fn run_pip_install_dry_run(
             dry_run_bin_dir.as_deref(),
             &mut install,
         );
-        println!();
-        println!(
-            "dry-run: would install pypi={} local_paths={} vcs={} python_site_packages={}",
-            install.pypi_packages,
-            local_path_count,
-            vcs_count,
-            install.python_site_packages.display()
-        );
+        if !report_stdout {
+            println!();
+            println!(
+                "dry-run: would install pypi={} local_paths={} vcs={} python_site_packages={}",
+                install.pypi_packages,
+                local_path_count,
+                vcs_count,
+                install.python_site_packages.display()
+            );
+        }
         write_pip_install_report_from(
             dry_run_project.path(),
             project_dir,
@@ -6917,7 +6942,9 @@ fn run_pip_install_dry_run(
     for spec in &resolved_specs {
         reports.extend(add_package_graph(spec, &options)?);
     }
-    print_link_reports(&reports);
+    if !report_stdout {
+        print_link_reports(&reports);
+    }
 
     let pypi_packages = reports
         .iter()
@@ -6939,12 +6966,14 @@ fn run_pip_install_dry_run(
         python_bin_dir: dry_run_bin_dir.unwrap_or_else(|| python_site_packages.join("bin")),
         python_site_packages,
     };
-    println!();
-    println!(
-        "dry-run: would install pypi={} python_site_packages={}",
-        install.pypi_packages,
-        install.python_site_packages.display()
-    );
+    if !report_stdout {
+        println!();
+        println!(
+            "dry-run: would install pypi={} python_site_packages={}",
+            install.pypi_packages,
+            install.python_site_packages.display()
+        );
+    }
     write_pip_install_report_from(
         dry_run_project.path(),
         project_dir,
@@ -6991,6 +7020,7 @@ fn run_pip_install_target(
         allow_flow,
         allow_all_host,
     } = action;
+    let report_stdout = pip_install_report_to_stdout(report.as_deref());
     let target = target.ok_or_else(|| {
         OmcRegistryError::UnsupportedSpec("pip install --target needs a path".to_owned())
     })?;
@@ -7058,11 +7088,15 @@ fn run_pip_install_target(
     for spec in &resolved_specs {
         reports.extend(add_package_graph(spec, &options)?);
     }
-    print_link_reports(&reports);
+    if !report_stdout {
+        print_link_reports(&reports);
+    }
 
     let install = install_project(&options)?;
-    println!();
-    print_install_report(&install);
+    if !report_stdout {
+        println!();
+        print_install_report(&install);
+    }
     write_pip_install_report_from(
         target_project.path(),
         project_dir,
@@ -7109,6 +7143,7 @@ fn run_pip_install_prefix(
         allow_flow,
         allow_all_host,
     } = action;
+    let report_stdout = pip_install_report_to_stdout(report.as_deref());
     let prefix = prefix.ok_or_else(|| {
         OmcRegistryError::UnsupportedSpec("pip install --prefix needs a path".to_owned())
     })?;
@@ -7175,11 +7210,15 @@ fn run_pip_install_prefix(
     for spec in &resolved_specs {
         reports.extend(add_package_graph(spec, &options)?);
     }
-    print_link_reports(&reports);
+    if !report_stdout {
+        print_link_reports(&reports);
+    }
 
     let install = install_project(&options)?;
-    println!();
-    print_install_report(&install);
+    if !report_stdout {
+        println!();
+        print_install_report(&install);
+    }
     write_pip_install_report_from(
         prefix_project.path(),
         project_dir,
@@ -7226,6 +7265,7 @@ fn run_pip_install_root(
         allow_flow,
         allow_all_host,
     } = action;
+    let report_stdout = pip_install_report_to_stdout(report.as_deref());
     let root = root.ok_or_else(|| {
         OmcRegistryError::UnsupportedSpec("pip install --root needs a path".to_owned())
     })?;
@@ -7290,11 +7330,15 @@ fn run_pip_install_root(
     for spec in &resolved_specs {
         reports.extend(add_package_graph(spec, &options)?);
     }
-    print_link_reports(&reports);
+    if !report_stdout {
+        print_link_reports(&reports);
+    }
 
     let install = install_project(&options)?;
-    println!();
-    print_install_report(&install);
+    if !report_stdout {
+        println!();
+        print_install_report(&install);
+    }
     write_pip_install_report_from(
         root_project.path(),
         project_dir,
@@ -7341,6 +7385,7 @@ fn run_pip_install_user(
         allow_flow,
         allow_all_host,
     } = action;
+    let report_stdout = pip_install_report_to_stdout(report.as_deref());
 
     let user_paths = pip_user_paths()?;
     let root_install = root.is_some();
@@ -7421,15 +7466,19 @@ fn run_pip_install_user(
     for spec in &resolved_specs {
         reports.extend(add_package_graph(spec, &options)?);
     }
-    print_link_reports(&reports);
+    if !report_stdout {
+        print_link_reports(&reports);
+    }
 
     let install = install_project(&options)?;
     if !root_install {
         sync_pip_user_script_local_paths(&user_paths)?;
         sync_pip_user_scripts(&user_paths)?;
     }
-    println!();
-    print_install_report(&install);
+    if !report_stdout {
+        println!();
+        print_install_report(&install);
+    }
     write_pip_install_report_from(&state_project, project_dir, report.as_deref(), &install)?;
     Ok(ExitCode::SUCCESS)
 }
@@ -40603,6 +40652,52 @@ version = "0.1.0"
 
             let _ = fs::remove_dir_all(project);
         }
+    }
+
+    #[test]
+    fn pip_install_dry_run_report_dash_does_not_write_literal_dash_file() {
+        let project = test_dir("pip-install-dry-run-report-dash");
+        let source = test_dir("pip-install-dry-run-report-dash-source");
+        let vendor = project.join("vendor");
+        fs::create_dir_all(source.join("src").join("idna")).unwrap();
+        fs::write(source.join("src").join("idna").join("__init__.py"), "").unwrap();
+        write_pip_local_wheel(
+            &source,
+            &PipLocalWheelMetadata {
+                name: "idna".to_owned(),
+                version: "3.7".to_owned(),
+                requires_dist: Vec::new(),
+                entry_points: Vec::new(),
+            },
+            &vendor.join("idna-3.7-py3-none-any.whl"),
+        )
+        .unwrap();
+
+        let status = with_clean_pip_env(|| {
+            run_pip_compat(
+                &project,
+                &args(&[
+                    "install",
+                    "--dry-run",
+                    "--report",
+                    "-",
+                    "--no-index",
+                    "--find-links",
+                    "vendor",
+                    "idna==3.7",
+                ]),
+            )
+        })
+        .unwrap();
+
+        assert_eq!(status, ExitCode::SUCCESS);
+        assert!(!project.join("-").exists());
+        assert!(!project.join("omc.toml").exists());
+        assert!(!project.join("omc.lock").exists());
+        assert!(!project.join(".omc").exists());
+
+        let _ = fs::remove_dir_all(project);
+        let _ = fs::remove_dir_all(source);
     }
 
     #[test]

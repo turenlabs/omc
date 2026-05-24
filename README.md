@@ -211,6 +211,7 @@ cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip install -r req
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip help install
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip completion --bash
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip install --dry-run --report install-report.json requests==2.32.3
+cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip install --dry-run --report - requests==2.32.3
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip install --dry-run -e ../local-package
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip install requests==2.32.3 --report install-report.json --allow-all-host
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip install --pre some-package
@@ -710,7 +711,7 @@ Supported now:
   without writing the current project; `pip check` validates
   both locked PyPI packages and OMC-recorded editable local paths, and
   `pip check --user` validates OMC-managed Python user site-packages; common
-  `pip install --report path` JSON reports and registry/archive
+  `pip install --report path` JSON reports, including stdout reports with `--report -`, and registry/archive
   `pip install --dry-run` resolution, including local editable paths and VCS
   requirements, without writing the current OMC manifest, lockfile, or
   site-packages; real `pip install --target DIR` installs into the requested
