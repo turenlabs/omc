@@ -348,6 +348,7 @@ enum NpmCompatAction {
         global: bool,
         save: bool,
         save_prefix: String,
+        save_bundle: bool,
         dependency_kind: ManifestDependencyKind,
         omit_dev: bool,
         omit_optional: bool,
@@ -371,6 +372,7 @@ enum NpmCompatAction {
         local_paths: Vec<PathBuf>,
         save: bool,
         save_prefix: String,
+        save_bundle: bool,
         dependency_kind: ManifestDependencyKind,
         omit_dev: bool,
         omit_optional: bool,
@@ -2680,6 +2682,7 @@ struct NpmInstallCompatRequest {
     global: bool,
     save: bool,
     save_prefix: String,
+    save_bundle: bool,
     dependency_kind: ManifestDependencyKind,
     omit_dev: bool,
     omit_optional: bool,
@@ -2706,6 +2709,7 @@ enum NpmLinkAction {
         archive_references: Vec<String>,
         local_paths: Vec<PathBuf>,
         save: bool,
+        save_bundle: bool,
         dependency_kind: ManifestDependencyKind,
         omit_dev: bool,
         omit_optional: bool,
@@ -2730,6 +2734,7 @@ fn run_npm_install_compat(
         global,
         save,
         save_prefix,
+        save_bundle,
         dependency_kind,
         omit_dev,
         omit_optional,
@@ -2755,6 +2760,7 @@ fn run_npm_install_compat(
                 global: false,
                 save,
                 save_prefix,
+                save_bundle,
                 dependency_kind,
                 omit_dev,
                 omit_optional,
@@ -2782,6 +2788,7 @@ fn run_npm_install_compat(
                 global: false,
                 save,
                 save_prefix,
+                save_bundle,
                 dependency_kind,
                 omit_dev,
                 omit_optional,
@@ -2812,6 +2819,7 @@ fn run_npm_install_compat(
                 global: false,
                 save,
                 save_prefix,
+                save_bundle,
                 dependency_kind,
                 omit_dev,
                 omit_optional,
@@ -2845,6 +2853,7 @@ fn run_npm_install_compat(
                 &[],
                 &local_paths,
                 dependency_kind,
+                save_bundle,
             )?;
         }
         if lock_only {
@@ -2906,6 +2915,7 @@ fn run_npm_install_compat(
                 &root_dependencies,
                 &local_paths,
                 dependency_kind,
+                save_bundle,
             )?;
         }
         if lock_only {
@@ -3027,12 +3037,19 @@ fn save_root_npm_package_json_dependencies(
     dependencies: &[(String, String)],
     local_paths: &[PathBuf],
     dependency_kind: ManifestDependencyKind,
+    save_bundle: bool,
 ) -> Result<(), OmcRegistryError> {
     if !project_dir.join("package.json").exists() {
         return Ok(());
     }
     for (name, requirement) in dependencies {
-        save_npm_package_json_dependency(project_dir, name, requirement, dependency_kind)?;
+        save_npm_package_json_dependency(
+            project_dir,
+            name,
+            requirement,
+            dependency_kind,
+            save_bundle,
+        )?;
     }
     for local_path in local_paths {
         save_npm_package_json_local_dependency(
@@ -3040,6 +3057,7 @@ fn save_root_npm_package_json_dependencies(
             project_dir,
             local_path,
             dependency_kind,
+            save_bundle,
         )?;
     }
     Ok(())
@@ -3058,6 +3076,7 @@ fn run_npm_install_workspace_compat(
         global: _,
         save,
         save_prefix,
+        save_bundle,
         dependency_kind,
         omit_dev,
         omit_optional,
@@ -3144,7 +3163,13 @@ fn run_npm_install_workspace_compat(
     if save {
         for target in &targets {
             for (name, requirement) in &root_dependencies {
-                save_npm_package_json_dependency(target, name, requirement, dependency_kind)?;
+                save_npm_package_json_dependency(
+                    target,
+                    name,
+                    requirement,
+                    dependency_kind,
+                    save_bundle,
+                )?;
             }
             for local_path in &local_paths {
                 save_npm_package_json_local_dependency(
@@ -3152,6 +3177,7 @@ fn run_npm_install_workspace_compat(
                     target,
                     local_path,
                     dependency_kind,
+                    save_bundle,
                 )?;
             }
         }
@@ -3268,6 +3294,7 @@ fn run_npm_link_compat(
             archive_references,
             mut local_paths,
             save,
+            save_bundle,
             dependency_kind,
             omit_dev,
             omit_optional,
@@ -3304,6 +3331,7 @@ fn run_npm_link_compat(
                     global: false,
                     save,
                     save_prefix: DEFAULT_NPM_SAVE_PREFIX.to_owned(),
+                    save_bundle,
                     dependency_kind,
                     omit_dev,
                     omit_optional,
@@ -3436,6 +3464,7 @@ fn run_npm_install_dry_run(
         global: _,
         save: _,
         save_prefix: _,
+        save_bundle: _,
         dependency_kind: _,
         omit_dev,
         omit_optional,
@@ -3627,6 +3656,7 @@ fn run_npm_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
             global,
             save,
             save_prefix,
+            save_bundle,
             dependency_kind,
             omit_dev,
             omit_optional,
@@ -3651,6 +3681,7 @@ fn run_npm_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
                     global,
                     save,
                     save_prefix,
+                    save_bundle,
                     dependency_kind,
                     omit_dev,
                     omit_optional,
@@ -3676,6 +3707,7 @@ fn run_npm_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
             local_paths,
             save,
             save_prefix,
+            save_bundle,
             dependency_kind,
             omit_dev,
             omit_optional,
@@ -3716,6 +3748,7 @@ fn run_npm_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
                         global: false,
                         save,
                         save_prefix,
+                        save_bundle,
                         dependency_kind,
                         omit_dev,
                         omit_optional,
@@ -4082,6 +4115,12 @@ fn npm_environment_default_args() -> Vec<String> {
             args.push("--save-exact=false".to_owned());
         }
     }
+    append_npm_bool_default_arg(
+        &mut args,
+        "save-bundle",
+        "--save-bundle",
+        "--save-bundle=false",
+    );
     if let Some(save_prefix) = npm_config_env("save-prefix") {
         args.push(format!("--save-prefix={save_prefix}"));
     }
@@ -4181,6 +4220,7 @@ fn npm_cli_default_config_key(key: &str) -> bool {
             | "package-lock-only"
             | "save"
             | "save-exact"
+            | "save-bundle"
             | "save-prefix"
     )
 }
@@ -4259,6 +4299,13 @@ fn append_npm_default_args_from_config(values: &BTreeMap<String, String>, args: 
             args.push("--save-exact=false".to_owned());
         }
     }
+    append_npm_bool_arg_from_config(
+        values,
+        args,
+        "save-bundle",
+        "--save-bundle",
+        "--save-bundle=false",
+    );
     if let Some(save_prefix) = values
         .get("save-prefix")
         .filter(|value| !value.trim().is_empty())
@@ -7162,7 +7209,8 @@ fn npm_command_help(usage: &str, lines: &[&str]) -> String {
 fn npm_help_topic(topic: &str) -> Option<&'static str> {
     match topic {
         "help" | "--help" | "-h" => None,
-        "install" | "i" | "add" | "update" | "up" | "upgrade" => Some("install"),
+        "install" | "i" | "in" | "ins" | "inst" | "insta" | "instal" | "isnt" | "isnta"
+        | "isntal" | "isntall" | "add" | "update" | "up" | "upgrade" => Some("install"),
         "link" | "ln" => Some("link"),
         "install-test" | "it" => Some("install-test"),
         "ci" => Some("ci"),
@@ -12580,6 +12628,14 @@ fn npm_package_lock_root_entry(package: &serde_json::Value) -> serde_json::Value
             );
         }
     }
+    for field in ["bundleDependencies", "bundledDependencies"] {
+        if let Some(value) = package.get(field).filter(|value| {
+            value.as_bool() == Some(true)
+                || value.as_array().is_some_and(|entries| !entries.is_empty())
+        }) {
+            root.insert(field.to_owned(), value.clone());
+        }
+    }
     serde_json::Value::Object(root)
 }
 
@@ -14546,6 +14602,7 @@ fn save_npm_package_json_dependency(
     name: &str,
     requirement: &str,
     kind: ManifestDependencyKind,
+    save_bundle: bool,
 ) -> Result<(), OmcRegistryError> {
     let package_json = package_dir.join("package.json");
     let mut package = read_npm_pkg_json(&package_json)?;
@@ -14555,6 +14612,9 @@ fn save_npm_package_json_dependency(
         name.to_owned(),
         serde_json::Value::String(requirement.to_owned()),
     );
+    if save_bundle {
+        save_npm_package_json_bundle_dependency(&mut package, name)?;
+    }
     write_npm_pkg_json(&package_json, &package)
 }
 
@@ -14563,12 +14623,13 @@ fn save_npm_package_json_local_dependency(
     package_dir: &Path,
     local_path: &Path,
     kind: ManifestDependencyKind,
+    save_bundle: bool,
 ) -> Result<(), OmcRegistryError> {
     let target = fs::canonicalize(absolutize_path(project_dir, local_path.to_path_buf()))?;
     let package = read_npm_pkg_json(&target.join("package.json"))?;
     let name = npm_package_json_name(&package)?;
     let requirement = format!("file:{}", target.display());
-    save_npm_package_json_dependency(package_dir, &name, &requirement, kind)
+    save_npm_package_json_dependency(package_dir, &name, &requirement, kind, save_bundle)
 }
 
 fn npm_package_json_dependency_field(kind: ManifestDependencyKind) -> &'static str {
@@ -14582,6 +14643,47 @@ fn npm_package_json_dependency_field(kind: ManifestDependencyKind) -> &'static s
 
 fn remove_npm_package_json_dependency(package: &mut serde_json::Value, name: &str) {
     let _ = remove_npm_package_json_dependency_entry(package, name);
+}
+
+fn save_npm_package_json_bundle_dependency(
+    package: &mut serde_json::Value,
+    name: &str,
+) -> Result<(), OmcRegistryError> {
+    if npm_package_json_bundle_field_is_true(package, "bundleDependencies")
+        || npm_package_json_bundle_field_is_true(package, "bundledDependencies")
+    {
+        return Ok(());
+    }
+
+    let field = if package.get("bundledDependencies").is_some()
+        && package.get("bundleDependencies").is_none()
+    {
+        "bundledDependencies"
+    } else {
+        "bundleDependencies"
+    };
+    let object = package.as_object_mut().ok_or_else(|| {
+        OmcRegistryError::UnsupportedSpec("package.json must contain a JSON object".to_owned())
+    })?;
+    let value = object
+        .entry(field.to_owned())
+        .or_insert_with(|| serde_json::Value::Array(Vec::new()));
+    if !value.is_array() {
+        *value = serde_json::Value::Array(Vec::new());
+    }
+    let entries = value.as_array_mut().expect("bundle field is an array");
+    if !entries.iter().any(|entry| entry.as_str() == Some(name)) {
+        entries.push(serde_json::Value::String(name.to_owned()));
+    }
+    entries.sort_by(|left, right| left.as_str().cmp(&right.as_str()));
+    Ok(())
+}
+
+fn npm_package_json_bundle_field_is_true(package: &serde_json::Value, field: &str) -> bool {
+    package
+        .get(field)
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
 }
 
 fn npm_specs_with_existing_manifest_requirements(
@@ -14695,6 +14797,24 @@ fn remove_npm_package_json_dependency_entry(package: &mut serde_json::Value, nam
     removed
 }
 
+fn remove_npm_package_json_bundle_dependency_entry(
+    package: &mut serde_json::Value,
+    name: &str,
+) -> bool {
+    let mut removed = false;
+    for field in ["bundleDependencies", "bundledDependencies"] {
+        if let Some(entries) = package
+            .get_mut(field)
+            .and_then(serde_json::Value::as_array_mut)
+        {
+            let before = entries.len();
+            entries.retain(|entry| entry.as_str() != Some(name));
+            removed |= entries.len() != before;
+        }
+    }
+    removed
+}
+
 fn remove_root_npm_package_json_dependency(
     project_dir: &Path,
     name: &str,
@@ -14712,7 +14832,8 @@ fn remove_npm_package_json_dependency_from_package_dir(
     }
     let mut package = read_npm_pkg_json(&package_json)?;
     let removed = remove_npm_package_json_dependency_entry(&mut package, name);
-    if removed {
+    let removed_bundle = remove_npm_package_json_bundle_dependency_entry(&mut package, name);
+    if removed || removed_bundle {
         write_npm_pkg_json(&package_json, &package)?;
     }
     Ok(removed)
@@ -19358,6 +19479,7 @@ fn parse_npm_compat_action(args: &[String]) -> Result<NpmCompatAction, OmcRegist
             global: false,
             save: true,
             save_prefix: DEFAULT_NPM_SAVE_PREFIX.to_owned(),
+            save_bundle: false,
             dependency_kind: ManifestDependencyKind::Production,
             omit_dev: false,
             omit_optional: false,
@@ -19383,7 +19505,8 @@ fn parse_npm_compat_action(args: &[String]) -> Result<NpmCompatAction, OmcRegist
         "link" | "ln" => parse_npm_link_args(&args[1..]),
         "install-test" | "it" => parse_npm_install_test_args(command, false, &args[1..]),
         "install-ci-test" | "cit" => parse_npm_install_test_args(command, true, &args[1..]),
-        "install" | "i" | "add" | "update" | "up" | "upgrade" => {
+        "install" | "i" | "in" | "ins" | "inst" | "insta" | "instal" | "isnt" | "isnta"
+        | "isntal" | "isntall" | "add" | "update" | "up" | "upgrade" => {
             parse_npm_install_args(command, &args[1..])
         }
         "ci" => {
@@ -19711,6 +19834,15 @@ fn npm_global_arg_supported_by_command(command: &str, arg: &str) -> bool {
             command,
             "install"
                 | "i"
+                | "in"
+                | "ins"
+                | "inst"
+                | "insta"
+                | "instal"
+                | "isnt"
+                | "isnta"
+                | "isntal"
+                | "isntall"
                 | "add"
                 | "update"
                 | "up"
@@ -19837,20 +19969,59 @@ fn npm_global_arg_supported_by_command(command: &str, arg: &str) -> bool {
             | "--save-optional"
             | "-O"
             | "--save-peer"
+            | "--save-bundle"
+            | "--save-bundled"
+            | "-B"
+            | "--no-save-bundle"
+            | "--no-save-bundled"
             | "--no-save"
             | "--save-exact"
             | "-E"
     ) || arg.starts_with("--save-exact=")
+        || arg.starts_with("--save-bundle=")
+        || arg.starts_with("--save-bundled=")
     {
         return matches!(
             command,
-            "install" | "i" | "add" | "update" | "up" | "upgrade" | "link" | "ln"
+            "install"
+                | "i"
+                | "in"
+                | "ins"
+                | "inst"
+                | "insta"
+                | "instal"
+                | "isnt"
+                | "isnta"
+                | "isntal"
+                | "isntall"
+                | "add"
+                | "update"
+                | "up"
+                | "upgrade"
+                | "link"
+                | "ln"
         );
     }
     if matches!(arg, "--save-prefix") || arg.starts_with("--save-prefix=") {
         return matches!(
             command,
-            "install" | "i" | "add" | "update" | "up" | "upgrade" | "link" | "ln"
+            "install"
+                | "i"
+                | "in"
+                | "ins"
+                | "inst"
+                | "insta"
+                | "instal"
+                | "isnt"
+                | "isnta"
+                | "isntal"
+                | "isntall"
+                | "add"
+                | "update"
+                | "up"
+                | "upgrade"
+                | "link"
+                | "ln"
         );
     }
     if matches!(
@@ -20199,6 +20370,11 @@ fn npm_global_preserved_bool_flag(arg: &str) -> bool {
             | "--save-optional"
             | "-O"
             | "--save-peer"
+            | "--save-bundle"
+            | "--save-bundled"
+            | "-B"
+            | "--no-save-bundle"
+            | "--no-save-bundled"
             | "--no-save"
             | "--save-exact"
             | "-E"
@@ -20271,6 +20447,8 @@ fn npm_global_preserved_equals_flag(arg: &str) -> bool {
         "--omit=",
         "--include=",
         "--save-exact=",
+        "--save-bundle=",
+        "--save-bundled=",
         "--save-prefix=",
         "--searchlimit=",
         "--limit=",
@@ -20789,6 +20967,7 @@ fn parse_npm_install_args(
         save,
         save_explicit,
         save_prefix,
+        save_bundle,
         package_lock,
         lock_only,
         dry_run: _,
@@ -20817,6 +20996,7 @@ fn parse_npm_install_args(
         global,
         save,
         save_prefix,
+        save_bundle,
         dependency_kind,
         omit_dev,
         omit_optional,
@@ -20925,6 +21105,7 @@ fn parse_npm_link_args(args: &[String]) -> Result<NpmCompatAction, OmcRegistryEr
         omit_optional,
         omit_peer,
         save,
+        save_bundle,
         lock_only,
         npm_registry,
         allow,
@@ -20946,6 +21127,7 @@ fn parse_npm_link_args(args: &[String]) -> Result<NpmCompatAction, OmcRegistryEr
             archive_references,
             local_paths,
             save: explicit_save && save,
+            save_bundle: explicit_save && save_bundle,
             dependency_kind,
             omit_dev,
             omit_optional,
@@ -20974,6 +21156,9 @@ fn npm_link_explicit_save(args: &[String]) -> bool {
                 | "--save-optional"
                 | "-O"
                 | "--save-peer"
+                | "--save-bundle"
+                | "--save-bundled"
+                | "-B"
         )
     })
 }
@@ -21022,6 +21207,7 @@ fn parse_npm_install_test_args(
             local_paths: Vec::new(),
             save: true,
             save_prefix: DEFAULT_NPM_SAVE_PREFIX.to_owned(),
+            save_bundle: false,
             dependency_kind: ManifestDependencyKind::Production,
             omit_dev,
             omit_optional,
@@ -21048,6 +21234,7 @@ fn parse_npm_install_test_args(
         global,
         save,
         save_prefix,
+        save_bundle,
         dependency_kind,
         omit_dev,
         omit_optional,
@@ -21079,6 +21266,7 @@ fn parse_npm_install_test_args(
         local_paths,
         save,
         save_prefix,
+        save_bundle,
         dependency_kind,
         omit_dev,
         omit_optional,
@@ -26919,6 +27107,7 @@ struct CommonCompatFlags {
     save: bool,
     save_explicit: bool,
     save_prefix: String,
+    save_bundle: bool,
     package_lock: bool,
     lock_only: bool,
     dry_run: bool,
@@ -26942,6 +27131,7 @@ impl Default for CommonCompatFlags {
             save: true,
             save_explicit: false,
             save_prefix: DEFAULT_NPM_SAVE_PREFIX.to_owned(),
+            save_bundle: false,
             package_lock: true,
             lock_only: false,
             dry_run: false,
@@ -27006,6 +27196,29 @@ fn parse_common_compat_flags(
             parsed.dependency_kind = ManifestDependencyKind::Peer;
             parsed.save = true;
             parsed.save_explicit = true;
+        } else if npm_mode
+            && matches!(
+                arg.as_str(),
+                "--save-bundle"
+                    | "--save-bundled"
+                    | "-B"
+                    | "--save-bundle=true"
+                    | "--save-bundled=true"
+            )
+        {
+            parsed.save = true;
+            parsed.save_explicit = true;
+            parsed.save_bundle = true;
+        } else if npm_mode
+            && matches!(
+                arg.as_str(),
+                "--no-save-bundle"
+                    | "--no-save-bundled"
+                    | "--save-bundle=false"
+                    | "--save-bundled=false"
+            )
+        {
+            parsed.save_bundle = false;
         } else if npm_mode && arg == "--no-save" {
             parsed.save = false;
             parsed.save_explicit = true;
@@ -27863,6 +28076,8 @@ mod tests {
                 ("npm_config_save", None),
                 ("NPM_CONFIG_SAVE_EXACT", None),
                 ("npm_config_save_exact", None),
+                ("NPM_CONFIG_SAVE_BUNDLE", None),
+                ("npm_config_save_bundle", None),
                 ("NPM_CONFIG_SAVE_PREFIX", None),
                 ("npm_config_save_prefix", None),
             ],
@@ -27905,6 +28120,8 @@ mod tests {
                 ("npm_config_save", None),
                 ("NPM_CONFIG_SAVE_EXACT", None),
                 ("npm_config_save_exact", None),
+                ("NPM_CONFIG_SAVE_BUNDLE", None),
+                ("npm_config_save_bundle", None),
                 ("NPM_CONFIG_SAVE_PREFIX", None),
                 ("npm_config_save_prefix", None),
             ],
@@ -27944,6 +28161,8 @@ mod tests {
                 ("npm_config_save", None),
                 ("NPM_CONFIG_SAVE_EXACT", Some("true")),
                 ("npm_config_save_exact", None),
+                ("NPM_CONFIG_SAVE_BUNDLE", None),
+                ("npm_config_save_bundle", None),
                 ("NPM_CONFIG_SAVE_PREFIX", Some("~")),
                 ("npm_config_save_prefix", None),
             ],
@@ -27994,6 +28213,53 @@ mod tests {
                 assert!(lock_only);
                 assert!(dry_run);
                 assert_eq!(save_prefix, DEFAULT_NPM_SAVE_PREFIX);
+            },
+        );
+
+        with_env_values(
+            &[
+                ("NODE_ENV", None),
+                ("NPM_CONFIG_PRODUCTION", None),
+                ("npm_config_production", None),
+                ("NPM_CONFIG_OMIT", None),
+                ("npm_config_omit", None),
+                ("NPM_CONFIG_INCLUDE", None),
+                ("npm_config_include", None),
+                ("NPM_CONFIG_GLOBAL", None),
+                ("npm_config_global", None),
+                ("NPM_CONFIG_DRY_RUN", None),
+                ("npm_config_dry_run", None),
+                ("NPM_CONFIG_PACKAGE_LOCK_ONLY", None),
+                ("npm_config_package_lock_only", None),
+                ("NPM_CONFIG_PACKAGE_LOCK", None),
+                ("npm_config_package_lock", None),
+                ("NPM_CONFIG_SAVE", None),
+                ("npm_config_save", None),
+                ("NPM_CONFIG_SAVE_EXACT", None),
+                ("npm_config_save_exact", None),
+                ("NPM_CONFIG_SAVE_BUNDLE", Some("true")),
+                ("npm_config_save_bundle", None),
+                ("NPM_CONFIG_SAVE_PREFIX", None),
+                ("npm_config_save_prefix", None),
+            ],
+            || {
+                assert_eq!(
+                    npm_args_with_environment_defaults(&args(&["install", "left-pad"])),
+                    args(&["--save-bundle", "install", "left-pad"])
+                );
+                let action =
+                    parse_npm_compat_action(&npm_args_with_environment_defaults(&args(&[
+                        "install", "left-pad",
+                    ])))
+                    .unwrap();
+                let NpmCompatAction::Install {
+                    save, save_bundle, ..
+                } = action
+                else {
+                    panic!("expected npm install action");
+                };
+                assert!(save);
+                assert!(save_bundle);
             },
         );
     }
@@ -28047,6 +28313,8 @@ mod tests {
                 ("npm_config_save", None),
                 ("NPM_CONFIG_SAVE_EXACT", None),
                 ("npm_config_save_exact", None),
+                ("NPM_CONFIG_SAVE_BUNDLE", None),
+                ("npm_config_save_bundle", None),
                 ("NPM_CONFIG_SAVE_PREFIX", None),
                 ("npm_config_save_prefix", None),
             ],
@@ -28110,6 +28378,73 @@ mod tests {
                 assert_eq!(save_prefix, DEFAULT_NPM_SAVE_PREFIX);
             },
         );
+    }
+
+    #[test]
+    fn npm_config_file_defaults_support_save_bundle() {
+        let project = test_dir("npm-config-file-save-bundle-default");
+        let user_config = project.join("user.npmrc");
+        let global_config = project.join("global.npmrc");
+        fs::write(&user_config, "").unwrap();
+        fs::write(&global_config, "").unwrap();
+        fs::write(project.join(".npmrc"), "save-bundle=true\n").unwrap();
+
+        with_env_values(
+            &[
+                ("NODE_ENV", None),
+                (
+                    "NPM_CONFIG_GLOBALCONFIG",
+                    Some(global_config.to_str().unwrap()),
+                ),
+                ("npm_config_globalconfig", None),
+                ("NPM_CONFIG_USERCONFIG", Some(user_config.to_str().unwrap())),
+                ("npm_config_userconfig", None),
+                ("NPM_CONFIG_PRODUCTION", None),
+                ("npm_config_production", None),
+                ("NPM_CONFIG_OMIT", None),
+                ("npm_config_omit", None),
+                ("NPM_CONFIG_INCLUDE", None),
+                ("npm_config_include", None),
+                ("NPM_CONFIG_GLOBAL", None),
+                ("npm_config_global", None),
+                ("NPM_CONFIG_DRY_RUN", None),
+                ("npm_config_dry_run", None),
+                ("NPM_CONFIG_PACKAGE_LOCK_ONLY", None),
+                ("npm_config_package_lock_only", None),
+                ("NPM_CONFIG_PACKAGE_LOCK", None),
+                ("npm_config_package_lock", None),
+                ("NPM_CONFIG_SAVE", None),
+                ("npm_config_save", None),
+                ("NPM_CONFIG_SAVE_EXACT", None),
+                ("npm_config_save_exact", None),
+                ("NPM_CONFIG_SAVE_BUNDLE", None),
+                ("npm_config_save_bundle", None),
+                ("NPM_CONFIG_SAVE_PREFIX", None),
+                ("npm_config_save_prefix", None),
+            ],
+            || {
+                assert_eq!(
+                    npm_args_with_config_defaults(&project, &args(&["install", "left-pad"]))
+                        .unwrap(),
+                    args(&["--save-bundle", "install", "left-pad"])
+                );
+                let action = parse_npm_compat_action(
+                    &npm_args_with_config_defaults(&project, &args(&["install", "left-pad"]))
+                        .unwrap(),
+                )
+                .unwrap();
+                let NpmCompatAction::Install {
+                    save, save_bundle, ..
+                } = action
+                else {
+                    panic!("expected npm install action");
+                };
+                assert!(save);
+                assert!(save_bundle);
+            },
+        );
+
+        let _ = fs::remove_dir_all(project);
     }
 
     #[test]
@@ -28761,6 +29096,81 @@ mod tests {
         let _ = fs::remove_dir_all(project);
         let _ = fs::remove_dir_all(package);
         let _ = fs::remove_dir_all(transient);
+    }
+
+    #[test]
+    fn npm_install_save_bundle_updates_package_json() {
+        let project = test_dir("npm-install-save-bundle-project");
+        fs::write(
+            project.join("package.json"),
+            r#"{"name":"root","version":"1.0.0"}"#,
+        )
+        .unwrap();
+
+        let package = test_dir("npm-install-save-bundle-package");
+        fs::write(
+            package.join("package.json"),
+            r#"{"name":"bundled-tarball","version":"1.2.3"}"#,
+        )
+        .unwrap();
+        fs::write(package.join("index.js"), "module.exports = 42;\n").unwrap();
+
+        let tarball = project.join("bundled-tarball-1.2.3.tgz");
+        let files = collect_npm_pack_files(&package).unwrap();
+        write_npm_pack_tarball(&tarball, &files).unwrap();
+
+        let status = run_npm_compat(
+            &project,
+            &args(&[
+                "install",
+                "--package-lock-only",
+                "--save-bundle",
+                tarball.to_str().unwrap(),
+            ]),
+        )
+        .unwrap();
+
+        assert_eq!(status, ExitCode::SUCCESS);
+        let package_json = read_npm_pkg_json(&project.join("package.json")).unwrap();
+        let saved = package_json
+            .get("dependencies")
+            .and_then(serde_json::Value::as_object)
+            .and_then(|dependencies| dependencies.get("bundled-tarball"))
+            .and_then(serde_json::Value::as_str)
+            .unwrap();
+        assert!(saved.starts_with("file://"));
+        assert_eq!(
+            package_json
+                .get("bundleDependencies")
+                .and_then(serde_json::Value::as_array)
+                .and_then(|entries| entries.first())
+                .and_then(serde_json::Value::as_str),
+            Some("bundled-tarball")
+        );
+        let package_lock: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(project.join("package-lock.json")).unwrap())
+                .unwrap();
+        assert_eq!(
+            package_lock["packages"][""]["bundleDependencies"][0],
+            "bundled-tarball"
+        );
+
+        let status = run_npm_compat(&project, &args(&["uninstall", "bundled-tarball"])).unwrap();
+        assert_eq!(status, ExitCode::SUCCESS);
+        let package_json = read_npm_pkg_json(&project.join("package.json")).unwrap();
+        assert!(package_json
+            .get("dependencies")
+            .and_then(serde_json::Value::as_object)
+            .is_none_or(|dependencies| !dependencies.contains_key("bundled-tarball")));
+        assert!(package_json
+            .get("bundleDependencies")
+            .and_then(serde_json::Value::as_array)
+            .is_none_or(|entries| entries
+                .iter()
+                .all(|entry| entry.as_str() != Some("bundled-tarball"))));
+
+        let _ = fs::remove_dir_all(project);
+        let _ = fs::remove_dir_all(package);
     }
 
     #[test]
@@ -29850,6 +30260,7 @@ verdict = "accepted"
                 global: false,
                 save: true,
                 save_prefix: DEFAULT_NPM_SAVE_PREFIX.to_owned(),
+                save_bundle: false,
                 dependency_kind: ManifestDependencyKind::Production,
                 omit_dev: false,
                 omit_optional: false,
@@ -30051,6 +30462,7 @@ verdict = "accepted"
                 global: false,
                 save: true,
                 save_prefix: DEFAULT_NPM_SAVE_PREFIX.to_owned(),
+                save_bundle: false,
                 dependency_kind: ManifestDependencyKind::Dev,
                 omit_dev: true,
                 omit_optional: false,
@@ -30119,6 +30531,32 @@ verdict = "accepted"
         };
         assert_eq!(save_prefix, "~");
 
+        let bundled = parse_npm_compat_action(&args(&["in", "-B", "left-pad"])).unwrap();
+        let NpmCompatAction::Install {
+            save,
+            save_bundle,
+            specs,
+            ..
+        } = bundled
+        else {
+            panic!("expected npm install action");
+        };
+        assert!(save);
+        assert!(save_bundle);
+        assert_eq!(specs, vec!["left-pad".to_owned()]);
+
+        let unbundled = parse_npm_compat_action(&args(&[
+            "install",
+            "--save-bundle",
+            "--no-save-bundle",
+            "left-pad",
+        ]))
+        .unwrap();
+        let NpmCompatAction::Install { save_bundle, .. } = unbundled else {
+            panic!("expected npm install action");
+        };
+        assert!(!save_bundle);
+
         assert_eq!(
             parse_npm_compat_action(&args(&["install", "--save-optional", "fsevents"])).unwrap(),
             NpmCompatAction::Install {
@@ -30128,6 +30566,7 @@ verdict = "accepted"
                 global: false,
                 save: true,
                 save_prefix: DEFAULT_NPM_SAVE_PREFIX.to_owned(),
+                save_bundle: false,
                 dependency_kind: ManifestDependencyKind::Optional,
                 omit_dev: false,
                 omit_optional: false,
@@ -30154,6 +30593,7 @@ verdict = "accepted"
                 global: false,
                 save: true,
                 save_prefix: DEFAULT_NPM_SAVE_PREFIX.to_owned(),
+                save_bundle: false,
                 dependency_kind: ManifestDependencyKind::Peer,
                 omit_dev: false,
                 omit_optional: false,
@@ -30189,6 +30629,7 @@ verdict = "accepted"
                 global: false,
                 save: true,
                 save_prefix: DEFAULT_NPM_SAVE_PREFIX.to_owned(),
+                save_bundle: false,
                 dependency_kind: ManifestDependencyKind::Production,
                 omit_dev: false,
                 omit_optional: false,
@@ -30226,6 +30667,7 @@ verdict = "accepted"
                     archive_references: Vec::new(),
                     local_paths: vec![PathBuf::from("../local-pkg")],
                     save: false,
+                    save_bundle: false,
                     dependency_kind: ManifestDependencyKind::Production,
                     omit_dev: false,
                     omit_optional: false,
@@ -30254,6 +30696,7 @@ verdict = "accepted"
                     archive_references: Vec::new(),
                     local_paths: Vec::new(),
                     save: true,
+                    save_bundle: false,
                     dependency_kind: ManifestDependencyKind::Dev,
                     omit_dev: true,
                     omit_optional: false,
@@ -30285,6 +30728,7 @@ verdict = "accepted"
                     ],
                     local_paths: Vec::new(),
                     save: false,
+                    save_bundle: false,
                     dependency_kind: ManifestDependencyKind::Production,
                     omit_dev: false,
                     omit_optional: false,
@@ -30319,6 +30763,7 @@ verdict = "accepted"
                 global: false,
                 save: false,
                 save_prefix: DEFAULT_NPM_SAVE_PREFIX.to_owned(),
+                save_bundle: false,
                 dependency_kind: ManifestDependencyKind::Production,
                 omit_dev: false,
                 omit_optional: true,
@@ -30349,6 +30794,7 @@ verdict = "accepted"
                 global: false,
                 save: true,
                 save_prefix: DEFAULT_NPM_SAVE_PREFIX.to_owned(),
+                save_bundle: false,
                 dependency_kind: ManifestDependencyKind::Production,
                 omit_dev: false,
                 omit_optional: false,
@@ -30478,6 +30924,7 @@ verdict = "accepted"
                 global: false,
                 save: true,
                 save_prefix: DEFAULT_NPM_SAVE_PREFIX.to_owned(),
+                save_bundle: false,
                 dependency_kind: ManifestDependencyKind::Production,
                 omit_dev: false,
                 omit_optional: false,
@@ -30561,6 +31008,7 @@ verdict = "accepted"
                 local_paths: Vec::new(),
                 save: true,
                 save_prefix: DEFAULT_NPM_SAVE_PREFIX.to_owned(),
+                save_bundle: false,
                 dependency_kind: ManifestDependencyKind::Production,
                 omit_dev: true,
                 omit_optional: false,
@@ -30596,6 +31044,7 @@ verdict = "accepted"
                 local_paths: Vec::new(),
                 save: true,
                 save_prefix: DEFAULT_NPM_SAVE_PREFIX.to_owned(),
+                save_bundle: false,
                 dependency_kind: ManifestDependencyKind::Production,
                 omit_dev: true,
                 omit_optional: false,
@@ -30632,6 +31081,7 @@ verdict = "accepted"
                 global: false,
                 save: false,
                 save_prefix: DEFAULT_NPM_SAVE_PREFIX.to_owned(),
+                save_bundle: false,
                 dependency_kind: ManifestDependencyKind::Production,
                 omit_dev: true,
                 omit_optional: false,
@@ -30658,6 +31108,7 @@ verdict = "accepted"
                 global: false,
                 save: true,
                 save_prefix: DEFAULT_NPM_SAVE_PREFIX.to_owned(),
+                save_bundle: false,
                 dependency_kind: ManifestDependencyKind::Dev,
                 omit_dev: false,
                 omit_optional: false,
@@ -33729,6 +34180,7 @@ verdict = "accepted"
             "left.pad",
             "1.3.0",
             ManifestDependencyKind::Production,
+            false,
         )
         .unwrap();
         let package = read_npm_pkg_json(&dir.join("packages/lib/package.json")).unwrap();
@@ -33756,6 +34208,7 @@ verdict = "accepted"
             &dir.join("packages/lib"),
             &PathBuf::from("vendor/local-pkg"),
             ManifestDependencyKind::Dev,
+            false,
         )
         .unwrap();
         let package = read_npm_pkg_json(&dir.join("packages/lib/package.json")).unwrap();
