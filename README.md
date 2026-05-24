@@ -567,8 +567,9 @@ Supported now:
   delegating to pip; common global pip flags such as
   `--disable-pip-version-check`, `--quiet`, `--timeout`, `--retries`,
   `--trusted-host`, `--cert`, `--client-cert`, and `--cache-dir` are accepted
-  before the subcommand; `pip uninstall -r requirements.txt` removes named
-  requirements from the OMC manifest and reinstalls the remaining graph; common
+  before the subcommand; `pip uninstall` removes OMC manifest dependencies or,
+  when a package only exists in the current locked environment, removes the
+  locked package and reinstalls the remaining environment; common
   `pip install --report path` JSON reports and registry/archive
   `pip install --dry-run` resolution, including local editable paths and VCS
   requirements, without writing the current OMC manifest, lockfile, or

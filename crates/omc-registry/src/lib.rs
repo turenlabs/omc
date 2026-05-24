@@ -967,6 +967,53 @@ pub fn remove_manifest_dependency(
     Ok(removed)
 }
 
+pub fn remove_locked_packages(
+    project_dir: impl AsRef<Path>,
+    specs: &[PackageSpec],
+) -> Result<Vec<String>> {
+    let project_dir = project_dir.as_ref();
+    let lockfile = project_dir.join(LOCKFILE);
+    let mut lock = read_lockfile(&lockfile)?;
+    let mut removed = Vec::new();
+    lock.packages.retain(|package| {
+        let should_remove = specs
+            .iter()
+            .any(|spec| locked_package_matches_spec(package, spec));
+        if should_remove {
+            removed.push(locked_package_key(package));
+            false
+        } else {
+            true
+        }
+    });
+
+    let removed_pypi_names = specs
+        .iter()
+        .filter(|spec| spec.ecosystem == Ecosystem::Pypi)
+        .map(|spec| normalize_pypi_name(&spec.name))
+        .collect::<BTreeSet<_>>();
+    if !removed_pypi_names.is_empty() {
+        lock.python_vcs.retain(|dependency| {
+            !removed_pypi_names.contains(&normalize_pypi_name(&dependency.name))
+        });
+    }
+
+    if !removed.is_empty() {
+        fs::write(lockfile, toml::to_string_pretty(&lock)?)?;
+    }
+    Ok(removed)
+}
+
+fn locked_package_matches_spec(package: &LockedPackage, spec: &PackageSpec) -> bool {
+    if package.ecosystem != spec.ecosystem {
+        return false;
+    }
+    match spec.ecosystem {
+        Ecosystem::Npm => package.name == spec.name,
+        Ecosystem::Pypi => normalize_pypi_name(&package.name) == normalize_pypi_name(&spec.name),
+    }
+}
+
 pub fn check_pypi_lock(lock: &OmcLock) -> Vec<PypiCheckIssue> {
     let constraints = BTreeMap::new();
     let hashes = BTreeMap::new();
@@ -16977,6 +17024,42 @@ packages:
         assert_eq!(removed, 1);
         assert_eq!(lock.packages.len(), 1);
         assert_eq!(lock.packages[0].name, "left-pad");
+    }
+
+    #[test]
+    fn removes_locked_packages_by_requested_spec() {
+        let dir = tempfile::tempdir().unwrap();
+        let keep = locked_package_for_test(Ecosystem::Pypi, "idna", "3.7");
+        let remove = locked_package_for_test(Ecosystem::Pypi, "Requests", "2.32.3");
+        fs::write(
+            dir.path().join("omc.lock"),
+            toml::to_string_pretty(&OmcLock {
+                version: 1,
+                packages: vec![keep, remove],
+                python_vcs: vec![LockedPythonVcsDependency {
+                    name: "requests".to_owned(),
+                    url: "https://example.invalid/requests.git".to_owned(),
+                    reference: None,
+                    resolved_commit: "0123456789abcdef0123456789abcdef01234567".to_owned(),
+                    archive: String::new(),
+                    sha256: String::new(),
+                    subdirectory: None,
+                    extras: Vec::new(),
+                }],
+            })
+            .unwrap(),
+        )
+        .unwrap();
+
+        let removed =
+            remove_locked_packages(dir.path(), &[PackageSpec::parse("pypi:requests").unwrap()])
+                .unwrap();
+
+        let lock = read_lockfile(dir.path().join("omc.lock")).unwrap();
+        assert_eq!(removed, vec!["pypi:Requests@2.32.3".to_owned()]);
+        assert_eq!(lock.packages.len(), 1);
+        assert_eq!(lock.packages[0].name, "idna");
+        assert!(lock.python_vcs.is_empty());
     }
 
     #[test]

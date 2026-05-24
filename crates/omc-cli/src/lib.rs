@@ -26,21 +26,21 @@ use omc_registry::{
     read_npm_ping_with_userconfig, read_npm_profile, read_npm_search, read_npm_stars,
     read_npm_team_users, read_npm_teams, read_npm_token_list, read_npm_whoami,
     read_npm_workspace_packages, read_package_scripts, read_pip_config_snapshot,
-    read_pypi_available_versions, read_requirements_files, remove_manifest_dependency,
-    remove_npm_dist_tag, remove_npm_org_user, remove_npm_team_user, revoke_npm_access,
-    revoke_npm_token, set_npm_access_mfa, set_npm_access_status, set_npm_org_user,
-    set_npm_profile_property, unpublish_npm_package, upload_pypi_distribution, Behavior, Ecosystem,
-    InstallReport, LinkOptions, LockedPackage, LockedPythonVcsDependency, ManifestDependencyKind,
-    NpmAccessMapResult, NpmAccessMutationResult, NpmAccessStatusResult, NpmAccessToken,
-    NpmDeprecateResult, NpmDistTagMutationResult, NpmOrgListResult, NpmOrgMutationResult,
-    NpmOwnerListResult, NpmOwnerMutationResult, NpmPackageTarball, NpmPingResult,
-    NpmProfileMutationResult, NpmProfileResult, NpmProvenanceBundle, NpmPublishPackage,
-    NpmPublishResult, NpmSearchPackage, NpmStarMutationResult, NpmStarsResult, NpmTeamListResult,
-    NpmTeamMutationResult, NpmTokenCreateOptions, NpmTokenCreateResult, NpmTokenListResult,
-    NpmTokenRevokeResult, NpmUnpublishResult, NpmWhoamiResult, NpmWorkspacePackage,
-    OmcRegistryError, PackageSpec, ProjectRequirements, PypiBinaryMode, PypiCheckIssue,
-    PypiUploadOptions, PypiUploadResult, PypiUploadSignature, PythonLocalRequirement,
-    PythonVcsRequirement, Verdict,
+    read_pypi_available_versions, read_requirements_files, remove_locked_packages,
+    remove_manifest_dependency, remove_npm_dist_tag, remove_npm_org_user, remove_npm_team_user,
+    revoke_npm_access, revoke_npm_token, set_npm_access_mfa, set_npm_access_status,
+    set_npm_org_user, set_npm_profile_property, unpublish_npm_package, upload_pypi_distribution,
+    Behavior, Ecosystem, InstallReport, LinkOptions, LockedPackage, LockedPythonVcsDependency,
+    ManifestDependencyKind, NpmAccessMapResult, NpmAccessMutationResult, NpmAccessStatusResult,
+    NpmAccessToken, NpmDeprecateResult, NpmDistTagMutationResult, NpmOrgListResult,
+    NpmOrgMutationResult, NpmOwnerListResult, NpmOwnerMutationResult, NpmPackageTarball,
+    NpmPingResult, NpmProfileMutationResult, NpmProfileResult, NpmProvenanceBundle,
+    NpmPublishPackage, NpmPublishResult, NpmSearchPackage, NpmStarMutationResult, NpmStarsResult,
+    NpmTeamListResult, NpmTeamMutationResult, NpmTokenCreateOptions, NpmTokenCreateResult,
+    NpmTokenListResult, NpmTokenRevokeResult, NpmUnpublishResult, NpmWhoamiResult,
+    NpmWorkspacePackage, OmcRegistryError, PackageSpec, ProjectRequirements, PypiBinaryMode,
+    PypiCheckIssue, PypiUploadOptions, PypiUploadResult, PypiUploadSignature,
+    PythonLocalRequirement, PythonVcsRequirement, Verdict,
 };
 use sha2::{Digest, Sha256, Sha384, Sha512};
 
@@ -1432,6 +1432,7 @@ fn run() -> Result<ExitCode, OmcRegistryError> {
                 &allow,
                 allow_all_host,
                 true,
+                false,
             )?;
         }
         Command::Allow { grants } => {
@@ -3003,6 +3004,7 @@ fn run_npm_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
                 &allow,
                 allow_all_host,
                 true,
+                false,
             )?;
         }
         NpmCompatAction::Maintenance {
@@ -3278,6 +3280,7 @@ fn run_pip_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
                 &allow,
                 allow_all_host,
                 false,
+                true,
             )?;
         }
         PipCompatAction::Show { specs, files } => {
@@ -11197,22 +11200,40 @@ fn remove_specs(
     allow: &[String],
     allow_all_host: bool,
     update_npm_package_json: bool,
+    allow_locked_pypi_removal: bool,
 ) -> Result<(), OmcRegistryError> {
     let specs = parse_package_specs(specs, ecosystem_hint)?;
     let update_npm_package_json =
         update_npm_package_json && specs.iter().any(|spec| spec.ecosystem == Ecosystem::Npm);
+    let allow_locked_pypi_removal =
+        allow_locked_pypi_removal && specs.iter().any(|spec| spec.ecosystem == Ecosystem::Pypi);
     let mut removed = Vec::new();
+    let mut removed_locked = false;
+    let mut removed_manifest = false;
     for spec in &specs {
         let removed_from_manifest = remove_manifest_dependency(project_dir, spec)?;
+        removed_manifest |= removed_from_manifest;
         let removed_from_package_json =
             if update_npm_package_json && spec.ecosystem == Ecosystem::Npm {
                 remove_root_npm_package_json_dependency(project_dir, &spec.name)?
             } else {
                 false
             };
-        if !removed_from_manifest && !removed_from_package_json {
+        let locked_removals = if !removed_from_manifest
+            && !removed_from_package_json
+            && allow_locked_pypi_removal
+            && spec.ecosystem == Ecosystem::Pypi
+        {
+            remove_locked_packages(project_dir, std::slice::from_ref(spec))?
+        } else {
+            Vec::new()
+        };
+        removed_locked |= !locked_removals.is_empty();
+        if !removed_from_manifest && !removed_from_package_json && locked_removals.is_empty() {
             let sources = if update_npm_package_json && spec.ecosystem == Ecosystem::Npm {
                 "omc.toml or package.json"
+            } else if allow_locked_pypi_removal && spec.ecosystem == Ecosystem::Pypi {
+                "omc.toml or omc.lock"
             } else {
                 "omc.toml"
             };
@@ -11224,10 +11245,14 @@ fn remove_specs(
         removed.push(spec.package_key());
     }
 
-    let mut options = LinkOptions::new(project_dir);
-    options.allowed_capabilities = parse_grants(allow, allow_all_host)?;
-    options.discover_project_requirements = update_npm_package_json;
-    let install = install_project(&options)?;
+    let install = if removed_locked && !removed_manifest && !update_npm_package_json {
+        install_locked_packages(project_dir)?
+    } else {
+        let mut options = LinkOptions::new(project_dir);
+        options.allowed_capabilities = parse_grants(allow, allow_all_host)?;
+        options.discover_project_requirements = update_npm_package_json;
+        install_project(&options)?
+    };
     println!("removed {}", removed.join(", "));
     print_install_report(&install);
     Ok(())
@@ -25408,6 +25433,56 @@ version = "0.1.0"
                 action: PipCacheAction::Purge,
             }
         );
+    }
+
+    #[test]
+    fn pip_uninstall_removes_locked_package_without_manifest_dependency() {
+        let project = test_dir("pip-uninstall-locked-package");
+        fs::write(
+            project.join("omc.lock"),
+            r#"version = 1
+
+[[packages]]
+ecosystem = "pypi"
+name = "Requests"
+version = "2.32.3"
+source_url = ""
+archive = ""
+artifact = ""
+sha256 = ""
+behavior = "pure"
+verdict = "accepted"
+
+[[python_vcs]]
+name = "requests"
+url = "https://example.invalid/requests.git"
+resolved_commit = "0123456789abcdef0123456789abcdef01234567"
+"#,
+        )
+        .unwrap();
+        fs::create_dir_all(
+            project
+                .join(".omc")
+                .join("python")
+                .join("site-packages")
+                .join("requests-2.32.3.dist-info"),
+        )
+        .unwrap();
+
+        let status = run_pip_compat(&project, &args(&["uninstall", "-y", "requests"])).unwrap();
+
+        assert_eq!(status, ExitCode::SUCCESS);
+        let lock = read_lockfile(project.join("omc.lock")).unwrap();
+        assert!(lock.packages.is_empty());
+        assert!(lock.python_vcs.is_empty());
+        assert!(!project
+            .join(".omc")
+            .join("python")
+            .join("site-packages")
+            .join("requests-2.32.3.dist-info")
+            .exists());
+
+        let _ = fs::remove_dir_all(project);
     }
 
     #[test]
