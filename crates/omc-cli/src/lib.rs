@@ -443,6 +443,10 @@ enum NpmCompatAction {
     Explore {
         action: NpmExploreAction,
     },
+    Edit {
+        target: String,
+        editor: Option<String>,
+    },
     Path {
         kind: NpmPathKind,
         global: bool,
@@ -2796,6 +2800,79 @@ fn npm_explore_shell(shell: Option<String>) -> String {
         })
 }
 
+fn run_npm_edit(
+    project_dir: &Path,
+    invocation_cwd: &Path,
+    target: &str,
+    editor: Option<String>,
+) -> Result<ExitCode, OmcRegistryError> {
+    let edit_path = npm_edit_target_path(project_dir, target)?;
+    if !edit_path.exists() {
+        return Err(OmcRegistryError::UnsupportedSpec(format!(
+            "npm edit target `{target}` is not installed under {}",
+            project_dir.join("node_modules").display()
+        )));
+    }
+
+    let editor = npm_config_editor(editor);
+    let mut command = package_script_command(&editor);
+    command.current_dir(invocation_cwd).arg(&edit_path);
+    let status = command.status()?;
+    Ok(exit_code(status.code()))
+}
+
+fn npm_edit_target_path(project_dir: &Path, target: &str) -> Result<PathBuf, OmcRegistryError> {
+    let (package, subpath) = npm_edit_target_parts(target)?;
+    let package_dir = npm_installed_package_dir(project_dir, &package)?;
+    if subpath.components().next().is_none() {
+        return Ok(package_dir);
+    }
+    Ok(package_dir.join(subpath))
+}
+
+fn npm_edit_target_parts(target: &str) -> Result<(String, PathBuf), OmcRegistryError> {
+    let target = target.trim();
+    if target.is_empty() || target.starts_with('/') || target.starts_with('\\') {
+        return Err(OmcRegistryError::UnsupportedSpec(
+            "npm edit needs a package".to_owned(),
+        ));
+    }
+
+    let mut parts = target.split('/').filter(|part| !part.is_empty());
+    let first = parts
+        .next()
+        .ok_or_else(|| OmcRegistryError::UnsupportedSpec("npm edit needs a package".to_owned()))?;
+    if first.contains('\\') {
+        return Err(OmcRegistryError::UnsupportedSpec(format!(
+            "invalid npm edit target `{target}`"
+        )));
+    }
+    let package = if first.starts_with('@') {
+        let second = parts.next().ok_or_else(|| {
+            OmcRegistryError::UnsupportedSpec(format!("invalid npm edit target `{target}`"))
+        })?;
+        if second.contains('\\') {
+            return Err(OmcRegistryError::UnsupportedSpec(format!(
+                "invalid npm edit target `{target}`"
+            )));
+        }
+        format!("{first}/{second}")
+    } else {
+        first.to_owned()
+    };
+
+    let mut subpath = PathBuf::new();
+    for part in parts {
+        if matches!(part, "." | "..") || part.contains('\\') {
+            return Err(OmcRegistryError::UnsupportedSpec(format!(
+                "invalid npm edit subpath `{target}`"
+            )));
+        }
+        subpath.push(part);
+    }
+    Ok((package, subpath))
+}
+
 fn run_npm_create(cwd: &Path, action: NpmCreateAction) -> Result<ExitCode, OmcRegistryError> {
     let package_spec = npm_create_package_spec(&action.initializer)?;
     let spec = parse_package_spec(&package_spec, Some(Ecosystem::Npm))?;
@@ -4068,6 +4145,9 @@ fn run_npm_compat_with_cwd(
             return run_npm_exec(project_dir, invocation_cwd, action)
         }
         NpmCompatAction::Explore { action } => return run_npm_explore(project_dir, action),
+        NpmCompatAction::Edit { target, editor } => {
+            return run_npm_edit(project_dir, invocation_cwd, &target, editor)
+        }
         NpmCompatAction::Path { kind, global } => print_npm_path(project_dir, kind, global)?,
         NpmCompatAction::List { action } => print_locked_packages(
             project_dir,
@@ -7723,6 +7803,13 @@ fn npm_help_text(topic: Option<&str>) -> String {
                 "Supports --shell for the interactive shell path.",
             ],
         ),
+        Some("edit") => npm_command_help(
+            "npm edit <package>[/<subpath>]",
+            &[
+                "Open an installed package directory or safe subpath in an editor.",
+                "Supports --editor, VISUAL, and EDITOR. OMC does not run package lifecycle scripts after editing.",
+            ],
+        ),
         Some("remove") => npm_command_help(
             "npm remove <package-spec>...",
             &[
@@ -7996,7 +8083,7 @@ fn npm_general_help_text() -> String {
         "npm <command>",
         &[
             "OMC npm compatibility runs supported npm workflows through OMC's verifier, lockfile, cache, and project-local runtime paths.",
-            "Supported commands: install, link, install-test, ci, install-ci-test, remove, run, test, start, stop, restart, exec, explore, completion, help-search, list, query, explain, audit, doctor, outdated, fund, prune, dedupe, rebuild, cache, pkg, version, shrinkwrap, pack, publish, unpublish, deprecate, undeprecate, diff, search, star, unstar, stars, ping, whoami, login, adduser, logout, token, profile, owner, access, org, team, dist-tag, sbom, view, docs, repo, bugs, home, config, get, set, init, create, bin, root, prefix.",
+            "Supported commands: install, link, install-test, ci, install-ci-test, remove, run, test, start, stop, restart, exec, explore, edit, completion, help-search, list, query, explain, audit, doctor, outdated, fund, prune, dedupe, rebuild, cache, pkg, version, shrinkwrap, pack, publish, unpublish, deprecate, undeprecate, diff, search, star, unstar, stars, ping, whoami, login, adduser, logout, token, profile, owner, access, org, team, dist-tag, sbom, view, docs, repo, bugs, home, config, get, set, init, create, bin, root, prefix.",
             "Use `npm help <command>` for focused OMC compatibility notes.",
         ],
     )
@@ -8028,6 +8115,7 @@ fn npm_help_topic(topic: &str) -> Option<&'static str> {
         "completion" => Some("completion"),
         "help-search" => Some("help-search"),
         "explore" => Some("explore"),
+        "edit" => Some("edit"),
         "remove" | "uninstall" | "rm" | "un" => Some("remove"),
         "list" | "ls" | "ll" | "la" => Some("list"),
         "query" => Some("query"),
@@ -8090,6 +8178,7 @@ const NPM_COMPLETION_COMMANDS: &[&str] = &[
     "dist-tag",
     "docs",
     "doctor",
+    "edit",
     "exec",
     "explain",
     "explore",
@@ -8158,6 +8247,7 @@ const NPM_COMPLETION_PACKAGE_COMMANDS: &[&str] = &[
     "access",
     "deprecate",
     "diff",
+    "edit",
     "explain",
     "explore",
     "fund",
@@ -20788,6 +20878,7 @@ fn parse_npm_compat_action(args: &[String]) -> Result<NpmCompatAction, OmcRegist
             action: parse_npm_exec_args(command, &args[1..])?,
         }),
         "explore" => parse_npm_explore_args(&args[1..]),
+        "edit" => parse_npm_edit_args(&args[1..]),
         "bin" => {
             let global = parse_npm_path_args("npm bin", &args[1..])?;
             Ok(NpmCompatAction::Path {
@@ -21025,6 +21116,7 @@ fn npm_global_arg_supported_by_command(command: &str, arg: &str) -> bool {
                 | "install-test"
                 | "it"
                 | "explore"
+                | "edit"
                 | "init"
                 | "create"
                 | "innit"
@@ -21070,6 +21162,9 @@ fn npm_global_arg_supported_by_command(command: &str, arg: &str) -> bool {
     }
     if matches!(arg, "--shell") || arg.starts_with("--shell=") {
         return command == "explore";
+    }
+    if matches!(arg, "--editor") || arg.starts_with("--editor=") {
+        return matches!(command, "edit" | "config" | "c");
     }
     if matches!(arg, "--otp") || arg.starts_with("--otp=") {
         return matches!(
@@ -21586,6 +21681,7 @@ fn npm_global_preserved_value_flag(arg: &str) -> bool {
             | "--otp"
             | "--auth-type"
             | "--shell"
+            | "--editor"
             | "--token"
             | "--auth-token"
             | "--tag"
@@ -21637,6 +21733,7 @@ fn npm_global_preserved_equals_flag(arg: &str) -> bool {
         "--otp=",
         "--auth-type=",
         "--shell=",
+        "--editor=",
         "--token=",
         "--auth-token=",
         "--tag=",
@@ -26433,6 +26530,56 @@ fn parse_npm_explore_args(args: &[String]) -> Result<NpmCompatAction, OmcRegistr
 
 fn npm_explore_equals_value_flag(arg: &str) -> bool {
     ["--shell=", "--loglevel=", "--cache=", "--registry="]
+        .iter()
+        .any(|prefix| arg.starts_with(prefix))
+}
+
+fn parse_npm_edit_args(args: &[String]) -> Result<NpmCompatAction, OmcRegistryError> {
+    let mut editor = None;
+    let mut positionals = Vec::new();
+    let mut index = 0;
+    while index < args.len() {
+        let arg = &args[index];
+        if arg == "--editor" {
+            index += 1;
+            let Some(value) = args.get(index) else {
+                return Err(OmcRegistryError::UnsupportedSpec(
+                    "--editor needs a value".to_owned(),
+                ));
+            };
+            editor = Some(value.clone());
+        } else if let Some(value) = arg.strip_prefix("--editor=") {
+            editor = Some(value.to_owned());
+        } else if matches!(arg.as_str(), "--loglevel" | "--cache" | "--registry") {
+            index += 1;
+            if args.get(index).is_none() {
+                return Err(OmcRegistryError::UnsupportedSpec(format!(
+                    "{arg} needs a value"
+                )));
+            }
+        } else if npm_edit_equals_value_flag(arg) {
+        } else if arg.starts_with('-') {
+            return Err(unsupported_compat_arg("npm edit", arg));
+        } else {
+            positionals.push(arg.clone());
+        }
+        index += 1;
+    }
+
+    match positionals.as_slice() {
+        [] => Err(OmcRegistryError::UnsupportedSpec(
+            "npm edit needs a package".to_owned(),
+        )),
+        [target] => Ok(NpmCompatAction::Edit {
+            target: target.clone(),
+            editor,
+        }),
+        [_, extra, ..] => Err(unsupported_compat_arg("npm edit", extra)),
+    }
+}
+
+fn npm_edit_equals_value_flag(arg: &str) -> bool {
+    ["--editor=", "--loglevel=", "--cache=", "--registry="]
         .iter()
         .any(|prefix| arg.starts_with(prefix))
 }
@@ -33955,6 +34102,19 @@ verdict = "accepted"
             }
         );
         assert_eq!(
+            parse_npm_compat_action(&args(&[
+                "--editor",
+                "true",
+                "edit",
+                "@scope/pkg/package.json",
+            ]))
+            .unwrap(),
+            NpmCompatAction::Edit {
+                target: "@scope/pkg/package.json".to_owned(),
+                editor: Some("true".to_owned()),
+            }
+        );
+        assert_eq!(
             parse_npm_compat_action(&args(&["bin", "--silent"])).unwrap(),
             NpmCompatAction::Path {
                 kind: NpmPathKind::Bin,
@@ -36864,6 +37024,51 @@ verdict = "accepted"
             .unwrap()
             .contains("registry=https://edited-npm.example/npm\n"));
         assert!(!invocation_cwd.join(".npmrc").exists());
+    }
+
+    #[test]
+    fn direct_npm_edit_runs_editor_for_installed_package() {
+        let project = test_dir("direct-npm-edit-project");
+        let invocation_cwd = project.join("work/release");
+        let package_dir = project.join("node_modules/@scope/pkg");
+        fs::create_dir_all(&invocation_cwd).unwrap();
+        fs::create_dir_all(&package_dir).unwrap();
+        fs::write(
+            project.join("package.json"),
+            r#"{ "name": "root", "version": "1.0.0" }"#,
+        )
+        .unwrap();
+        fs::write(
+            package_dir.join("package.json"),
+            r#"{ "name": "@scope/pkg", "version": "1.0.0" }"#,
+        )
+        .unwrap();
+        let editor_script = invocation_cwd.join("edit-package.sh");
+        fs::write(
+            &editor_script,
+            "#!/bin/sh\nprintf 'edited=true\\n' > \"$1\"\n",
+        )
+        .unwrap();
+        let editor = format!("sh {}", editor_script.display());
+
+        let status = run_npm_compat_with_cwd(
+            &project,
+            &args(&[
+                "--editor",
+                editor.as_str(),
+                "edit",
+                "@scope/pkg/package.json",
+            ]),
+            &invocation_cwd,
+        )
+        .unwrap();
+
+        assert_eq!(status, ExitCode::SUCCESS);
+        assert_eq!(
+            fs::read_to_string(package_dir.join("package.json")).unwrap(),
+            "edited=true\n"
+        );
+        assert!(npm_edit_target_parts("left-pad/..").is_err());
     }
 
     #[test]
