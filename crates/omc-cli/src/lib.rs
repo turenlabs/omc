@@ -12160,7 +12160,26 @@ fn print_locked_freeze(project_dir: &Path) -> Result<(), OmcRegistryError> {
     for dependency in &lock.python_vcs {
         println!("{}", pip_freeze_vcs_requirement(dependency));
     }
+    for requirement in pip_freeze_local_path_requirements(project_dir)? {
+        println!("{requirement}");
+    }
     Ok(())
+}
+
+fn pip_freeze_local_path_requirements(project_dir: &Path) -> Result<Vec<String>, OmcRegistryError> {
+    let local_paths_file = project_dir.join(".omc").join("python").join("local-paths");
+    let content = match fs::read_to_string(local_paths_file) {
+        Ok(content) => content,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(error.into()),
+    };
+    let requirements = content
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(|path| format!("-e {path}"))
+        .collect::<BTreeSet<_>>();
+    Ok(requirements.into_iter().collect())
 }
 
 fn pip_freeze_vcs_requirement(dependency: &LockedPythonVcsDependency) -> String {
@@ -25385,6 +25404,41 @@ version = "0.1.0"
             .contains("has no associated attestations"));
 
         fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn pip_freeze_lists_installed_local_paths() {
+        let project = test_dir("pip-freeze-local-paths-project");
+        let local_a = test_dir("pip-freeze-local-path-a");
+        let local_b = test_dir("pip-freeze-local-path-b");
+        let python_dir = project.join(".omc").join("python");
+        fs::create_dir_all(&python_dir).unwrap();
+        fs::write(
+            python_dir.join("local-paths"),
+            format!(
+                "{}\n\n{}\n{}\n",
+                local_b.display(),
+                local_a.display(),
+                local_b.display()
+            ),
+        )
+        .unwrap();
+
+        assert_eq!(
+            pip_freeze_local_path_requirements(&project).unwrap(),
+            vec![
+                format!("-e {}", local_a.display()),
+                format!("-e {}", local_b.display())
+            ]
+        );
+        assert_eq!(
+            pip_freeze_local_path_requirements(&test_dir("pip-freeze-no-local-paths")).unwrap(),
+            Vec::<String>::new()
+        );
+
+        fs::remove_dir_all(project).unwrap();
+        fs::remove_dir_all(local_a).unwrap();
+        fs::remove_dir_all(local_b).unwrap();
     }
 
     #[test]
