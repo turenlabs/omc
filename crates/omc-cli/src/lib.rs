@@ -1917,6 +1917,7 @@ fn run_pip_lock(project_dir: &Path, action: PipLockAction) -> Result<ExitCode, O
     options.pypi_binary_packages = binary_packages;
     apply_pip_compatibility_target(&mut options, compatibility);
     options.python_vcs_requirements = vcs_requirements;
+    apply_pip_constraint_files_for_explicit_specs(&mut options)?;
 
     let mut resolved_specs = parse_package_specs(&specs, Some(Ecosystem::Pypi))?;
     resolved_specs.extend(parse_pip_archive_references(
@@ -5038,6 +5039,8 @@ fn run_pip_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
                 apply_pip_compatibility_target(&mut options, compatibility);
                 options.python_target_dir = target.map(|path| absolutize_path(project_dir, path));
                 options.python_vcs_requirements = vcs_requirements;
+                apply_pip_environment_defaults_for_project(&mut options, project_dir);
+                apply_pip_constraint_files_for_explicit_specs(&mut options)?;
                 let mut specs = parse_package_specs(&specs, Some(Ecosystem::Pypi))?;
                 specs.extend(parse_pip_archive_references(
                     project_dir,
@@ -6053,6 +6056,7 @@ fn run_pip_install_target(
         target,
     ));
     options.python_vcs_requirements = vcs_requirements;
+    apply_pip_constraint_files_for_explicit_specs(&mut options)?;
 
     let mut resolved_specs = parse_package_specs(&specs, Some(Ecosystem::Pypi))?;
     resolved_specs.extend(parse_pip_archive_references(
@@ -6165,6 +6169,7 @@ fn run_pip_install_prefix(
     options.python_target_dir = Some(paths.site_packages);
     options.python_bin_dir = Some(paths.bin_dir);
     options.python_vcs_requirements = vcs_requirements;
+    apply_pip_constraint_files_for_explicit_specs(&mut options)?;
 
     let mut resolved_specs = parse_package_specs(&specs, Some(Ecosystem::Pypi))?;
     resolved_specs.extend(parse_pip_archive_references(
@@ -6275,6 +6280,7 @@ fn run_pip_install_root(
     options.python_target_dir = Some(paths.site_packages);
     options.python_bin_dir = Some(paths.bin_dir);
     options.python_vcs_requirements = vcs_requirements;
+    apply_pip_constraint_files_for_explicit_specs(&mut options)?;
 
     let mut resolved_specs = parse_package_specs(&specs, Some(Ecosystem::Pypi))?;
     resolved_specs.extend(parse_pip_archive_references(
@@ -6401,6 +6407,7 @@ fn run_pip_install_user(
     options.python_target_dir = Some(site_packages.clone());
     options.python_bin_dir = Some(install_bin_dir);
     options.python_vcs_requirements = vcs_requirements;
+    apply_pip_constraint_files_for_explicit_specs(&mut options)?;
 
     let mut resolved_specs = parse_package_specs(&specs, Some(Ecosystem::Pypi))?;
     resolved_specs.extend(parse_pip_archive_references(
@@ -11485,6 +11492,19 @@ fn apply_pypi_install_requirements(
     options
         .python_vcs_requirements
         .extend(requirements.python_vcs_requirements);
+}
+
+fn apply_pip_constraint_files_for_explicit_specs(
+    options: &mut LinkOptions,
+) -> Result<(), OmcRegistryError> {
+    if options.constraint_files.is_empty() {
+        return Ok(());
+    }
+
+    let constraints = read_constraint_files(&options.constraint_files)?;
+    let mut ignored_specs = Vec::new();
+    apply_pypi_install_requirements(options, &mut ignored_specs, constraints);
+    Ok(())
 }
 
 fn copy_downloaded_pypi_archives(
@@ -28126,6 +28146,8 @@ mod tests {
                 ("PIP_INDEX_URL", None),
                 ("PIP_EXTRA_INDEX_URL", None),
                 ("PIP_FIND_LINKS", None),
+                ("PIP_REQUIREMENT", None),
+                ("PIP_CONSTRAINT", None),
                 ("PIP_NO_INDEX", None),
                 ("PIP_TARGET", None),
                 ("PIP_PREFIX", None),
@@ -35980,6 +36002,79 @@ print("ok")
         let local_paths =
             fs::read_to_string(project.join(".omc").join("python").join("local-paths")).unwrap();
         assert!(local_paths.contains("vendor/scriptdep/src"));
+        fs::remove_dir_all(project).unwrap();
+    }
+
+    #[test]
+    fn pip_install_explicit_spec_applies_constraint_file_before_resolution() {
+        let project = test_dir("pip-install-explicit-constraint-project");
+        let dist = project.join("dist");
+        fs::create_dir_all(&dist).unwrap();
+        fs::write(
+            dist.join("constraint_pkg-1.0.0.tar.gz"),
+            pypi_sdist_for_test(
+                "constraint_pkg-1.0.0",
+                &[
+                    (
+                        "PKG-INFO",
+                        "Metadata-Version: 2.1\nName: constraint-pkg\nVersion: 1.0.0\n",
+                    ),
+                    ("constraint_pkg/__init__.py", "VALUE = 'constrained'\n"),
+                ],
+            ),
+        )
+        .unwrap();
+        fs::write(
+            dist.join("constraint_pkg-2.0.0.tar.gz"),
+            pypi_sdist_for_test(
+                "constraint_pkg-2.0.0",
+                &[
+                    (
+                        "PKG-INFO",
+                        "Metadata-Version: 2.1\nName: constraint-pkg\nVersion: 2.0.0\n",
+                    ),
+                    ("constraint_pkg/__init__.py", "VALUE = 'latest'\n"),
+                ],
+            ),
+        )
+        .unwrap();
+        fs::write(project.join("constraints.txt"), "constraint-pkg==1.0.0\n").unwrap();
+
+        let status = with_clean_pip_env(|| {
+            run_pip_compat(
+                &project,
+                &args(&[
+                    "install",
+                    "--no-index",
+                    "--find-links",
+                    "dist",
+                    "--no-deps",
+                    "-c",
+                    "constraints.txt",
+                    "constraint-pkg>=1",
+                ]),
+            )
+        })
+        .unwrap();
+
+        assert_eq!(status, ExitCode::SUCCESS);
+        assert_eq!(
+            fs::read_to_string(
+                project.join(".omc/python/site-packages/constraint_pkg/__init__.py")
+            )
+            .unwrap(),
+            "VALUE = 'constrained'\n"
+        );
+        let lock = read_lockfile(project.join("omc.lock")).unwrap();
+        assert!(lock
+            .packages
+            .iter()
+            .any(|package| package.name == "constraint-pkg" && package.version == "1.0.0"));
+        assert!(!lock
+            .packages
+            .iter()
+            .any(|package| package.name == "constraint-pkg" && package.version == "2.0.0"));
+
         fs::remove_dir_all(project).unwrap();
     }
 
