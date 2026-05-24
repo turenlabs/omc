@@ -310,6 +310,7 @@ enum NpmCompatAction {
         specs: Vec<String>,
         archive_references: Vec<String>,
         local_paths: Vec<PathBuf>,
+        global: bool,
         save: bool,
         save_prefix: String,
         dependency_kind: ManifestDependencyKind,
@@ -356,6 +357,7 @@ enum NpmCompatAction {
     },
     Remove {
         specs: Vec<String>,
+        global: bool,
         allow: Vec<String>,
         allow_all_host: bool,
         workspaces: Vec<String>,
@@ -391,6 +393,7 @@ enum NpmCompatAction {
     },
     Path {
         kind: NpmPathKind,
+        global: bool,
     },
     List {
         action: NpmListAction,
@@ -2301,6 +2304,7 @@ struct NpmInstallCompatRequest {
     specs: Vec<String>,
     archive_references: Vec<String>,
     local_paths: Vec<PathBuf>,
+    global: bool,
     save: bool,
     save_prefix: String,
     dependency_kind: ManifestDependencyKind,
@@ -2347,6 +2351,7 @@ fn run_npm_install_compat(
         specs,
         archive_references,
         local_paths,
+        global,
         save,
         save_prefix,
         dependency_kind,
@@ -2362,6 +2367,31 @@ fn run_npm_install_compat(
         all_workspaces,
         include_workspace_root,
     } = request;
+    if global {
+        return run_npm_global_install_compat(
+            project_dir,
+            NpmInstallCompatRequest {
+                specs,
+                archive_references,
+                local_paths,
+                global: false,
+                save,
+                save_prefix,
+                dependency_kind,
+                omit_dev,
+                omit_optional,
+                omit_peer,
+                lock_only,
+                dry_run,
+                npm_registry,
+                allow,
+                allow_all_host,
+                workspaces,
+                all_workspaces,
+                include_workspace_root,
+            },
+        );
+    }
     if dry_run {
         return run_npm_install_dry_run(
             project_dir,
@@ -2369,6 +2399,7 @@ fn run_npm_install_compat(
                 specs,
                 archive_references,
                 local_paths,
+                global: false,
                 save,
                 save_prefix,
                 dependency_kind,
@@ -2395,6 +2426,7 @@ fn run_npm_install_compat(
                 specs,
                 archive_references,
                 local_paths,
+                global: false,
                 save,
                 save_prefix,
                 dependency_kind,
@@ -2489,6 +2521,53 @@ fn run_npm_install_compat(
     Ok(ExitCode::SUCCESS)
 }
 
+fn run_npm_global_install_compat(
+    input_project_dir: &Path,
+    mut request: NpmInstallCompatRequest,
+) -> Result<ExitCode, OmcRegistryError> {
+    if !request.workspaces.is_empty() || request.all_workspaces || request.include_workspace_root {
+        return Err(OmcRegistryError::UnsupportedSpec(
+            "npm global install does not support workspace selection".to_owned(),
+        ));
+    }
+    let prefix = npm_global_prefix_path();
+    let global_project_dir = npm_global_project_dir_from_prefix(&prefix);
+    request.local_paths = absolutize_paths(input_project_dir, request.local_paths);
+    request.archive_references =
+        absolutize_npm_archive_references(input_project_dir, request.archive_references);
+    request.global = false;
+    request.save = true;
+    request.workspaces = Vec::new();
+    request.all_workspaces = false;
+    request.include_workspace_root = false;
+
+    let dry_run = request.dry_run;
+    let status = run_npm_install_compat(&global_project_dir, request)?;
+    if status == ExitCode::SUCCESS && !dry_run {
+        sync_npm_global_bins(&prefix, &global_project_dir)?;
+    }
+    Ok(status)
+}
+
+fn run_npm_global_remove_compat(
+    specs: &[String],
+    allow: &[String],
+    allow_all_host: bool,
+) -> Result<(), OmcRegistryError> {
+    let prefix = npm_global_prefix_path();
+    let global_project_dir = npm_global_project_dir_from_prefix(&prefix);
+    remove_specs(
+        &global_project_dir,
+        specs,
+        Some(Ecosystem::Npm),
+        allow,
+        allow_all_host,
+        true,
+        false,
+    )?;
+    sync_npm_global_bins(&prefix, &global_project_dir)
+}
+
 fn npm_package_json_requirement_for_link_root(
     spec: &PackageSpec,
     locked: &LockedPackage,
@@ -2556,6 +2635,7 @@ fn run_npm_install_workspace_compat(
         specs,
         archive_references,
         local_paths,
+        global: _,
         save,
         save_prefix,
         dependency_kind,
@@ -2758,6 +2838,7 @@ fn run_npm_link_compat(
                     specs: Vec::new(),
                     archive_references,
                     local_paths,
+                    global: false,
                     save,
                     save_prefix: DEFAULT_NPM_SAVE_PREFIX.to_owned(),
                     dependency_kind,
@@ -2887,6 +2968,7 @@ fn run_npm_install_dry_run(
         specs,
         archive_references,
         local_paths,
+        global: _,
         save: _,
         save_prefix: _,
         dependency_kind: _,
@@ -2994,6 +3076,7 @@ fn run_npm_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
             specs,
             archive_references,
             local_paths,
+            global,
             save,
             save_prefix,
             dependency_kind,
@@ -3015,6 +3098,7 @@ fn run_npm_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
                     specs,
                     archive_references,
                     local_paths,
+                    global,
                     save,
                     save_prefix,
                     dependency_kind,
@@ -3073,6 +3157,7 @@ fn run_npm_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
                         specs,
                         archive_references,
                         local_paths,
+                        global: false,
                         save,
                         save_prefix,
                         dependency_kind,
@@ -3124,12 +3209,22 @@ fn run_npm_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
         }
         NpmCompatAction::Remove {
             specs,
+            global,
             allow,
             allow_all_host,
             workspaces,
             all_workspaces,
             include_workspace_root,
         } => {
+            if global {
+                if !workspaces.is_empty() || all_workspaces || include_workspace_root {
+                    return Err(OmcRegistryError::UnsupportedSpec(
+                        "npm global remove does not support workspace selection".to_owned(),
+                    ));
+                }
+                run_npm_global_remove_compat(&specs, &allow, allow_all_host)?;
+                return Ok(ExitCode::SUCCESS);
+            }
             if !workspaces.is_empty() || all_workspaces || include_workspace_root {
                 return run_npm_remove_workspace_compat(
                     project_dir,
@@ -3193,7 +3288,7 @@ fn run_npm_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
         }
         NpmCompatAction::Exec { action } => return run_npm_exec(project_dir, action),
         NpmCompatAction::Explore { action } => return run_npm_explore(project_dir, action),
-        NpmCompatAction::Path { kind } => print_npm_path(project_dir, kind)?,
+        NpmCompatAction::Path { kind, global } => print_npm_path(project_dir, kind, global)?,
         NpmCompatAction::List { action } => print_locked_packages(
             project_dir,
             Some(Ecosystem::Npm),
@@ -4349,12 +4444,25 @@ fn rewrite_pip_dry_run_install_paths(
     install.python_bin_dir = install.python_site_packages.join("bin");
 }
 
-fn print_npm_path(project_dir: &Path, kind: NpmPathKind) -> Result<(), OmcRegistryError> {
+fn print_npm_path(
+    project_dir: &Path,
+    kind: NpmPathKind,
+    global: bool,
+) -> Result<(), OmcRegistryError> {
     let project_dir = absolute_project_dir(project_dir);
-    let path = match kind {
-        NpmPathKind::Bin => project_dir.join("node_modules").join(".bin"),
-        NpmPathKind::Root => project_dir.join("node_modules"),
-        NpmPathKind::Prefix => project_dir,
+    let path = if global {
+        let prefix = npm_global_prefix_path();
+        match kind {
+            NpmPathKind::Bin => npm_global_bin_dir_from_prefix(&prefix),
+            NpmPathKind::Root => npm_global_project_dir_from_prefix(&prefix).join("node_modules"),
+            NpmPathKind::Prefix => prefix,
+        }
+    } else {
+        match kind {
+            NpmPathKind::Bin => project_dir.join("node_modules").join(".bin"),
+            NpmPathKind::Root => project_dir.join("node_modules"),
+            NpmPathKind::Prefix => project_dir,
+        }
     };
     println!("{}", path.display());
     Ok(())
@@ -5543,6 +5651,182 @@ fn npm_global_prefix_path() -> PathBuf {
         return prefix;
     }
     npm_default_global_prefix_path()
+}
+
+#[cfg(windows)]
+fn npm_global_project_dir_from_prefix(prefix: &Path) -> PathBuf {
+    prefix.to_path_buf()
+}
+
+#[cfg(not(windows))]
+fn npm_global_project_dir_from_prefix(prefix: &Path) -> PathBuf {
+    prefix.join("lib")
+}
+
+#[cfg(windows)]
+fn npm_global_bin_dir_from_prefix(prefix: &Path) -> PathBuf {
+    prefix.to_path_buf()
+}
+
+#[cfg(not(windows))]
+fn npm_global_bin_dir_from_prefix(prefix: &Path) -> PathBuf {
+    prefix.join("bin")
+}
+
+fn sync_npm_global_bins(prefix: &Path, global_project_dir: &Path) -> Result<(), OmcRegistryError> {
+    let source_bin = global_project_dir.join("node_modules").join(".bin");
+    let target_bin = npm_global_bin_dir_from_prefix(prefix);
+    fs::create_dir_all(&target_bin)?;
+    remove_stale_npm_global_bins(&target_bin, &source_bin)?;
+    if !source_bin.exists() {
+        return Ok(());
+    }
+    for entry in fs::read_dir(&source_bin)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        let Some(name) = name
+            .to_str()
+            .filter(|name| npm_global_bin_name_is_safe(name))
+        else {
+            continue;
+        };
+        let source = entry.path();
+        let metadata = fs::symlink_metadata(&source)?;
+        if metadata.is_dir() && !metadata.file_type().is_symlink() {
+            continue;
+        }
+        let target = target_bin.join(name);
+        remove_cli_path_if_exists(&target)?;
+        create_npm_global_bin_link(&source, &target)?;
+    }
+    Ok(())
+}
+
+fn remove_stale_npm_global_bins(
+    target_bin: &Path,
+    source_bin: &Path,
+) -> Result<(), OmcRegistryError> {
+    if !target_bin.exists() {
+        return Ok(());
+    }
+    for entry in fs::read_dir(target_bin)? {
+        let entry = entry?;
+        let path = entry.path();
+        if npm_global_bin_owned_by_omc(&path, source_bin)? {
+            remove_cli_path_if_exists(&path)?;
+        }
+    }
+    Ok(())
+}
+
+fn npm_global_bin_owned_by_omc(path: &Path, source_bin: &Path) -> Result<bool, OmcRegistryError> {
+    let metadata = fs::symlink_metadata(path)?;
+    if metadata.file_type().is_symlink() {
+        let target = fs::read_link(path)?;
+        let target = if target.is_absolute() {
+            target
+        } else {
+            path.parent().unwrap_or_else(|| Path::new("")).join(target)
+        };
+        return Ok(target.starts_with(source_bin));
+    }
+    if metadata.is_file() {
+        let content = fs::read_to_string(path).unwrap_or_default();
+        return Ok(content.contains("OMC global npm shim")
+            && content.contains(&source_bin.display().to_string()));
+    }
+    Ok(false)
+}
+
+fn npm_global_bin_name_is_safe(name: &str) -> bool {
+    !name.is_empty() && !name.contains('/') && !name.contains('\\') && name != "." && name != ".."
+}
+
+fn remove_cli_path_if_exists(path: &Path) -> Result<(), OmcRegistryError> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {
+            fs::remove_dir_all(path)?;
+        }
+        Ok(_) => {
+            fs::remove_file(path)?;
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(OmcRegistryError::Io(error)),
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn create_npm_global_bin_link(source: &Path, target: &Path) -> Result<(), OmcRegistryError> {
+    std::os::unix::fs::symlink(source, target)?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn create_npm_global_bin_link(source: &Path, target: &Path) -> Result<(), OmcRegistryError> {
+    fs::write(
+        target,
+        format!(
+            "@echo off\r\nREM OMC global npm shim {}\r\n\"{}\" %*\r\n",
+            source.parent().unwrap_or_else(|| Path::new("")).display(),
+            source.display()
+        ),
+    )?;
+    Ok(())
+}
+
+fn absolutize_npm_archive_references(base_dir: &Path, references: Vec<String>) -> Vec<String> {
+    references
+        .into_iter()
+        .map(|reference| absolutize_npm_archive_reference(base_dir, &reference))
+        .collect()
+}
+
+fn absolutize_npm_archive_reference(base_dir: &Path, reference: &str) -> String {
+    if reference.starts_with("http://") || reference.starts_with("https://") {
+        return reference.to_owned();
+    }
+    let (scheme, value) = reference
+        .strip_prefix("file:")
+        .map(|value| ("file:", value))
+        .unwrap_or(("", reference));
+    let (path, suffix) = split_npm_archive_suffix(value);
+    if !npm_archive_reference_is_local(path) {
+        return reference.to_owned();
+    }
+    let path = expand_cli_local_path(path, base_dir);
+    format!("{scheme}{}{}", path.display(), suffix)
+}
+
+fn split_npm_archive_suffix(value: &str) -> (&str, &str) {
+    let suffix_index = [value.find('#'), value.find('?')]
+        .into_iter()
+        .flatten()
+        .min()
+        .unwrap_or(value.len());
+    value.split_at(suffix_index)
+}
+
+fn npm_archive_reference_is_local(value: &str) -> bool {
+    value.starts_with("./")
+        || value.starts_with("../")
+        || value.starts_with('/')
+        || value.starts_with("~/")
+        || value.contains('\\')
+}
+
+fn expand_cli_local_path(value: &str, base_dir: &Path) -> PathBuf {
+    if let Some(rest) = value.strip_prefix("~/") {
+        if let Some(home) = env::var_os("HOME") {
+            return PathBuf::from(home).join(rest);
+        }
+    }
+    let path = Path::new(value);
+    if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        base_dir.join(path)
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -15011,6 +15295,7 @@ fn parse_npm_compat_action(args: &[String]) -> Result<NpmCompatAction, OmcRegist
             specs: Vec::new(),
             archive_references: Vec::new(),
             local_paths: Vec::new(),
+            global: false,
             save: true,
             save_prefix: DEFAULT_NPM_SAVE_PREFIX.to_owned(),
             dependency_kind: ManifestDependencyKind::Production,
@@ -15061,6 +15346,19 @@ fn parse_npm_compat_action(args: &[String]) -> Result<NpmCompatAction, OmcRegist
             })
         }
         "remove" | "uninstall" | "rm" | "un" => {
+            let mut global = false;
+            let mut filtered = Vec::new();
+            for arg in &args[1..] {
+                if matches!(arg.as_str(), "--global" | "-g") {
+                    global = true;
+                } else if arg == "--global=false" {
+                    global = false;
+                } else if matches!(arg.as_str(), "--global=true" | "--location=global") {
+                    global = true;
+                } else {
+                    filtered.push(arg.clone());
+                }
+            }
             let CommonCompatFlags {
                 allow,
                 allow_all_host,
@@ -15069,7 +15367,7 @@ fn parse_npm_compat_action(args: &[String]) -> Result<NpmCompatAction, OmcRegist
                 include_workspace_root,
                 positionals,
                 ..
-            } = parse_common_compat_flags(&args[1..], true)?;
+            } = parse_common_compat_flags(&filtered, true)?;
             if positionals.is_empty() {
                 return Err(OmcRegistryError::UnsupportedSpec(
                     "npm remove needs at least one package".to_owned(),
@@ -15077,6 +15375,7 @@ fn parse_npm_compat_action(args: &[String]) -> Result<NpmCompatAction, OmcRegist
             }
             Ok(NpmCompatAction::Remove {
                 specs: positionals,
+                global,
                 allow,
                 allow_all_host,
                 workspaces,
@@ -15147,21 +15446,24 @@ fn parse_npm_compat_action(args: &[String]) -> Result<NpmCompatAction, OmcRegist
         }),
         "explore" => parse_npm_explore_args(&args[1..]),
         "bin" => {
-            parse_npm_path_args("npm bin", &args[1..])?;
+            let global = parse_npm_path_args("npm bin", &args[1..])?;
             Ok(NpmCompatAction::Path {
                 kind: NpmPathKind::Bin,
+                global,
             })
         }
         "root" => {
-            parse_npm_path_args("npm root", &args[1..])?;
+            let global = parse_npm_path_args("npm root", &args[1..])?;
             Ok(NpmCompatAction::Path {
                 kind: NpmPathKind::Root,
+                global,
             })
         }
         "prefix" => {
-            parse_npm_path_args("npm prefix", &args[1..])?;
+            let global = parse_npm_path_args("npm prefix", &args[1..])?;
             Ok(NpmCompatAction::Path {
                 kind: NpmPathKind::Prefix,
+                global,
             })
         }
         "list" | "ls" | "ll" | "la" => parse_npm_list_args(&args[1..]),
@@ -15328,7 +15630,7 @@ fn npm_preserved_global_args_for_command(command: &str, args: Vec<String>) -> Ve
 }
 
 fn npm_global_arg_supported_by_command(command: &str, arg: &str) -> bool {
-    if matches!(arg, "--global" | "-g") {
+    if matches!(arg, "--global" | "-g") || arg.starts_with("--global=") {
         return true;
     }
     if matches!(arg, "--registry") || arg.starts_with("--registry=") {
@@ -15874,6 +16176,7 @@ fn npm_global_preserved_equals_flag(arg: &str) -> bool {
         "--sbom-format=",
         "--sbom-type=",
         "--package-lock-only=",
+        "--global=",
         "--expect-results=",
         "--expect-result-count=",
         "--diff=",
@@ -15914,14 +16217,26 @@ fn npm_global_ignored_equals_flag(arg: &str) -> bool {
         .any(|prefix| arg.starts_with(prefix))
 }
 
-fn parse_npm_path_args(command: &str, args: &[String]) -> Result<(), OmcRegistryError> {
+fn parse_npm_path_args(command: &str, args: &[String]) -> Result<bool, OmcRegistryError> {
+    let mut global = false;
     for arg in args {
         if matches!(arg.as_str(), "--silent" | "-s" | "--parseable" | "-p") {
             continue;
         }
+        if matches!(
+            arg.as_str(),
+            "--global" | "-g" | "--global=true" | "--location=global"
+        ) {
+            global = true;
+            continue;
+        }
+        if arg == "--global=false" {
+            global = false;
+            continue;
+        }
         return Err(unsupported_compat_arg(command, arg));
     }
-    Ok(())
+    Ok(global)
 }
 
 fn parse_npm_maintenance_args(
@@ -16301,6 +16616,7 @@ fn parse_npm_install_args(
 ) -> Result<NpmCompatAction, OmcRegistryError> {
     let mut archive_references = Vec::new();
     let mut local_paths = Vec::new();
+    let mut global = false;
     let mut dry_run = false;
     let mut filtered = Vec::new();
     let mut index = 0;
@@ -16308,6 +16624,12 @@ fn parse_npm_install_args(
         let arg = &args[index];
         if arg == "--dry-run" {
             dry_run = true;
+        } else if matches!(arg.as_str(), "--global" | "-g") {
+            global = true;
+        } else if arg == "--global=false" {
+            global = false;
+        } else if matches!(arg.as_str(), "--global=true" | "--location=global") {
+            global = true;
         } else if is_npm_archive_arg(arg) {
             archive_references.push(arg.clone());
         } else if ignored_npm_value_flag(arg) {
@@ -16355,6 +16677,7 @@ fn parse_npm_install_args(
         specs: positionals,
         archive_references,
         local_paths,
+        global,
         save,
         save_prefix,
         dependency_kind,
@@ -16527,6 +16850,7 @@ fn parse_npm_install_test_args(
         specs,
         archive_references,
         local_paths,
+        global,
         save,
         save_prefix,
         dependency_kind,
@@ -16545,6 +16869,11 @@ fn parse_npm_install_test_args(
     else {
         unreachable!("parse_npm_install_args only returns install actions")
     };
+    if global {
+        return Err(OmcRegistryError::UnsupportedSpec(format!(
+            "npm {command} does not support --global"
+        )));
+    }
     Ok(NpmCompatAction::InstallTest {
         command: command.to_owned(),
         use_ci,
@@ -23083,6 +23412,57 @@ mod tests {
     }
 
     #[test]
+    fn npm_global_install_uses_prefix_project_and_bins() {
+        let project = test_dir("npm-global-install-project");
+        let prefix = test_dir("npm-global-prefix");
+        let package = test_dir("npm-global-install-package");
+        fs::write(
+            package.join("package.json"),
+            r#"{"name":"global-tarball","version":"1.2.3","bin":{"global-bin":"cli.js"}}"#,
+        )
+        .unwrap();
+        fs::write(package.join("index.js"), "module.exports = 42;\n").unwrap();
+        fs::write(package.join("cli.js"), "#!/usr/bin/env node\n").unwrap();
+
+        let tarball = project.join("global-tarball-1.2.3.tgz");
+        let files = collect_npm_pack_files(&package).unwrap();
+        write_npm_pack_tarball(&tarball, &files).unwrap();
+
+        with_env_var("NPM_CONFIG_PREFIX", &prefix, || {
+            let status = run_npm_compat(
+                &project,
+                &args(&["install", "--global", tarball.to_str().unwrap()]),
+            )
+            .unwrap();
+            assert_eq!(status, ExitCode::SUCCESS);
+
+            let global_project = npm_global_project_dir_from_prefix(&prefix);
+            assert_eq!(
+                fs::read_to_string(global_project.join("node_modules/global-tarball/index.js"))
+                    .unwrap(),
+                "module.exports = 42;\n"
+            );
+            assert!(global_project.join("omc.toml").exists());
+            assert!(prefix.join("bin/global-bin").exists());
+            #[cfg(unix)]
+            assert_eq!(
+                fs::read_link(prefix.join("bin/global-bin")).unwrap(),
+                global_project.join("node_modules/.bin/global-bin")
+            );
+
+            let status =
+                run_npm_compat(&project, &args(&["remove", "-g", "global-tarball"])).unwrap();
+            assert_eq!(status, ExitCode::SUCCESS);
+            assert!(!prefix.join("bin/global-bin").exists());
+            assert!(!global_project.join("node_modules/global-tarball").exists());
+        });
+
+        let _ = fs::remove_dir_all(project);
+        let _ = fs::remove_dir_all(prefix);
+        let _ = fs::remove_dir_all(package);
+    }
+
+    #[test]
     fn npm_install_saves_root_package_json_dependencies() {
         let project = test_dir("npm-install-root-package-json-project");
         fs::write(
@@ -23395,6 +23775,7 @@ mod tests {
                 specs: vec!["left-pad".to_owned()],
                 archive_references: Vec::new(),
                 local_paths: Vec::new(),
+                global: false,
                 save: true,
                 save_prefix: DEFAULT_NPM_SAVE_PREFIX.to_owned(),
                 dependency_kind: ManifestDependencyKind::Production,
@@ -23591,6 +23972,7 @@ mod tests {
                 specs: vec!["left-pad@1.3.0".to_owned()],
                 archive_references: Vec::new(),
                 local_paths: Vec::new(),
+                global: false,
                 save: true,
                 save_prefix: DEFAULT_NPM_SAVE_PREFIX.to_owned(),
                 dependency_kind: ManifestDependencyKind::Dev,
@@ -23628,6 +24010,7 @@ mod tests {
                 specs: vec!["fsevents".to_owned()],
                 archive_references: Vec::new(),
                 local_paths: Vec::new(),
+                global: false,
                 save: true,
                 save_prefix: DEFAULT_NPM_SAVE_PREFIX.to_owned(),
                 dependency_kind: ManifestDependencyKind::Optional,
@@ -23651,6 +24034,7 @@ mod tests {
                 specs: vec!["react".to_owned()],
                 archive_references: Vec::new(),
                 local_paths: Vec::new(),
+                global: false,
                 save: true,
                 save_prefix: DEFAULT_NPM_SAVE_PREFIX.to_owned(),
                 dependency_kind: ManifestDependencyKind::Peer,
@@ -23683,6 +24067,7 @@ mod tests {
                 specs: vec!["@scope/runtime".to_owned()],
                 archive_references: vec!["./pkg.tgz".to_owned(), "file:../other.tgz".to_owned()],
                 local_paths: vec![PathBuf::from("../local-pkg")],
+                global: false,
                 save: true,
                 save_prefix: DEFAULT_NPM_SAVE_PREFIX.to_owned(),
                 dependency_kind: ManifestDependencyKind::Production,
@@ -23801,6 +24186,7 @@ mod tests {
                 specs: vec!["left-pad".to_owned()],
                 archive_references: Vec::new(),
                 local_paths: Vec::new(),
+                global: false,
                 save: false,
                 save_prefix: DEFAULT_NPM_SAVE_PREFIX.to_owned(),
                 dependency_kind: ManifestDependencyKind::Production,
@@ -23828,6 +24214,7 @@ mod tests {
                 specs: vec!["left-pad".to_owned()],
                 archive_references: Vec::new(),
                 local_paths: Vec::new(),
+                global: false,
                 save: true,
                 save_prefix: DEFAULT_NPM_SAVE_PREFIX.to_owned(),
                 dependency_kind: ManifestDependencyKind::Production,
@@ -23860,6 +24247,7 @@ mod tests {
                 specs: vec!["left-pad".to_owned()],
                 archive_references: Vec::new(),
                 local_paths: Vec::new(),
+                global: false,
                 save: true,
                 save_prefix: DEFAULT_NPM_SAVE_PREFIX.to_owned(),
                 dependency_kind: ManifestDependencyKind::Production,
@@ -23888,6 +24276,7 @@ mod tests {
             .unwrap(),
             NpmCompatAction::Remove {
                 specs: vec!["left-pad".to_owned()],
+                global: false,
                 allow: Vec::new(),
                 allow_all_host: false,
                 workspaces: vec!["@demo/lib".to_owned()],
@@ -23971,6 +24360,7 @@ mod tests {
                 specs: vec!["left-pad".to_owned()],
                 archive_references: Vec::new(),
                 local_paths: Vec::new(),
+                global: false,
                 save: false,
                 save_prefix: DEFAULT_NPM_SAVE_PREFIX.to_owned(),
                 dependency_kind: ManifestDependencyKind::Production,
@@ -23994,6 +24384,7 @@ mod tests {
                 specs: vec!["left-pad".to_owned()],
                 archive_references: Vec::new(),
                 local_paths: Vec::new(),
+                global: false,
                 save: true,
                 save_prefix: DEFAULT_NPM_SAVE_PREFIX.to_owned(),
                 dependency_kind: ManifestDependencyKind::Dev,
@@ -24309,18 +24700,28 @@ mod tests {
             parse_npm_compat_action(&args(&["bin", "--silent"])).unwrap(),
             NpmCompatAction::Path {
                 kind: NpmPathKind::Bin,
+                global: false,
             }
         );
         assert_eq!(
             parse_npm_compat_action(&args(&["root"])).unwrap(),
             NpmCompatAction::Path {
                 kind: NpmPathKind::Root,
+                global: false,
             }
         );
         assert_eq!(
             parse_npm_compat_action(&args(&["prefix", "--parseable"])).unwrap(),
             NpmCompatAction::Path {
                 kind: NpmPathKind::Prefix,
+                global: false,
+            }
+        );
+        assert_eq!(
+            parse_npm_compat_action(&args(&["--global", "bin"])).unwrap(),
+            NpmCompatAction::Path {
+                kind: NpmPathKind::Bin,
+                global: true,
             }
         );
         assert_eq!(
