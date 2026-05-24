@@ -646,6 +646,7 @@ pub struct LinkOptions {
     pub pypi_environment_base_dir: Option<PathBuf>,
     pub python_target_dir: Option<PathBuf>,
     pub python_bin_dir: Option<PathBuf>,
+    pub python_target_overwrite_existing: bool,
     pub npm_local_paths: Vec<PathBuf>,
     pub python_local_paths: Vec<PathBuf>,
     pub python_local_requirements: Vec<PythonLocalRequirement>,
@@ -690,6 +691,7 @@ impl LinkOptions {
             pypi_environment_base_dir: None,
             python_target_dir: None,
             python_bin_dir: None,
+            python_target_overwrite_existing: true,
             npm_local_paths: Vec::new(),
             python_local_paths: Vec::new(),
             python_local_requirements: Vec::new(),
@@ -1265,6 +1267,7 @@ pub fn install_project(options: &LinkOptions) -> Result<InstallReport> {
         &lock,
         options.python_target_dir.as_deref(),
         options.python_bin_dir.as_deref(),
+        options.python_target_overwrite_existing,
     )?;
     report.npm_bins += install_npm_project_links(
         &options.project_dir,
@@ -1331,6 +1334,7 @@ pub fn install_locked_project(options: &LinkOptions) -> Result<InstallReport> {
         &selected,
         options.python_target_dir.as_deref(),
         options.python_bin_dir.as_deref(),
+        options.python_target_overwrite_existing,
     )?;
     report.npm_bins += install_npm_project_links(
         &options.project_dir,
@@ -6733,6 +6737,7 @@ pub fn install_locked_packages_with_python_target(
         &lock,
         Some(python_target_dir.as_ref()),
         None,
+        true,
     )?;
     report.npm_bins += install_npm_project_links(
         project_dir,
@@ -6749,7 +6754,7 @@ pub fn install_locked_packages_with_python_target(
 }
 
 fn install_lock(project_dir: &Path, lock: &OmcLock) -> Result<InstallReport> {
-    install_lock_with_python_target(project_dir, lock, None, None)
+    install_lock_with_python_target(project_dir, lock, None, None, true)
 }
 
 fn install_lock_with_python_target(
@@ -6757,6 +6762,7 @@ fn install_lock_with_python_target(
     lock: &OmcLock,
     python_target_dir: Option<&Path>,
     python_bin_dir: Option<&Path>,
+    overwrite_existing: bool,
 ) -> Result<InstallReport> {
     let node_modules = project_dir.join("node_modules");
     let npm_bin_dir = node_modules.join(".bin");
@@ -6830,6 +6836,7 @@ fn install_lock_with_python_target(
                     package,
                     &report.python_site_packages,
                     &report.python_bin_dir,
+                    overwrite_existing,
                 )?;
                 report.pypi_packages += 1;
             }
@@ -6886,7 +6893,7 @@ fn install_python_local_paths(
         local_paths_file,
         format!("{}\n", lines.into_iter().collect::<Vec<_>>().join("\n")),
     )?;
-    install_python_entry_point_scripts(&entry_points, bin_dir)
+    install_python_entry_point_scripts(&entry_points, bin_dir, true)
 }
 
 pub fn install_python_project_local_import_paths(
@@ -7318,10 +7325,17 @@ fn install_pypi_package(
     package: &LockedPackage,
     site_packages: &Path,
     bin_dir: &Path,
+    overwrite_existing: bool,
 ) -> Result<usize> {
     let archive_path = project_dir.join(&package.archive);
     if archive_path.extension().and_then(|ext| ext.to_str()) == Some("whl") {
-        return install_pypi_wheel_package(project_dir, package, site_packages, bin_dir);
+        return install_pypi_wheel_package(
+            project_dir,
+            package,
+            site_packages,
+            bin_dir,
+            overwrite_existing,
+        );
     }
     if archive_path
         .file_name()
@@ -7329,7 +7343,13 @@ fn install_pypi_package(
         .map(is_python_sdist_filename)
         .unwrap_or(false)
     {
-        return install_pypi_sdist_package(project_dir, package, site_packages, bin_dir);
+        return install_pypi_sdist_package(
+            project_dir,
+            package,
+            site_packages,
+            bin_dir,
+            overwrite_existing,
+        );
     }
 
     Err(OmcRegistryError::UnsupportedInstallArtifact(
@@ -7342,6 +7362,7 @@ fn install_pypi_wheel_package(
     package: &LockedPackage,
     site_packages: &Path,
     bin_dir: &Path,
+    overwrite_existing: bool,
 ) -> Result<usize> {
     let archive_path = project_dir.join(&package.archive);
     if archive_path.extension().and_then(|ext| ext.to_str()) != Some("whl") {
@@ -7353,9 +7374,19 @@ fn install_pypi_wheel_package(
     let reader = Cursor::new(read_locked_archive(project_dir, package)?);
     let mut archive = zip::ZipArchive::new(reader)?;
     let mut entry_points = Vec::new();
+    let existing_top_level = if overwrite_existing {
+        BTreeSet::new()
+    } else {
+        existing_top_level_targets(site_packages)?
+    };
     for index in 0..archive.len() {
         let mut file = archive.by_index(index)?;
-        let output = checked_join(site_packages, Path::new(file.name()))?;
+        let archive_path = Path::new(file.name());
+        if !overwrite_existing && wheel_path_has_existing_target(archive_path, &existing_top_level)
+        {
+            continue;
+        }
+        let output = checked_join(site_packages, archive_path)?;
 
         if file.is_dir() {
             fs::create_dir_all(output)?;
@@ -7376,7 +7407,7 @@ fn install_pypi_wheel_package(
         }
     }
 
-    install_python_entry_points(&entry_points, bin_dir)
+    install_python_entry_points(&entry_points, bin_dir, overwrite_existing)
 }
 
 fn install_pypi_sdist_package(
@@ -7384,6 +7415,7 @@ fn install_pypi_sdist_package(
     package: &LockedPackage,
     site_packages: &Path,
     bin_dir: &Path,
+    overwrite_existing: bool,
 ) -> Result<usize> {
     let source_dir = project_dir
         .join(".omc")
@@ -7409,10 +7441,11 @@ fn install_pypi_sdist_package(
     } else {
         source_dir.clone()
     };
-    let installed_files = copy_python_sdist_import_tree(&import_root, site_packages)?;
+    let installed_files =
+        copy_python_sdist_import_tree(&import_root, site_packages, overwrite_existing)?;
     write_python_sdist_dist_info(site_packages, package, installed_files)?;
     let entry_points = read_python_local_entry_points(&source_dir)?;
-    install_python_entry_point_scripts(&entry_points, bin_dir)
+    install_python_entry_point_scripts(&entry_points, bin_dir, overwrite_existing)
 }
 
 fn write_python_sdist_dist_info(
@@ -7545,8 +7578,17 @@ fn unpack_python_zip_sdist(bytes: &[u8], target: &Path) -> Result<()> {
     Ok(())
 }
 
-fn copy_python_sdist_import_tree(source: &Path, site_packages: &Path) -> Result<Vec<String>> {
+fn copy_python_sdist_import_tree(
+    source: &Path,
+    site_packages: &Path,
+    overwrite_existing: bool,
+) -> Result<Vec<String>> {
     let mut installed_files = Vec::new();
+    let existing_top_level = if overwrite_existing {
+        BTreeSet::new()
+    } else {
+        existing_top_level_targets(site_packages)?
+    };
     for entry in WalkDir::new(source)
         .into_iter()
         .filter_map(|entry| entry.ok())
@@ -7558,6 +7600,9 @@ fn copy_python_sdist_import_tree(source: &Path, site_packages: &Path) -> Result<
         if !should_copy_python_sdist_path(relative) {
             continue;
         }
+        if !overwrite_existing && sdist_path_has_existing_target(relative, &existing_top_level) {
+            continue;
+        }
         let output = checked_join(site_packages, relative)?;
         if let Some(parent) = output.parent() {
             fs::create_dir_all(parent)?;
@@ -7567,6 +7612,48 @@ fn copy_python_sdist_import_tree(source: &Path, site_packages: &Path) -> Result<
     }
     installed_files.sort();
     Ok(installed_files)
+}
+
+fn existing_top_level_targets(site_packages: &Path) -> Result<BTreeSet<String>> {
+    if !site_packages.exists() {
+        return Ok(BTreeSet::new());
+    }
+    let mut paths = BTreeSet::new();
+    for entry in fs::read_dir(site_packages)? {
+        let entry = entry?;
+        if let Some(name) = entry.file_name().to_str() {
+            paths.insert(name.to_owned());
+        }
+    }
+    Ok(paths)
+}
+
+fn wheel_path_has_existing_target(path: &Path, existing_top_level: &BTreeSet<String>) -> bool {
+    let Some(top_level) = top_level_archive_component(path) else {
+        return false;
+    };
+    if is_python_metadata_dir(top_level) {
+        return false;
+    }
+    existing_top_level.contains(top_level)
+}
+
+fn sdist_path_has_existing_target(path: &Path, existing_top_level: &BTreeSet<String>) -> bool {
+    let Some(top_level) = top_level_archive_component(path) else {
+        return false;
+    };
+    existing_top_level.contains(top_level)
+}
+
+fn top_level_archive_component(path: &Path) -> Option<&str> {
+    path.components()
+        .next()
+        .and_then(|component| component.as_os_str().to_str())
+        .filter(|component| !component.is_empty())
+}
+
+fn is_python_metadata_dir(name: &str) -> bool {
+    name.ends_with(".dist-info") || name.ends_with(".egg-info")
 }
 
 fn should_copy_python_sdist_path(path: &Path) -> bool {
@@ -7811,17 +7898,22 @@ fn install_npm_bins(package_dir: &Path, package_name: &str, bin_dir: &Path) -> R
     Ok(installed)
 }
 
-fn install_python_entry_points(entry_points: &[String], bin_dir: &Path) -> Result<usize> {
+fn install_python_entry_points(
+    entry_points: &[String],
+    bin_dir: &Path,
+    overwrite_existing: bool,
+) -> Result<usize> {
     let entries = entry_points
         .iter()
         .flat_map(|content| parse_python_entry_points(content))
         .collect::<Vec<_>>();
-    install_python_entry_point_scripts(&entries, bin_dir)
+    install_python_entry_point_scripts(&entries, bin_dir, overwrite_existing)
 }
 
 fn install_python_entry_point_scripts(
     entry_points: &[PythonEntryPoint],
     bin_dir: &Path,
+    overwrite_existing: bool,
 ) -> Result<usize> {
     fs::create_dir_all(bin_dir)?;
     let mut installed = 0;
@@ -7831,6 +7923,9 @@ fn install_python_entry_point_scripts(
             continue;
         }
         let target = bin_dir.join(&entry.name);
+        if !overwrite_existing && target.exists() {
+            continue;
+        }
         remove_path_if_exists(&target)?;
         fs::write(&target, python_entry_point_script(entry))?;
         make_executable(&target)?;
@@ -18968,6 +19063,7 @@ print("hi")
             },
             Some(&target),
             None,
+            true,
         )
         .unwrap();
         assert_eq!(report.pypi_packages, 1);

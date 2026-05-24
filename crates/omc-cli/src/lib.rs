@@ -1221,6 +1221,7 @@ struct PipInstallAction {
     require_hashes: bool,
     no_deps: bool,
     allow_prereleases: bool,
+    upgrade: bool,
     compatibility: PipCompatibilityTarget,
     target: Option<PathBuf>,
     prefix: Option<PathBuf>,
@@ -1839,6 +1840,7 @@ fn run_pip_lock(project_dir: &Path, action: PipLockAction) -> Result<ExitCode, O
         require_hashes,
         no_deps,
         allow_prereleases,
+        upgrade: _,
         compatibility,
         target,
         prefix,
@@ -2104,11 +2106,17 @@ impl TempOmcProject {
     }
 
     fn create_path(prefix: &str) -> Result<PathBuf, OmcRegistryError> {
+        static TEMP_PROJECT_COUNTER: std::sync::atomic::AtomicU64 =
+            std::sync::atomic::AtomicU64::new(0);
         let nonce = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_err(|error| OmcRegistryError::UnsupportedSpec(error.to_string()))?
             .as_nanos();
-        let path = env::temp_dir().join(format!("omc-{prefix}-{}-{nonce}", std::process::id()));
+        let sequence = TEMP_PROJECT_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let path = env::temp_dir().join(format!(
+            "omc-{prefix}-{}-{nonce}-{sequence}",
+            std::process::id()
+        ));
         let _ = fs::remove_dir_all(&path);
         fs::create_dir_all(&path)?;
         Ok(path)
@@ -4709,6 +4717,7 @@ fn run_pip_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
                 require_hashes,
                 no_deps,
                 allow_prereleases,
+                upgrade: _,
                 compatibility,
                 target,
                 prefix: _,
@@ -5491,6 +5500,7 @@ fn run_pip_install_dry_run(
         require_hashes,
         no_deps,
         allow_prereleases,
+        upgrade: _,
         compatibility,
         target,
         prefix,
@@ -5726,6 +5736,7 @@ fn run_pip_install_target(
         require_hashes,
         no_deps,
         allow_prereleases,
+        upgrade,
         compatibility,
         target,
         prefix: _,
@@ -5763,6 +5774,7 @@ fn run_pip_install_target(
     options.pypi_allow_prereleases = allow_prereleases;
     options.pypi_binary_all = binary_all;
     options.pypi_binary_packages = binary_packages;
+    options.python_target_overwrite_existing = upgrade;
     apply_pip_compatibility_target(&mut options, compatibility);
     options.python_target_dir = Some(pip_rooted_project_path(
         project_dir,
@@ -5836,6 +5848,7 @@ fn run_pip_install_prefix(
         require_hashes,
         no_deps,
         allow_prereleases,
+        upgrade: _,
         compatibility,
         target: _,
         prefix,
@@ -5946,6 +5959,7 @@ fn run_pip_install_root(
         require_hashes,
         no_deps,
         allow_prereleases,
+        upgrade: _,
         compatibility,
         target: _,
         prefix: _,
@@ -6054,6 +6068,7 @@ fn run_pip_install_user(
         require_hashes,
         no_deps,
         allow_prereleases,
+        upgrade: _,
         compatibility,
         target: _,
         prefix: _,
@@ -25457,6 +25472,7 @@ fn parse_pip_install_args(args: &[String]) -> Result<PipCompatAction, OmcRegistr
     let mut require_hashes = false;
     let mut no_deps = false;
     let mut allow_prereleases = false;
+    let mut upgrade = false;
     let mut compatibility = PipCompatibilityTarget::default();
     let mut target = None;
     let mut prefix = None;
@@ -25674,12 +25690,13 @@ fn parse_pip_install_args(args: &[String]) -> Result<PipCompatAction, OmcRegistr
             } else {
                 local_paths.push(pip_local_path_arg(path)?);
             }
+        } else if matches!(arg.as_str(), "--upgrade" | "-U") {
+            upgrade = true;
+        } else if arg == "--upgrade=false" {
+            upgrade = false;
         } else if matches!(
             arg.as_str(),
-            "--upgrade"
-                | "-U"
-                | "-I"
-                | "--break-system-packages"
+            "-I" | "--break-system-packages"
                 | "--disable-pip-version-check"
                 | "--no-cache-dir"
                 | "--force-reinstall"
@@ -25744,6 +25761,7 @@ fn parse_pip_install_args(args: &[String]) -> Result<PipCompatAction, OmcRegistr
         require_hashes,
         no_deps,
         allow_prereleases,
+        upgrade,
         compatibility,
         target,
         prefix,
@@ -27218,6 +27236,37 @@ mod tests {
             }
             result
         })
+    }
+
+    fn with_clean_pip_env<T>(f: impl FnOnce() -> T) -> T {
+        with_env_values(
+            &[
+                ("PIP_CONFIG_FILE", None),
+                ("PIP_INDEX_URL", None),
+                ("PIP_EXTRA_INDEX_URL", None),
+                ("PIP_FIND_LINKS", None),
+                ("PIP_NO_INDEX", None),
+                ("PIP_TARGET", None),
+                ("PIP_PREFIX", None),
+                ("PIP_ROOT", None),
+                ("PIP_USER", None),
+                ("PIP_DRY_RUN", None),
+                ("PIP_REPORT", None),
+                ("PIP_NO_DEPS", None),
+                ("PIP_REQUIRE_HASHES", None),
+                ("PIP_NO_BINARY", None),
+                ("PIP_ONLY_BINARY", None),
+                ("PIP_PRE", None),
+                ("PIP_PLATFORM", None),
+                ("PIP_PYTHON_VERSION", None),
+                ("PIP_IMPLEMENTATION", None),
+                ("PIP_ABI", None),
+                ("PIP_DEST", None),
+                ("PIP_DESTINATION_DIR", None),
+                ("PIP_WHEEL_DIR", None),
+            ],
+            f,
+        )
     }
 
     #[test]
@@ -32844,6 +32893,7 @@ verdict = "accepted"
             "-I",
             "--force-reinstall",
             "--ignore-installed",
+            "--upgrade",
             "--upgrade-strategy",
             "eager",
             "--src",
@@ -32900,6 +32950,7 @@ verdict = "accepted"
                 require_hashes: true,
                 no_deps: true,
                 allow_prereleases: true,
+                upgrade: true,
                 compatibility: PipCompatibilityTarget {
                     platforms: vec!["macosx_14_0_arm64".to_owned()],
                     python_version: Some("3.12".to_owned()),
@@ -33208,6 +33259,7 @@ verdict = "accepted"
                 require_hashes: false,
                 no_deps: false,
                 allow_prereleases: false,
+                upgrade: false,
                 compatibility: PipCompatibilityTarget::default(),
                 target: None,
                 prefix: None,
@@ -33247,6 +33299,7 @@ verdict = "accepted"
                 require_hashes: false,
                 no_deps: false,
                 allow_prereleases: false,
+                upgrade: false,
                 compatibility: PipCompatibilityTarget::default(),
                 target: None,
                 prefix: None,
@@ -33546,6 +33599,7 @@ version = "0.1.0"
                 require_hashes: false,
                 no_deps: false,
                 allow_prereleases: false,
+                upgrade: false,
                 compatibility: PipCompatibilityTarget::default(),
                 target: None,
                 prefix: None,
@@ -33800,16 +33854,18 @@ print("ok")
         )
         .unwrap();
 
-        let status = run_pip_compat(
-            &project,
-            &args(&[
-                "install",
-                "--target",
-                "vendor",
-                "--no-deps",
-                "./dist/demo_pkg-1.0.0.tar.gz",
-            ]),
-        )
+        let status = with_clean_pip_env(|| {
+            run_pip_compat(
+                &project,
+                &args(&[
+                    "install",
+                    "--target",
+                    "vendor",
+                    "--no-deps",
+                    "./dist/demo_pkg-1.0.0.tar.gz",
+                ]),
+            )
+        })
         .unwrap();
 
         assert_eq!(status, ExitCode::SUCCESS);
@@ -33859,6 +33915,176 @@ print("ok")
         assert!(!project.join("omc.toml").exists());
         assert!(!project.join("omc.lock").exists());
         assert!(!project.join(".omc").exists());
+
+        fs::remove_dir_all(project).unwrap();
+    }
+
+    #[test]
+    fn pip_install_target_preserves_existing_package_without_upgrade() {
+        let project = test_dir("pip-target-no-upgrade-project");
+        let dist = project.join("dist");
+        fs::create_dir_all(&dist).unwrap();
+        fs::write(
+            dist.join("target_keep_pkg-1.0.0.tar.gz"),
+            pypi_sdist_for_test(
+                "target_keep_pkg-1.0.0",
+                &[
+                    (
+                        "PKG-INFO",
+                        "Metadata-Version: 2.1\nName: target-keep-pkg\nVersion: 1.0.0\n",
+                    ),
+                    ("target_keep_pkg/__init__.py", "VALUE = 'old'\n"),
+                ],
+            ),
+        )
+        .unwrap();
+        fs::write(
+            dist.join("target_keep_pkg-1.1.0.tar.gz"),
+            pypi_sdist_for_test(
+                "target_keep_pkg-1.1.0",
+                &[
+                    (
+                        "PKG-INFO",
+                        "Metadata-Version: 2.1\nName: target-keep-pkg\nVersion: 1.1.0\n",
+                    ),
+                    ("target_keep_pkg/__init__.py", "VALUE = 'new'\n"),
+                    ("target_keep_pkg/extra.py", "EXTRA = True\n"),
+                ],
+            ),
+        )
+        .unwrap();
+
+        let status = with_clean_pip_env(|| {
+            run_pip_compat(
+                &project,
+                &args(&[
+                    "install",
+                    "--target",
+                    "vendor",
+                    "--no-deps",
+                    "./dist/target_keep_pkg-1.0.0.tar.gz",
+                ]),
+            )
+        })
+        .unwrap();
+        assert_eq!(status, ExitCode::SUCCESS);
+        let status = with_clean_pip_env(|| {
+            run_pip_compat(
+                &project,
+                &args(&[
+                    "install",
+                    "--target",
+                    "vendor",
+                    "--no-deps",
+                    "./dist/target_keep_pkg-1.1.0.tar.gz",
+                ]),
+            )
+        })
+        .unwrap();
+
+        assert_eq!(status, ExitCode::SUCCESS);
+        assert_eq!(
+            fs::read_to_string(project.join("vendor/target_keep_pkg/__init__.py")).unwrap(),
+            "VALUE = 'old'\n"
+        );
+        assert!(!project.join("vendor/target_keep_pkg/extra.py").exists());
+        assert!(project
+            .join("vendor")
+            .join("target_keep_pkg-1.0.0.dist-info")
+            .join("METADATA")
+            .exists());
+        assert!(project
+            .join("vendor")
+            .join("target_keep_pkg-1.1.0.dist-info")
+            .join("METADATA")
+            .exists());
+
+        fs::remove_dir_all(project).unwrap();
+    }
+
+    #[test]
+    fn pip_install_target_upgrade_replaces_existing_package() {
+        let project = test_dir("pip-target-upgrade-project");
+        let dist = project.join("dist");
+        fs::create_dir_all(&dist).unwrap();
+        fs::write(
+            dist.join("target_replace_pkg-1.0.0.tar.gz"),
+            pypi_sdist_for_test(
+                "target_replace_pkg-1.0.0",
+                &[
+                    (
+                        "PKG-INFO",
+                        "Metadata-Version: 2.1\nName: target-replace-pkg\nVersion: 1.0.0\n",
+                    ),
+                    ("target_replace_pkg/__init__.py", "VALUE = 'old'\n"),
+                ],
+            ),
+        )
+        .unwrap();
+        fs::write(
+            dist.join("target_replace_pkg-1.1.0.tar.gz"),
+            pypi_sdist_for_test(
+                "target_replace_pkg-1.1.0",
+                &[
+                    (
+                        "PKG-INFO",
+                        "Metadata-Version: 2.1\nName: target-replace-pkg\nVersion: 1.1.0\n",
+                    ),
+                    ("target_replace_pkg/__init__.py", "VALUE = 'new'\n"),
+                    ("target_replace_pkg/extra.py", "EXTRA = True\n"),
+                ],
+            ),
+        )
+        .unwrap();
+
+        let status = with_clean_pip_env(|| {
+            run_pip_compat(
+                &project,
+                &args(&[
+                    "install",
+                    "--target",
+                    "vendor",
+                    "--no-deps",
+                    "./dist/target_replace_pkg-1.0.0.tar.gz",
+                ]),
+            )
+        })
+        .unwrap();
+        assert_eq!(status, ExitCode::SUCCESS);
+        let status = with_clean_pip_env(|| {
+            run_pip_compat(
+                &project,
+                &args(&[
+                    "install",
+                    "--target",
+                    "vendor",
+                    "--upgrade",
+                    "--no-deps",
+                    "./dist/target_replace_pkg-1.1.0.tar.gz",
+                ]),
+            )
+        })
+        .unwrap();
+
+        assert_eq!(status, ExitCode::SUCCESS);
+        assert_eq!(
+            fs::read_to_string(project.join("vendor/target_replace_pkg/__init__.py")).unwrap(),
+            "VALUE = 'new'\n"
+        );
+        assert_eq!(
+            fs::read_to_string(project.join("vendor/target_replace_pkg/extra.py")).unwrap(),
+            "EXTRA = True\n"
+        );
+        assert!(project
+            .join("vendor")
+            .join("target_replace_pkg-1.0.0.dist-info")
+            .join("METADATA")
+            .exists());
+        assert!(project
+            .join("vendor")
+            .join("target_replace_pkg-1.1.0.dist-info")
+            .join("METADATA")
+            .exists());
 
         fs::remove_dir_all(project).unwrap();
     }
@@ -34083,6 +34309,7 @@ verdict = "accepted"
                 require_hashes: false,
                 no_deps: false,
                 allow_prereleases: false,
+                upgrade: false,
                 compatibility: PipCompatibilityTarget::default(),
                 target: None,
                 prefix: None,
