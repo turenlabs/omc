@@ -1328,6 +1328,7 @@ enum PipConfigAction {
     List {
         json: bool,
     },
+    Debug,
     Set {
         assignments: Vec<(String, String)>,
         location: PipConfigLocation,
@@ -8357,8 +8358,8 @@ fn pip_help_text(topic: Option<&str>) -> String {
             &["List available package versions from the configured index. Supports --json and index flags."],
         ),
         Some("config") => pip_command_help(
-            "pip config <get|set|unset|list> ...",
-            &["Read and update pip config used by OMC. Supports --site, --user, --global, and --json where relevant."],
+            "pip config <get|set|unset|list|debug> ...",
+            &["Read, update, and debug pip config used by OMC. Supports --site, --user, --global, and --json where relevant."],
         ),
         Some(_) => pip_command_help(
             "pip help [command]",
@@ -16233,7 +16234,7 @@ fn print_pip_config(project_dir: &Path, action: PipConfigAction) -> Result<(), O
             unset_pip_config_keys(project_dir, location, &keys)?;
             return Ok(());
         }
-        PipConfigAction::Get { .. } | PipConfigAction::List { .. } => {}
+        PipConfigAction::Get { .. } | PipConfigAction::List { .. } | PipConfigAction::Debug => {}
     }
 
     let values = pip_config_values(project_dir)?;
@@ -16265,9 +16266,78 @@ fn print_pip_config(project_dir: &Path, action: PipConfigAction) -> Result<(), O
                 }
             }
         }
+        PipConfigAction::Debug => print_pip_config_debug(project_dir, &values)?,
         PipConfigAction::Set { .. } | PipConfigAction::Unset { .. } => unreachable!(),
     }
     Ok(())
+}
+
+fn print_pip_config_debug(
+    project_dir: &Path,
+    values: &BTreeMap<String, String>,
+) -> Result<(), OmcRegistryError> {
+    print!("{}", pip_config_debug_report(project_dir, values)?);
+    Ok(())
+}
+
+fn pip_config_debug_report(
+    project_dir: &Path,
+    values: &BTreeMap<String, String>,
+) -> Result<String, OmcRegistryError> {
+    let mut output = String::from("env_var:\n");
+    let mut printed_env = false;
+    for key in [
+        "PIP_CONFIG_FILE",
+        "PIP_INDEX_URL",
+        "PIP_EXTRA_INDEX_URL",
+        "PIP_FIND_LINKS",
+        "PIP_NO_INDEX",
+    ] {
+        if let Some(value) = env::var_os(key) {
+            output.push_str(&format!("  {key}={}\n", value.to_string_lossy()));
+            printed_env = true;
+        }
+    }
+    if !printed_env {
+        output.push_str("  <none>\n");
+    }
+
+    output.push_str("config_file:\n");
+    for (label, path) in [
+        (
+            "global",
+            pip_config_write_path(project_dir, PipConfigLocation::Global)?,
+        ),
+        (
+            "user",
+            pip_config_write_path(project_dir, PipConfigLocation::User)?,
+        ),
+        (
+            "site",
+            pip_config_write_path(project_dir, PipConfigLocation::Site)?,
+        ),
+        (
+            "env",
+            pip_config_write_path(project_dir, PipConfigLocation::Auto)?,
+        ),
+    ] {
+        output.push_str(&format!(
+            "  {label}: {} ({})",
+            path.display(),
+            if path.exists() { "exists" } else { "missing" }
+        ));
+        output.push('\n');
+    }
+
+    output.push_str("config_value:\n");
+    if values.is_empty() {
+        output.push_str("  <none>\n");
+    } else {
+        for (key, value) in values {
+            output.push_str(&format!("  {key}={value}\n"));
+        }
+    }
+    Ok(output)
 }
 
 fn pip_config_values(project_dir: &Path) -> Result<BTreeMap<String, String>, OmcRegistryError> {
@@ -26930,6 +27000,14 @@ fn parse_pip_config_args(args: &[String]) -> Result<PipCompatAction, OmcRegistry
             }
             Ok(PipCompatAction::Config {
                 action: PipConfigAction::List { json },
+            })
+        }
+        "debug" => {
+            if !positionals.is_empty() {
+                return Err(unsupported_compat_arg("pip config debug", &positionals[0]));
+            }
+            Ok(PipCompatAction::Config {
+                action: PipConfigAction::Debug,
             })
         }
         "set" => {
@@ -40692,6 +40770,12 @@ resolved_commit = "0123456789abcdef0123456789abcdef01234567"
             }
         );
         assert_eq!(
+            parse_pip_compat_action(&args(&["config", "debug"])).unwrap(),
+            PipCompatAction::Config {
+                action: PipConfigAction::Debug,
+            }
+        );
+        assert_eq!(
             parse_pip_compat_action(&args(&["config", "set", "global.index-url", "x"])).unwrap(),
             PipCompatAction::Config {
                 action: PipConfigAction::Set {
@@ -40802,6 +40886,27 @@ resolved_commit = "0123456789abcdef0123456789abcdef01234567"
             let config = fs::read_to_string(dir.join("pip.conf")).unwrap();
             assert!(!config.contains("index-url = https://new.example.invalid/simple\n"));
             assert!(config.contains("extra-index-url = https://extra.example.invalid/simple\n"));
+        });
+    }
+
+    #[test]
+    fn reports_pip_config_debug() {
+        without_env_var("PIP_CONFIG_FILE", || {
+            let dir = test_dir("pip-config-debug");
+            fs::write(
+                dir.join("pip.conf"),
+                "[global]\nindex-url = https://debug.example.invalid/simple\n",
+            )
+            .unwrap();
+
+            let values = pip_config_values(&dir).unwrap();
+            let output = pip_config_debug_report(&dir, &values).unwrap();
+
+            assert!(output.contains("env_var:"));
+            assert!(output.contains("config_file:"));
+            assert!(output.contains("site:"));
+            assert!(output.contains("config_value:"));
+            assert!(output.contains("global.index-url=https://debug.example.invalid/simple/"));
         });
     }
 
