@@ -5298,11 +5298,11 @@ fn run_pip_compat_with_cwd(
         }
         PipCompatAction::Download(mut action) => {
             absolutize_pip_download_action_paths(invocation_cwd, &mut action);
-            download_pip_packages(project_dir, *action, PipArtifactCommand::Download)?;
+            download_pip_packages(project_dir, *action)?;
         }
         PipCompatAction::Wheel(mut action) => {
             absolutize_pip_download_action_paths(invocation_cwd, &mut action);
-            download_pip_packages(project_dir, *action, PipArtifactCommand::Wheel)?;
+            download_pip_packages(project_dir, *action)?;
         }
         PipCompatAction::Uninstall {
             mut specs,
@@ -11634,7 +11634,6 @@ fn pip_hash_digest(algorithm: PipHashAlgorithm, bytes: &[u8]) -> String {
 fn download_pip_packages(
     project_dir: &Path,
     action: PipDownloadAction,
-    command: PipArtifactCommand,
 ) -> Result<(), OmcRegistryError> {
     let PipDownloadAction {
         specs,
@@ -11696,7 +11695,7 @@ fn download_pip_packages(
             &mut resolved_specs,
             &mut local_paths,
             requirements,
-            command == PipArtifactCommand::Wheel,
+            true,
         )?;
     }
     if !options.constraint_files.is_empty() {
@@ -11715,7 +11714,7 @@ fn download_pip_packages(
                 .to_owned(),
         ));
     }
-    if command == PipArtifactCommand::Wheel && options.pypi_include_dependencies {
+    if options.pypi_include_dependencies && !local_paths.is_empty() {
         resolved_specs.extend(collect_pip_local_wheel_dependencies(
             project_dir,
             &mut local_paths,
@@ -11730,11 +11729,6 @@ fn download_pip_packages(
         copy_downloaded_pypi_archives(project_dir, &destination, &reports)?;
     }
     if !local_paths.is_empty() {
-        if command != PipArtifactCommand::Wheel {
-            return Err(OmcRegistryError::UnsupportedSpec(
-                "pip download cannot build local directories; use pip wheel".to_owned(),
-            ));
-        }
         build_pip_local_wheels(project_dir, &destination, &local_paths)?;
     }
     Ok(())
@@ -27244,14 +27238,7 @@ fn parse_pip_artifact_args(
         } else if is_pip_archive_arg(arg) {
             archive_references.push(arg.clone());
         } else if is_pip_local_directory_arg(arg) {
-            match command {
-                PipArtifactCommand::Download => {
-                    return Err(OmcRegistryError::UnsupportedSpec(format!(
-                        "pip download cannot build local directory `{arg}`; use pip wheel"
-                    )));
-                }
-                PipArtifactCommand::Wheel => local_paths.push(pip_local_path_arg(arg)?),
-            }
+            local_paths.push(pip_local_path_arg(arg)?);
         } else {
             filtered.push(arg.clone());
         }
@@ -36420,7 +36407,33 @@ verdict = "accepted"
                 allow_all_host: false,
             }))
         );
-        assert!(parse_pip_compat_action(&args(&["download", "./local_pkg"])).is_err());
+        assert_eq!(
+            parse_pip_compat_action(&args(&["download", "./local_pkg"])).unwrap(),
+            PipCompatAction::Download(Box::new(PipDownloadAction {
+                specs: Vec::new(),
+                requirements: Vec::new(),
+                constraints: Vec::new(),
+                archive_references: Vec::new(),
+                local_paths: vec![PythonLocalRequirement::new(
+                    PathBuf::from("./local_pkg"),
+                    BTreeSet::new()
+                )],
+                index_url: None,
+                extra_index_urls: Vec::new(),
+                find_links: Vec::new(),
+                no_index: false,
+                binary_all: None,
+                binary_packages: BTreeMap::new(),
+                require_hashes: false,
+                no_deps: false,
+                allow_prereleases: false,
+                compatibility: PipCompatibilityTarget::default(),
+                destination: PathBuf::from("."),
+                allow: Vec::new(),
+                allow_flow: Vec::new(),
+                allow_all_host: false,
+            }))
+        );
     }
 
     #[test]
@@ -36530,6 +36543,60 @@ verdict = "accepted"
                 allow_all_host: false,
             }))
         );
+    }
+
+    #[test]
+    fn pip_download_builds_local_directory_wheel() {
+        let project = test_dir("pip-download-local-project");
+        let local = test_dir("pip-download-local-package");
+        fs::create_dir_all(local.join("src").join("local_download")).unwrap();
+        fs::write(
+            local.join("src").join("local_download").join("__init__.py"),
+            "VALUE = 9\n",
+        )
+        .unwrap();
+        fs::write(
+            local.join("pyproject.toml"),
+            r#"
+[project]
+name = "local-download"
+version = "0.1.0"
+"#,
+        )
+        .unwrap();
+
+        with_env_values(
+            &[
+                ("PIP_CONFIG_FILE", None),
+                ("PIP_INDEX_URL", None),
+                ("PIP_EXTRA_INDEX_URL", None),
+                ("PIP_FIND_LINKS", None),
+                ("PIP_NO_INDEX", None),
+                ("PIP_DEST", None),
+                ("PIP_DESTINATION_DIR", None),
+            ],
+            || {
+                let status = run_pip_compat(
+                    &project,
+                    &args(&[
+                        "download",
+                        local.to_str().unwrap(),
+                        "-d",
+                        "downloads",
+                        "--no-deps",
+                    ]),
+                )
+                .unwrap();
+                assert_eq!(status, ExitCode::SUCCESS);
+                assert!(project
+                    .join("downloads")
+                    .join("local_download-0.1.0-py3-none-any.whl")
+                    .exists());
+            },
+        );
+
+        let _ = fs::remove_dir_all(project);
+        let _ = fs::remove_dir_all(local);
     }
 
     #[test]

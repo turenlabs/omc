@@ -227,6 +227,7 @@ cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip install ./dist
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip lock -r requirements.txt -o pylock.toml
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip install -r pylock.toml
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip download -r requirements.txt -d wheelhouse
+cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip download ../local-package -d wheelhouse --no-deps
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip download --only-binary=:all: --platform manylinux_2_28_x86_64 --python-version 3.11 --implementation cp --abi cp311 requests -d wheelhouse
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip wheel -r requirements.txt -w wheelhouse
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip wheel --no-binary=:all: ./dist/local_pkg-1.0.0.tar.gz -w wheelhouse
@@ -533,11 +534,11 @@ Supported now:
   `--no-binary`, `--prefer-binary`, `--pre`, enforced `--require-hashes`, local editable/direct/bare
   directory paths with selected extras, and common Python environment markers
 - `pip download` and `pip wheel` compatibility for registry requirements,
-  requirement files, hashes, direct wheel archives, and direct source
-  distributions, including pip-style target compatibility flags
+  requirement files, hashes, direct wheel archives, direct source
+  distributions, and static local directory wheels, including pip-style target compatibility flags
   `--platform`, `--python-version`, `--implementation`, and `--abi`;
-  `pip wheel` populates the wheelhouse with safe source distributions when a
-  build would otherwise be required and includes registry and local path
+  `pip download` and `pip wheel` populate the wheelhouse with safe local
+  wheels when a build would otherwise be required and include registry and local path
   dependencies declared by static local directory wheels unless `--no-deps` is
   passed
 - unsupported requirements entries and unsupported direct archive formats fail
