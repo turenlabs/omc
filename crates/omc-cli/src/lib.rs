@@ -470,6 +470,7 @@ enum NpmCompatAction {
     Pkg {
         action: NpmPkgAction,
     },
+    Shrinkwrap,
     Pack {
         action: NpmPackAction,
     },
@@ -4059,6 +4060,7 @@ fn run_npm_compat_with_cwd(
         NpmCompatAction::Fund { action } => print_npm_fund(project_dir, action)?,
         NpmCompatAction::Cache { action } => print_npm_cache(project_dir, action)?,
         NpmCompatAction::Pkg { action } => print_npm_pkg(project_dir, action)?,
+        NpmCompatAction::Shrinkwrap => write_npm_shrinkwrap(project_dir)?,
         NpmCompatAction::Pack { mut action } => {
             absolutize_npm_pack_action_paths(invocation_cwd, &mut action);
             print_npm_pack(project_dir, action)?
@@ -7772,6 +7774,13 @@ fn npm_help_text(topic: Option<&str>) -> String {
                 "Supports --sbom-format, --sbom-type, --package-lock-only, omit flags, and workspace flags.",
             ],
         ),
+        Some("shrinkwrap") => npm_command_help(
+            "npm shrinkwrap",
+            &[
+                "Repurpose package-lock.json as npm-shrinkwrap.json, or create a publishable shrinkwrap from package.json and the OMC lockfile.",
+                "This command does not support workspaces.",
+            ],
+        ),
         Some("view") => npm_command_help(
             "npm view <package-spec> [field...]",
             &["Read package metadata from the configured npm registry. Aliases: info, show, v. Supports --json."],
@@ -7826,7 +7835,7 @@ fn npm_general_help_text() -> String {
         "npm <command>",
         &[
             "OMC npm compatibility runs supported npm workflows through OMC's verifier, lockfile, cache, and project-local runtime paths.",
-            "Supported commands: install, link, install-test, ci, install-ci-test, remove, run, test, start, stop, restart, exec, explore, completion, list, query, explain, audit, outdated, fund, prune, dedupe, rebuild, cache, pkg, version, pack, publish, unpublish, deprecate, undeprecate, diff, search, star, unstar, stars, ping, whoami, login, adduser, logout, token, profile, owner, access, org, team, dist-tag, sbom, view, docs, repo, bugs, home, config, get, set, init, create, bin, root, prefix.",
+            "Supported commands: install, link, install-test, ci, install-ci-test, remove, run, test, start, stop, restart, exec, explore, completion, list, query, explain, audit, outdated, fund, prune, dedupe, rebuild, cache, pkg, version, shrinkwrap, pack, publish, unpublish, deprecate, undeprecate, diff, search, star, unstar, stars, ping, whoami, login, adduser, logout, token, profile, owner, access, org, team, dist-tag, sbom, view, docs, repo, bugs, home, config, get, set, init, create, bin, root, prefix.",
             "Use `npm help <command>` for focused OMC compatibility notes.",
         ],
     )
@@ -7885,6 +7894,7 @@ fn npm_help_topic(topic: &str) -> Option<&'static str> {
         "team" => Some("team"),
         "dist-tag" | "dist-tags" => Some("dist-tag"),
         "sbom" => Some("sbom"),
+        "shrinkwrap" => Some("shrinkwrap"),
         "view" | "info" | "show" | "v" => Some("view"),
         "docs" | "doc" | "repo" | "repository" | "bugs" | "home" | "homepage" => {
             Some("metadata-url")
@@ -7947,6 +7957,7 @@ const NPM_COMPLETION_COMMANDS: &[&str] = &[
     "sbom",
     "search",
     "set",
+    "shrinkwrap",
     "star",
     "stars",
     "start",
@@ -13152,6 +13163,45 @@ fn sync_npm_package_lock(project_dir: &Path) -> Result<(), OmcRegistryError> {
         project_dir.join("package-lock.json"),
         format!("{}\n", serde_json::to_string_pretty(&package_lock)?),
     )?;
+    Ok(())
+}
+
+fn write_npm_shrinkwrap(project_dir: &Path) -> Result<(), OmcRegistryError> {
+    let shrinkwrap_path = project_dir.join("npm-shrinkwrap.json");
+    if shrinkwrap_path.exists() {
+        eprintln!("npm notice npm-shrinkwrap.json up to date");
+        return Ok(());
+    }
+
+    let package_lock_path = project_dir.join("package-lock.json");
+    if package_lock_path.exists() {
+        fs::rename(package_lock_path, shrinkwrap_path)?;
+        eprintln!("npm notice package-lock.json has been renamed to npm-shrinkwrap.json");
+        return Ok(());
+    }
+
+    let package_json_path = project_dir.join("package.json");
+    let package = if package_json_path.exists() {
+        read_npm_pkg_json(&package_json_path)?
+    } else {
+        serde_json::json!({})
+    };
+    let lockfile_path = project_dir.join("omc.lock");
+    let lock = if lockfile_path.exists() {
+        read_lockfile(lockfile_path)?
+    } else {
+        OmcLock {
+            version: 1,
+            packages: Vec::new(),
+            python_vcs: Vec::new(),
+        }
+    };
+    let shrinkwrap = npm_package_lock_json(&package, &lock);
+    fs::write(
+        shrinkwrap_path,
+        format!("{}\n", serde_json::to_string_pretty(&shrinkwrap)?),
+    )?;
+    eprintln!("npm notice created a lockfile as npm-shrinkwrap.json with version 3");
     Ok(())
 }
 
@@ -20314,6 +20364,7 @@ fn parse_npm_compat_action(args: &[String]) -> Result<NpmCompatAction, OmcRegist
         "fund" => parse_npm_fund_args(&args[1..]),
         "cache" => parse_npm_cache_args(&args[1..]),
         "pkg" => parse_npm_pkg_args(&args[1..]),
+        "shrinkwrap" => parse_npm_shrinkwrap_args(&args[1..]),
         "pack" => parse_npm_pack_args(&args[1..]),
         "publish" => parse_npm_publish_args(&args[1..]),
         "unpublish" => parse_npm_unpublish_args(&args[1..]),
@@ -20748,6 +20799,7 @@ fn npm_global_arg_supported_by_command(command: &str, arg: &str) -> bool {
                 | "undeprecate"
                 | "link"
                 | "ln"
+                | "shrinkwrap"
         );
     }
     if matches!(arg, "--force" | "-f") || arg.starts_with("--force=") {
@@ -20866,6 +20918,7 @@ fn npm_global_arg_supported_by_command(command: &str, arg: &str) -> bool {
                 | "dist-tags"
                 | "sbom"
                 | "query"
+                | "shrinkwrap"
         );
     }
     if matches!(arg, "--workspaces" | "--include-workspace-root")
@@ -20898,6 +20951,7 @@ fn npm_global_arg_supported_by_command(command: &str, arg: &str) -> bool {
                 | "dist-tags"
                 | "sbom"
                 | "query"
+                | "shrinkwrap"
         );
     }
     if arg == "--json" {
@@ -22257,6 +22311,21 @@ fn npm_pkg_ignored_equals_flag(arg: &str) -> bool {
     ["--workspace=", "--loglevel="]
         .iter()
         .any(|prefix| arg.starts_with(prefix))
+}
+
+fn parse_npm_shrinkwrap_args(args: &[String]) -> Result<NpmCompatAction, OmcRegistryError> {
+    let CommonCompatFlags {
+        workspaces,
+        all_workspaces,
+        include_workspace_root,
+        ..
+    } = parse_common_compat_flags(args, true)?;
+    if !workspaces.is_empty() || all_workspaces || include_workspace_root {
+        return Err(OmcRegistryError::UnsupportedSpec(
+            "npm shrinkwrap does not support workspaces".to_owned(),
+        ));
+    }
+    Ok(NpmCompatAction::Shrinkwrap)
 }
 
 fn parse_npm_pack_args(args: &[String]) -> Result<NpmCompatAction, OmcRegistryError> {
@@ -33631,6 +33700,13 @@ verdict = "accepted"
             }
         );
         assert_eq!(
+            parse_npm_compat_action(&args(&["shrinkwrap", "--dry-run", "ignored"])).unwrap(),
+            NpmCompatAction::Shrinkwrap
+        );
+        assert!(
+            parse_npm_compat_action(&args(&["shrinkwrap", "--workspace", "@demo/lib"])).is_err()
+        );
+        assert_eq!(
             parse_npm_compat_action(&args(&[
                 "outdated",
                 "--json",
@@ -40467,6 +40543,74 @@ resolved_commit = "0123456789abcdef0123456789abcdef01234567"
             "2.1.0"
         );
         assert!(package_lock["packages"]["node_modules/idna"].is_null());
+    }
+
+    #[test]
+    fn npm_shrinkwrap_renames_package_lock() {
+        let project = test_dir("npm-shrinkwrap-rename");
+        fs::write(
+            project.join("package.json"),
+            r#"{ "name": "demo", "version": "1.0.0" }"#,
+        )
+        .unwrap();
+        fs::write(
+            project.join("package-lock.json"),
+            r#"{
+                "name": "demo",
+                "version": "1.0.0",
+                "lockfileVersion": 3,
+                "requires": true,
+                "packages": { "": { "name": "demo", "version": "1.0.0" } }
+            }"#,
+        )
+        .unwrap();
+
+        let status = run_npm_compat(&project, &args(&["shrinkwrap"])).unwrap();
+
+        assert_eq!(status, ExitCode::SUCCESS);
+        assert!(!project.join("package-lock.json").exists());
+        let shrinkwrap: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(project.join("npm-shrinkwrap.json")).unwrap())
+                .unwrap();
+        assert_eq!(shrinkwrap["lockfileVersion"], 3);
+        assert_eq!(shrinkwrap["packages"][""]["name"], "demo");
+    }
+
+    #[test]
+    fn npm_shrinkwrap_creates_from_omc_lock() {
+        let project = test_dir("npm-shrinkwrap-from-omc-lock");
+        fs::write(
+            project.join("package.json"),
+            r#"{
+                "name": "demo",
+                "version": "1.0.0",
+                "dependencies": { "left-pad": "1.3.0" }
+            }"#,
+        )
+        .unwrap();
+        let lock = OmcLock {
+            version: 1,
+            packages: vec![locked_npm_package("left-pad", "1.3.0", Vec::new())],
+            python_vcs: Vec::new(),
+        };
+        fs::write(project.join("omc.lock"), toml::to_string(&lock).unwrap()).unwrap();
+
+        let status = run_npm_compat(&project, &args(&["shrinkwrap"])).unwrap();
+
+        assert_eq!(status, ExitCode::SUCCESS);
+        assert!(!project.join("package-lock.json").exists());
+        let shrinkwrap: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(project.join("npm-shrinkwrap.json")).unwrap())
+                .unwrap();
+        assert_eq!(shrinkwrap["lockfileVersion"], 3);
+        assert_eq!(
+            shrinkwrap["packages"][""]["dependencies"]["left-pad"],
+            "1.3.0"
+        );
+        assert_eq!(
+            shrinkwrap["packages"]["node_modules/left-pad"]["version"],
+            "1.3.0"
+        );
     }
 
     fn locked_pypi_package(name: &str, version: &str, dependencies: Vec<String>) -> LockedPackage {
