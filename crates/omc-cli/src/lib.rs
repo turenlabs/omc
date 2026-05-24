@@ -1066,6 +1066,7 @@ enum PipCompatAction {
     },
     Inspect {
         paths: Vec<PathBuf>,
+        user: bool,
     },
     Freeze {
         action: PipFreezeAction,
@@ -1075,6 +1076,7 @@ enum PipCompatAction {
         outdated: bool,
         uptodate: bool,
         paths: Vec<PathBuf>,
+        user: bool,
         exclude: Vec<String>,
         editable: PipEditableMode,
         not_required: bool,
@@ -1215,6 +1217,7 @@ impl PipEditableMode {
 struct PipFreezeAction {
     requirements: Vec<PathBuf>,
     paths: Vec<PathBuf>,
+    user: bool,
     exclude: Vec<String>,
     exclude_editable: bool,
 }
@@ -3556,7 +3559,8 @@ fn run_pip_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
         PipCompatAction::Cache { action } => print_pip_cache(project_dir, action)?,
         PipCompatAction::Check => return print_locked_pip_check(project_dir),
         PipCompatAction::Debug { action } => print_pip_debug(project_dir, action)?,
-        PipCompatAction::Inspect { paths } => {
+        PipCompatAction::Inspect { paths, user } => {
+            let paths = pip_effective_scope_paths(&paths, user)?;
             if paths.is_empty() {
                 print_locked_pip_inspect(project_dir)?
             } else {
@@ -3564,7 +3568,8 @@ fn run_pip_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
             }
         }
         PipCompatAction::Freeze { action } => {
-            if action.paths.is_empty() {
+            let paths = pip_effective_scope_paths(&action.paths, action.user)?;
+            if paths.is_empty() {
                 print_locked_freeze(
                     project_dir,
                     &action.exclude,
@@ -3574,7 +3579,7 @@ fn run_pip_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
             } else {
                 print_pip_path_freeze(
                     project_dir,
-                    &action.paths,
+                    &paths,
                     &action.exclude,
                     action.exclude_editable,
                     &action.requirements,
@@ -3586,6 +3591,7 @@ fn run_pip_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
             outdated,
             uptodate,
             paths,
+            user,
             exclude,
             editable,
             not_required,
@@ -3595,6 +3601,7 @@ fn run_pip_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
             no_index,
             allow_prereleases,
         } => {
+            let paths = pip_effective_scope_paths(&paths, user)?;
             if outdated || uptodate {
                 print_pip_outdated(
                     project_dir,
@@ -13341,6 +13348,17 @@ fn print_pip_path_freeze(
     Ok(())
 }
 
+fn pip_effective_scope_paths(
+    paths: &[PathBuf],
+    user: bool,
+) -> Result<Vec<PathBuf>, OmcRegistryError> {
+    if user && paths.is_empty() {
+        Ok(vec![pip_user_paths()?.site_packages])
+    } else {
+        Ok(paths.to_vec())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct PipFrozenRequirement {
     name: Option<String>,
@@ -21980,18 +21998,15 @@ fn pip_debug_ignored_equals_flag(arg: &str) -> bool {
 
 fn parse_pip_inspect_args(args: &[String]) -> Result<PipCompatAction, OmcRegistryError> {
     let mut paths = Vec::new();
+    let mut user = false;
     let mut index = 0;
     while index < args.len() {
         let arg = &args[index];
-        if matches!(
+        if arg == "--user" {
+            user = true;
+        } else if matches!(
             arg.as_str(),
-            "--local"
-                | "--user"
-                | "--verbose"
-                | "-v"
-                | "--quiet"
-                | "-q"
-                | "--disable-pip-version-check"
+            "--local" | "--verbose" | "-v" | "--quiet" | "-q" | "--disable-pip-version-check"
         ) {
         } else if arg == "--path" {
             index += 1;
@@ -22008,7 +22023,7 @@ fn parse_pip_inspect_args(args: &[String]) -> Result<PipCompatAction, OmcRegistr
         }
         index += 1;
     }
-    Ok(PipCompatAction::Inspect { paths })
+    Ok(PipCompatAction::Inspect { paths, user })
 }
 
 fn parse_pip_freeze_args(args: &[String]) -> Result<PipFreezeAction, OmcRegistryError> {
@@ -22016,11 +22031,12 @@ fn parse_pip_freeze_args(args: &[String]) -> Result<PipFreezeAction, OmcRegistry
     let mut index = 0;
     while index < args.len() {
         let arg = &args[index];
-        if matches!(
+        if arg == "--user" {
+            action.user = true;
+        } else if matches!(
             arg.as_str(),
             "--all"
                 | "--local"
-                | "--user"
                 | "--exclude-editable"
                 | "--disable-pip-version-check"
                 | "-v"
@@ -23238,6 +23254,7 @@ fn parse_pip_list_args(args: &[String]) -> Result<PipCompatAction, OmcRegistryEr
     let mut no_index = false;
     let mut allow_prereleases = false;
     let mut paths = Vec::new();
+    let mut user = false;
     let mut exclude = Vec::new();
     let mut editable = PipEditableMode::Include;
     let mut not_required = false;
@@ -23292,10 +23309,11 @@ fn parse_pip_list_args(args: &[String]) -> Result<PipCompatAction, OmcRegistryEr
             no_index = true;
         } else if arg == "--pre" {
             allow_prereleases = true;
+        } else if arg == "--user" {
+            user = true;
         } else if matches!(
             arg.as_str(),
             "--local"
-                | "--user"
                 | "--disable-pip-version-check"
                 | "--ignore-requires-python"
                 | "-v"
@@ -23350,6 +23368,7 @@ fn parse_pip_list_args(args: &[String]) -> Result<PipCompatAction, OmcRegistryEr
         outdated,
         uptodate,
         paths,
+        user,
         exclude,
         editable,
         not_required,
@@ -28425,6 +28444,28 @@ print("ok")
             assert!(source_script.exists());
             assert!(user_script.exists());
 
+            let scope_paths = pip_effective_scope_paths(&[], true).unwrap();
+            assert_eq!(scope_paths, vec![paths.site_packages.clone()]);
+            let packages =
+                read_pip_path_packages(&project, &scope_paths, &[], PipEditableMode::Include)
+                    .unwrap();
+            assert_eq!(packages.len(), 1);
+            assert_eq!(packages[0].name, "demoedit");
+            assert_eq!(packages[0].version, "0.1.0");
+
+            let freeze_entries =
+                pip_freeze_path_local_entries(&project, &scope_paths, &BTreeSet::new()).unwrap();
+            assert_eq!(freeze_entries.len(), 1);
+            assert_eq!(
+                freeze_entries[0].line,
+                format!("-e {}", canonical_src.display())
+            );
+
+            let inspect = pip_path_inspect_entries(&project, &scope_paths).unwrap();
+            assert_eq!(inspect.len(), 1);
+            assert_eq!(inspect[0]["metadata"]["name"], "demoedit");
+            assert_eq!(inspect[0]["metadata"]["version"], "0.1.0");
+
             #[cfg(unix)]
             {
                 assert_eq!(fs::read_link(&user_script).unwrap(), source_script);
@@ -29424,6 +29465,14 @@ version = "0.2.0"
             .unwrap(),
             PipCompatAction::Inspect {
                 paths: vec![PathBuf::from(".omc/python/site-packages")],
+                user: false,
+            }
+        );
+        assert_eq!(
+            parse_pip_compat_action(&args(&["inspect", "--user"])).unwrap(),
+            PipCompatAction::Inspect {
+                paths: Vec::new(),
+                user: true,
             }
         );
         assert_eq!(
@@ -29609,8 +29658,21 @@ resolved_commit = "0123456789abcdef0123456789abcdef01234567"
                 action: PipFreezeAction {
                     requirements: vec![PathBuf::from("requirements.txt")],
                     paths: vec![PathBuf::from("vendor")],
+                    user: false,
                     exclude: vec!["requests".to_owned()],
                     exclude_editable: false,
+                },
+            }
+        );
+        assert_eq!(
+            parse_pip_compat_action(&args(&["freeze", "--user", "--exclude-editable"])).unwrap(),
+            PipCompatAction::Freeze {
+                action: PipFreezeAction {
+                    requirements: Vec::new(),
+                    paths: Vec::new(),
+                    user: true,
+                    exclude: Vec::new(),
+                    exclude_editable: true,
                 },
             }
         );
@@ -29621,6 +29683,7 @@ resolved_commit = "0123456789abcdef0123456789abcdef01234567"
                 outdated: false,
                 uptodate: false,
                 paths: Vec::new(),
+                user: false,
                 exclude: Vec::new(),
                 editable: PipEditableMode::Include,
                 not_required: false,
@@ -29639,6 +29702,7 @@ resolved_commit = "0123456789abcdef0123456789abcdef01234567"
                 outdated: false,
                 uptodate: false,
                 paths: Vec::new(),
+                user: false,
                 exclude: Vec::new(),
                 editable: PipEditableMode::Include,
                 not_required: true,
@@ -29665,6 +29729,7 @@ resolved_commit = "0123456789abcdef0123456789abcdef01234567"
                 outdated: false,
                 uptodate: false,
                 paths: vec![PathBuf::from("vendor")],
+                user: false,
                 exclude: vec!["requests".to_owned()],
                 editable: PipEditableMode::Exclude,
                 not_required: false,
@@ -29682,6 +29747,7 @@ resolved_commit = "0123456789abcdef0123456789abcdef01234567"
                 outdated: false,
                 uptodate: false,
                 paths: Vec::new(),
+                user: false,
                 exclude: Vec::new(),
                 editable: PipEditableMode::Only,
                 not_required: false,
@@ -29708,6 +29774,7 @@ resolved_commit = "0123456789abcdef0123456789abcdef01234567"
                 outdated: false,
                 uptodate: true,
                 paths: Vec::new(),
+                user: false,
                 exclude: Vec::new(),
                 editable: PipEditableMode::Include,
                 not_required: false,
@@ -29726,6 +29793,7 @@ resolved_commit = "0123456789abcdef0123456789abcdef01234567"
                 outdated: true,
                 uptodate: false,
                 paths: Vec::new(),
+                user: false,
                 exclude: Vec::new(),
                 editable: PipEditableMode::Include,
                 not_required: false,
@@ -29734,6 +29802,24 @@ resolved_commit = "0123456789abcdef0123456789abcdef01234567"
                 find_links: Vec::new(),
                 no_index: false,
                 allow_prereleases: true,
+            }
+        );
+        assert_eq!(
+            parse_pip_compat_action(&args(&["list", "--user", "--format=json"])).unwrap(),
+            PipCompatAction::List {
+                format: PipListFormat::Json,
+                outdated: false,
+                uptodate: false,
+                paths: Vec::new(),
+                user: true,
+                exclude: Vec::new(),
+                editable: PipEditableMode::Include,
+                not_required: false,
+                index_url: None,
+                extra_index_urls: Vec::new(),
+                find_links: Vec::new(),
+                no_index: false,
+                allow_prereleases: false,
             }
         );
         assert!(parse_pip_compat_action(&args(&["list", "--outdated", "--uptodate"])).is_err());
