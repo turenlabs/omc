@@ -13,19 +13,19 @@ use flate2::Compression;
 use omc_cap::Capability;
 use omc_registry::{
     add_manifest_npm_local_paths, add_manifest_policy_grants, add_npm_dist_tag, add_npm_team_user,
-    add_package_graph, apply_pypi_binary_option, check_pypi_distribution, compare_npm_versions,
-    compare_pypi_versions, create_npm_team, create_npm_token, deprecate_npm_package,
-    destroy_npm_team, download_npm_package_tarball, grant_npm_access, init_project,
-    install_locked_packages, install_locked_packages_with_python_target, install_locked_project,
-    install_project, install_python_project_local_import_paths, lock_project,
-    mutate_npm_package_owner, mutate_npm_package_star, parse_capability_grant,
-    parse_npm_direct_archive_reference, parse_pypi_direct_archive_reference,
-    parse_pypi_vcs_requirement, publish_npm_package, read_constraint_files, read_lockfile,
-    read_manifest, read_npm_access_collaborators, read_npm_access_packages, read_npm_access_status,
-    read_npm_config_snapshot_with_globalconfig, read_npm_org_users, read_npm_package_metadata,
-    read_npm_package_metadata_with_userconfig, read_npm_package_owners,
-    read_npm_ping_with_userconfig, read_npm_profile, read_npm_search, read_npm_stars,
-    read_npm_team_users, read_npm_teams, read_npm_token_list, read_npm_whoami,
+    add_package_graph, apply_pypi_binary_option, apply_pypi_environment_defaults,
+    check_pypi_distribution, compare_npm_versions, compare_pypi_versions, create_npm_team,
+    create_npm_token, deprecate_npm_package, destroy_npm_team, download_npm_package_tarball,
+    grant_npm_access, init_project, install_locked_packages,
+    install_locked_packages_with_python_target, install_locked_project, install_project,
+    install_python_project_local_import_paths, lock_project, mutate_npm_package_owner,
+    mutate_npm_package_star, parse_capability_grant, parse_npm_direct_archive_reference,
+    parse_pypi_direct_archive_reference, parse_pypi_vcs_requirement, publish_npm_package,
+    read_constraint_files, read_lockfile, read_manifest, read_npm_access_collaborators,
+    read_npm_access_packages, read_npm_access_status, read_npm_config_snapshot_with_globalconfig,
+    read_npm_org_users, read_npm_package_metadata, read_npm_package_metadata_with_userconfig,
+    read_npm_package_owners, read_npm_ping_with_userconfig, read_npm_profile, read_npm_search,
+    read_npm_stars, read_npm_team_users, read_npm_teams, read_npm_token_list, read_npm_whoami,
     read_npm_workspace_packages, read_package_scripts, read_pip_config_snapshot,
     read_pypi_available_versions, read_requirements_files, read_script_requirement_files,
     remove_locked_packages, remove_manifest_dependency, remove_npm_dist_tag, remove_npm_org_user,
@@ -1773,6 +1773,7 @@ fn run_pip_lock(project_dir: &Path, action: PipLockAction) -> Result<ExitCode, O
         find_links,
         no_index,
     );
+    apply_pip_environment_defaults_for_project(&mut options, project_dir);
     options.pypi_require_hashes = require_hashes;
     options.pypi_include_dependencies = !no_deps;
     options.pypi_allow_prereleases = allow_prereleases;
@@ -4451,6 +4452,9 @@ fn run_pip_install_dry_run(
         find_links,
         no_index,
     );
+    options.requirement_files = absolutize_paths(project_dir, requirements);
+    options.constraint_files = absolutize_paths(project_dir, constraints);
+    apply_pip_environment_defaults_for_project(&mut options, project_dir);
     options.pypi_require_hashes = require_hashes;
     options.pypi_include_dependencies = !no_deps;
     options.pypi_allow_prereleases = allow_prereleases;
@@ -4468,12 +4472,12 @@ fn run_pip_install_dry_run(
         &archive_references,
         &mut options,
     )?);
-    if !requirements.is_empty() {
-        let requirements = read_requirements_files(&absolutize_paths(project_dir, requirements))?;
+    if !options.requirement_files.is_empty() {
+        let requirements = read_requirements_files(&options.requirement_files)?;
         apply_pypi_install_requirements(&mut options, &mut resolved_specs, requirements);
     }
-    if !constraints.is_empty() {
-        let constraints = read_constraint_files(&absolutize_paths(project_dir, constraints))?;
+    if !options.constraint_files.is_empty() {
+        let constraints = read_constraint_files(&options.constraint_files)?;
         apply_pypi_install_requirements(&mut options, &mut resolved_specs, constraints);
     }
     if !script_requirements.is_empty() {
@@ -4643,6 +4647,7 @@ fn run_pip_install_target(
         find_links,
         no_index,
     );
+    apply_pip_environment_defaults_for_project(&mut options, project_dir);
     options.pypi_require_hashes = require_hashes;
     options.pypi_include_dependencies = !no_deps;
     options.pypi_allow_prereleases = allow_prereleases;
@@ -4741,6 +4746,7 @@ fn run_pip_install_user(
         find_links,
         no_index,
     );
+    apply_pip_environment_defaults_for_project(&mut options, project_dir);
     options.pypi_require_hashes = require_hashes;
     options.pypi_include_dependencies = !no_deps;
     options.pypi_allow_prereleases = allow_prereleases;
@@ -9564,6 +9570,9 @@ fn download_pip_packages(
         find_links,
         no_index,
     );
+    options.requirement_files = absolutize_paths(project_dir, requirements);
+    options.constraint_files = absolutize_paths(project_dir, constraints);
+    apply_pip_environment_defaults_for_project(&mut options, project_dir);
     options.pypi_require_hashes = require_hashes;
     options.pypi_include_dependencies = !no_deps;
     options.pypi_allow_prereleases = allow_prereleases;
@@ -9577,12 +9586,12 @@ fn download_pip_packages(
         &archive_references,
         &mut options,
     )?);
-    if !requirements.is_empty() {
-        let requirements = read_requirements_files(&absolutize_paths(project_dir, requirements))?;
+    if !options.requirement_files.is_empty() {
+        let requirements = read_requirements_files(&options.requirement_files)?;
         apply_pypi_download_requirements(&mut options, &mut resolved_specs, requirements)?;
     }
-    if !constraints.is_empty() {
-        let constraints = read_constraint_files(&absolutize_paths(project_dir, constraints))?;
+    if !options.constraint_files.is_empty() {
+        let constraints = read_constraint_files(&options.constraint_files)?;
         apply_pypi_download_requirements(&mut options, &mut resolved_specs, constraints)?;
     }
     if resolved_specs.is_empty() {
@@ -15729,6 +15738,12 @@ fn apply_pip_compat_index_options(
     options.pypi_extra_index_urls.extend(extra_index_urls);
     options.pypi_find_links.extend(find_links);
     options.pypi_no_index |= no_index;
+}
+
+fn apply_pip_environment_defaults_for_project(options: &mut LinkOptions, project_dir: &Path) {
+    options.pypi_environment_base_dir = Some(project_dir.to_path_buf());
+    let override_index = options.pypi_index_url.is_none();
+    apply_pypi_environment_defaults(options, override_index);
 }
 
 fn apply_project_runtime_env(

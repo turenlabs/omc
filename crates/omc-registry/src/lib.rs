@@ -639,6 +639,7 @@ pub struct LinkOptions {
     pub pypi_target_implementation: Option<String>,
     pub pypi_target_platforms: Vec<String>,
     pub pypi_target_abis: Vec<String>,
+    pub pypi_environment_base_dir: Option<PathBuf>,
     pub python_target_dir: Option<PathBuf>,
     pub npm_local_paths: Vec<PathBuf>,
     pub python_local_paths: Vec<PathBuf>,
@@ -680,6 +681,7 @@ impl LinkOptions {
             pypi_target_implementation: None,
             pypi_target_platforms: Vec::new(),
             pypi_target_abis: Vec::new(),
+            pypi_environment_base_dir: None,
             python_target_dir: None,
             npm_local_paths: Vec::new(),
             python_local_paths: Vec::new(),
@@ -2714,18 +2716,25 @@ fn apply_pypi_environment_config(options: &mut LinkOptions, override_index: bool
     let index_url = env::var("PIP_INDEX_URL").ok();
     let extra_index_urls = env::var("PIP_EXTRA_INDEX_URL").ok();
     let find_links = env::var("PIP_FIND_LINKS").ok();
+    let requirement_files = env::var("PIP_REQUIREMENT").ok();
+    let constraint_files = env::var("PIP_CONSTRAINT").ok();
     let no_binary = env::var("PIP_NO_BINARY").ok();
     let only_binary = env::var("PIP_ONLY_BINARY").ok();
     let no_index = env_truthy("PIP_NO_INDEX");
     let allow_prereleases = env_truthy("PIP_PRE");
-    let project_dir = options.project_dir.clone();
+    let base_dir = options
+        .pypi_environment_base_dir
+        .clone()
+        .unwrap_or_else(|| options.project_dir.clone());
     apply_pypi_environment_values(
         options,
-        &project_dir,
+        &base_dir,
         PypiEnvironmentValues {
             index_url: index_url.as_deref(),
             extra_index_urls: extra_index_urls.as_deref(),
             find_links: find_links.as_deref(),
+            requirement_files: requirement_files.as_deref(),
+            constraint_files: constraint_files.as_deref(),
             no_binary: no_binary.as_deref(),
             only_binary: only_binary.as_deref(),
             no_index,
@@ -2735,11 +2744,17 @@ fn apply_pypi_environment_config(options: &mut LinkOptions, override_index: bool
     );
 }
 
+pub fn apply_pypi_environment_defaults(options: &mut LinkOptions, override_index: bool) {
+    apply_pypi_environment_config(options, override_index);
+}
+
 #[derive(Debug, Clone, Copy, Default)]
 struct PypiEnvironmentValues<'a> {
     index_url: Option<&'a str>,
     extra_index_urls: Option<&'a str>,
     find_links: Option<&'a str>,
+    requirement_files: Option<&'a str>,
+    constraint_files: Option<&'a str>,
     no_binary: Option<&'a str>,
     only_binary: Option<&'a str>,
     no_index: bool,
@@ -2771,6 +2786,16 @@ fn apply_pypi_environment_values(
                 .filter_map(|find_links| normalize_pypi_find_links_source(&find_links, base_dir)),
         );
     }
+    if let Some(requirement_files) = values.requirement_files {
+        options
+            .requirement_files
+            .extend(pypi_path_values(requirement_files, base_dir));
+    }
+    if let Some(constraint_files) = values.constraint_files {
+        options
+            .constraint_files
+            .extend(pypi_path_values(constraint_files, base_dir));
+    }
     if let Some(no_binary) = values.no_binary {
         apply_pypi_binary_option(
             &mut options.pypi_binary_all,
@@ -2791,6 +2816,8 @@ fn apply_pypi_environment_values(
     options.pypi_allow_prereleases |= values.allow_prereleases;
     dedupe_pypi_find_links(options);
     dedupe_pypi_extra_index_urls(options);
+    dedupe_paths(&mut options.requirement_files);
+    dedupe_paths(&mut options.constraint_files);
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -2798,6 +2825,8 @@ struct PipConfig {
     index_url: Option<String>,
     extra_index_urls: Vec<String>,
     find_links: Vec<String>,
+    requirement_files: Vec<PathBuf>,
+    constraint_files: Vec<PathBuf>,
     binary_all: Option<PypiBinaryMode>,
     binary_packages: BTreeMap<String, PypiBinaryMode>,
     no_index: bool,
@@ -2830,6 +2859,8 @@ fn apply_pip_config_files(project_dir: &Path, options: &mut LinkOptions) -> Resu
         .pypi_extra_index_urls
         .extend(config.extra_index_urls);
     options.pypi_find_links.extend(config.find_links);
+    options.requirement_files.extend(config.requirement_files);
+    options.constraint_files.extend(config.constraint_files);
     if config.binary_all.is_some() {
         options.pypi_binary_all = config.binary_all;
     }
@@ -2838,6 +2869,8 @@ fn apply_pip_config_files(project_dir: &Path, options: &mut LinkOptions) -> Resu
     options.pypi_allow_prereleases |= config.allow_prereleases;
     dedupe_pypi_find_links(options);
     dedupe_pypi_extra_index_urls(options);
+    dedupe_paths(&mut options.requirement_files);
+    dedupe_paths(&mut options.constraint_files);
     Ok(())
 }
 
@@ -3077,6 +3110,16 @@ fn apply_pip_config_value(
                     }),
             );
         }
+        "requirement" => {
+            config
+                .requirement_files
+                .extend(pypi_path_values(value, base_dir));
+        }
+        "constraint" => {
+            config
+                .constraint_files
+                .extend(pypi_path_values(value, base_dir));
+        }
         "no-index" => {
             config.no_index |= pip_config_bool(value);
         }
@@ -3109,10 +3152,19 @@ fn apply_pip_config_value(
     config
         .find_links
         .retain(|find_links| seen.insert(find_links.clone()));
+    dedupe_paths(&mut config.requirement_files);
+    dedupe_paths(&mut config.constraint_files);
 }
 
 fn pypi_index_url_values(value: &str) -> Vec<String> {
     shell_like_tokens(value)
+}
+
+fn pypi_path_values(value: &str, base_dir: &Path) -> Vec<PathBuf> {
+    shell_like_tokens(value)
+        .into_iter()
+        .map(|path| resolve_manifest_path(base_dir, &path))
+        .collect()
 }
 
 fn pip_config_bool(value: &str) -> bool {
@@ -3141,6 +3193,11 @@ fn dedupe_pypi_find_links(options: &mut LinkOptions) {
     options
         .pypi_find_links
         .retain(|find_links| seen.insert(find_links.clone()));
+}
+
+fn dedupe_paths(paths: &mut Vec<PathBuf>) {
+    let mut seen = BTreeSet::new();
+    paths.retain(|path| seen.insert(path.clone()));
 }
 
 fn prune_lockfile(project_dir: &Path, retained: &BTreeSet<String>) -> Result<usize> {
@@ -23491,6 +23548,8 @@ wheels = [
                     "https://extra.example/simple 'https://quoted.example/simple' https://extra.example/simple",
                 ),
                 find_links: Some("./wheelhouse https://files.example/packages"),
+                requirement_files: None,
+                constraint_files: None,
                 no_binary: Some(":all:"),
                 only_binary: Some("idna"),
                 no_index: true,
@@ -23582,6 +23641,73 @@ wheels = [
     }
 
     #[test]
+    fn applies_pypi_environment_requirement_and_constraint_files() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir_all(dir.path().join("requirements")).unwrap();
+        fs::create_dir_all(dir.path().join("constraints")).unwrap();
+        fs::write(
+            dir.path().join("requirements").join("base.txt"),
+            "idna>=2\n",
+        )
+        .unwrap();
+        fs::write(
+            dir.path().join("requirements").join("dev.txt"),
+            "certifi==2024.2.2\n",
+        )
+        .unwrap();
+        fs::write(
+            dir.path().join("constraints").join("prod constraints.txt"),
+            "idna==3.7\n",
+        )
+        .unwrap();
+        fs::write(
+            dir.path().join("constraints").join("base.txt"),
+            "certifi==2024.2.2\n",
+        )
+        .unwrap();
+
+        let mut options = LinkOptions::new(dir.path());
+        apply_pypi_environment_values(
+            &mut options,
+            dir.path(),
+            PypiEnvironmentValues {
+                requirement_files: Some(
+                    "requirements/base.txt requirements/dev.txt requirements/base.txt",
+                ),
+                constraint_files: Some("'constraints/prod constraints.txt' constraints/base.txt"),
+                ..PypiEnvironmentValues::default()
+            },
+        );
+
+        assert_eq!(
+            options.requirement_files,
+            vec![
+                dir.path().join("requirements").join("base.txt"),
+                dir.path().join("requirements").join("dev.txt"),
+            ]
+        );
+        assert_eq!(
+            options.constraint_files,
+            vec![
+                dir.path().join("constraints").join("prod constraints.txt"),
+                dir.path().join("constraints").join("base.txt"),
+            ]
+        );
+
+        let specs = project_requested_specs(&mut options, false).unwrap();
+        assert!(has_spec(&specs, "idna", ">=2"));
+        assert!(has_spec(&specs, "certifi", "==2024.2.2"));
+        assert_eq!(
+            options.constraints.get("pypi:idna").map(String::as_str),
+            Some("==3.7")
+        );
+        assert_eq!(
+            options.constraints.get("pypi:certifi").map(String::as_str),
+            Some("==2024.2.2")
+        );
+    }
+
+    #[test]
     fn parses_pip_config_indexes() {
         let dir = tempfile::tempdir().unwrap();
         let mut config = PipConfig::default();
@@ -23591,6 +23717,8 @@ wheels = [
             index-url = https://global.example/simple
             extra-index-url = https://extra.example/simple 'https://quoted.example/simple'
             find-links = ./wheelhouse
+            requirement = requirements/base.txt 'requirements/dev requirements.txt'
+            constraint = constraints/base.txt
 
             [install]
             extra-index-url =
@@ -23599,6 +23727,9 @@ wheels = [
             find-links =
                 https://files.example/packages
                 ./wheelhouse
+            constraint =
+                constraints/prod.txt
+                constraints/base.txt
             no-binary = :all:
             only-binary = idna
             no-index = true
@@ -23632,6 +23763,20 @@ wheels = [
                     .to_string_lossy()
                     .into_owned(),
                 "https://files.example/packages".to_owned(),
+            ]
+        );
+        assert_eq!(
+            config.requirement_files,
+            vec![
+                dir.path().join("requirements").join("base.txt"),
+                dir.path().join("requirements").join("dev requirements.txt"),
+            ]
+        );
+        assert_eq!(
+            config.constraint_files,
+            vec![
+                dir.path().join("constraints").join("base.txt"),
+                dir.path().join("constraints").join("prod.txt"),
             ]
         );
         assert_eq!(config.binary_all, Some(PypiBinaryMode::Source));
