@@ -545,6 +545,12 @@ enum NpmCompatAction {
         userconfig: Option<PathBuf>,
         globalconfig: Option<PathBuf>,
     },
+    ConfigEdit {
+        location: NpmConfigLocation,
+        editor: Option<String>,
+        userconfig: Option<PathBuf>,
+        globalconfig: Option<PathBuf>,
+    },
     View {
         spec: String,
         fields: Vec<String>,
@@ -4187,6 +4193,23 @@ fn run_npm_compat_with_cwd(
                 userconfig.as_deref(),
                 globalconfig.as_deref(),
             )?
+        }
+        NpmCompatAction::ConfigEdit {
+            location,
+            editor,
+            mut userconfig,
+            mut globalconfig,
+        } => {
+            absolutize_optional_path(invocation_cwd, &mut userconfig);
+            absolutize_optional_path(invocation_cwd, &mut globalconfig);
+            return run_npm_config_edit(
+                project_dir,
+                invocation_cwd,
+                userconfig.as_deref(),
+                globalconfig.as_deref(),
+                location,
+                editor,
+            );
         }
         NpmCompatAction::View {
             spec,
@@ -7931,10 +7954,10 @@ fn npm_help_text(topic: Option<&str>) -> String {
             ],
         ),
         Some("config") => npm_command_help(
-            "npm config <get|set|delete|list> ...",
+            "npm config <get|set|delete|list|edit> ...",
             &[
-                "Read and update npm registry config used by OMC.",
-                "Aliases: c, npm get. Supports --json, --registry, --userconfig, --globalconfig, --global, and --location where relevant.",
+                "Read, update, and edit npm registry config used by OMC.",
+                "Aliases: c, npm get. Supports --json, --registry, --userconfig, --globalconfig, --global, --location, and --editor where relevant.",
             ],
         ),
         Some("cache") => npm_command_help(
@@ -9092,6 +9115,38 @@ fn delete_npm_config_keys(
         !keys.iter().any(|target| target == key)
     });
     write_npm_config_lines(&path, &lines)
+}
+
+fn run_npm_config_edit(
+    project_dir: &Path,
+    invocation_cwd: &Path,
+    userconfig: Option<&Path>,
+    globalconfig: Option<&Path>,
+    location: NpmConfigLocation,
+    editor: Option<String>,
+) -> Result<ExitCode, OmcRegistryError> {
+    let path = npm_config_write_path(project_dir, userconfig, globalconfig, location);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    if !path.exists() {
+        fs::write(&path, "")?;
+    }
+
+    let editor = npm_config_editor(editor);
+    let mut command = package_script_command(&editor);
+    command.current_dir(invocation_cwd).arg(&path);
+    let status = command.status()?;
+    Ok(exit_code(status.code()))
+}
+
+fn npm_config_editor(editor: Option<String>) -> String {
+    editor
+        .or_else(|| env::var("VISUAL").ok())
+        .or_else(|| env::var("EDITOR").ok())
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "vi".to_owned())
 }
 
 fn npm_config_write_path(
@@ -25670,22 +25725,88 @@ fn npm_outdated_equals_value_flag(arg: &str) -> bool {
 }
 
 fn parse_npm_config_args(args: &[String]) -> Result<NpmCompatAction, OmcRegistryError> {
-    let Some(command) = args.first().map(String::as_str) else {
-        return Ok(NpmCompatAction::Config {
-            action: NpmConfigAction::List {
-                json: false,
-                location: NpmConfigLocation::User,
-            },
-            npm_registry: None,
-            userconfig: None,
-            globalconfig: None,
-        });
+    let NpmConfigArgs {
+        editor,
+        json,
+        location,
+        npm_registry,
+        userconfig,
+        globalconfig,
+        mut positionals,
+    } = parse_npm_config_common_args(args)?;
+    let command = if positionals.is_empty() {
+        "list".to_owned()
+    } else {
+        positionals.remove(0)
     };
-    match command {
-        "get" => parse_npm_config_get_args(&args[1..]),
-        "list" | "ls" => parse_npm_config_list_args(&args[1..]),
-        "set" => parse_npm_config_set_args(&args[1..]),
-        "delete" | "del" | "rm" | "unset" => parse_npm_config_delete_args(&args[1..]),
+    match command.as_str() {
+        "get" => {
+            if positionals.is_empty() {
+                return Err(OmcRegistryError::UnsupportedSpec(
+                    "npm config get needs at least one key".to_owned(),
+                ));
+            }
+            Ok(NpmCompatAction::Config {
+                action: NpmConfigAction::Get {
+                    keys: positionals,
+                    json,
+                    location,
+                },
+                npm_registry,
+                userconfig,
+                globalconfig,
+            })
+        }
+        "list" | "ls" => {
+            if !positionals.is_empty() {
+                return Err(unsupported_compat_arg("npm config list", &positionals[0]));
+            }
+            Ok(NpmCompatAction::Config {
+                action: NpmConfigAction::List { json, location },
+                npm_registry,
+                userconfig,
+                globalconfig,
+            })
+        }
+        "edit" => {
+            if !positionals.is_empty() {
+                return Err(unsupported_compat_arg("npm config edit", &positionals[0]));
+            }
+            Ok(NpmCompatAction::ConfigEdit {
+                location,
+                editor,
+                userconfig,
+                globalconfig,
+            })
+        }
+        "set" => {
+            let assignments = parse_npm_config_assignments(positionals)?;
+            Ok(NpmCompatAction::Config {
+                action: NpmConfigAction::Set {
+                    assignments,
+                    location,
+                },
+                npm_registry,
+                userconfig,
+                globalconfig,
+            })
+        }
+        "delete" | "del" | "rm" | "unset" => {
+            if positionals.is_empty() {
+                return Err(OmcRegistryError::UnsupportedSpec(
+                    "npm config delete needs at least one key".to_owned(),
+                ));
+            }
+            Ok(NpmCompatAction::Config {
+                action: NpmConfigAction::Delete {
+                    keys: positionals,
+                    location,
+                },
+                npm_registry,
+                userconfig,
+                globalconfig,
+            })
+        }
         other => Err(OmcRegistryError::UnsupportedSpec(format!(
             "unsupported npm config command `{other}`"
         ))),
@@ -25803,6 +25924,7 @@ fn parse_npm_config_get_args(args: &[String]) -> Result<NpmCompatAction, OmcRegi
         userconfig,
         globalconfig,
         positionals,
+        ..
     } = parse_npm_config_common_args(args)?;
     if positionals.is_empty() {
         return Err(OmcRegistryError::UnsupportedSpec(
@@ -25815,26 +25937,6 @@ fn parse_npm_config_get_args(args: &[String]) -> Result<NpmCompatAction, OmcRegi
             json,
             location,
         },
-        npm_registry,
-        userconfig,
-        globalconfig,
-    })
-}
-
-fn parse_npm_config_list_args(args: &[String]) -> Result<NpmCompatAction, OmcRegistryError> {
-    let NpmConfigArgs {
-        json,
-        location,
-        npm_registry,
-        userconfig,
-        globalconfig,
-        positionals,
-    } = parse_npm_config_common_args(args)?;
-    if !positionals.is_empty() {
-        return Err(unsupported_compat_arg("npm config list", &positionals[0]));
-    }
-    Ok(NpmCompatAction::Config {
-        action: NpmConfigAction::List { json, location },
         npm_registry,
         userconfig,
         globalconfig,
@@ -25854,31 +25956,6 @@ fn parse_npm_config_set_args(args: &[String]) -> Result<NpmCompatAction, OmcRegi
     Ok(NpmCompatAction::Config {
         action: NpmConfigAction::Set {
             assignments,
-            location,
-        },
-        npm_registry,
-        userconfig,
-        globalconfig,
-    })
-}
-
-fn parse_npm_config_delete_args(args: &[String]) -> Result<NpmCompatAction, OmcRegistryError> {
-    let NpmConfigArgs {
-        location,
-        npm_registry,
-        userconfig,
-        globalconfig,
-        positionals,
-        ..
-    } = parse_npm_config_common_args(args)?;
-    if positionals.is_empty() {
-        return Err(OmcRegistryError::UnsupportedSpec(
-            "npm config delete needs at least one key".to_owned(),
-        ));
-    }
-    Ok(NpmCompatAction::Config {
-        action: NpmConfigAction::Delete {
-            keys: positionals,
             location,
         },
         npm_registry,
@@ -25928,6 +26005,7 @@ fn npm_config_assignment(key: &str, value: &str) -> Result<(String, String), Omc
 
 #[derive(Debug)]
 struct NpmConfigArgs {
+    editor: Option<String>,
     json: bool,
     location: NpmConfigLocation,
     npm_registry: Option<String>,
@@ -25937,6 +26015,7 @@ struct NpmConfigArgs {
 }
 
 fn parse_npm_config_common_args(args: &[String]) -> Result<NpmConfigArgs, OmcRegistryError> {
+    let mut editor = None;
     let mut json = false;
     let mut location = NpmConfigLocation::User;
     let mut userconfig = None;
@@ -25979,6 +26058,16 @@ fn parse_npm_config_common_args(args: &[String]) -> Result<NpmConfigArgs, OmcReg
             location = parse_npm_config_location(value)?;
         } else if let Some(value) = arg.strip_prefix("--location=") {
             location = parse_npm_config_location(value)?;
+        } else if arg == "--editor" {
+            index += 1;
+            let Some(value) = args.get(index) else {
+                return Err(OmcRegistryError::UnsupportedSpec(
+                    "--editor needs a value".to_owned(),
+                ));
+            };
+            editor = Some(value.clone());
+        } else if let Some(value) = arg.strip_prefix("--editor=") {
+            editor = Some(value.to_owned());
         } else if matches!(arg.as_str(), "--long" | "-l" | "--parseable") {
         } else {
             filtered.push(arg.clone());
@@ -25992,6 +26081,7 @@ fn parse_npm_config_common_args(args: &[String]) -> Result<NpmConfigArgs, OmcReg
         ..
     } = parse_common_compat_flags(&filtered, true)?;
     Ok(NpmConfigArgs {
+        editor,
         json,
         location,
         npm_registry,
@@ -35307,6 +35397,37 @@ verdict = "accepted"
             }
         );
         assert_eq!(
+            parse_npm_compat_action(&args(&[
+                "config",
+                "edit",
+                "--location=project",
+                "--editor",
+                "true",
+            ]))
+            .unwrap(),
+            NpmCompatAction::ConfigEdit {
+                location: NpmConfigLocation::Project,
+                editor: Some("true".to_owned()),
+                userconfig: None,
+                globalconfig: None,
+            }
+        );
+        assert_eq!(
+            parse_npm_compat_action(&args(&[
+                "config",
+                "--location=project",
+                "--editor=true",
+                "edit",
+            ]))
+            .unwrap(),
+            NpmCompatAction::ConfigEdit {
+                location: NpmConfigLocation::Project,
+                editor: Some("true".to_owned()),
+                userconfig: None,
+                globalconfig: None,
+            }
+        );
+        assert_eq!(
             parse_npm_compat_action(&args(&["config", "set", "registry", "x"])).unwrap(),
             NpmCompatAction::Config {
                 action: NpmConfigAction::Set {
@@ -36705,6 +36826,44 @@ verdict = "accepted"
             .unwrap()
             .contains("registry=https://nested-globalconfig.example/npm"));
         assert!(!project.join("global.npmrc").exists());
+    }
+
+    #[test]
+    fn direct_npm_config_edit_runs_editor_for_selected_config() {
+        let project = test_dir("direct-npm-config-edit-project");
+        let invocation_cwd = project.join("work/release");
+        fs::create_dir_all(&invocation_cwd).unwrap();
+        fs::write(
+            project.join("package.json"),
+            r#"{ "name": "root", "version": "1.0.0" }"#,
+        )
+        .unwrap();
+        let editor_script = invocation_cwd.join("edit-npm-config.sh");
+        fs::write(
+            &editor_script,
+            "#!/bin/sh\nprintf 'registry=https://edited-npm.example/npm\\n' > \"$1\"\n",
+        )
+        .unwrap();
+        let editor = format!("sh {}", editor_script.display());
+
+        let status = run_npm_compat_with_cwd(
+            &project,
+            &args(&[
+                "config",
+                "edit",
+                "--location=project",
+                "--editor",
+                editor.as_str(),
+            ]),
+            &invocation_cwd,
+        )
+        .unwrap();
+
+        assert_eq!(status, ExitCode::SUCCESS);
+        assert!(fs::read_to_string(project.join(".npmrc"))
+            .unwrap()
+            .contains("registry=https://edited-npm.example/npm\n"));
+        assert!(!invocation_cwd.join(".npmrc").exists());
     }
 
     #[test]
