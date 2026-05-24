@@ -1042,6 +1042,7 @@ enum PipCompatAction {
         shell: Option<PipCompletionShell>,
     },
     Install(Box<PipInstallAction>),
+    Lock(Box<PipLockAction>),
     Download(Box<PipDownloadAction>),
     Wheel(Box<PipDownloadAction>),
     Uninstall {
@@ -1172,6 +1173,12 @@ struct PipInstallAction {
     vcs_requirements: Vec<PythonVcsRequirement>,
     allow: Vec<String>,
     allow_all_host: bool,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct PipLockAction {
+    install: PipInstallAction,
+    output: PathBuf,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -1683,6 +1690,191 @@ fn write_pip_install_report_from(
         fs::write(report_path, format!("{report}\n"))?;
     }
     Ok(())
+}
+
+fn run_pip_lock(project_dir: &Path, action: PipLockAction) -> Result<ExitCode, OmcRegistryError> {
+    let PipInstallAction {
+        specs,
+        requirements,
+        constraints,
+        script_requirements,
+        groups,
+        report: _,
+        dry_run: _,
+        archive_references,
+        local_paths,
+        index_url,
+        extra_index_urls,
+        find_links,
+        no_index,
+        binary_all,
+        binary_packages,
+        require_hashes,
+        no_deps,
+        allow_prereleases,
+        target,
+        user,
+        vcs_requirements,
+        allow,
+        allow_all_host,
+    } = action.install;
+
+    if user {
+        return Err(OmcRegistryError::UnsupportedSpec(
+            "pip lock does not support --user".to_owned(),
+        ));
+    }
+    if target.is_some() {
+        return Err(OmcRegistryError::UnsupportedSpec(
+            "pip lock does not support --target".to_owned(),
+        ));
+    }
+
+    let temp_project = TempOmcProject::empty("pip-lock")?;
+    let mut options = LinkOptions::new(temp_project.path());
+    options.save_manifest_dependency = false;
+    options.allowed_capabilities = parse_grants(&allow, allow_all_host)?;
+    options.requirement_files = absolutize_paths(project_dir, requirements);
+    options.constraint_files = absolutize_paths(project_dir, constraints);
+    options.python_local_requirements =
+        absolutize_python_local_requirements(project_dir, local_paths);
+    if !groups.is_empty() {
+        options
+            .python_local_requirements
+            .push(PythonLocalRequirement::new(
+                project_dir.to_path_buf(),
+                groups.into_iter().collect(),
+            ));
+    }
+    apply_pip_compat_index_options(
+        &mut options,
+        index_url,
+        extra_index_urls,
+        find_links,
+        no_index,
+    );
+    options.pypi_require_hashes = require_hashes;
+    options.pypi_include_dependencies = !no_deps;
+    options.pypi_allow_prereleases = allow_prereleases;
+    options.pypi_binary_all = binary_all;
+    options.pypi_binary_packages = binary_packages;
+    options.python_vcs_requirements = vcs_requirements;
+
+    let mut resolved_specs = parse_package_specs(&specs, Some(Ecosystem::Pypi))?;
+    resolved_specs.extend(parse_pip_archive_references(
+        project_dir,
+        &archive_references,
+        &mut options,
+    )?);
+    if !script_requirements.is_empty() {
+        let requirements =
+            read_script_requirement_files(&absolutize_paths(project_dir, script_requirements))?;
+        apply_pypi_install_requirements(&mut options, &mut resolved_specs, requirements);
+    }
+
+    let has_project_inputs = !options.requirement_files.is_empty()
+        || !options.python_local_requirements.is_empty()
+        || !options.python_vcs_requirements.is_empty();
+    if resolved_specs.is_empty() && !has_project_inputs {
+        options
+            .python_local_requirements
+            .push(PythonLocalRequirement::new(
+                project_dir.to_path_buf(),
+                BTreeSet::new(),
+            ));
+    }
+
+    let mut all_reports = Vec::new();
+    if !options.requirement_files.is_empty()
+        || !options.python_local_requirements.is_empty()
+        || !options.python_vcs_requirements.is_empty()
+    {
+        all_reports.extend(lock_project(&options)?);
+    }
+
+    for spec in &resolved_specs {
+        all_reports.extend(add_package_graph(spec, &options)?);
+    }
+    if !all_reports.is_empty() {
+        print_link_reports(&all_reports);
+    }
+
+    let lock = read_lockfile(temp_project.path().join("omc.lock"))?;
+    let output = pylock_toml_from_omc_lock(&lock);
+    if action.output == Path::new("-") {
+        print!("{output}");
+    } else {
+        let output_path = absolutize_path(project_dir, action.output);
+        if let Some(parent) = output_path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::write(&output_path, output)?;
+        println!("wrote {}", output_path.display());
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+fn pylock_toml_from_omc_lock(lock: &OmcLock) -> String {
+    let mut packages = lock
+        .packages
+        .iter()
+        .filter(|package| {
+            package.ecosystem == Ecosystem::Pypi && package.verdict == Verdict::Accepted
+        })
+        .collect::<Vec<_>>();
+    packages.sort_by(|left, right| {
+        (
+            normalize_pip_show_name(&left.name),
+            left.version.as_str(),
+            left.source_url.as_str(),
+        )
+            .cmp(&(
+                normalize_pip_show_name(&right.name),
+                right.version.as_str(),
+                right.source_url.as_str(),
+            ))
+    });
+
+    let mut output = format!(
+        "lock-version = \"1.0\"\ncreated-by = \"omc {}\"\n\n",
+        env!("CARGO_PKG_VERSION")
+    );
+    for package in packages {
+        output.push_str("[[packages]]\n");
+        output.push_str(&format!("name = {}\n", toml_string(&package.name)));
+        output.push_str(&format!("version = {}\n", toml_string(&package.version)));
+        append_pylock_distribution(&mut output, package);
+        output.push('\n');
+    }
+    output
+}
+
+fn append_pylock_distribution(output: &mut String, package: &LockedPackage) {
+    if package.sha256.is_empty() {
+        return;
+    }
+    let source = if package.source_url.is_empty() {
+        package.archive.as_str()
+    } else {
+        package.source_url.as_str()
+    };
+    if source.is_empty() {
+        return;
+    }
+    let distribution = format!(
+        "{{ url = {}, hashes = {{ sha256 = {} }} }}",
+        toml_string(source),
+        toml_string(&package.sha256)
+    );
+    if pip_locked_package_filetype(package) == "sdist" {
+        output.push_str(&format!("sdist = {distribution}\n"));
+    } else {
+        output.push_str(&format!("wheels = [\n  {distribution},\n]\n"));
+    }
+}
+
+fn toml_string(value: &str) -> String {
+    toml::Value::String(value.to_owned()).to_string()
 }
 
 fn pip_install_report_json(
@@ -3399,6 +3591,9 @@ fn run_pip_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
         PipCompatAction::Help { topic } => print_pip_help(topic.as_deref()),
         PipCompatAction::Version => println!("pip {} from OMC", env!("CARGO_PKG_VERSION")),
         PipCompatAction::Completion { shell } => print_pip_completion(shell),
+        PipCompatAction::Lock(action) => {
+            return run_pip_lock(project_dir, *action);
+        }
         PipCompatAction::Install(action) => {
             let action = *action;
             if action.user && action.target.is_some() {
@@ -5576,6 +5771,13 @@ fn pip_help_text(topic: Option<&str>) -> String {
                 "Supports requirements/constraints, inline script requirements, indexes, find-links, no-index, hashes, no-deps, install reports, dry-runs, binary policy, target dirs, local archives, local directories, editable paths, and editable VCS requirements.",
             ],
         ),
+        Some("lock") => pip_command_help(
+            "pip lock [<requirement>...]",
+            &[
+                "Resolve and verify PyPI requirements with OMC, then write a pylock.toml-style lock file without installing packages.",
+                "Supports install-style requirements, constraints, inline script requirements, indexes, find-links, hashes, no-deps, local paths, editable VCS requirements, --group, and -o/--output.",
+            ],
+        ),
         Some("download") => pip_command_help(
             "pip download [<requirement>...]",
             &["Download locked PyPI archives into a destination directory. Shares install-style requirement and index flags."],
@@ -5640,7 +5842,7 @@ fn pip_general_help_text() -> String {
         "pip <command>",
         &[
             "OMC pip compatibility runs supported pip workflows through OMC's resolver, verifier, lockfile, cache, and isolated Python site-packages.",
-            "Supported commands: install, download, wheel, uninstall, freeze, list, show, check, inspect, debug, hash, cache, index versions, config, completion.",
+            "Supported commands: install, lock, download, wheel, uninstall, freeze, list, show, check, inspect, debug, hash, cache, index versions, config, completion.",
             "Use `pip help <command>` for focused OMC compatibility notes.",
         ],
     )
@@ -5663,6 +5865,7 @@ fn pip_help_topic(topic: &str) -> Option<&'static str> {
         "help" | "--help" | "-h" => None,
         "completion" => Some("completion"),
         "install" => Some("install"),
+        "lock" => Some("lock"),
         "download" => Some("download"),
         "wheel" => Some("wheel"),
         "uninstall" | "remove" => Some("uninstall"),
@@ -5694,6 +5897,7 @@ const PIP_COMPLETION_COMMANDS: &[&str] = &[
     "inspect",
     "install",
     "list",
+    "lock",
     "search",
     "show",
     "uninstall",
@@ -21360,6 +21564,7 @@ fn parse_pip_compat_action(args: &[String]) -> Result<PipCompatAction, OmcRegist
         "--version" | "-V" => Ok(PipCompatAction::Version),
         "completion" => parse_pip_completion_args(&args[1..]),
         "install" => parse_pip_install_args(&args[1..]),
+        "lock" => parse_pip_lock_args(&args[1..]),
         "download" => parse_pip_download_args(&args[1..]),
         "wheel" => parse_pip_wheel_args(&args[1..]),
         "uninstall" | "remove" => parse_pip_uninstall_args(&args[1..]),
@@ -22691,6 +22896,45 @@ fn parse_pip_install_args(args: &[String]) -> Result<PipCompatAction, OmcRegistr
         vcs_requirements,
         allow,
         allow_all_host,
+    })))
+}
+
+fn parse_pip_lock_args(args: &[String]) -> Result<PipCompatAction, OmcRegistryError> {
+    let mut output = PathBuf::from("pylock.toml");
+    let mut install_args = Vec::new();
+    let mut index = 0;
+    while index < args.len() {
+        let arg = &args[index];
+        if arg == "-o" || arg == "--output" {
+            index += 1;
+            let Some(path) = args.get(index) else {
+                return Err(OmcRegistryError::UnsupportedSpec(format!(
+                    "{arg} needs a path"
+                )));
+            };
+            output = PathBuf::from(path);
+        } else if let Some(path) = arg.strip_prefix("--output=") {
+            output = PathBuf::from(path);
+        } else if arg == "--build-constraint" {
+            index += 1;
+            if args.get(index).is_none() {
+                return Err(OmcRegistryError::UnsupportedSpec(format!(
+                    "{arg} needs a path"
+                )));
+            }
+        } else if arg.starts_with("--build-constraint=") {
+        } else {
+            install_args.push(arg.clone());
+        }
+        index += 1;
+    }
+
+    let PipCompatAction::Install(action) = parse_pip_install_args(&install_args)? else {
+        unreachable!("parse_pip_install_args returns install actions")
+    };
+    Ok(PipCompatAction::Lock(Box::new(PipLockAction {
+        install: *action,
+        output,
     })))
 }
 
@@ -28755,6 +28999,36 @@ version = "0.1.0"
     }
 
     #[test]
+    fn pip_lock_writes_pylock_without_installing_project() {
+        let project = test_dir("pip-lock-local-project");
+        fs::create_dir_all(project.join("src").join("localpkg")).unwrap();
+        fs::write(project.join("src").join("localpkg").join("__init__.py"), "").unwrap();
+        fs::write(
+            project.join("pyproject.toml"),
+            r#"
+[project]
+name = "localpkg"
+version = "0.1.0"
+"#,
+        )
+        .unwrap();
+
+        let status = run_pip_compat(&project, &args(&["lock", "-o", "locks/pylock.toml"])).unwrap();
+
+        assert_eq!(status, ExitCode::SUCCESS);
+        let pylock = fs::read_to_string(project.join("locks").join("pylock.toml")).unwrap();
+        assert!(pylock.contains("lock-version = \"1.0\""));
+        assert!(pylock.contains("created-by = \"omc "));
+        assert!(!project.join("omc.lock").exists());
+        assert!(!project
+            .join(".omc")
+            .join("python")
+            .join("site-packages")
+            .exists());
+        fs::remove_dir_all(project).unwrap();
+    }
+
+    #[test]
     fn pip_install_requirements_from_script_uses_inline_metadata() {
         let project = test_dir("pip-install-script-req-project");
         let local = project.join("vendor").join("scriptdep");
@@ -30032,6 +30306,27 @@ version = "0.2.0"
             parse_pip_compat_action(&args(&["check", "--user"])).unwrap(),
             PipCompatAction::Check { user: true }
         );
+        match parse_pip_compat_action(&args(&[
+            "lock",
+            "-r",
+            "requirements.txt",
+            "--group",
+            "pyproject.toml:Dev",
+            "-o",
+            "locks/pylock.toml",
+        ]))
+        .unwrap()
+        {
+            PipCompatAction::Lock(action) => {
+                assert_eq!(action.output, PathBuf::from("locks/pylock.toml"));
+                assert_eq!(
+                    action.install.requirements,
+                    vec![PathBuf::from("requirements.txt")]
+                );
+                assert_eq!(action.install.groups, vec!["dev".to_owned()]);
+            }
+            other => panic!("expected pip lock action, got {other:?}"),
+        }
         assert_eq!(
             parse_pip_compat_action(&args(&[
                 "debug",
@@ -30726,6 +31021,37 @@ resolved_commit = "0123456789abcdef0123456789abcdef01234567"
             }
         );
         fs::remove_dir_all(site_packages.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn pylock_output_contains_pypi_hashes() {
+        let mut wheel = locked_pypi_package("idna", "3.7", Vec::new());
+        wheel.sha256 = "a".repeat(64);
+        let mut sdist = locked_pypi_package("source-pkg", "1.0.0", Vec::new());
+        sdist.source_url = "https://files.example/source-pkg-1.0.0.tar.gz".to_owned();
+        sdist.sha256 = "b".repeat(64);
+        let lock = OmcLock {
+            version: 1,
+            packages: vec![
+                locked_npm_package("left-pad", "1.3.0", Vec::new()),
+                sdist,
+                wheel,
+            ],
+            python_vcs: Vec::new(),
+        };
+
+        let pylock = pylock_toml_from_omc_lock(&lock);
+
+        assert!(pylock.contains("name = \"idna\""));
+        assert!(pylock.contains("wheels = ["));
+        assert!(pylock.contains(
+            "sha256 = \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\""
+        ));
+        assert!(pylock.contains("name = \"source-pkg\""));
+        assert!(
+            pylock.contains("sdist = { url = \"https://files.example/source-pkg-1.0.0.tar.gz\"")
+        );
+        assert!(!pylock.contains("left-pad"));
     }
 
     fn locked_pypi_package(name: &str, version: &str, dependencies: Vec<String>) -> LockedPackage {

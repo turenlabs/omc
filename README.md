@@ -216,6 +216,7 @@ cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip install --no-d
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip install --target vendor ./dist/local_pkg-1.0.0.tar.gz
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip install --user -e ../local-package
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip install ./dist/local_pkg-1.0.0-py3-none-any.whl
+cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip lock -r requirements.txt -o pylock.toml
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip download -r requirements.txt -d wheelhouse
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip wheel -r requirements.txt -w wheelhouse
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip wheel --no-binary=:all: ./dist/local_pkg-1.0.0.tar.gz -w wheelhouse
@@ -575,7 +576,7 @@ Supported now:
   workspace flags such as `--if-present`, `--workspace`, `--workspaces`,
   `--include-workspace-root`, `--silent`, `-s`, and `--loglevel=silent` are
   understood
-- `omc pip` compatibility commands for common `install`, `uninstall`, `freeze`,
+- `omc pip` compatibility commands for common `install`, `lock`, `uninstall`, `freeze`,
   `download`, `check`, `debug`, `help`, `inspect`, `show`, `hash`, `cache dir/list/remove/purge`,
   `wheel`, `index versions`, `config get/set/unset/list`, and
   `list --format=columns|freeze|json` flows, including `pip list --outdated`
@@ -609,7 +610,9 @@ Supported now:
   `pyproject.toml` dependency groups, and path-qualified groups such as
   `pip install --group './packages/tooling/pyproject.toml:dev'`, through OMC's existing pyproject
   resolver; `pip install --requirements-from-script FILE` installs PEP 723
-  inline script dependencies through OMC; `pip list --user`,
+  inline script dependencies through OMC; `pip lock` resolves through the same
+  verifier and writes a pylock-style output file without installing packages;
+  `pip list --user`,
   `pip freeze --user`, `pip inspect --user`, and `pip show --user` read
   OMC-managed Python user site-packages; `pip freeze -r requirements.txt`
   preserves requirement-file order
