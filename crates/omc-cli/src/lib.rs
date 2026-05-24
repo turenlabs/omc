@@ -352,6 +352,7 @@ enum NpmCompatAction {
         omit_dev: bool,
         omit_optional: bool,
         omit_peer: bool,
+        package_lock: bool,
         lock_only: bool,
         dry_run: bool,
         npm_registry: Option<String>,
@@ -374,6 +375,7 @@ enum NpmCompatAction {
         omit_dev: bool,
         omit_optional: bool,
         omit_peer: bool,
+        package_lock: bool,
         lock_only: bool,
         dry_run: bool,
         npm_registry: Option<String>,
@@ -2664,6 +2666,7 @@ struct NpmInstallCompatRequest {
     omit_dev: bool,
     omit_optional: bool,
     omit_peer: bool,
+    package_lock: bool,
     lock_only: bool,
     dry_run: bool,
     npm_registry: Option<String>,
@@ -2713,6 +2716,7 @@ fn run_npm_install_compat(
         omit_dev,
         omit_optional,
         omit_peer,
+        package_lock,
         lock_only,
         dry_run,
         npm_registry,
@@ -2737,6 +2741,7 @@ fn run_npm_install_compat(
                 omit_dev,
                 omit_optional,
                 omit_peer,
+                package_lock,
                 lock_only,
                 dry_run,
                 npm_registry,
@@ -2763,6 +2768,7 @@ fn run_npm_install_compat(
                 omit_dev,
                 omit_optional,
                 omit_peer,
+                package_lock,
                 lock_only,
                 dry_run,
                 npm_registry,
@@ -2792,6 +2798,7 @@ fn run_npm_install_compat(
                 omit_dev,
                 omit_optional,
                 omit_peer,
+                package_lock,
                 lock_only,
                 dry_run,
                 npm_registry,
@@ -2830,7 +2837,9 @@ fn run_npm_install_compat(
         } else {
             let install = install_npm_project_with_complete_lock(&options)?;
             print_install_report(&install);
-            sync_npm_package_lock(project_dir)?;
+            if package_lock {
+                sync_npm_package_lock(project_dir)?;
+            }
         }
     } else {
         let mut options = LinkOptions::new(project_dir);
@@ -2895,7 +2904,9 @@ fn run_npm_install_compat(
         };
         println!();
         print_install_report(&install);
-        sync_npm_package_lock(project_dir)?;
+        if package_lock {
+            sync_npm_package_lock(project_dir)?;
+        }
     }
     Ok(ExitCode::SUCCESS)
 }
@@ -3022,6 +3033,7 @@ fn run_npm_install_workspace_compat(
         omit_dev,
         omit_optional,
         omit_peer,
+        package_lock,
         lock_only,
         dry_run: _,
         npm_registry,
@@ -3064,7 +3076,9 @@ fn run_npm_install_workspace_compat(
             install_npm_project_with_complete_lock(&options)?
         };
         print_install_report(&install);
-        sync_npm_package_lock(project_dir)?;
+        if package_lock {
+            sync_npm_package_lock(project_dir)?;
+        }
         return Ok(ExitCode::SUCCESS);
     }
 
@@ -3121,7 +3135,9 @@ fn run_npm_install_workspace_compat(
     let install = install_npm_project_with_complete_lock(&options)?;
     println!();
     print_install_report(&install);
-    sync_npm_package_lock(project_dir)?;
+    if package_lock {
+        sync_npm_package_lock(project_dir)?;
+    }
     Ok(ExitCode::SUCCESS)
 }
 
@@ -3244,6 +3260,7 @@ fn run_npm_link_compat(
                     omit_dev,
                     omit_optional,
                     omit_peer,
+                    package_lock: true,
                     lock_only,
                     dry_run,
                     npm_registry,
@@ -3375,6 +3392,7 @@ fn run_npm_install_dry_run(
         omit_dev,
         omit_optional,
         omit_peer,
+        package_lock: _,
         lock_only,
         dry_run: _,
         npm_registry,
@@ -3514,6 +3532,7 @@ fn run_npm_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
             omit_dev,
             omit_optional,
             omit_peer,
+            package_lock,
             lock_only,
             dry_run,
             npm_registry,
@@ -3537,6 +3556,7 @@ fn run_npm_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
                     omit_dev,
                     omit_optional,
                     omit_peer,
+                    package_lock,
                     lock_only,
                     dry_run,
                     npm_registry,
@@ -3561,6 +3581,7 @@ fn run_npm_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
             omit_dev,
             omit_optional,
             omit_peer,
+            package_lock,
             lock_only,
             dry_run,
             npm_registry,
@@ -3599,6 +3620,7 @@ fn run_npm_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
                         omit_dev,
                         omit_optional,
                         omit_peer,
+                        package_lock,
                         lock_only,
                         dry_run,
                         npm_registry,
@@ -3881,6 +3903,12 @@ fn npm_environment_default_args() -> Vec<String> {
         "--package-lock-only",
         "--package-lock-only=false",
     );
+    append_npm_bool_default_arg(
+        &mut args,
+        "package-lock",
+        "--package-lock",
+        "--package-lock=false",
+    );
     if let Some(save) = npm_config_env("save") {
         if config_bool(&save) {
             args.push("--save".to_owned());
@@ -3990,6 +4018,7 @@ fn npm_cli_default_config_key(key: &str) -> bool {
             | "include"
             | "global"
             | "dry-run"
+            | "package-lock"
             | "package-lock-only"
             | "save"
             | "save-exact"
@@ -4049,6 +4078,13 @@ fn append_npm_default_args_from_config(values: &BTreeMap<String, String>, args: 
         "package-lock-only",
         "--package-lock-only",
         "--package-lock-only=false",
+    );
+    append_npm_bool_arg_from_config(
+        values,
+        args,
+        "package-lock",
+        "--package-lock",
+        "--package-lock=false",
     );
     if let Some(save) = values.get("save") {
         if config_bool(save) {
@@ -18817,6 +18853,7 @@ fn parse_npm_compat_action(args: &[String]) -> Result<NpmCompatAction, OmcRegist
             omit_dev: false,
             omit_optional: false,
             omit_peer: false,
+            package_lock: true,
             lock_only: false,
             dry_run: false,
             npm_registry: None,
@@ -20221,6 +20258,7 @@ fn parse_npm_install_args(
         save,
         save_explicit,
         save_prefix,
+        package_lock,
         lock_only,
         npm_registry,
         allow,
@@ -20249,6 +20287,7 @@ fn parse_npm_install_args(
         omit_dev,
         omit_optional,
         omit_peer,
+        package_lock,
         lock_only,
         dry_run,
         npm_registry,
@@ -20417,6 +20456,7 @@ fn parse_npm_install_test_args(
             omit_optional,
             omit_peer,
             lock_only: false,
+            package_lock: true,
             dry_run: false,
             npm_registry: None,
             allow,
@@ -20441,6 +20481,7 @@ fn parse_npm_install_test_args(
         omit_dev,
         omit_optional,
         omit_peer,
+        package_lock,
         lock_only,
         dry_run,
         npm_registry,
@@ -20471,6 +20512,7 @@ fn parse_npm_install_test_args(
         omit_dev,
         omit_optional,
         omit_peer,
+        package_lock,
         lock_only,
         dry_run,
         npm_registry,
@@ -26285,6 +26327,7 @@ struct CommonCompatFlags {
     save: bool,
     save_explicit: bool,
     save_prefix: String,
+    package_lock: bool,
     lock_only: bool,
     npm_registry: Option<String>,
     allow: Vec<String>,
@@ -26306,6 +26349,7 @@ impl Default for CommonCompatFlags {
             save: true,
             save_explicit: false,
             save_prefix: DEFAULT_NPM_SAVE_PREFIX.to_owned(),
+            package_lock: true,
             lock_only: false,
             npm_registry: None,
             allow: Vec::new(),
@@ -26399,6 +26443,16 @@ fn parse_common_compat_flags(
         } else if npm_mode {
             if let Some(lock_only) = npm_bool_flag_value(arg, "--package-lock-only") {
                 parsed.lock_only = lock_only;
+                index += 1;
+                continue;
+            }
+            if let Some(package_lock) = npm_bool_flag_value(arg, "--package-lock") {
+                parsed.package_lock = package_lock;
+                index += 1;
+                continue;
+            }
+            if arg == "--no-package-lock" {
+                parsed.package_lock = false;
                 index += 1;
                 continue;
             }
@@ -26528,9 +26582,6 @@ fn ignored_compat_flag(npm_mode: bool, arg: &str) -> bool {
                 | "--audit"
                 | "--no-audit"
                 | "--audit=false"
-                | "--package-lock"
-                | "--package-lock=true"
-                | "--package-lock=false"
                 | "--foreground-scripts"
                 | "--legacy-peer-deps"
                 | "--legacy-peer-deps=true"
@@ -27169,6 +27220,8 @@ mod tests {
                 ("npm_config_dry_run", None),
                 ("NPM_CONFIG_PACKAGE_LOCK_ONLY", None),
                 ("npm_config_package_lock_only", None),
+                ("NPM_CONFIG_PACKAGE_LOCK", None),
+                ("npm_config_package_lock", None),
                 ("NPM_CONFIG_SAVE", None),
                 ("npm_config_save", None),
                 ("NPM_CONFIG_SAVE_EXACT", None),
@@ -27209,6 +27262,8 @@ mod tests {
                 ("npm_config_dry_run", None),
                 ("NPM_CONFIG_PACKAGE_LOCK_ONLY", None),
                 ("npm_config_package_lock_only", None),
+                ("NPM_CONFIG_PACKAGE_LOCK", None),
+                ("npm_config_package_lock", None),
                 ("NPM_CONFIG_SAVE", None),
                 ("npm_config_save", None),
                 ("NPM_CONFIG_SAVE_EXACT", None),
@@ -27246,6 +27301,8 @@ mod tests {
                 ("npm_config_dry_run", None),
                 ("NPM_CONFIG_PACKAGE_LOCK_ONLY", Some("true")),
                 ("npm_config_package_lock_only", None),
+                ("NPM_CONFIG_PACKAGE_LOCK", None),
+                ("npm_config_package_lock", None),
                 ("NPM_CONFIG_SAVE", Some("false")),
                 ("npm_config_save", None),
                 ("NPM_CONFIG_SAVE_EXACT", Some("true")),
@@ -27347,6 +27404,8 @@ mod tests {
                 ("npm_config_dry_run", None),
                 ("NPM_CONFIG_PACKAGE_LOCK_ONLY", None),
                 ("npm_config_package_lock_only", None),
+                ("NPM_CONFIG_PACKAGE_LOCK", None),
+                ("npm_config_package_lock", None),
                 ("NPM_CONFIG_SAVE", None),
                 ("npm_config_save", None),
                 ("NPM_CONFIG_SAVE_EXACT", None),
@@ -28275,6 +28334,39 @@ mod tests {
     }
 
     #[test]
+    fn npm_install_package_lock_false_skips_package_lock_file() {
+        let project = test_dir("npm-install-package-lock-false");
+        write_npm_fixture_tarball(&project, "prod-pkg", "1.0.0");
+        fs::write(
+            project.join("package.json"),
+            r#"{
+                "name": "root",
+                "version": "1.0.0",
+                "dependencies": { "prod-pkg": "file:prod-pkg-1.0.0.tgz" }
+            }"#,
+        )
+        .unwrap();
+
+        let status = run_npm_compat(&project, &args(&["install", "--package-lock=false"])).unwrap();
+
+        assert_eq!(status, ExitCode::SUCCESS);
+        assert!(project.join("node_modules/prod-pkg/index.js").exists());
+        assert!(project.join("omc.lock").exists());
+        assert!(!project.join("package-lock.json").exists());
+
+        let status = run_npm_compat(
+            &project,
+            &args(&["install", "--package-lock-only", "--package-lock=false"]),
+        )
+        .unwrap();
+
+        assert_eq!(status, ExitCode::SUCCESS);
+        assert!(project.join("package-lock.json").exists());
+
+        let _ = fs::remove_dir_all(project);
+    }
+
+    #[test]
     fn npm_no_save_specs_reuse_existing_manifest_requirements() {
         let project = test_dir("npm-no-save-existing-manifest-requirements");
         fs::write(
@@ -28575,6 +28667,7 @@ mod tests {
                 omit_dev: false,
                 omit_optional: false,
                 omit_peer: false,
+                package_lock: true,
                 lock_only: false,
                 dry_run: false,
                 npm_registry: Some("https://registry.example.invalid/npm".to_owned()),
@@ -28775,6 +28868,7 @@ mod tests {
                 omit_dev: true,
                 omit_optional: false,
                 omit_peer: false,
+                package_lock: false,
                 lock_only: false,
                 dry_run: true,
                 npm_registry: Some("https://registry.example.invalid/npm".to_owned()),
@@ -28834,6 +28928,7 @@ mod tests {
                 omit_dev: false,
                 omit_optional: false,
                 omit_peer: false,
+                package_lock: true,
                 lock_only: false,
                 dry_run: false,
                 npm_registry: None,
@@ -28859,6 +28954,7 @@ mod tests {
                 omit_dev: false,
                 omit_optional: false,
                 omit_peer: false,
+                package_lock: true,
                 lock_only: false,
                 dry_run: false,
                 npm_registry: None,
@@ -28893,6 +28989,7 @@ mod tests {
                 omit_dev: false,
                 omit_optional: false,
                 omit_peer: false,
+                package_lock: true,
                 lock_only: false,
                 dry_run: false,
                 npm_registry: None,
@@ -29016,6 +29113,7 @@ mod tests {
                 omit_dev: false,
                 omit_optional: true,
                 omit_peer: true,
+                package_lock: true,
                 lock_only: false,
                 dry_run: false,
                 npm_registry: None,
@@ -29045,6 +29143,7 @@ mod tests {
                 omit_dev: false,
                 omit_optional: false,
                 omit_peer: false,
+                package_lock: true,
                 lock_only: true,
                 dry_run: false,
                 npm_registry: None,
@@ -29131,6 +29230,7 @@ mod tests {
                 omit_dev: false,
                 omit_optional: false,
                 omit_peer: false,
+                package_lock: true,
                 lock_only: false,
                 dry_run: false,
                 npm_registry: None,
@@ -29186,6 +29286,7 @@ mod tests {
                 omit_dev: true,
                 omit_optional: false,
                 omit_peer: false,
+                package_lock: true,
                 lock_only: false,
                 dry_run: false,
                 npm_registry: Some("https://registry.example.invalid/npm".to_owned()),
@@ -29213,6 +29314,7 @@ mod tests {
                 omit_dev: true,
                 omit_optional: false,
                 omit_peer: false,
+                package_lock: true,
                 lock_only: false,
                 dry_run: false,
                 npm_registry: None,
@@ -29248,6 +29350,7 @@ mod tests {
                 omit_dev: true,
                 omit_optional: false,
                 omit_peer: false,
+                package_lock: true,
                 lock_only: true,
                 dry_run: false,
                 npm_registry: Some("https://registry.example.invalid/npm".to_owned()),
@@ -29273,6 +29376,7 @@ mod tests {
                 omit_dev: false,
                 omit_optional: false,
                 omit_peer: false,
+                package_lock: true,
                 lock_only: false,
                 dry_run: false,
                 npm_registry: None,
