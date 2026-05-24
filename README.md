@@ -232,6 +232,7 @@ cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip uninstall -r r
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo twine check --strict dist/*
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo twine upload -r testpypi dist/*
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo twine upload --repository-url https://upload.pypi.org/legacy/ -u __token__ -p "$PYPI_API_TOKEN" --skip-existing dist/*
+cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo twine upload --sign --identity release@example.com dist/*
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo twine upload --repository-url https://private.example/legacy/ --cert certs/ca.pem --client-cert certs/client.pem -u __token__ -p "$PYPI_API_TOKEN" dist/*
 cargo run -p omc-cli --bin twine -- --omc-project-dir /tmp/omc-demo upload --repository-url https://test.pypi.org/legacy/ -u __token__ -p "$TEST_PYPI_API_TOKEN" dist/*
 cargo run -p omc-cli --bin python3 -- --omc-project-dir /tmp/omc-demo -m twine upload dist/*

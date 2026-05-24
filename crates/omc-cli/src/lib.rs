@@ -39,7 +39,8 @@ use omc_registry::{
     NpmTeamMutationResult, NpmTokenCreateOptions, NpmTokenCreateResult, NpmTokenListResult,
     NpmTokenRevokeResult, NpmUnpublishResult, NpmWhoamiResult, NpmWorkspacePackage,
     OmcRegistryError, PackageSpec, ProjectRequirements, PypiBinaryMode, PypiCheckIssue,
-    PypiUploadOptions, PypiUploadResult, PythonLocalRequirement, PythonVcsRequirement, Verdict,
+    PypiUploadOptions, PypiUploadResult, PypiUploadSignature, PythonLocalRequirement,
+    PythonVcsRequirement, Verdict,
 };
 use sha2::{Digest, Sha256, Sha384, Sha512};
 
@@ -1200,7 +1201,7 @@ enum TwineCompatAction {
     Help { topic: Option<String> },
     Version,
     Check(TwineCheckAction),
-    Upload(TwineUploadAction),
+    Upload(Box<TwineUploadAction>),
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -1221,6 +1222,9 @@ struct TwineUploadAction {
     client_cert: Option<PathBuf>,
     skip_existing: bool,
     comment: Option<String>,
+    sign: bool,
+    sign_with: Option<String>,
+    identity: Option<String>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -3301,7 +3305,7 @@ fn run_twine_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, Omc
             })
         }
         TwineCompatAction::Upload(action) => {
-            print_twine_upload(project_dir, action)?;
+            print_twine_upload(project_dir, *action)?;
             Ok(ExitCode::SUCCESS)
         }
     }
@@ -3356,6 +3360,15 @@ fn print_twine_upload(
             .and_then(|name| name.to_str())
             .unwrap_or("distribution");
         println!("Uploading {filename}");
+        let signature = if action.sign {
+            Some(twine_sign_distribution(
+                &path,
+                action.sign_with.as_deref(),
+                action.identity.as_deref(),
+            )?)
+        } else {
+            None
+        };
         let result = upload_pypi_distribution(
             &settings.repository_url,
             &settings.username,
@@ -3366,6 +3379,10 @@ fn print_twine_upload(
                 comment: action.comment.as_deref(),
                 cert: settings.cert.as_deref(),
                 client_cert: settings.client_cert.as_deref(),
+                signature: signature.as_ref().map(|signature| PypiUploadSignature {
+                    filename: signature.filename.as_str(),
+                    bytes: &signature.bytes,
+                }),
             },
         )?;
         print_twine_upload_result(&result);
@@ -3382,6 +3399,59 @@ fn print_twine_upload_result(result: &PypiUploadResult) {
     } else {
         println!("Uploaded {}", result.filename);
     }
+}
+
+struct TwineUploadSignature {
+    filename: String,
+    bytes: Vec<u8>,
+}
+
+fn twine_sign_distribution(
+    path: &Path,
+    sign_with: Option<&str>,
+    identity: Option<&str>,
+) -> Result<TwineUploadSignature, OmcRegistryError> {
+    let signer = sign_with
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("gpg");
+    let mut command = ProcessCommand::new(signer);
+    command.arg("--detach-sign").arg("-a");
+    if let Some(identity) = identity.map(str::trim).filter(|value| !value.is_empty()) {
+        command.arg("--local-user").arg(identity);
+    }
+    command.arg(path);
+    let status = command.status()?;
+    if !status.success() {
+        return Err(OmcRegistryError::UnsupportedSpec(format!(
+            "twine upload signing failed for `{}` using `{signer}`",
+            path.display()
+        )));
+    }
+
+    let signature_path = twine_signature_path(path)?;
+    let bytes = fs::read(&signature_path)?;
+    let filename = signature_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| {
+            OmcRegistryError::UnsupportedSpec(format!(
+                "twine upload signature path `{}` does not have a valid UTF-8 filename",
+                signature_path.display()
+            ))
+        })?
+        .to_owned();
+    Ok(TwineUploadSignature { filename, bytes })
+}
+
+fn twine_signature_path(path: &Path) -> Result<PathBuf, OmcRegistryError> {
+    let Some(filename) = path.file_name().and_then(|name| name.to_str()) else {
+        return Err(OmcRegistryError::UnsupportedSpec(format!(
+            "twine upload path `{}` does not have a valid UTF-8 filename",
+            path.display()
+        )));
+    };
+    Ok(path.with_file_name(format!("{filename}.asc")))
 }
 
 fn resolve_twine_upload_settings(
@@ -4686,7 +4756,7 @@ fn twine_help_text(topic: Option<&str>) -> String {
             "twine upload [options] dist [dist ...]",
             &[
                 "Upload one or more .whl, .tar.gz, .tgz, or .zip distributions.",
-                "Supports -r/--repository, --repository-url, -u/--username, -p/--password, --config-file, --cert, --client-cert, --skip-existing, --non-interactive, --comment, --verbose, and --disable-progress-bar.",
+                "Supports -r/--repository, --repository-url, -u/--username, -p/--password, --config-file, --cert, --client-cert, --skip-existing, --non-interactive, --comment, --sign, --sign-with, --identity, --verbose, and --disable-progress-bar.",
             ],
         ),
         Some(_) => twine_command_help(
@@ -18127,6 +18197,9 @@ fn parse_twine_upload_args(args: &[String]) -> Result<TwineCompatAction, OmcRegi
     let mut client_cert = None;
     let mut skip_existing = false;
     let mut comment = None;
+    let mut sign = false;
+    let mut sign_with = None;
+    let mut identity = None;
     let mut index = 0;
     while index < args.len() {
         let arg = &args[index];
@@ -18180,17 +18253,19 @@ fn parse_twine_upload_args(args: &[String]) -> Result<TwineCompatAction, OmcRegi
             arg.as_str(),
             "--non-interactive" | "--disable-progress-bar" | "--verbose"
         ) {
-        } else if matches!(arg.as_str(), "--attestations" | "-s" | "--sign") {
-            return Err(OmcRegistryError::UnsupportedSpec(format!(
-                "twine upload {arg} is not implemented yet"
-            )));
-        } else if matches!(arg.as_str(), "--sign-with" | "-i" | "--identity") {
+        } else if matches!(arg.as_str(), "-s" | "--sign") {
+            sign = true;
+        } else if arg == "--sign-with" {
             index += 1;
-            let _ = twine_flag_value(args, index, arg)?;
-            return Err(OmcRegistryError::UnsupportedSpec(format!(
-                "twine upload {arg} is not implemented yet"
-            )));
-        } else if arg.starts_with("--sign-with=") || arg.starts_with("--identity=") {
+            sign_with = Some(twine_flag_value(args, index, arg)?);
+        } else if let Some(value) = arg.strip_prefix("--sign-with=") {
+            sign_with = Some(value.to_owned());
+        } else if arg == "-i" || arg == "--identity" {
+            index += 1;
+            identity = Some(twine_flag_value(args, index, arg)?);
+        } else if let Some(value) = arg.strip_prefix("--identity=") {
+            identity = Some(value.to_owned());
+        } else if arg == "--attestations" {
             return Err(OmcRegistryError::UnsupportedSpec(format!(
                 "twine upload {arg} is not implemented yet"
             )));
@@ -18201,7 +18276,7 @@ fn parse_twine_upload_args(args: &[String]) -> Result<TwineCompatAction, OmcRegi
         }
         index += 1;
     }
-    Ok(TwineCompatAction::Upload(TwineUploadAction {
+    Ok(TwineCompatAction::Upload(Box::new(TwineUploadAction {
         paths,
         repository,
         repository_url,
@@ -18212,7 +18287,10 @@ fn parse_twine_upload_args(args: &[String]) -> Result<TwineCompatAction, OmcRegi
         client_cert,
         skip_existing,
         comment,
-    }))
+        sign,
+        sign_with,
+        identity,
+    })))
 }
 
 fn twine_flag_value(args: &[String], index: usize, flag: &str) -> Result<String, OmcRegistryError> {
@@ -24603,13 +24681,17 @@ version = "0.1.0"
                 "--skip-existing",
                 "--comment",
                 "release upload",
+                "--sign",
+                "--sign-with",
+                "gpg2",
+                "--identity=release@example.com",
                 "--non-interactive",
                 "--disable-progress-bar",
                 "dist/demo-1.0.0.tar.gz",
                 "dist/demo-1.0.0-py3-none-any.whl",
             ]))
             .unwrap(),
-            TwineCompatAction::Upload(TwineUploadAction {
+            TwineCompatAction::Upload(Box::new(TwineUploadAction {
                 paths: vec![
                     PathBuf::from("dist/demo-1.0.0.tar.gz"),
                     PathBuf::from("dist/demo-1.0.0-py3-none-any.whl"),
@@ -24623,7 +24705,10 @@ version = "0.1.0"
                 client_cert: Some(PathBuf::from("certs/client.pem")),
                 skip_existing: true,
                 comment: Some("release upload".to_owned()),
-            })
+                sign: true,
+                sign_with: Some("gpg2".to_owned()),
+                identity: Some("release@example.com".to_owned()),
+            }))
         );
         assert!(print_twine_check(
             Path::new("."),
@@ -24657,6 +24742,9 @@ version = "0.1.0"
                 client_cert: None,
                 skip_existing: false,
                 comment: None,
+                sign: false,
+                sign_with: None,
+                identity: None,
             },
         )
         .unwrap();
@@ -24679,6 +24767,9 @@ version = "0.1.0"
                 client_cert: Some(PathBuf::from("certs/client.pem")),
                 skip_existing: false,
                 comment: None,
+                sign: false,
+                sign_with: None,
+                identity: None,
             },
         )
         .unwrap();

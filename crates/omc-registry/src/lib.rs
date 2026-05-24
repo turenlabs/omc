@@ -7881,6 +7881,13 @@ pub struct PypiUploadOptions<'a> {
     pub comment: Option<&'a str>,
     pub cert: Option<&'a Path>,
     pub client_cert: Option<&'a Path>,
+    pub signature: Option<PypiUploadSignature<'a>>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct PypiUploadSignature<'a> {
+    pub filename: &'a str,
+    pub bytes: &'a [u8],
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -10849,7 +10856,7 @@ pub fn upload_pypi_distribution(
     }
 
     let distribution = prepare_pypi_upload_distribution(path)?;
-    let form = pypi_upload_form(&distribution, options.comment)?;
+    let form = pypi_upload_form(&distribution, options.comment, options.signature)?;
     let client = pypi_upload_client(options.cert, options.client_cert)?;
     let mut request = client.post(repository_url);
     if !username.trim().is_empty() || !password.is_empty() {
@@ -11141,7 +11148,11 @@ fn pypi_upload_metadata_value<'a>(
         .map(String::as_str)
 }
 
-fn pypi_upload_form(distribution: &PypiUploadDistribution, comment: Option<&str>) -> Result<Form> {
+fn pypi_upload_form(
+    distribution: &PypiUploadDistribution,
+    comment: Option<&str>,
+    signature: Option<PypiUploadSignature<'_>>,
+) -> Result<Form> {
     let metadata_version = pypi_upload_metadata_value(&distribution.metadata, "metadata_version")
         .unwrap_or("2.1")
         .to_owned();
@@ -11180,7 +11191,14 @@ fn pypi_upload_form(distribution: &PypiUploadDistribution, comment: Option<&str>
     let content = Part::bytes(distribution.bytes.clone())
         .file_name(distribution.filename.clone())
         .mime_str("application/octet-stream")?;
-    Ok(form.part("content", content))
+    let mut form = form.part("content", content);
+    if let Some(signature) = signature {
+        let signature_part = Part::bytes(signature.bytes.to_vec())
+            .file_name(signature.filename.to_owned())
+            .mime_str("application/octet-stream")?;
+        form = form.part("gpg_signature", signature_part);
+    }
+    Ok(form)
 }
 
 fn pypi_upload_response_is_existing(status: u16, text: &str) -> bool {
@@ -22132,6 +22150,9 @@ wheels = [
             assert!(body.contains(r#"name="comment""#));
             assert!(body.contains("release upload"));
             assert!(body.contains(r#"filename="demo_pkg-1.0.0-py3-none-any.whl""#));
+            assert!(body.contains(r#"name="gpg_signature""#));
+            assert!(body.contains(r#"filename="demo_pkg-1.0.0-py3-none-any.whl.asc""#));
+            assert!(body.contains("fake-signature"));
 
             let response = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nOK";
             stream.write_all(response.as_bytes()).unwrap();
@@ -22144,6 +22165,10 @@ wheels = [
             &wheel_path,
             PypiUploadOptions {
                 comment: Some("release upload"),
+                signature: Some(PypiUploadSignature {
+                    filename: "demo_pkg-1.0.0-py3-none-any.whl.asc",
+                    bytes: b"fake-signature",
+                }),
                 ..PypiUploadOptions::default()
             },
         )
