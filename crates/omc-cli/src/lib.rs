@@ -18929,16 +18929,15 @@ fn parse_npm_compat_action(args: &[String]) -> Result<NpmCompatAction, OmcRegist
         "remove" | "uninstall" | "rm" | "un" => {
             let mut global = false;
             let mut filtered = Vec::new();
-            for arg in &args[1..] {
-                if matches!(arg.as_str(), "--global" | "-g") {
-                    global = true;
-                } else if arg == "--global=false" {
-                    global = false;
-                } else if matches!(arg.as_str(), "--global=true" | "--location=global") {
-                    global = true;
+            let mut index = 1;
+            while index < args.len() {
+                let arg = &args[index];
+                if let Some(value) = npm_global_location_flag_value(args, &mut index, arg)? {
+                    global = value;
                 } else {
                     filtered.push(arg.clone());
                 }
+                index += 1;
             }
             let CommonCompatFlags {
                 allow,
@@ -19215,6 +19214,29 @@ fn npm_preserved_global_args_for_command(command: &str, args: Vec<String>) -> Ve
 fn npm_global_arg_supported_by_command(command: &str, arg: &str) -> bool {
     if matches!(arg, "--global" | "-g") || arg.starts_with("--global=") {
         return true;
+    }
+    if matches!(arg, "--location") || arg.starts_with("--location=") {
+        return matches!(
+            command,
+            "install"
+                | "i"
+                | "add"
+                | "update"
+                | "up"
+                | "upgrade"
+                | "link"
+                | "ln"
+                | "remove"
+                | "uninstall"
+                | "rm"
+                | "un"
+                | "bin"
+                | "root"
+                | "prefix"
+                | "config"
+                | "c"
+                | "get"
+        );
     }
     if matches!(arg, "--registry") || arg.starts_with("--registry=") {
         return matches!(
@@ -19738,6 +19760,7 @@ fn npm_global_preserved_value_flag(arg: &str) -> bool {
             | "--password"
             | "--sbom-format"
             | "--sbom-type"
+            | "--location"
             | "--expect-result-count"
             | "--diff"
             | "--diff-unified"
@@ -19788,6 +19811,7 @@ fn npm_global_preserved_equals_flag(arg: &str) -> bool {
         "--password=",
         "--sbom-format=",
         "--sbom-type=",
+        "--location=",
         "--package-lock-only=",
         "--global=",
         "--expect-results=",
@@ -19832,22 +19856,16 @@ fn npm_global_ignored_equals_flag(arg: &str) -> bool {
 
 fn parse_npm_path_args(command: &str, args: &[String]) -> Result<bool, OmcRegistryError> {
     let mut global = false;
-    for arg in args {
+    let mut index = 0;
+    while index < args.len() {
+        let arg = &args[index];
         if matches!(arg.as_str(), "--silent" | "-s" | "--parseable" | "-p") {
-            continue;
+        } else if let Some(value) = npm_global_location_flag_value(args, &mut index, arg)? {
+            global = value;
+        } else {
+            return Err(unsupported_compat_arg(command, arg));
         }
-        if matches!(
-            arg.as_str(),
-            "--global" | "-g" | "--global=true" | "--location=global"
-        ) {
-            global = true;
-            continue;
-        }
-        if arg == "--global=false" {
-            global = false;
-            continue;
-        }
-        return Err(unsupported_compat_arg(command, arg));
+        index += 1;
     }
     Ok(global)
 }
@@ -20251,12 +20269,8 @@ fn parse_npm_install_args(
             dry_run = value;
         } else if arg == "--no-dry-run" {
             dry_run = false;
-        } else if matches!(arg.as_str(), "--global" | "-g") {
-            global = true;
-        } else if arg == "--global=false" {
-            global = false;
-        } else if matches!(arg.as_str(), "--global=true" | "--location=global") {
-            global = true;
+        } else if let Some(value) = npm_global_location_flag_value(args, &mut index, arg)? {
+            global = value;
         } else if is_npm_archive_arg(arg) {
             archive_references.push(arg.clone());
         } else if ignored_npm_value_flag(arg) {
@@ -20344,6 +20358,42 @@ fn npm_bool_flag_value(arg: &str, flag: &str) -> Option<bool> {
     }
 }
 
+fn npm_global_location_flag_value(
+    args: &[String],
+    index: &mut usize,
+    arg: &str,
+) -> Result<Option<bool>, OmcRegistryError> {
+    if matches!(arg, "--global" | "-g" | "--global=true") {
+        return Ok(Some(true));
+    }
+    if arg == "--global=false" {
+        return Ok(Some(false));
+    }
+    if arg == "--location" {
+        *index += 1;
+        let Some(value) = args.get(*index) else {
+            return Err(OmcRegistryError::UnsupportedSpec(
+                "--location needs a value".to_owned(),
+            ));
+        };
+        return npm_location_is_global(value).map(Some);
+    }
+    if let Some(value) = arg.strip_prefix("--location=") {
+        return npm_location_is_global(value).map(Some);
+    }
+    Ok(None)
+}
+
+fn npm_location_is_global(value: &str) -> Result<bool, OmcRegistryError> {
+    match value {
+        "global" => Ok(true),
+        "project" | "user" => Ok(false),
+        other => Err(OmcRegistryError::UnsupportedSpec(format!(
+            "unsupported npm location `{other}`"
+        ))),
+    }
+}
+
 fn parse_npm_link_args(args: &[String]) -> Result<NpmCompatAction, OmcRegistryError> {
     let explicit_save = npm_link_explicit_save(args);
     let mut archive_references = Vec::new();
@@ -20357,7 +20407,7 @@ fn parse_npm_link_args(args: &[String]) -> Result<NpmCompatAction, OmcRegistryEr
             dry_run = value;
         } else if arg == "--no-dry-run" {
             dry_run = false;
-        } else if matches!(arg.as_str(), "--global" | "-g") {
+        } else if npm_global_location_flag_value(args, &mut index, arg)?.is_some() {
         } else if is_npm_archive_arg(arg) {
             archive_references.push(arg.clone());
         } else if ignored_npm_value_flag(arg) {
@@ -29019,6 +29069,23 @@ mod tests {
             }
         );
 
+        let action =
+            parse_npm_compat_action(&args(&["--location=global", "install", "left-pad"])).unwrap();
+        let NpmCompatAction::Install { global, specs, .. } = action else {
+            panic!("expected npm install action");
+        };
+        assert!(global);
+        assert_eq!(specs, vec!["left-pad".to_owned()]);
+
+        let action =
+            parse_npm_compat_action(&args(&["install", "--location", "project", "left-pad"]))
+                .unwrap();
+        let NpmCompatAction::Install { global, specs, .. } = action else {
+            panic!("expected npm install action");
+        };
+        assert!(!global);
+        assert_eq!(specs, vec!["left-pad".to_owned()]);
+
         let action = parse_npm_compat_action(&args(&[
             "install",
             "--allow=env:API_TOKEN",
@@ -29142,6 +29209,12 @@ mod tests {
 
         assert_eq!(
             parse_npm_compat_action(&args(&["link"])).unwrap(),
+            NpmCompatAction::Link {
+                action: NpmLinkAction::Register { dry_run: false },
+            }
+        );
+        assert_eq!(
+            parse_npm_compat_action(&args(&["--location=global", "link"])).unwrap(),
             NpmCompatAction::Link {
                 action: NpmLinkAction::Register { dry_run: false },
             }
@@ -29429,6 +29502,26 @@ mod tests {
                 allow_flow: Vec::new(),
                 allow_all_host: false,
                 workspaces: vec!["@demo/lib".to_owned()],
+                all_workspaces: false,
+                include_workspace_root: false,
+            }
+        );
+        assert_eq!(
+            parse_npm_compat_action(&args(&[
+                "--location=global",
+                "remove",
+                "left-pad",
+                "--location",
+                "project",
+            ]))
+            .unwrap(),
+            NpmCompatAction::Remove {
+                specs: vec!["left-pad".to_owned()],
+                global: false,
+                allow: Vec::new(),
+                allow_flow: Vec::new(),
+                allow_all_host: false,
+                workspaces: Vec::new(),
                 all_workspaces: false,
                 include_workspace_root: false,
             }
@@ -29887,6 +29980,20 @@ mod tests {
             NpmCompatAction::Path {
                 kind: NpmPathKind::Bin,
                 global: true,
+            }
+        );
+        assert_eq!(
+            parse_npm_compat_action(&args(&["--location", "global", "prefix"])).unwrap(),
+            NpmCompatAction::Path {
+                kind: NpmPathKind::Prefix,
+                global: true,
+            }
+        );
+        assert_eq!(
+            parse_npm_compat_action(&args(&["root", "--location=project"])).unwrap(),
+            NpmCompatAction::Path {
+                kind: NpmPathKind::Root,
+                global: false,
             }
         );
         assert_eq!(

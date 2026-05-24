@@ -629,9 +629,10 @@ Supported now:
   `npm ci` treats an existing `package-lock.json` or `npm-shrinkwrap.json` as
   the source of truth for the OMC lock/install and falls back to strict
   `omc.lock` installs when no npm lockfile is present,
-  `npm install -g <pkg>` and `npm remove -g <pkg>` use the configured npm
-  prefix as an OMC-managed global project and mirror generated package bins
-  into the prefix bin directory,
+  `npm install -g <pkg>`, `npm install --location=global <pkg>`,
+  `npm remove -g <pkg>`, and `npm remove --location=global <pkg>` use the
+  configured npm prefix as an OMC-managed global project and mirror generated
+  package bins into the prefix bin directory,
   `npm remove <pkg>` removes root `package.json` entries when present, and
   workspace-scoped `npm install`/`npm remove` update selected workspace
   `package.json` files while installing the root OMC graph; common global npm flags such as
