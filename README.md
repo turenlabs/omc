@@ -504,8 +504,9 @@ Supported now:
   distributions, including pip-style target compatibility flags
   `--platform`, `--python-version`, `--implementation`, and `--abi`;
   `pip wheel` populates the wheelhouse with safe source distributions when a
-  build would otherwise be required and includes dependencies declared by
-  static local directory wheels unless `--no-deps` is passed
+  build would otherwise be required and includes registry and local path
+  dependencies declared by static local directory wheels unless `--no-deps` is
+  passed
 - unsupported requirements entries and unsupported direct archive formats fail
   closed instead of being silently ignored
 - `Pipfile` ingestion for Pipenv packages/dev-packages, source indexes, extras,

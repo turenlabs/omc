@@ -21,11 +21,12 @@ use omc_registry::{
     install_python_project_local_import_paths, lock_project, mutate_npm_package_owner,
     mutate_npm_package_star, parse_capability_grant, parse_npm_direct_archive_reference,
     parse_pypi_direct_archive_reference, parse_pypi_vcs_requirement, publish_npm_package,
-    read_constraint_files, read_lockfile, read_manifest, read_npm_access_collaborators,
-    read_npm_access_packages, read_npm_access_status, read_npm_config_snapshot_with_globalconfig,
-    read_npm_org_users, read_npm_package_metadata, read_npm_package_metadata_with_userconfig,
-    read_npm_package_owners, read_npm_ping_with_userconfig, read_npm_profile, read_npm_search,
-    read_npm_stars, read_npm_team_users, read_npm_teams, read_npm_token_list, read_npm_whoami,
+    pypi_marker_applies, read_constraint_files, read_lockfile, read_manifest,
+    read_npm_access_collaborators, read_npm_access_packages, read_npm_access_status,
+    read_npm_config_snapshot_with_globalconfig, read_npm_org_users, read_npm_package_metadata,
+    read_npm_package_metadata_with_userconfig, read_npm_package_owners,
+    read_npm_ping_with_userconfig, read_npm_profile, read_npm_search, read_npm_stars,
+    read_npm_team_users, read_npm_teams, read_npm_token_list, read_npm_whoami,
     read_npm_workspace_packages, read_package_scripts, read_pip_config_snapshot,
     read_pypi_available_versions, read_requirements_files, read_script_requirement_files,
     remove_locked_packages, remove_manifest_dependency, remove_npm_dist_tag, remove_npm_org_user,
@@ -10820,7 +10821,10 @@ fn download_pip_packages(
         ));
     }
     if command == PipArtifactCommand::Wheel && options.pypi_include_dependencies {
-        resolved_specs.extend(pip_local_wheel_dependency_specs(project_dir, &local_paths)?);
+        resolved_specs.extend(collect_pip_local_wheel_dependencies(
+            project_dir,
+            &mut local_paths,
+        )?);
     }
 
     if !resolved_specs.is_empty() {
@@ -11009,6 +11013,12 @@ struct PipLocalWheelEntryPoint {
     target: String,
 }
 
+enum PipLocalWheelDependencySource {
+    Local(PythonLocalRequirement),
+    Skipped,
+    Other,
+}
+
 fn build_pip_local_wheels(
     project_dir: &Path,
     destination: &Path,
@@ -11033,28 +11043,97 @@ fn build_pip_local_wheels(
     Ok(())
 }
 
-fn pip_local_wheel_dependency_specs(
+fn collect_pip_local_wheel_dependencies(
     project_dir: &Path,
-    requirements: &[PythonLocalRequirement],
+    requirements: &mut Vec<PythonLocalRequirement>,
 ) -> Result<Vec<PackageSpec>, OmcRegistryError> {
     let mut specs = Vec::new();
     let mut seen_paths = BTreeSet::new();
     let mut seen_specs = BTreeSet::new();
-    for requirement in requirements {
-        let package_dir = resolve_pip_local_wheel_path(project_dir, requirement)?;
+    let mut index = 0;
+    while index < requirements.len() {
+        let requirement = requirements[index].clone();
+        index += 1;
+        let package_dir = resolve_pip_local_wheel_path(project_dir, &requirement)?;
         if !seen_paths.insert((package_dir.clone(), requirement.extras.clone())) {
             continue;
         }
 
         let metadata = read_pip_local_wheel_metadata(&package_dir, &requirement.extras)?;
         for dependency in metadata.requires_dist {
-            let spec = parse_package_spec(&dependency, Some(Ecosystem::Pypi))?;
-            if seen_specs.insert(spec.requested()) {
-                specs.push(spec);
+            match pip_local_wheel_dependency_source(&dependency, &requirement.extras, &package_dir)?
+            {
+                PipLocalWheelDependencySource::Local(local_requirement) => {
+                    requirements.push(local_requirement);
+                }
+                PipLocalWheelDependencySource::Skipped => {}
+                PipLocalWheelDependencySource::Other => {
+                    let spec = parse_package_spec(&dependency, Some(Ecosystem::Pypi))?;
+                    if seen_specs.insert(spec.requested()) {
+                        specs.push(spec);
+                    }
+                }
             }
         }
     }
     Ok(specs)
+}
+
+fn pip_local_wheel_dependency_source(
+    dependency: &str,
+    active_extras: &BTreeSet<String>,
+    base_dir: &Path,
+) -> Result<PipLocalWheelDependencySource, OmcRegistryError> {
+    let mut parts = dependency.splitn(2, ';');
+    let requirement = parts.next().unwrap_or_default().trim();
+    if let Some(marker) = parts.next() {
+        if !pypi_marker_applies(marker, active_extras) {
+            return Ok(PipLocalWheelDependencySource::Skipped);
+        }
+    }
+
+    let Some((name, source)) = requirement.split_once(" @ ") else {
+        return Ok(PipLocalWheelDependencySource::Other);
+    };
+    let (_, extras) = pip_local_path_and_extras(name.trim());
+    let source = source
+        .trim()
+        .split_once('#')
+        .map(|(source, _)| source)
+        .unwrap_or_else(|| source.trim());
+    if source.is_empty() || source.starts_with("git+") || is_pip_archive_arg(source) {
+        return Ok(PipLocalWheelDependencySource::Other);
+    }
+
+    let path = if source.contains("://") {
+        let Ok(url) = reqwest::Url::parse(source) else {
+            return Ok(PipLocalWheelDependencySource::Other);
+        };
+        if url.scheme() != "file" {
+            return Ok(PipLocalWheelDependencySource::Other);
+        }
+        url.to_file_path().map_err(|_| {
+            OmcRegistryError::UnsupportedRequirement(format!(
+                "local wheel dependency `{dependency}` uses an invalid file URL"
+            ))
+        })?
+    } else {
+        let path = PathBuf::from(source);
+        if path.is_absolute() {
+            path
+        } else {
+            base_dir.join(path)
+        }
+    };
+
+    if !path.is_dir() {
+        return Err(OmcRegistryError::UnsupportedRequirement(format!(
+            "local wheel dependency `{dependency}` must point to an existing directory"
+        )));
+    }
+    Ok(PipLocalWheelDependencySource::Local(
+        PythonLocalRequirement::new(path, extras),
+    ))
 }
 
 fn resolve_pip_local_wheel_path(
@@ -11453,10 +11532,11 @@ fn write_pip_local_wheel(
         python_wheel_version_component(&metadata.version)
     );
     let metadata_path = format!("{dist_info}/METADATA");
+    let metadata_content = pip_local_wheel_metadata_content(package_dir, metadata)?;
     write_wheel_file(
         &mut archive,
         &metadata_path,
-        pip_local_wheel_metadata_content(metadata).as_bytes(),
+        metadata_content.as_bytes(),
         options,
     )?;
     record_paths.push(metadata_path);
@@ -11597,17 +11677,62 @@ fn write_wheel_file<W: io::Write + io::Seek>(
     Ok(())
 }
 
-fn pip_local_wheel_metadata_content(metadata: &PipLocalWheelMetadata) -> String {
+fn pip_local_wheel_metadata_content(
+    package_dir: &Path,
+    metadata: &PipLocalWheelMetadata,
+) -> Result<String, OmcRegistryError> {
     let mut content = format!(
         "Metadata-Version: 2.1\nName: {}\nVersion: {}\n",
         metadata.name, metadata.version
     );
     for requirement in &metadata.requires_dist {
-        content.push_str("Requires-Dist: ");
-        content.push_str(requirement);
-        content.push('\n');
+        if let Some(requirement) = pip_local_wheel_metadata_requirement(package_dir, requirement)? {
+            content.push_str("Requires-Dist: ");
+            content.push_str(&requirement);
+            content.push('\n');
+        }
     }
-    content
+    Ok(content)
+}
+
+fn pip_local_wheel_metadata_requirement(
+    package_dir: &Path,
+    requirement: &str,
+) -> Result<Option<String>, OmcRegistryError> {
+    match pip_local_wheel_dependency_source(requirement, &BTreeSet::new(), package_dir)? {
+        PipLocalWheelDependencySource::Skipped => Ok(None),
+        PipLocalWheelDependencySource::Other => Ok(Some(requirement.to_owned())),
+        PipLocalWheelDependencySource::Local(local_requirement) => {
+            let dependency_dir = fs::canonicalize(&local_requirement.path).map_err(|error| {
+                OmcRegistryError::UnsupportedRequirement(format!(
+                    "local wheel dependency `{}` could not be resolved: {error}",
+                    local_requirement.path.display()
+                ))
+            })?;
+            let dependency_metadata =
+                read_pip_local_wheel_metadata(&dependency_dir, &local_requirement.extras)?;
+            Ok(Some(pip_local_wheel_pinned_requirement(
+                &dependency_metadata,
+                &local_requirement.extras,
+            )))
+        }
+    }
+}
+
+fn pip_local_wheel_pinned_requirement(
+    metadata: &PipLocalWheelMetadata,
+    extras: &BTreeSet<String>,
+) -> String {
+    let name = if extras.is_empty() {
+        metadata.name.clone()
+    } else {
+        format!(
+            "{}[{}]",
+            metadata.name,
+            extras.iter().cloned().collect::<Vec<_>>().join(",")
+        )
+    };
+    format!("{name}=={}", metadata.version)
 }
 
 fn pip_local_wheel_entry_points_content(entry_points: &[PipLocalWheelEntryPoint]) -> String {
@@ -31984,6 +32109,121 @@ local-cli = "local_pkg:main"
 
         let _ = fs::remove_dir_all(project);
         let _ = fs::remove_dir_all(local);
+        let _ = fs::remove_dir_all(idna_src);
+    }
+
+    #[test]
+    fn pip_wheel_builds_recursive_local_directory_dependencies() {
+        let project = test_dir("pip-wheel-local-dependencies-project");
+        let parent = test_dir("pip-wheel-local-parent-package");
+        let child = parent.join("child");
+        let vendor = project.join("vendor");
+        let idna_src = test_dir("pip-wheel-local-child-idna-source");
+        fs::create_dir_all(parent.join("src").join("parent_pkg")).unwrap();
+        fs::create_dir_all(child.join("src").join("child_pkg")).unwrap();
+        fs::create_dir_all(idna_src.join("src").join("idna")).unwrap();
+        fs::write(
+            parent.join("src").join("parent_pkg").join("__init__.py"),
+            "VALUE = 'parent'\n",
+        )
+        .unwrap();
+        fs::write(
+            child.join("src").join("child_pkg").join("__init__.py"),
+            "VALUE = 'child'\n",
+        )
+        .unwrap();
+        fs::write(idna_src.join("src").join("idna").join("__init__.py"), "").unwrap();
+        write_pip_local_wheel(
+            &idna_src,
+            &PipLocalWheelMetadata {
+                name: "idna".to_owned(),
+                version: "3.7".to_owned(),
+                requires_dist: Vec::new(),
+                entry_points: Vec::new(),
+            },
+            &vendor.join("idna-3.7-py3-none-any.whl"),
+        )
+        .unwrap();
+        fs::write(
+            parent.join("pyproject.toml"),
+            r#"
+[project]
+name = "parent-pkg"
+version = "0.1.0"
+dependencies = ["child-pkg @ ./child"]
+"#,
+        )
+        .unwrap();
+        fs::write(
+            child.join("pyproject.toml"),
+            r#"
+[project]
+name = "child-pkg"
+version = "0.1.0"
+dependencies = ["idna==3.7"]
+"#,
+        )
+        .unwrap();
+
+        with_env_values(
+            &[
+                ("PIP_CONFIG_FILE", None),
+                ("PIP_INDEX_URL", None),
+                ("PIP_EXTRA_INDEX_URL", None),
+                ("PIP_FIND_LINKS", None),
+                ("PIP_NO_INDEX", None),
+                ("PIP_WHEEL_DIR", None),
+            ],
+            || {
+                let status = run_pip_compat(
+                    &project,
+                    &args(&[
+                        "wheel",
+                        parent.to_str().unwrap(),
+                        "-w",
+                        "wheelhouse",
+                        "--no-index",
+                        "--find-links",
+                        "vendor",
+                    ]),
+                )
+                .unwrap();
+                assert_eq!(status, ExitCode::SUCCESS);
+                for filename in [
+                    "parent_pkg-0.1.0-py3-none-any.whl",
+                    "child_pkg-0.1.0-py3-none-any.whl",
+                    "idna-3.7-py3-none-any.whl",
+                ] {
+                    assert!(project.join("wheelhouse").join(filename).exists());
+                }
+
+                let status = run_pip_compat(
+                    &project,
+                    &args(&[
+                        "install",
+                        "--no-index",
+                        "--find-links",
+                        "wheelhouse",
+                        "parent-pkg==0.1.0",
+                    ]),
+                )
+                .unwrap();
+                assert_eq!(status, ExitCode::SUCCESS);
+            },
+        );
+
+        for package in ["parent_pkg", "child_pkg", "idna"] {
+            assert!(project
+                .join(".omc")
+                .join("python")
+                .join("site-packages")
+                .join(package)
+                .join("__init__.py")
+                .exists());
+        }
+
+        let _ = fs::remove_dir_all(project);
+        let _ = fs::remove_dir_all(parent);
         let _ = fs::remove_dir_all(idna_src);
     }
 

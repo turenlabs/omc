@@ -14487,7 +14487,7 @@ impl PypiMarkerEnvironment {
     }
 }
 
-fn pypi_marker_applies(marker: &str, active_extras: &BTreeSet<String>) -> bool {
+pub fn pypi_marker_applies(marker: &str, active_extras: &BTreeSet<String>) -> bool {
     let mut env = PypiMarkerEnvironment::current();
     if active_extras.is_empty() {
         return evaluate_pypi_marker(marker.trim(), &env).unwrap_or(true);
