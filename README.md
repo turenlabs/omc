@@ -572,7 +572,8 @@ Supported now:
   `-r`, index URL,
   constraints, extra-index, find-links, no-index,
   require-hashes, no-deps, prerelease opt-in, target-directory, trusted-host, retry/timeout,
-  reinstall, warning, build-isolation, and binary-policy install flags without
+  reinstall/ignore-installed (`-I`), editable source-dir (`--src`), warning,
+  build-isolation, and binary-policy install flags without
   delegating to pip; common global pip flags such as
   `--disable-pip-version-check`, `--quiet`, `--timeout`, `--retries`,
   `--trusted-host`, `--cert`, `--client-cert`, and `--cache-dir` are accepted

@@ -21449,6 +21449,7 @@ fn parse_pip_install_args(args: &[String]) -> Result<PipCompatAction, OmcRegistr
             arg.as_str(),
             "--upgrade"
                 | "-U"
+                | "-I"
                 | "--user"
                 | "--break-system-packages"
                 | "--disable-pip-version-check"
@@ -21750,6 +21751,7 @@ fn pip_ignored_install_value_flag(arg: &str) -> bool {
         arg,
         "--progress-bar"
             | "--upgrade-strategy"
+            | "--src"
             | "--root-user-action"
             | "--retries"
             | "--timeout"
@@ -21762,6 +21764,7 @@ fn pip_ignored_install_equals_flag(arg: &str) -> bool {
     [
         "--progress-bar=",
         "--upgrade-strategy=",
+        "--src=",
         "--root-user-action=",
         "--retries=",
         "--timeout=",
@@ -26779,10 +26782,13 @@ verdict = "accepted"
             "--trusted-host",
             "mirror.example",
             "--prefer-binary",
+            "-I",
             "--force-reinstall",
             "--ignore-installed",
             "--upgrade-strategy",
             "eager",
+            "--src",
+            "src",
             "--root-user-action=ignore",
             "--progress-bar",
             "off",
