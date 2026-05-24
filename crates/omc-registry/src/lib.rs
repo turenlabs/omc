@@ -975,11 +975,15 @@ pub fn remove_locked_packages(
     let lockfile = project_dir.join(LOCKFILE);
     let mut lock = read_lockfile(&lockfile)?;
     let mut removed = Vec::new();
+    let mut removed_locked_pypi_names = BTreeSet::new();
     lock.packages.retain(|package| {
         let should_remove = specs
             .iter()
             .any(|spec| locked_package_matches_spec(package, spec));
         if should_remove {
+            if package.ecosystem == Ecosystem::Pypi {
+                removed_locked_pypi_names.insert(normalize_pypi_name(&package.name));
+            }
             removed.push(locked_package_key(package));
             false
         } else {
@@ -992,15 +996,26 @@ pub fn remove_locked_packages(
         .filter(|spec| spec.ecosystem == Ecosystem::Pypi)
         .map(|spec| normalize_pypi_name(&spec.name))
         .collect::<BTreeSet<_>>();
+    let mut removed_vcs = Vec::new();
     if !removed_pypi_names.is_empty() {
         lock.python_vcs.retain(|dependency| {
-            !removed_pypi_names.contains(&normalize_pypi_name(&dependency.name))
+            let name = normalize_pypi_name(&dependency.name);
+            let should_remove = removed_pypi_names.contains(&name);
+            if should_remove {
+                if !removed_locked_pypi_names.contains(&name) {
+                    removed_vcs.push(format!("pypi:{}", dependency.name));
+                }
+                false
+            } else {
+                true
+            }
         });
     }
 
-    if !removed.is_empty() {
+    if !removed.is_empty() || !removed_vcs.is_empty() {
         fs::write(lockfile, toml::to_string_pretty(&lock)?)?;
     }
+    removed.extend(removed_vcs);
     Ok(removed)
 }
 
@@ -17163,6 +17178,39 @@ packages:
         assert_eq!(removed, vec!["pypi:Requests@2.32.3".to_owned()]);
         assert_eq!(lock.packages.len(), 1);
         assert_eq!(lock.packages[0].name, "idna");
+        assert!(lock.python_vcs.is_empty());
+    }
+
+    #[test]
+    fn removes_python_vcs_lock_without_regular_package() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(
+            dir.path().join("omc.lock"),
+            toml::to_string_pretty(&OmcLock {
+                version: 1,
+                packages: Vec::new(),
+                python_vcs: vec![LockedPythonVcsDependency {
+                    name: "gitpkg".to_owned(),
+                    url: "https://example.invalid/gitpkg.git".to_owned(),
+                    reference: Some("main".to_owned()),
+                    resolved_commit: "0123456789abcdef0123456789abcdef01234567".to_owned(),
+                    archive: String::new(),
+                    sha256: String::new(),
+                    subdirectory: None,
+                    extras: Vec::new(),
+                }],
+            })
+            .unwrap(),
+        )
+        .unwrap();
+
+        let removed =
+            remove_locked_packages(dir.path(), &[PackageSpec::parse("pypi:gitpkg").unwrap()])
+                .unwrap();
+
+        let lock = read_lockfile(dir.path().join("omc.lock")).unwrap();
+        assert_eq!(removed, vec!["pypi:gitpkg".to_owned()]);
+        assert!(lock.packages.is_empty());
         assert!(lock.python_vcs.is_empty());
     }
 
