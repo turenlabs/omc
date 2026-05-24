@@ -577,7 +577,7 @@ Supported now:
   target through transient OMC state without writing the current manifest or
   lockfile; read-only `pip freeze --path DIR`, `pip list --path DIR`, and
   `pip inspect --path DIR` inspect target-directory `.dist-info` metadata,
-  and scope flags
+  including `Requires-Dist` dependency metadata, and scope flags
   such as `--all`, `--local`, `--user`, `--exclude`, and
   `--exclude-editable` are accepted;
   direct `pip install -e PATH` and `pip install ./path` local directory

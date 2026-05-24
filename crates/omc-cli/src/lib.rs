@@ -12390,6 +12390,7 @@ fn print_locked_pip_list_columns(
 struct InstalledPythonPackage {
     name: String,
     version: String,
+    dependencies: Vec<String>,
     metadata_location: Option<PathBuf>,
 }
 
@@ -12489,22 +12490,24 @@ fn read_dist_info_metadata(
 ) -> Result<Option<InstalledPythonPackage>, OmcRegistryError> {
     let metadata = dist_info.join("METADATA");
     if metadata.exists() {
+        let metadata = fs::read_to_string(metadata)?;
         let mut name = None;
         let mut version = None;
-        for line in fs::read_to_string(metadata)?.lines() {
+        let mut dependencies = Vec::new();
+        for line in pip_metadata_lines(&metadata) {
             if let Some(value) = line.strip_prefix("Name:") {
                 name = Some(value.trim().to_owned());
             } else if let Some(value) = line.strip_prefix("Version:") {
                 version = Some(value.trim().to_owned());
-            }
-            if name.is_some() && version.is_some() {
-                break;
+            } else if let Some(value) = line.strip_prefix("Requires-Dist:") {
+                dependencies.push(value.trim().to_owned());
             }
         }
         if let (Some(name), Some(version)) = (name, version) {
             return Ok(Some(InstalledPythonPackage {
                 name,
                 version,
+                dependencies,
                 metadata_location: Some(dist_info.to_path_buf()),
             }));
         }
@@ -12519,8 +12522,24 @@ fn read_dist_info_metadata(
     Ok(Some(InstalledPythonPackage {
         name: name.replace('_', "-"),
         version: version.to_owned(),
+        dependencies: Vec::new(),
         metadata_location: Some(dist_info.to_path_buf()),
     }))
+}
+
+fn pip_metadata_lines(metadata: &str) -> Vec<String> {
+    let mut lines: Vec<String> = Vec::new();
+    for line in metadata.lines() {
+        if line.starts_with(' ') || line.starts_with('\t') {
+            if let Some(previous) = lines.last_mut() {
+                previous.push(' ');
+                previous.push_str(line.trim());
+            }
+        } else {
+            lines.push(line.to_owned());
+        }
+    }
+    lines
 }
 
 fn pip_excluded_names(exclude: &[String]) -> BTreeSet<String> {
@@ -12608,7 +12627,7 @@ fn pip_path_inspect_entries(
                 "metadata_location": metadata_location,
                 "installer": installer,
                 "requested": false,
-                "dependencies": [],
+                "dependencies": package.dependencies,
             }))
         })
         .collect()
@@ -12782,6 +12801,7 @@ fn locked_pip_installed_packages(
         .map(|package| InstalledPythonPackage {
             name: package.name,
             version: package.version,
+            dependencies: Vec::new(),
             metadata_location: None,
         })
         .collect::<Vec<_>>();
@@ -25604,7 +25624,7 @@ version = "0.1.0"
                 &[
                     (
                         "PKG-INFO",
-                        "Metadata-Version: 2.1\nName: demo-pkg\nVersion: 1.0.0\n",
+                        "Metadata-Version: 2.1\nName: demo-pkg\nVersion: 1.0.0\nRequires-Dist: idna>=3\n",
                     ),
                     ("demo_pkg/__init__.py", "VALUE = 'target'\n"),
                 ],
@@ -25618,6 +25638,7 @@ version = "0.1.0"
                 "install",
                 "--target",
                 "vendor",
+                "--no-deps",
                 "./dist/demo_pkg-1.0.0.tar.gz",
             ]),
         )
@@ -25638,6 +25659,7 @@ version = "0.1.0"
             vec![InstalledPythonPackage {
                 name: "demo-pkg".to_owned(),
                 version: "1.0.0".to_owned(),
+                dependencies: vec!["idna>=3".to_owned()],
                 metadata_location: Some(project.join("vendor").join("demo_pkg-1.0.0.dist-info")),
             }]
         );
@@ -25646,6 +25668,7 @@ version = "0.1.0"
         assert_eq!(inspect[0]["metadata"]["name"], "demo-pkg");
         assert_eq!(inspect[0]["metadata"]["version"], "1.0.0");
         assert_eq!(inspect[0]["installer"], "omc");
+        assert_eq!(inspect[0]["dependencies"][0], "idna>=3");
         assert!(inspect[0]["metadata_location"]
             .as_str()
             .unwrap()

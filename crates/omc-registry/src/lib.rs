@@ -6958,15 +6958,40 @@ fn write_python_sdist_dist_info(site_packages: &Path, package: &LockedPackage) -
         package.version
     ));
     fs::create_dir_all(&dist_info)?;
-    fs::write(
-        dist_info.join("METADATA"),
-        format!(
-            "Metadata-Version: 2.1\nName: {}\nVersion: {}\n",
-            package.name, package.version
-        ),
-    )?;
+    let mut metadata = format!(
+        "Metadata-Version: 2.1\nName: {}\nVersion: {}\n",
+        package.name, package.version
+    );
+    for dependency in &package.dependencies {
+        if let Some(requirement) = python_requires_dist_from_locked_dependency(dependency) {
+            metadata.push_str("Requires-Dist: ");
+            metadata.push_str(&requirement);
+            metadata.push('\n');
+        }
+    }
+    fs::write(dist_info.join("METADATA"), metadata)?;
     fs::write(dist_info.join("INSTALLER"), "omc\n")?;
     Ok(())
+}
+
+fn python_requires_dist_from_locked_dependency(dependency: &str) -> Option<String> {
+    let spec = PackageSpec::parse(dependency).ok()?;
+    if spec.ecosystem != Ecosystem::Pypi {
+        return None;
+    }
+    let mut name = spec.name;
+    if !spec.extras.is_empty() {
+        name.push('[');
+        name.push_str(&spec.extras.into_iter().collect::<Vec<_>>().join(","));
+        name.push(']');
+    }
+    if let Some(url) = spec.direct_url {
+        Some(format!("{name} @ {url}"))
+    } else if let Some(version) = spec.version {
+        Some(format!("{name}{version}"))
+    } else {
+        Some(name)
+    }
 }
 
 fn python_dist_info_component(value: &str) -> String {
