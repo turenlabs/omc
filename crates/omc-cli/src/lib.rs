@@ -654,6 +654,9 @@ struct NpmExecAction {
     allow: Vec<String>,
     allow_flow: Vec<String>,
     allow_all_host: bool,
+    workspaces: Vec<String>,
+    all_workspaces: bool,
+    include_workspace_root: bool,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -2737,11 +2740,14 @@ fn run_npm_exec(
     cwd: &Path,
     action: NpmExecAction,
 ) -> Result<ExitCode, OmcRegistryError> {
+    let target_cwds = npm_exec_target_cwds(project_dir, cwd, &action)?;
     if action.packages.is_empty() || action.no_install {
-        return run_project_command_in_cwd(project_dir, cwd, &action.command, &action.args);
+        return run_npm_exec_in_project_cwds(project_dir, &target_cwds, &action);
     }
-    if action.prefer_project_bin && project_command_exists(project_dir, cwd, &action.command)? {
-        return run_project_command_in_cwd(project_dir, cwd, &action.command, &action.args);
+    if action.prefer_project_bin
+        && npm_exec_all_project_commands_exist(project_dir, &target_cwds, &action.command)?
+    {
+        return run_npm_exec_in_project_cwds(project_dir, &target_cwds, &action);
     }
 
     let temp_project = TempOmcProject::empty("npm-exec")?;
@@ -2763,10 +2769,76 @@ fn run_npm_exec(
     }
     install_project(&options)?;
 
-    let mut process = ProcessCommand::new(command_program_for_cwd(&action.command, cwd));
-    apply_project_runtime_env_for_cwd(&mut process, temp_project.path(), cwd)?;
-    let status = process.args(action.args).status()?;
-    Ok(exit_code(status.code()))
+    for target_cwd in target_cwds {
+        if action.prefer_project_bin
+            && project_command_exists(project_dir, &target_cwd, &action.command)?
+        {
+            let status = run_project_command_in_cwd(
+                project_dir,
+                &target_cwd,
+                &action.command,
+                &action.args,
+            )?;
+            if status != ExitCode::SUCCESS {
+                return Ok(status);
+            }
+            continue;
+        }
+
+        let mut process =
+            ProcessCommand::new(command_program_for_cwd(&action.command, &target_cwd));
+        apply_project_runtime_env_for_cwd(&mut process, temp_project.path(), &target_cwd)?;
+        let status = process.args(&action.args).status()?;
+        let status = exit_code(status.code());
+        if status != ExitCode::SUCCESS {
+            return Ok(status);
+        }
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+fn npm_exec_target_cwds(
+    project_dir: &Path,
+    cwd: &Path,
+    action: &NpmExecAction,
+) -> Result<Vec<PathBuf>, OmcRegistryError> {
+    if action.workspaces.is_empty() && !action.all_workspaces {
+        return Ok(vec![cwd.to_path_buf()]);
+    }
+    npm_script_target_dirs(
+        project_dir,
+        &action.workspaces,
+        action.all_workspaces,
+        action.include_workspace_root,
+    )
+}
+
+fn run_npm_exec_in_project_cwds(
+    project_dir: &Path,
+    target_cwds: &[PathBuf],
+    action: &NpmExecAction,
+) -> Result<ExitCode, OmcRegistryError> {
+    for target_cwd in target_cwds {
+        let status =
+            run_project_command_in_cwd(project_dir, target_cwd, &action.command, &action.args)?;
+        if status != ExitCode::SUCCESS {
+            return Ok(status);
+        }
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+fn npm_exec_all_project_commands_exist(
+    project_dir: &Path,
+    target_cwds: &[PathBuf],
+    command: &str,
+) -> Result<bool, OmcRegistryError> {
+    for target_cwd in target_cwds {
+        if !project_command_exists(project_dir, target_cwd, command)? {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
 
 fn project_command_exists(
@@ -7839,7 +7911,7 @@ fn npm_help_text(topic: Option<&str>) -> String {
             &[
                 "Run a project-local executable with OMC runtime paths.",
                 "--package installs verified packages into a temporary OMC project before running the command; --call/-c runs a shell command with the same OMC runtime paths.",
-                "Aliases: x, npx. Common flags: --yes, --no-install, --package, --call, --cache, --registry, --allow, --allow-all-host.",
+                "Aliases: x, npx. Common flags: --yes, --no-install, --package, --call, --workspace, --workspaces, --include-workspace-root, --cache, --registry, --allow, --allow-all-host.",
             ],
         ),
         Some("completion") => npm_command_help(
@@ -21539,6 +21611,9 @@ fn npm_global_arg_supported_by_command(command: &str, arg: &str) -> bool {
                 | "ln"
                 | "install-test"
                 | "it"
+                | "exec"
+                | "x"
+                | "npx"
                 | "explore"
                 | "edit"
                 | "init"
@@ -21606,6 +21681,9 @@ fn npm_global_arg_supported_by_command(command: &str, arg: &str) -> bool {
                 | "unstar"
                 | "trust"
                 | "token"
+                | "exec"
+                | "x"
+                | "npx"
                 | "profile"
                 | "owner"
                 | "access"
@@ -21925,6 +22003,9 @@ fn npm_global_arg_supported_by_command(command: &str, arg: &str) -> bool {
                 | "ci"
                 | "run"
                 | "run-script"
+                | "exec"
+                | "x"
+                | "npx"
                 | "test"
                 | "start"
                 | "stop"
@@ -21947,6 +22028,7 @@ fn npm_global_arg_supported_by_command(command: &str, arg: &str) -> bool {
         );
     }
     if matches!(arg, "--workspaces" | "--include-workspace-root")
+        || arg.starts_with("--workspaces=")
         || arg.starts_with("--include-workspace-root=")
     {
         return matches!(
@@ -21965,6 +22047,9 @@ fn npm_global_arg_supported_by_command(command: &str, arg: &str) -> bool {
                 | "ci"
                 | "run"
                 | "run-script"
+                | "exec"
+                | "x"
+                | "npx"
                 | "test"
                 | "start"
                 | "stop"
@@ -22223,6 +22308,7 @@ fn npm_global_preserved_equals_flag(arg: &str) -> bool {
         "--limit=",
         "--workspace=",
         "-w=",
+        "--workspaces=",
         "--include-workspace-root=",
         "--otp=",
         "--auth-type=",
@@ -27239,6 +27325,9 @@ fn parse_npm_exec_args(
     let mut allow = Vec::new();
     let mut allow_flow = Vec::new();
     let mut allow_all_host = false;
+    let mut workspaces = Vec::new();
+    let mut all_workspaces = false;
+    let mut include_workspace_root = false;
     let mut call = None;
     let mut filtered = Vec::new();
     let mut index = 0;
@@ -27310,6 +27399,36 @@ fn parse_npm_exec_args(
             allow_flow.push(flow.to_owned());
         } else if arg == "--allow-all-host" {
             allow_all_host = true;
+        } else if matches!(arg.as_str(), "--workspaces" | "--workspaces=true") {
+            all_workspaces = true;
+        } else if arg == "--workspaces=false" {
+            all_workspaces = false;
+        } else if matches!(
+            arg.as_str(),
+            "--include-workspace-root" | "--include-workspace-root=true"
+        ) {
+            include_workspace_root = true;
+        } else if arg == "--include-workspace-root=false" {
+            include_workspace_root = false;
+        } else if matches!(arg.as_str(), "--workspace" | "-w") {
+            index += 1;
+            let Some(workspace) = args.get(index) else {
+                return Err(OmcRegistryError::UnsupportedSpec(format!(
+                    "{arg} needs a workspace"
+                )));
+            };
+            workspaces.push(workspace.clone());
+        } else if let Some(workspace) = arg
+            .strip_prefix("--workspace=")
+            .or_else(|| arg.strip_prefix("-w="))
+        {
+            if workspace == "true" {
+                all_workspaces = true;
+            } else if workspace == "false" {
+                all_workspaces = false;
+            } else {
+                workspaces.push(workspace.to_owned());
+            }
         } else if matches!(arg.as_str(), "--cache" | "--userconfig") {
             index += 1;
             if args.get(index).is_none() {
@@ -27356,6 +27475,9 @@ fn parse_npm_exec_args(
         allow,
         allow_flow,
         allow_all_host,
+        workspaces,
+        all_workspaces,
+        include_workspace_root,
     })
 }
 
@@ -28953,6 +29075,7 @@ fn parse_pip_install_args(args: &[String]) -> Result<PipCompatAction, OmcRegistr
                 | "--no-cache-dir"
                 | "--isolated"
                 | "--require-virtualenv"
+                | "--ignore-requires-python"
                 | "--no-build-isolation"
                 | "--check-build-dependencies"
                 | "--use-pep517"
@@ -34893,6 +35016,9 @@ verdict = "accepted"
                     allow: Vec::new(),
                     allow_flow: Vec::new(),
                     allow_all_host: false,
+                    workspaces: Vec::new(),
+                    all_workspaces: false,
+                    include_workspace_root: false,
                 },
             }
         );
@@ -34915,6 +35041,9 @@ verdict = "accepted"
                     allow: Vec::new(),
                     allow_flow: Vec::new(),
                     allow_all_host: false,
+                    workspaces: Vec::new(),
+                    all_workspaces: false,
+                    include_workspace_root: false,
                 },
             }
         );
@@ -34941,6 +35070,9 @@ verdict = "accepted"
                     allow: Vec::new(),
                     allow_flow: Vec::new(),
                     allow_all_host: false,
+                    workspaces: Vec::new(),
+                    all_workspaces: false,
+                    include_workspace_root: false,
                 },
             }
         );
@@ -34966,6 +35098,9 @@ verdict = "accepted"
                     allow: Vec::new(),
                     allow_flow: Vec::new(),
                     allow_all_host: false,
+                    workspaces: Vec::new(),
+                    all_workspaces: false,
+                    include_workspace_root: false,
                 },
             }
         );
@@ -34990,6 +35125,9 @@ verdict = "accepted"
                     allow: Vec::new(),
                     allow_flow: Vec::new(),
                     allow_all_host: false,
+                    workspaces: Vec::new(),
+                    all_workspaces: false,
+                    include_workspace_root: false,
                 },
             }
         );
@@ -35006,6 +35144,9 @@ verdict = "accepted"
                     allow: Vec::new(),
                     allow_flow: Vec::new(),
                     allow_all_host: false,
+                    workspaces: Vec::new(),
+                    all_workspaces: false,
+                    include_workspace_root: false,
                 },
             }
         );
@@ -35022,6 +35163,9 @@ verdict = "accepted"
                     allow: Vec::new(),
                     allow_flow: Vec::new(),
                     allow_all_host: false,
+                    workspaces: Vec::new(),
+                    all_workspaces: false,
+                    include_workspace_root: false,
                 },
             }
         );
@@ -35049,6 +35193,38 @@ verdict = "accepted"
                     allow: vec!["env:TOOL_TOKEN".to_owned()],
                     allow_flow: Vec::new(),
                     allow_all_host: true,
+                    workspaces: Vec::new(),
+                    all_workspaces: false,
+                    include_workspace_root: false,
+                },
+            }
+        );
+        assert_eq!(
+            parse_npm_compat_action(&args(&[
+                "--workspace",
+                "@demo/lib",
+                "exec",
+                "--include-workspace-root",
+                "--",
+                "node",
+                "-e",
+                "console.log(process.cwd())",
+            ]))
+            .unwrap(),
+            NpmCompatAction::Exec {
+                action: NpmExecAction {
+                    packages: Vec::new(),
+                    command: "node".to_owned(),
+                    args: vec!["-e".to_owned(), "console.log(process.cwd())".to_owned()],
+                    no_install: false,
+                    prefer_project_bin: false,
+                    npm_registry: None,
+                    allow: Vec::new(),
+                    allow_flow: Vec::new(),
+                    allow_all_host: false,
+                    workspaces: vec!["@demo/lib".to_owned()],
+                    all_workspaces: false,
+                    include_workspace_root: true,
                 },
             }
         );
@@ -35072,6 +35248,9 @@ verdict = "accepted"
                     allow: Vec::new(),
                     allow_flow: Vec::new(),
                     allow_all_host: false,
+                    workspaces: Vec::new(),
+                    all_workspaces: false,
+                    include_workspace_root: false,
                 },
             }
         );
@@ -38380,6 +38559,28 @@ verdict = "accepted"
                 dir.join("packages/lib")
             ]
         );
+        assert_eq!(
+            npm_exec_target_cwds(
+                &dir,
+                &dir,
+                &NpmExecAction {
+                    packages: Vec::new(),
+                    command: "node".to_owned(),
+                    args: Vec::new(),
+                    no_install: false,
+                    prefer_project_bin: false,
+                    npm_registry: None,
+                    allow: Vec::new(),
+                    allow_flow: Vec::new(),
+                    allow_all_host: false,
+                    workspaces: vec!["@demo/api".to_owned()],
+                    all_workspaces: false,
+                    include_workspace_root: false,
+                }
+            )
+            .unwrap(),
+            vec![dir.join("packages/api")]
+        );
         assert!(npm_script_target_dirs(&dir, &["missing".to_owned()], false, false).is_err());
         let _ = fs::remove_dir_all(dir);
     }
@@ -38763,6 +38964,7 @@ verdict = "accepted"
             "--use-feature",
             "truststore",
             "--use-deprecated=legacy-resolver",
+            "--ignore-requires-python",
             "--no-build-isolation",
             "--check-build-dependencies",
             "-C",
