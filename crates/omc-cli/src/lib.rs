@@ -1388,6 +1388,7 @@ enum DirectCompatMode {
 #[derive(Debug, PartialEq, Eq)]
 struct DirectCompatInvocation {
     project_dir: PathBuf,
+    cwd: PathBuf,
     args: Vec<String>,
 }
 
@@ -1411,13 +1412,21 @@ fn run_entry() -> Result<ExitCode, OmcRegistryError> {
     if let Some(mode) = direct_compat_mode(program.as_deref()) {
         let invocation = parse_direct_compat_invocation(mode, raw_args)?;
         return match mode {
-            DirectCompatMode::Node => run_node(&invocation.project_dir, &invocation.args),
-            DirectCompatMode::Npm => run_npm_compat(&invocation.project_dir, &invocation.args),
-            DirectCompatMode::Npx => {
-                run_npm_compat(&invocation.project_dir, &npx_compat_args(invocation.args))
+            DirectCompatMode::Node => {
+                run_node_in_cwd(&invocation.project_dir, &invocation.cwd, &invocation.args)
             }
+            DirectCompatMode::Npm => {
+                run_npm_compat_with_cwd(&invocation.project_dir, &invocation.args, &invocation.cwd)
+            }
+            DirectCompatMode::Npx => run_npm_compat_with_cwd(
+                &invocation.project_dir,
+                &npx_compat_args(invocation.args),
+                &invocation.cwd,
+            ),
             DirectCompatMode::Pip => run_pip_compat(&invocation.project_dir, &invocation.args),
-            DirectCompatMode::Python => run_python(&invocation.project_dir, &invocation.args),
+            DirectCompatMode::Python => {
+                run_python_in_cwd(&invocation.project_dir, &invocation.cwd, &invocation.args)
+            }
             DirectCompatMode::Twine => run_twine_compat(&invocation.project_dir, &invocation.args),
         };
     }
@@ -1454,6 +1463,7 @@ fn parse_direct_compat_invocation<I>(
 where
     I: IntoIterator<Item = OsString>,
 {
+    let cwd = env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let env_project_dir = env::var_os("OMC_PROJECT_DIR").map(PathBuf::from);
     let mut project_dir = env_project_dir
         .clone()
@@ -1500,6 +1510,7 @@ where
     }
     Ok(DirectCompatInvocation {
         project_dir,
+        cwd,
         args: compat_args,
     })
 }
@@ -2204,8 +2215,16 @@ impl Drop for TempOmcProject {
 }
 
 fn run_node(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRegistryError> {
+    run_node_in_cwd(project_dir, project_dir, args)
+}
+
+fn run_node_in_cwd(
+    project_dir: &Path,
+    cwd: &Path,
+    args: &[String],
+) -> Result<ExitCode, OmcRegistryError> {
     let mut command = ProcessCommand::new(host_node_program()?);
-    apply_project_runtime_env(&mut command, project_dir)?;
+    apply_project_runtime_env_for_cwd(&mut command, project_dir, cwd)?;
     let status = command.args(args).status()?;
     Ok(exit_code(status.code()))
 }
@@ -2215,6 +2234,14 @@ fn host_node_program() -> Result<PathBuf, OmcRegistryError> {
 }
 
 fn run_python(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRegistryError> {
+    run_python_in_cwd(project_dir, project_dir, args)
+}
+
+fn run_python_in_cwd(
+    project_dir: &Path,
+    cwd: &Path,
+    args: &[String],
+) -> Result<ExitCode, OmcRegistryError> {
     if let Some(pip_args) = python_pip_module_args(args) {
         return run_pip_compat(project_dir, pip_args);
     }
@@ -2223,7 +2250,7 @@ fn run_python(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRegist
     }
 
     let mut command = ProcessCommand::new(host_python_program()?);
-    apply_project_runtime_env(&mut command, project_dir)?;
+    apply_project_runtime_env_for_cwd(&mut command, project_dir, cwd)?;
     let status = command.arg("-S").args(args).status()?;
     Ok(exit_code(status.code()))
 }
@@ -2599,18 +2626,44 @@ fn run_project_command(
     command: &str,
     args: &[String],
 ) -> Result<ExitCode, OmcRegistryError> {
-    let mut process = ProcessCommand::new(command);
-    apply_project_runtime_env(&mut process, project_dir)?;
+    run_project_command_in_cwd(project_dir, project_dir, command, args)
+}
+
+fn run_project_command_in_cwd(
+    project_dir: &Path,
+    cwd: &Path,
+    command: &str,
+    args: &[String],
+) -> Result<ExitCode, OmcRegistryError> {
+    let mut process = ProcessCommand::new(command_program_for_cwd(command, cwd));
+    apply_project_runtime_env_for_cwd(&mut process, project_dir, cwd)?;
     let status = process.args(args).status()?;
     Ok(exit_code(status.code()))
 }
 
-fn run_npm_exec(project_dir: &Path, action: NpmExecAction) -> Result<ExitCode, OmcRegistryError> {
-    if action.packages.is_empty() || action.no_install {
-        return run_project_command(project_dir, &action.command, &action.args);
+fn command_program_for_cwd(command: &str, cwd: &Path) -> PathBuf {
+    let path = Path::new(command);
+    if path.is_relative() && command_has_path_separator(command) {
+        cwd.join(path)
+    } else {
+        path.to_path_buf()
     }
-    if action.prefer_project_bin && project_command_exists(project_dir, &action.command)? {
-        return run_project_command(project_dir, &action.command, &action.args);
+}
+
+fn command_has_path_separator(command: &str) -> bool {
+    command.contains('/') || command.contains('\\')
+}
+
+fn run_npm_exec(
+    project_dir: &Path,
+    cwd: &Path,
+    action: NpmExecAction,
+) -> Result<ExitCode, OmcRegistryError> {
+    if action.packages.is_empty() || action.no_install {
+        return run_project_command_in_cwd(project_dir, cwd, &action.command, &action.args);
+    }
+    if action.prefer_project_bin && project_command_exists(project_dir, cwd, &action.command)? {
+        return run_project_command_in_cwd(project_dir, cwd, &action.command, &action.args);
     }
 
     let temp_project = TempOmcProject::empty("npm-exec")?;
@@ -2632,24 +2685,30 @@ fn run_npm_exec(project_dir: &Path, action: NpmExecAction) -> Result<ExitCode, O
     }
     install_project(&options)?;
 
-    let mut process = ProcessCommand::new(action.command);
-    apply_project_runtime_env_for_cwd(&mut process, temp_project.path(), project_dir)?;
+    let mut process = ProcessCommand::new(command_program_for_cwd(&action.command, cwd));
+    apply_project_runtime_env_for_cwd(&mut process, temp_project.path(), cwd)?;
     let status = process.args(action.args).status()?;
     Ok(exit_code(status.code()))
 }
 
-fn project_command_exists(project_dir: &Path, command: &str) -> Result<bool, OmcRegistryError> {
+fn project_command_exists(
+    project_dir: &Path,
+    cwd: &Path,
+    command: &str,
+) -> Result<bool, OmcRegistryError> {
     if command.is_empty() {
         return Ok(false);
     }
-    if command.starts_with("./")
-        || command.starts_with("../")
-        || Path::new(command).is_absolute()
-        || command.contains('\\')
-    {
-        return Ok(Path::new(command).exists());
+    let command_path = Path::new(command);
+    if command_path.is_absolute() || command_has_path_separator(command) {
+        let candidate = if command_path.is_absolute() {
+            command_path.to_path_buf()
+        } else {
+            cwd.join(command_path)
+        };
+        return Ok(candidate.exists());
     }
-    let path = project_path_for_cwd(project_dir, project_dir)?;
+    let path = project_path_for_cwd(project_dir, cwd)?;
     for dir in env::split_paths(&path) {
         let candidate = dir.join(command);
         if candidate.is_file() {
@@ -2703,10 +2762,7 @@ fn npm_explore_shell(shell: Option<String>) -> String {
         })
 }
 
-fn run_npm_create(
-    project_dir: &Path,
-    action: NpmCreateAction,
-) -> Result<ExitCode, OmcRegistryError> {
+fn run_npm_create(cwd: &Path, action: NpmCreateAction) -> Result<ExitCode, OmcRegistryError> {
     let package_spec = npm_create_package_spec(&action.initializer)?;
     let spec = parse_package_spec(&package_spec, Some(Ecosystem::Npm))?;
     let temp_project = TempOmcProject::empty("npm-create")?;
@@ -2726,8 +2782,8 @@ fn run_npm_create(
     install_project(&options)?;
 
     let command = npm_create_bin_name(temp_project.path(), &spec.name)?;
-    let mut process = ProcessCommand::new(command);
-    apply_project_runtime_env_for_cwd(&mut process, temp_project.path(), project_dir)?;
+    let mut process = ProcessCommand::new(command_program_for_cwd(&command, cwd));
+    apply_project_runtime_env_for_cwd(&mut process, temp_project.path(), cwd)?;
     let status = process.args(action.args).status()?;
     Ok(exit_code(status.code()))
 }
@@ -3696,6 +3752,14 @@ fn npm_project_has_npm_lockfile(project_dir: &Path) -> bool {
 }
 
 fn run_npm_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRegistryError> {
+    run_npm_compat_with_cwd(project_dir, args, project_dir)
+}
+
+fn run_npm_compat_with_cwd(
+    project_dir: &Path,
+    args: &[String],
+    invocation_cwd: &Path,
+) -> Result<ExitCode, OmcRegistryError> {
     let (project_dir, args) = npm_project_dir_from_prefix_args(project_dir, args)?;
     let project_dir = project_dir.as_path();
     let args = npm_args_with_config_defaults(project_dir, &args)?;
@@ -3704,7 +3768,7 @@ fn run_npm_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
         NpmCompatAction::Version => println!("{}", env!("CARGO_PKG_VERSION")),
         NpmCompatAction::Completion { words } => print_npm_completion(project_dir, words)?,
         NpmCompatAction::Init { action } => print_npm_init(project_dir, action)?,
-        NpmCompatAction::Create { action } => return run_npm_create(project_dir, action),
+        NpmCompatAction::Create { action } => return run_npm_create(invocation_cwd, action),
         NpmCompatAction::PackageVersion { action } => print_npm_version(project_dir, action)?,
         NpmCompatAction::Link { action } => return run_npm_link_compat(project_dir, action),
         NpmCompatAction::Install {
@@ -3964,7 +4028,9 @@ fn run_npm_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
         NpmCompatAction::RunList { action } => {
             print_npm_run_list(project_dir, action)?;
         }
-        NpmCompatAction::Exec { action } => return run_npm_exec(project_dir, action),
+        NpmCompatAction::Exec { action } => {
+            return run_npm_exec(project_dir, invocation_cwd, action)
+        }
         NpmCompatAction::Explore { action } => return run_npm_explore(project_dir, action),
         NpmCompatAction::Path { kind, global } => print_npm_path(project_dir, kind, global)?,
         NpmCompatAction::List { action } => print_locked_packages(
@@ -19193,13 +19259,6 @@ fn apply_pip_environment_defaults_for_project(options: &mut LinkOptions, project
     apply_pypi_environment_defaults(options, override_index);
 }
 
-fn apply_project_runtime_env(
-    command: &mut ProcessCommand,
-    project_dir: &Path,
-) -> Result<(), OmcRegistryError> {
-    apply_project_runtime_env_for_cwd(command, project_dir, project_dir)
-}
-
 fn apply_project_runtime_env_for_cwd(
     command: &mut ProcessCommand,
     project_dir: &Path,
@@ -31123,6 +31182,7 @@ verdict = "accepted"
 
     #[test]
     fn parses_direct_compat_project_dir_prefix() {
+        let cwd = env::current_dir().unwrap();
         let npm_root = test_dir("direct-compat-npm-root");
         let npm_workspace = npm_root.join("packages").join("lib");
         let npm_nested = npm_workspace.join("src");
@@ -31166,6 +31226,7 @@ verdict = "accepted"
             .unwrap(),
             DirectCompatInvocation {
                 project_dir: PathBuf::from("/tmp/project"),
+                cwd: cwd.clone(),
                 args: args(&["install", "left-pad"]),
             }
         );
@@ -31177,6 +31238,7 @@ verdict = "accepted"
             .unwrap(),
             DirectCompatInvocation {
                 project_dir: PathBuf::from("/tmp/project"),
+                cwd: cwd.clone(),
                 args: args(&["show", "requests"]),
             }
         );
@@ -31188,6 +31250,7 @@ verdict = "accepted"
             .unwrap(),
             DirectCompatInvocation {
                 project_dir: PathBuf::from("/tmp/project"),
+                cwd: cwd.clone(),
                 args: args(&["test", "--", "--watch"]),
             }
         );
@@ -31199,6 +31262,7 @@ verdict = "accepted"
             .unwrap(),
             DirectCompatInvocation {
                 project_dir: PathBuf::from("/tmp/project"),
+                cwd: cwd.clone(),
                 args: args(&["eslint", "--", "."]),
             }
         );
@@ -31236,6 +31300,7 @@ verdict = "accepted"
             .unwrap(),
             DirectCompatInvocation {
                 project_dir: PathBuf::from("/tmp/project"),
+                cwd: cwd.clone(),
                 args: args(&["-e", "console.log(1)"]),
             }
         );
@@ -31254,6 +31319,7 @@ verdict = "accepted"
             .unwrap(),
             DirectCompatInvocation {
                 project_dir: PathBuf::from("/tmp/project"),
+                cwd: cwd.clone(),
                 args: args(&["-m", "pip", "install", "requests"]),
             }
         );
@@ -31272,6 +31338,7 @@ verdict = "accepted"
             .unwrap(),
             DirectCompatInvocation {
                 project_dir: PathBuf::from("/tmp/project"),
+                cwd,
                 args: args(&["upload", "--repository", "testpypi", "dist/pkg.whl"]),
             }
         );
@@ -37318,7 +37385,7 @@ print("ok")
                 ExitCode::SUCCESS
             );
             let mut command = ProcessCommand::new("demo-cli");
-            apply_project_runtime_env(&mut command, &project).unwrap();
+            apply_project_runtime_env_for_cwd(&mut command, &project, &project).unwrap();
             let output = command.output().unwrap();
             assert!(output.status.success());
             assert_eq!(String::from_utf8_lossy(&output.stdout), "user-cli-ok\n");
