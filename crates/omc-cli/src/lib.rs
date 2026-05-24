@@ -1166,6 +1166,9 @@ enum PipCompatAction {
         compatibility: PipCompatibilityTarget,
         json: bool,
     },
+    Search {
+        query: Vec<String>,
+    },
     Config {
         action: PipConfigAction,
     },
@@ -5561,6 +5564,7 @@ fn run_pip_compat_with_cwd(
             },
             json,
         )?,
+        PipCompatAction::Search { query } => return print_pip_search_deprecated(query),
         PipCompatAction::Config { action } => print_pip_config(project_dir, action)?,
     }
 
@@ -8341,6 +8345,13 @@ fn pip_help_text(topic: Option<&str>) -> String {
             "pip cache <dir|info|list|remove|purge>",
             &["Inspect or clear OMC's PyPI cache."],
         ),
+        Some("search") => pip_command_help(
+            "pip search <query>",
+            &[
+                "Recognize pip's deprecated PyPI search command and return PyPI's XML-RPC deprecation guidance.",
+                "Use pip index versions <package> for package version lookup.",
+            ],
+        ),
         Some("index") => pip_command_help(
             "pip index versions <package>",
             &["List available package versions from the configured index. Supports --json and index flags."],
@@ -8361,7 +8372,7 @@ fn pip_general_help_text() -> String {
         "pip <command>",
         &[
             "OMC pip compatibility runs supported pip workflows through OMC's resolver, verifier, lockfile, cache, and isolated Python site-packages.",
-            "Supported commands: install, lock, download, wheel, uninstall, freeze, list, show, check, inspect, debug, hash, cache, index versions, config, completion.",
+            "Supported commands: install, lock, download, wheel, uninstall, freeze, list, show, check, inspect, debug, hash, cache, search, index versions, config, completion.",
             "Use `pip help <command>` for focused OMC compatibility notes.",
         ],
     )
@@ -8396,6 +8407,7 @@ fn pip_help_topic(topic: &str) -> Option<&'static str> {
         "debug" => Some("debug"),
         "hash" => Some("hash"),
         "cache" => Some("cache"),
+        "search" => Some("search"),
         "index" => Some("index"),
         "config" => Some("config"),
         _ => Some("unknown"),
@@ -11954,6 +11966,19 @@ fn print_pip_index_versions(
         println!("Available versions: {}", listing.versions.join(", "));
     }
     Ok(())
+}
+
+fn print_pip_search_deprecated(query: Vec<String>) -> Result<ExitCode, OmcRegistryError> {
+    if query.is_empty() {
+        return Err(OmcRegistryError::UnsupportedSpec(
+            "pip search needs at least one search term".to_owned(),
+        ));
+    }
+    eprintln!("ERROR: XMLRPC request failed [code: -32500]");
+    eprintln!(
+        "RuntimeError: PyPI no longer supports 'pip search' (or XML-RPC search). Please use https://pypi.org/search (via a browser) instead. See https://warehouse.pypa.io/api-reference/xml-rpc.html#deprecated-methods for more information."
+    );
+    Ok(ExitCode::FAILURE)
 }
 
 fn pypi_available_versions_options(
@@ -26248,6 +26273,7 @@ fn parse_pip_compat_action(args: &[String]) -> Result<PipCompatAction, OmcRegist
         }
         "list" => parse_pip_list_args(&args[1..]),
         "index" => parse_pip_index_args(&args[1..]),
+        "search" => parse_pip_search_args(&args[1..]),
         "config" => parse_pip_config_args(&args[1..]),
         other => Err(OmcRegistryError::UnsupportedSpec(format!(
             "unsupported pip compatibility command `{other}`"
@@ -26802,6 +26828,72 @@ fn pip_index_ignored_equals_flag(arg: &str) -> bool {
         "--proxy=",
         "--cache-dir=",
         "--log=",
+    ]
+    .iter()
+    .any(|prefix| arg.starts_with(prefix))
+}
+
+fn parse_pip_search_args(args: &[String]) -> Result<PipCompatAction, OmcRegistryError> {
+    let mut query = Vec::new();
+    let mut index = 0;
+    while index < args.len() {
+        let arg = &args[index];
+        if matches!(
+            arg.as_str(),
+            "--isolated"
+                | "--disable-pip-version-check"
+                | "--no-cache-dir"
+                | "--no-color"
+                | "--no-input"
+                | "--no-python-version-warning"
+        ) || pip_ignored_verbosity_flag(arg)
+        {
+        } else if matches!(
+            arg.as_str(),
+            "-i" | "--index"
+                | "--log"
+                | "--proxy"
+                | "--retries"
+                | "--timeout"
+                | "--exists-action"
+                | "--trusted-host"
+                | "--cert"
+                | "--client-cert"
+                | "--cache-dir"
+                | "--use-feature"
+                | "--use-deprecated"
+        ) {
+            index += 1;
+            if args.get(index).is_none() {
+                return Err(OmcRegistryError::UnsupportedSpec(format!(
+                    "{arg} needs a value"
+                )));
+            }
+        } else if pip_search_ignored_equals_flag(arg) {
+        } else if arg.starts_with('-') {
+            return Err(unsupported_compat_arg("pip search", arg));
+        } else {
+            query.push(arg.clone());
+        }
+        index += 1;
+    }
+    Ok(PipCompatAction::Search { query })
+}
+
+fn pip_search_ignored_equals_flag(arg: &str) -> bool {
+    [
+        "--index=",
+        "--log=",
+        "--proxy=",
+        "--retries=",
+        "--timeout=",
+        "--exists-action=",
+        "--trusted-host=",
+        "--cert=",
+        "--client-cert=",
+        "--cache-dir=",
+        "--use-feature=",
+        "--use-deprecated=",
     ]
     .iter()
     .any(|prefix| arg.starts_with(prefix))
@@ -39947,6 +40039,19 @@ version = "0.2.0"
         );
         assert!(pip_help_text(None).contains("Supported commands: install"));
         assert!(pip_help_text(Some("debug")).contains("pip debug"));
+        assert!(pip_help_text(Some("search")).contains("pip search"));
+        assert_eq!(
+            parse_pip_compat_action(&args(&[
+                "search",
+                "--index",
+                "https://pypi.example.invalid/pypi",
+                "requests",
+            ]))
+            .unwrap(),
+            PipCompatAction::Search {
+                query: vec!["requests".to_owned()],
+            }
+        );
         assert_eq!(
             parse_pip_compat_action(&args(&["uninstall", "-y", "requests"])).unwrap(),
             PipCompatAction::Uninstall {
