@@ -9603,7 +9603,6 @@ fn npm_config_values(
             "prefix".to_owned(),
             project_dir.to_string_lossy().into_owned(),
         ),
-        ("registry".to_owned(), snapshot.registry),
         ("save".to_owned(), "true".to_owned()),
         (
             "userconfig".to_owned(),
@@ -9612,10 +9611,84 @@ fn npm_config_values(
                 .into_owned(),
         ),
     ]);
+    extend_npm_config_values_from_files(
+        &mut values,
+        project_dir.as_path(),
+        userconfig,
+        globalconfig,
+        location,
+    )?;
+    values.insert("registry".to_owned(), snapshot.registry);
     for (scope, registry) in snapshot.scoped_registries {
         values.insert(format!("{scope}:registry"), registry);
     }
     Ok(values)
+}
+
+fn extend_npm_config_values_from_files(
+    values: &mut BTreeMap<String, String>,
+    project_dir: &Path,
+    userconfig: Option<&Path>,
+    globalconfig: Option<&Path>,
+    location: NpmConfigLocation,
+) -> Result<(), OmcRegistryError> {
+    let globalconfig = npm_globalconfig_path(project_dir, globalconfig);
+    let userconfig = npm_userconfig_path(project_dir, userconfig);
+    let project_config = project_dir.join(".npmrc");
+
+    match location {
+        NpmConfigLocation::Global => {
+            read_npm_config_values_file(&globalconfig, values)?;
+        }
+        NpmConfigLocation::User | NpmConfigLocation::Project => {
+            for path in [globalconfig, userconfig, project_config] {
+                read_npm_config_values_file(&path, values)?;
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn read_npm_config_values_file(
+    path: &Path,
+    values: &mut BTreeMap<String, String>,
+) -> Result<(), OmcRegistryError> {
+    if !path.exists() {
+        return Ok(());
+    }
+    for line in fs::read_to_string(path)?.lines() {
+        let Some((key, value)) = npm_config_line_assignment(line) else {
+            continue;
+        };
+        if npm_config_key_is_secret(&key) {
+            continue;
+        }
+        values.insert(key, value);
+    }
+    Ok(())
+}
+
+fn npm_config_line_assignment(line: &str) -> Option<(String, String)> {
+    let line = strip_npm_config_comment(line).trim();
+    if line.is_empty() {
+        return None;
+    }
+    let (key, value) = line.split_once('=')?;
+    let key = key.trim();
+    if key.is_empty() {
+        return None;
+    }
+    let value = expand_npm_config_default_value(value.trim())?;
+    Some((key.to_owned(), value))
+}
+
+fn npm_config_key_is_secret(key: &str) -> bool {
+    let key = key.to_ascii_lowercase();
+    key == "_auth"
+        || key.ends_with(":_auth")
+        || key.contains("_authtoken")
+        || key.contains("password")
 }
 
 fn npm_userconfig_path(project_dir: &Path, userconfig: Option<&Path>) -> PathBuf {
@@ -39062,6 +39135,69 @@ verdict = "accepted"
         assert!(!fs::read_to_string(dir.join("global.npmrc"))
             .unwrap()
             .contains("registry=https://global.example.invalid/npm\n"));
+    }
+
+    #[test]
+    fn npm_config_values_include_npmrc_defaults() {
+        let dir = test_dir("npm-config-values-npmrc");
+        fs::write(
+            dir.join("global.npmrc"),
+            "save-prefix=~\nregistry=https://global.example.invalid/npm\n",
+        )
+        .unwrap();
+        fs::write(
+            dir.join("user.npmrc"),
+            "save-exact=true\nmin-release-age=7\nallow-git=none\n//registry.example.invalid/:_authToken=secret\n",
+        )
+        .unwrap();
+        fs::write(
+            dir.join(".npmrc"),
+            "registry=https://project.example.invalid/npm\n@scope:registry=https://scope.example.invalid/npm\nignore-scripts=false\n",
+        )
+        .unwrap();
+
+        let values = npm_config_values(
+            &dir,
+            None,
+            Some(Path::new("user.npmrc")),
+            Some(Path::new("global.npmrc")),
+            NpmConfigLocation::User,
+        )
+        .unwrap();
+
+        assert_eq!(values.get("save-prefix").map(String::as_str), Some("~"));
+        assert_eq!(values.get("save-exact").map(String::as_str), Some("true"));
+        assert_eq!(values.get("min-release-age").map(String::as_str), Some("7"));
+        assert_eq!(values.get("allow-git").map(String::as_str), Some("none"));
+        assert_eq!(
+            values.get("ignore-scripts").map(String::as_str),
+            Some("false")
+        );
+        assert_eq!(
+            values.get("registry").map(String::as_str),
+            Some("https://project.example.invalid/npm/")
+        );
+        assert_eq!(
+            values.get("@scope:registry").map(String::as_str),
+            Some("https://scope.example.invalid/npm/")
+        );
+        assert!(!values.contains_key("//registry.example.invalid/:_authToken"));
+
+        let global_values = npm_config_values(
+            &dir,
+            None,
+            Some(Path::new("user.npmrc")),
+            Some(Path::new("global.npmrc")),
+            NpmConfigLocation::Global,
+        )
+        .unwrap();
+        assert_eq!(
+            global_values.get("save-prefix").map(String::as_str),
+            Some("~")
+        );
+        assert!(!global_values.contains_key("save-exact"));
+
+        let _ = fs::remove_dir_all(dir);
     }
 
     #[test]
