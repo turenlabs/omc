@@ -224,6 +224,7 @@ cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip freeze
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip freeze -r requirements.txt
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip show requests
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip list --format=json
+cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip list --editable --format=columns
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip list --not-required --format=json
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip inspect
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip debug --verbose
@@ -591,7 +592,8 @@ Supported now:
   `.dist-info/RECORD` files support `pip show -f`, and `pip show` reads
   installed summary, homepage, author, license, and requirement metadata; scope flags
   such as `--all`, `--local`, `--user`, `--exclude`, and
-  `--exclude-editable` are accepted, and `pip list --not-required` filters to
+  `--editable`, `--include-editable`, and `--exclude-editable` filter local
+  editable installs recorded by OMC, and `pip list --not-required` filters to
   top-level packages not required by another installed package;
   direct `pip install -e PATH` and `pip install ./path` local directory
   installs, including selected extras such as

@@ -1070,7 +1070,7 @@ enum PipCompatAction {
         uptodate: bool,
         paths: Vec<PathBuf>,
         exclude: Vec<String>,
-        exclude_editable: bool,
+        editable: PipEditableMode,
         not_required: bool,
         index_url: Option<String>,
         extra_index_urls: Vec<String>,
@@ -1183,6 +1183,23 @@ enum PipListFormat {
     Columns,
     Freeze,
     Json,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PipEditableMode {
+    Include,
+    Only,
+    Exclude,
+}
+
+impl PipEditableMode {
+    fn includes_editables(self) -> bool {
+        !matches!(self, Self::Exclude)
+    }
+
+    fn includes_regular(self) -> bool {
+        !matches!(self, Self::Only)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -3407,7 +3424,7 @@ fn run_pip_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
             uptodate,
             paths,
             exclude,
-            exclude_editable,
+            editable,
             not_required,
             index_url,
             extra_index_urls,
@@ -3422,6 +3439,7 @@ fn run_pip_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
                         format,
                         paths: &paths,
                         exclude: &exclude,
+                        editable,
                         not_required,
                         uptodate,
                         index_url,
@@ -3432,13 +3450,21 @@ fn run_pip_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
                     },
                 )?;
             } else if !paths.is_empty() {
-                print_pip_path_list(project_dir, format, &paths, &exclude, not_required)?;
+                print_pip_path_list(
+                    project_dir,
+                    format,
+                    &paths,
+                    &exclude,
+                    editable,
+                    not_required,
+                )?;
             } else {
                 match format {
                     PipListFormat::Columns => print_locked_pip_list(
                         project_dir,
                         PipListFormat::Columns,
                         &exclude,
+                        editable,
                         not_required,
                     )?,
                     PipListFormat::Freeze => {
@@ -3447,16 +3473,24 @@ fn run_pip_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
                                 project_dir,
                                 PipListFormat::Freeze,
                                 &exclude,
+                                editable,
                                 true,
                             )?
                         } else {
-                            print_locked_freeze(project_dir, &exclude, exclude_editable, &[])?
+                            print_locked_pip_list(
+                                project_dir,
+                                PipListFormat::Freeze,
+                                &exclude,
+                                editable,
+                                false,
+                            )?
                         }
                     }
                     PipListFormat::Json => print_locked_pip_list(
                         project_dir,
                         PipListFormat::Json,
                         &exclude,
+                        editable,
                         not_required,
                     )?,
                 }
@@ -12501,7 +12535,7 @@ fn print_pip_path_freeze(
     exclude: &[String],
     requirements: &[PathBuf],
 ) -> Result<(), OmcRegistryError> {
-    let entries = read_pip_path_packages(project_dir, paths, exclude)?
+    let entries = read_pip_path_packages(project_dir, paths, exclude, PipEditableMode::Exclude)?
         .into_iter()
         .map(|package| PipFrozenRequirement {
             name: Some(normalize_pip_show_name(&package.name)),
@@ -12716,9 +12750,10 @@ fn print_locked_pip_list(
     project_dir: &Path,
     format: PipListFormat,
     exclude: &[String],
+    editable: PipEditableMode,
     not_required: bool,
 ) -> Result<(), OmcRegistryError> {
-    let mut packages = locked_pip_installed_packages(project_dir, exclude)?;
+    let mut packages = locked_pip_installed_packages(project_dir, exclude, editable)?;
     if not_required {
         packages = pip_not_required_packages(packages);
     }
@@ -12731,6 +12766,7 @@ struct InstalledPythonPackage {
     version: String,
     dependencies: Vec<String>,
     metadata_location: Option<PathBuf>,
+    editable_project_location: Option<PathBuf>,
 }
 
 fn print_pip_path_list(
@@ -12738,9 +12774,10 @@ fn print_pip_path_list(
     format: PipListFormat,
     paths: &[PathBuf],
     exclude: &[String],
+    editable: PipEditableMode,
     not_required: bool,
 ) -> Result<(), OmcRegistryError> {
-    let mut packages = read_pip_path_packages(project_dir, paths, exclude)?;
+    let mut packages = read_pip_path_packages(project_dir, paths, exclude, editable)?;
     if not_required {
         packages = pip_not_required_packages(packages);
     }
@@ -12754,9 +12791,24 @@ fn print_pip_installed_list(
     match format {
         PipListFormat::Columns => {
             if !packages.is_empty() {
-                println!("Package Version");
-                for package in packages {
-                    println!("{} {}", package.name, package.version);
+                let has_editable_locations = packages
+                    .iter()
+                    .any(|package| package.editable_project_location.is_some());
+                if has_editable_locations {
+                    println!("Package Version Location");
+                    for package in packages {
+                        let location = package
+                            .editable_project_location
+                            .as_ref()
+                            .map(|path| path.display().to_string())
+                            .unwrap_or_default();
+                        println!("{} {} {}", package.name, package.version, location);
+                    }
+                } else {
+                    println!("Package Version");
+                    for package in packages {
+                        println!("{} {}", package.name, package.version);
+                    }
                 }
             }
         }
@@ -12785,18 +12837,257 @@ fn read_pip_path_packages(
     project_dir: &Path,
     paths: &[PathBuf],
     exclude: &[String],
+    editable: PipEditableMode,
 ) -> Result<Vec<InstalledPythonPackage>, OmcRegistryError> {
     let excluded = pip_excluded_names(exclude);
     let mut packages = BTreeMap::new();
     for path in paths {
         let site_packages = absolutize_path(project_dir, path.clone());
-        for package in read_site_packages_metadata(&site_packages)? {
-            if !pip_name_excluded(&package.name, &excluded) {
+        if editable.includes_regular() {
+            for package in read_site_packages_metadata(&site_packages)? {
+                if !pip_name_excluded(&package.name, &excluded) {
+                    packages.insert(normalize_pip_show_name(&package.name), package);
+                }
+            }
+        }
+        if editable.includes_editables() {
+            for package in pip_local_editable_packages_from_file(
+                site_packages.join(".omc-local-paths"),
+                &excluded,
+            )? {
                 packages.insert(normalize_pip_show_name(&package.name), package);
             }
         }
     }
     Ok(packages.into_values().collect())
+}
+
+fn pip_project_local_path_packages(
+    project_dir: &Path,
+    exclude: &[String],
+) -> Result<Vec<InstalledPythonPackage>, OmcRegistryError> {
+    let excluded = pip_excluded_names(exclude);
+    pip_local_editable_packages_from_file(
+        project_dir.join(".omc").join("python").join("local-paths"),
+        &excluded,
+    )
+}
+
+fn pip_local_editable_packages_from_file(
+    local_paths_file: PathBuf,
+    excluded: &BTreeSet<String>,
+) -> Result<Vec<InstalledPythonPackage>, OmcRegistryError> {
+    let content = match fs::read_to_string(local_paths_file) {
+        Ok(content) => content,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(error.into()),
+    };
+    let mut packages = BTreeMap::new();
+    for line in content
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+    {
+        let path = PathBuf::from(line);
+        let Some(package) = pip_local_editable_package(&path)? else {
+            continue;
+        };
+        if !pip_name_excluded(&package.name, excluded) {
+            packages.insert(normalize_pip_show_name(&package.name), package);
+        }
+    }
+    Ok(packages.into_values().collect())
+}
+
+fn pip_local_editable_package(
+    import_path: &Path,
+) -> Result<Option<InstalledPythonPackage>, OmcRegistryError> {
+    let project_root = pip_editable_project_root(import_path);
+    let Some((name, version)) = read_python_project_identity(&project_root)? else {
+        return Ok(None);
+    };
+    Ok(Some(InstalledPythonPackage {
+        name,
+        version,
+        dependencies: Vec::new(),
+        metadata_location: None,
+        editable_project_location: Some(import_path.to_path_buf()),
+    }))
+}
+
+fn pip_editable_project_root(import_path: &Path) -> PathBuf {
+    if import_path.file_name().and_then(|name| name.to_str()) == Some("src") {
+        if let Some(parent) = import_path.parent() {
+            if python_project_identity_file_exists(parent) {
+                return parent.to_path_buf();
+            }
+        }
+    }
+    import_path.to_path_buf()
+}
+
+fn python_project_identity_file_exists(path: &Path) -> bool {
+    path.join("pyproject.toml").exists()
+        || path.join("setup.cfg").exists()
+        || path.join("setup.py").exists()
+}
+
+fn read_python_project_identity(
+    project_root: &Path,
+) -> Result<Option<(String, String)>, OmcRegistryError> {
+    let pyproject = project_root.join("pyproject.toml");
+    if pyproject.exists() {
+        if let Some(identity) = read_pyproject_identity(&pyproject)? {
+            return Ok(Some(identity));
+        }
+    }
+
+    let setup_cfg = project_root.join("setup.cfg");
+    if setup_cfg.exists() {
+        if let Some(identity) = read_setup_cfg_identity(&setup_cfg)? {
+            return Ok(Some(identity));
+        }
+    }
+
+    let setup_py = project_root.join("setup.py");
+    if setup_py.exists() {
+        if let Some(identity) = read_setup_py_identity(&setup_py)? {
+            return Ok(Some(identity));
+        }
+    }
+
+    Ok(None)
+}
+
+fn read_pyproject_identity(path: &Path) -> Result<Option<(String, String)>, OmcRegistryError> {
+    let pyproject = fs::read_to_string(path)?;
+    let value = toml::from_str::<toml::Value>(&pyproject)?;
+    if let Some(project) = value.get("project").and_then(|value| value.as_table()) {
+        if let Some(identity) = python_project_identity_from_table(project) {
+            return Ok(Some(identity));
+        }
+    }
+    if let Some(poetry) = value
+        .get("tool")
+        .and_then(|value| value.get("poetry"))
+        .and_then(|value| value.as_table())
+    {
+        if let Some(identity) = python_project_identity_from_table(poetry) {
+            return Ok(Some(identity));
+        }
+    }
+    Ok(None)
+}
+
+fn python_project_identity_from_table(
+    table: &toml::map::Map<String, toml::Value>,
+) -> Option<(String, String)> {
+    let name = table.get("name").and_then(|value| value.as_str())?;
+    let version = table
+        .get("version")
+        .and_then(|value| value.as_str())
+        .unwrap_or("0.0.0");
+    Some((name.to_owned(), version.to_owned()))
+}
+
+fn read_setup_cfg_identity(path: &Path) -> Result<Option<(String, String)>, OmcRegistryError> {
+    let content = fs::read_to_string(path)?;
+    let mut in_metadata = false;
+    let mut name = None;
+    let mut version = None;
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('[') && trimmed.ends_with(']') {
+            in_metadata = trimmed.eq_ignore_ascii_case("[metadata]");
+            continue;
+        }
+        if !in_metadata
+            || trimmed.is_empty()
+            || trimmed.starts_with('#')
+            || trimmed.starts_with(';')
+        {
+            continue;
+        }
+        let Some((key, value)) = trimmed.split_once('=') else {
+            continue;
+        };
+        let key = key.trim();
+        let value = value.trim();
+        if key.eq_ignore_ascii_case("name") {
+            name = Some(value.to_owned());
+        } else if key.eq_ignore_ascii_case("version") {
+            version = Some(value.to_owned());
+        }
+    }
+    Ok(name.map(|name| (name, version.unwrap_or_else(|| "0.0.0".to_owned()))))
+}
+
+fn read_setup_py_identity(path: &Path) -> Result<Option<(String, String)>, OmcRegistryError> {
+    let content = fs::read_to_string(path)?;
+    let Some(name) = setup_py_string_arg(&content, "name") else {
+        return Ok(None);
+    };
+    let version = setup_py_string_arg(&content, "version").unwrap_or_else(|| "0.0.0".to_owned());
+    Ok(Some((name, version)))
+}
+
+fn setup_py_string_arg(content: &str, arg: &str) -> Option<String> {
+    let pattern = format!("{arg}=");
+    for (offset, _) in content.match_indices(&pattern) {
+        let value = content[offset + pattern.len()..].trim_start();
+        let quote = value.chars().next()?;
+        if quote != '\'' && quote != '"' {
+            continue;
+        }
+        let mut parsed = String::new();
+        let mut escaped = false;
+        for ch in value[quote.len_utf8()..].chars() {
+            if escaped {
+                parsed.push(ch);
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == quote {
+                return Some(parsed);
+            } else {
+                parsed.push(ch);
+            }
+        }
+    }
+    None
+}
+
+fn sort_installed_python_packages(packages: &mut [InstalledPythonPackage]) {
+    packages.sort_by(|left, right| {
+        normalize_pip_show_name(&left.name).cmp(&normalize_pip_show_name(&right.name))
+    });
+}
+
+fn merge_installed_python_package(
+    packages: &mut BTreeMap<String, InstalledPythonPackage>,
+    package: InstalledPythonPackage,
+) {
+    packages.insert(normalize_pip_show_name(&package.name), package);
+}
+
+fn merge_installed_python_packages(
+    packages: Vec<InstalledPythonPackage>,
+) -> Vec<InstalledPythonPackage> {
+    let mut merged = BTreeMap::new();
+    for package in packages {
+        merge_installed_python_package(&mut merged, package);
+    }
+    merged.into_values().collect()
+}
+
+fn append_pip_project_editables(
+    project_dir: &Path,
+    exclude: &[String],
+    packages: &mut Vec<InstalledPythonPackage>,
+) -> Result<(), OmcRegistryError> {
+    packages.extend(pip_project_local_path_packages(project_dir, exclude)?);
+    *packages = merge_installed_python_packages(std::mem::take(packages));
+    Ok(())
 }
 
 fn pip_not_required_packages(packages: Vec<InstalledPythonPackage>) -> Vec<InstalledPythonPackage> {
@@ -12868,6 +13159,7 @@ fn read_dist_info_metadata(
                 version,
                 dependencies,
                 metadata_location: Some(dist_info.to_path_buf()),
+                editable_project_location: None,
             }));
         }
     }
@@ -12883,6 +13175,7 @@ fn read_dist_info_metadata(
         version: version.to_owned(),
         dependencies: Vec::new(),
         metadata_location: Some(dist_info.to_path_buf()),
+        editable_project_location: None,
     }))
 }
 
@@ -12964,7 +13257,7 @@ fn pip_path_inspect_entries(
     project_dir: &Path,
     paths: &[PathBuf],
 ) -> Result<Vec<serde_json::Value>, OmcRegistryError> {
-    read_pip_path_packages(project_dir, paths, &[])?
+    read_pip_path_packages(project_dir, paths, &[], PipEditableMode::Exclude)?
         .into_iter()
         .map(|package| {
             let metadata_location = package
@@ -13018,6 +13311,7 @@ struct PipOutdatedOptions<'a> {
     format: PipListFormat,
     paths: &'a [PathBuf],
     exclude: &'a [String],
+    editable: PipEditableMode,
     not_required: bool,
     uptodate: bool,
     index_url: Option<String>,
@@ -13035,7 +13329,12 @@ fn print_pip_outdated(
         return print_locked_pip_outdated(project_dir, options);
     }
 
-    let mut packages = read_pip_path_packages(project_dir, options.paths, options.exclude)?;
+    let mut packages = read_pip_path_packages(
+        project_dir,
+        options.paths,
+        options.exclude,
+        options.editable,
+    )?;
     if options.not_required {
         packages = pip_not_required_packages(packages);
     }
@@ -13086,38 +13385,71 @@ fn print_locked_pip_outdated(
         BTreeSet::new()
     };
     let mut rows = Vec::new();
-    for package in lock
-        .packages
-        .into_iter()
-        .filter(|package| package.ecosystem == Ecosystem::Pypi)
-        .filter(|package| !pip_name_excluded(&package.name, &excluded))
-        .filter(|package| {
-            !options.not_required || !required.contains(&normalize_pip_show_name(&package.name))
-        })
-    {
-        let listing = match read_pypi_available_versions(
-            project_dir,
-            &package.name,
-            options.index_url.clone(),
-            options.extra_index_urls.clone(),
-            options.find_links.clone(),
-            options.no_index,
-            options.allow_prereleases,
-        ) {
-            Ok(listing) => listing,
-            Err(OmcRegistryError::PackageNotFound(_)) => continue,
-            Err(error) => return Err(error),
-        };
-        let Some(latest_version) = listing.versions.first() else {
-            continue;
-        };
-        if pip_version_status_matches(latest_version, &package.version, options.uptodate) {
-            rows.push(PipOutdatedPackage {
-                name: package.name.clone(),
-                version: package.version.clone(),
-                latest_version: latest_version.clone(),
-                latest_filetype: pip_locked_package_filetype(&package).to_owned(),
-            });
+    if options.editable.includes_regular() {
+        for package in lock
+            .packages
+            .into_iter()
+            .filter(|package| package.ecosystem == Ecosystem::Pypi)
+            .filter(|package| !pip_name_excluded(&package.name, &excluded))
+            .filter(|package| {
+                !options.not_required || !required.contains(&normalize_pip_show_name(&package.name))
+            })
+        {
+            let listing = match read_pypi_available_versions(
+                project_dir,
+                &package.name,
+                options.index_url.clone(),
+                options.extra_index_urls.clone(),
+                options.find_links.clone(),
+                options.no_index,
+                options.allow_prereleases,
+            ) {
+                Ok(listing) => listing,
+                Err(OmcRegistryError::PackageNotFound(_)) => continue,
+                Err(error) => return Err(error),
+            };
+            let Some(latest_version) = listing.versions.first() else {
+                continue;
+            };
+            if pip_version_status_matches(latest_version, &package.version, options.uptodate) {
+                rows.push(PipOutdatedPackage {
+                    name: package.name.clone(),
+                    version: package.version.clone(),
+                    latest_version: latest_version.clone(),
+                    latest_filetype: pip_locked_package_filetype(&package).to_owned(),
+                });
+            }
+        }
+    }
+    if options.editable.includes_editables() {
+        for package in pip_project_local_path_packages(project_dir, options.exclude)? {
+            if options.not_required && required.contains(&normalize_pip_show_name(&package.name)) {
+                continue;
+            }
+            let listing = match read_pypi_available_versions(
+                project_dir,
+                &package.name,
+                options.index_url.clone(),
+                options.extra_index_urls.clone(),
+                options.find_links.clone(),
+                options.no_index,
+                options.allow_prereleases,
+            ) {
+                Ok(listing) => listing,
+                Err(OmcRegistryError::PackageNotFound(_)) => continue,
+                Err(error) => return Err(error),
+            };
+            let Some(latest_version) = listing.versions.first() else {
+                continue;
+            };
+            if pip_version_status_matches(latest_version, &package.version, options.uptodate) {
+                rows.push(PipOutdatedPackage {
+                    name: package.name,
+                    version: package.version,
+                    latest_version: latest_version.clone(),
+                    latest_filetype: "editable".to_owned(),
+                });
+            }
         }
     }
     print_pip_outdated_rows(options.format, rows)
@@ -13176,24 +13508,30 @@ fn print_pip_outdated_rows(
 fn locked_pip_installed_packages(
     project_dir: &Path,
     exclude: &[String],
+    editable: PipEditableMode,
 ) -> Result<Vec<InstalledPythonPackage>, OmcRegistryError> {
     let excluded = pip_excluded_names(exclude);
     let lock = read_lockfile(project_dir.join("omc.lock"))?;
-    let mut packages = lock
-        .packages
-        .into_iter()
-        .filter(|package| package.ecosystem == Ecosystem::Pypi)
-        .filter(|package| !pip_name_excluded(&package.name, &excluded))
-        .map(|package| InstalledPythonPackage {
-            name: package.name,
-            version: package.version,
-            dependencies: package.dependencies,
-            metadata_location: None,
-        })
-        .collect::<Vec<_>>();
-    packages.sort_by(|left, right| {
-        normalize_pip_show_name(&left.name).cmp(&normalize_pip_show_name(&right.name))
-    });
+    let mut packages = Vec::new();
+    if editable.includes_regular() {
+        packages.extend(
+            lock.packages
+                .into_iter()
+                .filter(|package| package.ecosystem == Ecosystem::Pypi)
+                .filter(|package| !pip_name_excluded(&package.name, &excluded))
+                .map(|package| InstalledPythonPackage {
+                    name: package.name,
+                    version: package.version,
+                    dependencies: package.dependencies,
+                    metadata_location: None,
+                    editable_project_location: None,
+                }),
+        );
+    }
+    if editable.includes_editables() {
+        append_pip_project_editables(project_dir, exclude, &mut packages)?;
+    }
+    sort_installed_python_packages(&mut packages);
     Ok(packages)
 }
 
@@ -21439,7 +21777,7 @@ fn parse_pip_list_args(args: &[String]) -> Result<PipCompatAction, OmcRegistryEr
     let mut allow_prereleases = false;
     let mut paths = Vec::new();
     let mut exclude = Vec::new();
-    let mut exclude_editable = false;
+    let mut editable = PipEditableMode::Include;
     let mut not_required = false;
     let mut index = 0;
     while index < args.len() {
@@ -21496,8 +21834,6 @@ fn parse_pip_list_args(args: &[String]) -> Result<PipCompatAction, OmcRegistryEr
             arg.as_str(),
             "--local"
                 | "--user"
-                | "--editable"
-                | "--include-editable"
                 | "--disable-pip-version-check"
                 | "--ignore-requires-python"
                 | "-v"
@@ -21505,8 +21841,12 @@ fn parse_pip_list_args(args: &[String]) -> Result<PipCompatAction, OmcRegistryEr
                 | "-q"
                 | "--quiet"
         ) {
+        } else if arg == "-e" || arg == "--editable" {
+            editable = PipEditableMode::Only;
+        } else if arg == "--include-editable" {
+            editable = PipEditableMode::Include;
         } else if arg == "--exclude-editable" {
-            exclude_editable = true;
+            editable = PipEditableMode::Exclude;
         } else if arg == "--not-required" {
             not_required = true;
         } else if matches!(arg.as_str(), "--path" | "--exclude") {
@@ -21549,7 +21889,7 @@ fn parse_pip_list_args(args: &[String]) -> Result<PipCompatAction, OmcRegistryEr
         uptodate,
         paths,
         exclude,
-        exclude_editable,
+        editable,
         not_required,
         index_url,
         extra_index_urls,
@@ -26207,12 +26547,19 @@ version = "0.1.0"
         assert!(installed_files.contains(&"demo_pkg-1.0.0.dist-info/METADATA".to_owned()));
         assert!(installed_files.contains(&"demo_pkg-1.0.0.dist-info/RECORD".to_owned()));
         assert_eq!(
-            read_pip_path_packages(&project, &[PathBuf::from("vendor")], &[]).unwrap(),
+            read_pip_path_packages(
+                &project,
+                &[PathBuf::from("vendor")],
+                &[],
+                PipEditableMode::Include,
+            )
+            .unwrap(),
             vec![InstalledPythonPackage {
                 name: "demo-pkg".to_owned(),
                 version: "1.0.0".to_owned(),
                 dependencies: vec!["idna>=3".to_owned()],
                 metadata_location: Some(project.join("vendor").join("demo_pkg-1.0.0.dist-info")),
+                editable_project_location: None,
             }]
         );
         let inspect = pip_path_inspect_entries(&project, &[PathBuf::from("vendor")]).unwrap();
@@ -26563,6 +26910,48 @@ version = "0.1.0"
     }
 
     #[test]
+    fn pip_list_reads_editable_local_path_metadata() {
+        let project = test_dir("pip-list-editable-project");
+        let local = test_dir("pip-list-editable-local");
+        let src = local.join("src");
+        fs::create_dir_all(src.join("demoedit")).unwrap();
+        fs::write(src.join("demoedit").join("__init__.py"), "").unwrap();
+        fs::write(
+            local.join("pyproject.toml"),
+            r#"[project]
+name = "demoedit"
+version = "0.1.2"
+"#,
+        )
+        .unwrap();
+        fs::create_dir_all(project.join(".omc").join("python")).unwrap();
+        fs::write(
+            project.join(".omc").join("python").join("local-paths"),
+            format!("{}\n", src.display()),
+        )
+        .unwrap();
+
+        assert_eq!(
+            pip_project_local_path_packages(&project, &[]).unwrap(),
+            vec![InstalledPythonPackage {
+                name: "demoedit".to_owned(),
+                version: "0.1.2".to_owned(),
+                dependencies: Vec::new(),
+                metadata_location: None,
+                editable_project_location: Some(src.clone()),
+            }]
+        );
+        assert!(
+            pip_project_local_path_packages(&project, &["demoedit".to_owned()])
+                .unwrap()
+                .is_empty()
+        );
+
+        fs::remove_dir_all(project).unwrap();
+        fs::remove_dir_all(local).unwrap();
+    }
+
+    #[test]
     fn pip_freeze_requirement_files_preserve_order_and_comments() {
         let project = test_dir("pip-freeze-requirement-order");
         fs::write(
@@ -26626,24 +27015,28 @@ version = "0.1.0"
                     "charset-normalizer>=2".to_owned(),
                 ],
                 metadata_location: None,
+                editable_project_location: None,
             },
             InstalledPythonPackage {
                 name: "idna".to_owned(),
                 version: "3.7".to_owned(),
                 dependencies: Vec::new(),
                 metadata_location: None,
+                editable_project_location: None,
             },
             InstalledPythonPackage {
                 name: "charset-normalizer".to_owned(),
                 version: "3.3.2".to_owned(),
                 dependencies: Vec::new(),
                 metadata_location: None,
+                editable_project_location: None,
             },
             InstalledPythonPackage {
                 name: "pytest".to_owned(),
                 version: "8.0.0".to_owned(),
                 dependencies: Vec::new(),
                 metadata_location: None,
+                editable_project_location: None,
             },
         ];
 
@@ -26987,7 +27380,7 @@ resolved_commit = "0123456789abcdef0123456789abcdef01234567"
                 uptodate: false,
                 paths: Vec::new(),
                 exclude: Vec::new(),
-                exclude_editable: false,
+                editable: PipEditableMode::Include,
                 not_required: false,
                 index_url: None,
                 extra_index_urls: Vec::new(),
@@ -27005,7 +27398,7 @@ resolved_commit = "0123456789abcdef0123456789abcdef01234567"
                 uptodate: false,
                 paths: Vec::new(),
                 exclude: Vec::new(),
-                exclude_editable: false,
+                editable: PipEditableMode::Include,
                 not_required: true,
                 index_url: None,
                 extra_index_urls: Vec::new(),
@@ -27031,7 +27424,24 @@ resolved_commit = "0123456789abcdef0123456789abcdef01234567"
                 uptodate: false,
                 paths: vec![PathBuf::from("vendor")],
                 exclude: vec!["requests".to_owned()],
-                exclude_editable: true,
+                editable: PipEditableMode::Exclude,
+                not_required: false,
+                index_url: None,
+                extra_index_urls: Vec::new(),
+                find_links: Vec::new(),
+                no_index: false,
+                allow_prereleases: false,
+            }
+        );
+        assert_eq!(
+            parse_pip_compat_action(&args(&["list", "--editable", "--format=columns"])).unwrap(),
+            PipCompatAction::List {
+                format: PipListFormat::Columns,
+                outdated: false,
+                uptodate: false,
+                paths: Vec::new(),
+                exclude: Vec::new(),
+                editable: PipEditableMode::Only,
                 not_required: false,
                 index_url: None,
                 extra_index_urls: Vec::new(),
@@ -27057,7 +27467,7 @@ resolved_commit = "0123456789abcdef0123456789abcdef01234567"
                 uptodate: true,
                 paths: Vec::new(),
                 exclude: Vec::new(),
-                exclude_editable: false,
+                editable: PipEditableMode::Include,
                 not_required: false,
                 index_url: None,
                 extra_index_urls: Vec::new(),
@@ -27075,7 +27485,7 @@ resolved_commit = "0123456789abcdef0123456789abcdef01234567"
                 uptodate: false,
                 paths: Vec::new(),
                 exclude: Vec::new(),
-                exclude_editable: false,
+                editable: PipEditableMode::Include,
                 not_required: false,
                 index_url: None,
                 extra_index_urls: Vec::new(),
