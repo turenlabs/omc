@@ -4081,12 +4081,20 @@ fn npm_environment_default_args() -> Vec<String> {
         }
     }
 
+    if let Some(only) = npm_config_env("only") {
+        append_npm_only_default_args(&only, &mut args);
+    }
+
     if let Some(optional) = npm_config_env("optional") {
         if config_false(&optional) {
             args.push("--omit=optional".to_owned());
         } else if config_bool(&optional) {
             args.push("--include=optional".to_owned());
         }
+    }
+
+    if let Some(also) = npm_config_env("also") {
+        append_npm_also_default_args(&also, &mut args);
     }
 
     if let Some(omit) = npm_config_env("omit") {
@@ -4238,6 +4246,7 @@ fn npm_cli_default_config_key(key: &str) -> bool {
         key,
         "production"
             | "only"
+            | "also"
             | "optional"
             | "omit"
             | "include"
@@ -4276,10 +4285,6 @@ fn append_npm_default_args_from_config(values: &BTreeMap<String, String>, args: 
         .get("production")
         .map(|value| config_bool(value))
         .unwrap_or(false)
-        || values
-            .get("only")
-            .map(|value| value.eq_ignore_ascii_case("production"))
-            .unwrap_or(false)
     {
         args.push("--omit=dev".to_owned());
     } else if values
@@ -4290,12 +4295,20 @@ fn append_npm_default_args_from_config(values: &BTreeMap<String, String>, args: 
         args.push("--include=dev".to_owned());
     }
 
+    if let Some(only) = values.get("only") {
+        append_npm_only_default_args(only, args);
+    }
+
     if let Some(optional) = values.get("optional") {
         if config_false(optional) {
             args.push("--omit=optional".to_owned());
         } else if config_bool(optional) {
             args.push("--include=optional".to_owned());
         }
+    }
+
+    if let Some(also) = values.get("also") {
+        append_npm_also_default_args(also, args);
     }
 
     if let Some(omit) = values.get("omit").filter(|value| !value.trim().is_empty()) {
@@ -4381,6 +4394,36 @@ fn append_npm_save_location_default_arg_from_config(
         .unwrap_or(false)
     {
         args.push(flag.to_owned());
+    }
+}
+
+fn append_npm_only_default_args(value: &str, args: &mut Vec<String>) {
+    if npm_dependency_set_contains(value, "production")
+        || npm_dependency_set_contains(value, "prod")
+    {
+        args.push("--omit=dev".to_owned());
+    } else if npm_dependency_set_contains(value, "development")
+        || npm_dependency_set_contains(value, "dev")
+    {
+        args.push("--include=dev".to_owned());
+    }
+}
+
+fn append_npm_also_default_args(value: &str, args: &mut Vec<String>) {
+    let mut include = Vec::new();
+    if npm_dependency_set_contains(value, "development")
+        || npm_dependency_set_contains(value, "dev")
+    {
+        include.push("dev");
+    }
+    if npm_dependency_set_contains(value, "optional") {
+        include.push("optional");
+    }
+    if npm_dependency_set_contains(value, "peer") {
+        include.push("peer");
+    }
+    if !include.is_empty() {
+        args.push(format!("--include={}", include.join(",")));
     }
 }
 
@@ -6948,7 +6991,7 @@ fn npm_help_text(topic: Option<&str>) -> String {
             &[
                 "Resolve, verify, lock, and install npm packages with OMC.",
                 "Aliases: i, add, update, up, upgrade.",
-                "Common flags: --save, --no-save, --save-dev, --save-optional, --save-peer, --omit=dev|optional|peer, --include=dev|optional|peer, --workspace, --workspaces, --include-workspace-root, --package-lock-only, --dry-run, --registry, --allow, --allow-all-host.",
+                "Common flags: --save, --no-save, --save-dev, --save-optional, --save-peer, --only=prod|dev, --also=dev, --no-optional, --omit=dev|optional|peer, --include=dev|optional|peer, --workspace, --workspaces, --include-workspace-root, --package-lock-only, --dry-run, --registry, --allow, --allow-all-host.",
                 "Direct local inputs are supported for .tgz archives and local package directories.",
                 "Workspace installs save dependencies into selected workspace package.json files and install the root OMC graph.",
             ],
@@ -6966,7 +7009,7 @@ fn npm_help_text(topic: Option<&str>) -> String {
             "npm ci",
             &[
                 "Install the exact OMC lockfile state.",
-                "Common flags: --dry-run, --omit=dev|optional|peer, --include=dev|optional|peer, --allow, --allow-all-host.",
+                "Common flags: --dry-run, --only=prod|dev, --also=dev, --no-optional, --omit=dev|optional|peer, --include=dev|optional|peer, --allow, --allow-all-host.",
             ],
         ),
         Some("install-test") => npm_command_help(
@@ -27402,6 +27445,28 @@ fn parse_common_compat_flags(
                 "--omit-dev" | "--production" | "--prod" | "--only=production"
             ) {
                 parsed.omit_dev = true;
+            } else if arg == "--only=prod" {
+                parsed.omit_dev = true;
+            } else if matches!(arg.as_str(), "--only=development" | "--only=dev") {
+                parsed.omit_dev = false;
+            } else if arg == "--only" {
+                index += 1;
+                let Some(value) = args.get(index) else {
+                    return Err(OmcRegistryError::UnsupportedSpec(
+                        "--only needs a value".to_owned(),
+                    ));
+                };
+                apply_npm_only_value(&mut parsed, value);
+            } else if arg == "--also" {
+                index += 1;
+                let Some(value) = args.get(index) else {
+                    return Err(OmcRegistryError::UnsupportedSpec(
+                        "--also needs a value".to_owned(),
+                    ));
+                };
+                apply_npm_also_value(&mut parsed, value);
+            } else if let Some(value) = arg.strip_prefix("--also=") {
+                apply_npm_also_value(&mut parsed, value);
             } else if matches!(arg.as_str(), "--production=false" | "--prod=false") {
                 parsed.omit_dev = false;
             } else if matches!(arg.as_str(), "--no-optional" | "--optional=false") {
@@ -27500,6 +27565,32 @@ fn parse_common_compat_flags(
         index += 1;
     }
     Ok(parsed)
+}
+
+fn apply_npm_only_value(parsed: &mut CommonCompatFlags, value: &str) {
+    if npm_dependency_set_contains(value, "production")
+        || npm_dependency_set_contains(value, "prod")
+    {
+        parsed.omit_dev = true;
+    } else if npm_dependency_set_contains(value, "development")
+        || npm_dependency_set_contains(value, "dev")
+    {
+        parsed.omit_dev = false;
+    }
+}
+
+fn apply_npm_also_value(parsed: &mut CommonCompatFlags, value: &str) {
+    if npm_dependency_set_contains(value, "development")
+        || npm_dependency_set_contains(value, "dev")
+    {
+        parsed.omit_dev = false;
+    }
+    if npm_dependency_set_contains(value, "optional") {
+        parsed.omit_optional = false;
+    }
+    if npm_dependency_set_contains(value, "peer") {
+        parsed.omit_peer = false;
+    }
 }
 
 fn npm_save_location_flag_kind(arg: &str) -> Option<ManifestDependencyKind> {
@@ -28213,6 +28304,10 @@ mod tests {
                 ("NODE_ENV", Some("production")),
                 ("NPM_CONFIG_PRODUCTION", None),
                 ("npm_config_production", None),
+                ("NPM_CONFIG_ONLY", None),
+                ("npm_config_only", None),
+                ("NPM_CONFIG_ALSO", None),
+                ("npm_config_also", None),
                 ("NPM_CONFIG_OPTIONAL", None),
                 ("npm_config_optional", None),
                 ("NPM_CONFIG_OMIT", None),
@@ -28267,6 +28362,10 @@ mod tests {
                 ("NODE_ENV", Some("production")),
                 ("NPM_CONFIG_PRODUCTION", Some("false")),
                 ("npm_config_production", None),
+                ("NPM_CONFIG_ONLY", None),
+                ("npm_config_only", None),
+                ("NPM_CONFIG_ALSO", None),
+                ("npm_config_also", None),
                 ("NPM_CONFIG_OPTIONAL", None),
                 ("npm_config_optional", None),
                 ("NPM_CONFIG_OMIT", None),
@@ -28318,6 +28417,65 @@ mod tests {
                 ("NODE_ENV", None),
                 ("NPM_CONFIG_PRODUCTION", None),
                 ("npm_config_production", None),
+                ("NPM_CONFIG_ONLY", Some("production")),
+                ("npm_config_only", None),
+                ("NPM_CONFIG_ALSO", Some("dev")),
+                ("npm_config_also", None),
+                ("NPM_CONFIG_OPTIONAL", None),
+                ("npm_config_optional", None),
+                ("NPM_CONFIG_OMIT", None),
+                ("npm_config_omit", None),
+                ("NPM_CONFIG_INCLUDE", None),
+                ("npm_config_include", None),
+                ("NPM_CONFIG_GLOBAL", None),
+                ("npm_config_global", None),
+                ("NPM_CONFIG_DRY_RUN", None),
+                ("npm_config_dry_run", None),
+                ("NPM_CONFIG_PACKAGE_LOCK_ONLY", None),
+                ("npm_config_package_lock_only", None),
+                ("NPM_CONFIG_PACKAGE_LOCK", None),
+                ("npm_config_package_lock", None),
+                ("NPM_CONFIG_SAVE", None),
+                ("npm_config_save", None),
+                ("NPM_CONFIG_SAVE_PROD", None),
+                ("npm_config_save_prod", None),
+                ("NPM_CONFIG_SAVE_DEV", None),
+                ("npm_config_save_dev", None),
+                ("NPM_CONFIG_SAVE_OPTIONAL", None),
+                ("npm_config_save_optional", None),
+                ("NPM_CONFIG_SAVE_PEER", None),
+                ("npm_config_save_peer", None),
+                ("NPM_CONFIG_SAVE_EXACT", None),
+                ("npm_config_save_exact", None),
+                ("NPM_CONFIG_SAVE_BUNDLE", None),
+                ("npm_config_save_bundle", None),
+                ("NPM_CONFIG_SAVE_PREFIX", None),
+                ("npm_config_save_prefix", None),
+            ],
+            || {
+                assert_eq!(
+                    npm_args_with_environment_defaults(&args(&["ci"])),
+                    args(&["--omit=dev", "--include=dev", "ci"])
+                );
+                let action =
+                    parse_npm_compat_action(&npm_args_with_environment_defaults(&args(&["ci"])))
+                        .unwrap();
+                let NpmCompatAction::Ci { omit_dev, .. } = action else {
+                    panic!("expected npm ci action");
+                };
+                assert!(!omit_dev);
+            },
+        );
+
+        with_env_values(
+            &[
+                ("NODE_ENV", None),
+                ("NPM_CONFIG_PRODUCTION", None),
+                ("npm_config_production", None),
+                ("NPM_CONFIG_ONLY", None),
+                ("npm_config_only", None),
+                ("NPM_CONFIG_ALSO", None),
+                ("npm_config_also", None),
                 ("NPM_CONFIG_OPTIONAL", Some("false")),
                 ("npm_config_optional", None),
                 ("NPM_CONFIG_OMIT", None),
@@ -28380,6 +28538,10 @@ mod tests {
                 ("NODE_ENV", Some("production")),
                 ("NPM_CONFIG_PRODUCTION", None),
                 ("npm_config_production", None),
+                ("NPM_CONFIG_ONLY", None),
+                ("npm_config_only", None),
+                ("NPM_CONFIG_ALSO", None),
+                ("npm_config_also", None),
                 ("NPM_CONFIG_OPTIONAL", None),
                 ("npm_config_optional", None),
                 ("NPM_CONFIG_OMIT", Some("optional,peer")),
@@ -28466,6 +28628,10 @@ mod tests {
                 ("NODE_ENV", None),
                 ("NPM_CONFIG_PRODUCTION", None),
                 ("npm_config_production", None),
+                ("NPM_CONFIG_ONLY", None),
+                ("npm_config_only", None),
+                ("NPM_CONFIG_ALSO", None),
+                ("npm_config_also", None),
                 ("NPM_CONFIG_OPTIONAL", None),
                 ("npm_config_optional", None),
                 ("NPM_CONFIG_OMIT", None),
@@ -28523,6 +28689,10 @@ mod tests {
                 ("NODE_ENV", None),
                 ("NPM_CONFIG_PRODUCTION", None),
                 ("npm_config_production", None),
+                ("NPM_CONFIG_ONLY", None),
+                ("npm_config_only", None),
+                ("NPM_CONFIG_ALSO", None),
+                ("npm_config_also", None),
                 ("NPM_CONFIG_OPTIONAL", None),
                 ("npm_config_optional", None),
                 ("NPM_CONFIG_OMIT", None),
@@ -28619,6 +28789,10 @@ mod tests {
                 ("npm_config_userconfig", None),
                 ("NPM_CONFIG_PRODUCTION", None),
                 ("npm_config_production", None),
+                ("NPM_CONFIG_ONLY", None),
+                ("npm_config_only", None),
+                ("NPM_CONFIG_ALSO", None),
+                ("npm_config_also", None),
                 ("NPM_CONFIG_OPTIONAL", None),
                 ("npm_config_optional", None),
                 ("NPM_CONFIG_OMIT", None),
@@ -28713,6 +28887,81 @@ mod tests {
     }
 
     #[test]
+    fn npm_config_file_defaults_support_only_and_also() {
+        let project = test_dir("npm-config-file-only-also-default");
+        let user_config = project.join("user.npmrc");
+        let global_config = project.join("global.npmrc");
+        fs::write(&user_config, "also=dev\n").unwrap();
+        fs::write(&global_config, "").unwrap();
+        fs::write(project.join(".npmrc"), "only=prod\n").unwrap();
+
+        with_env_values(
+            &[
+                ("NODE_ENV", None),
+                (
+                    "NPM_CONFIG_GLOBALCONFIG",
+                    Some(global_config.to_str().unwrap()),
+                ),
+                ("npm_config_globalconfig", None),
+                ("NPM_CONFIG_USERCONFIG", Some(user_config.to_str().unwrap())),
+                ("npm_config_userconfig", None),
+                ("NPM_CONFIG_PRODUCTION", None),
+                ("npm_config_production", None),
+                ("NPM_CONFIG_ONLY", None),
+                ("npm_config_only", None),
+                ("NPM_CONFIG_ALSO", None),
+                ("npm_config_also", None),
+                ("NPM_CONFIG_OPTIONAL", None),
+                ("npm_config_optional", None),
+                ("NPM_CONFIG_OMIT", None),
+                ("npm_config_omit", None),
+                ("NPM_CONFIG_INCLUDE", None),
+                ("npm_config_include", None),
+                ("NPM_CONFIG_GLOBAL", None),
+                ("npm_config_global", None),
+                ("NPM_CONFIG_DRY_RUN", None),
+                ("npm_config_dry_run", None),
+                ("NPM_CONFIG_PACKAGE_LOCK_ONLY", None),
+                ("npm_config_package_lock_only", None),
+                ("NPM_CONFIG_PACKAGE_LOCK", None),
+                ("npm_config_package_lock", None),
+                ("NPM_CONFIG_SAVE", None),
+                ("npm_config_save", None),
+                ("NPM_CONFIG_SAVE_PROD", None),
+                ("npm_config_save_prod", None),
+                ("NPM_CONFIG_SAVE_DEV", None),
+                ("npm_config_save_dev", None),
+                ("NPM_CONFIG_SAVE_OPTIONAL", None),
+                ("npm_config_save_optional", None),
+                ("NPM_CONFIG_SAVE_PEER", None),
+                ("npm_config_save_peer", None),
+                ("NPM_CONFIG_SAVE_EXACT", None),
+                ("npm_config_save_exact", None),
+                ("NPM_CONFIG_SAVE_BUNDLE", None),
+                ("npm_config_save_bundle", None),
+                ("NPM_CONFIG_SAVE_PREFIX", None),
+                ("npm_config_save_prefix", None),
+            ],
+            || {
+                assert_eq!(
+                    npm_args_with_config_defaults(&project, &args(&["ci"])).unwrap(),
+                    args(&["--omit=dev", "--include=dev", "ci"])
+                );
+                let action = parse_npm_compat_action(
+                    &npm_args_with_config_defaults(&project, &args(&["ci"])).unwrap(),
+                )
+                .unwrap();
+                let NpmCompatAction::Ci { omit_dev, .. } = action else {
+                    panic!("expected npm ci action");
+                };
+                assert!(!omit_dev);
+            },
+        );
+
+        let _ = fs::remove_dir_all(project);
+    }
+
+    #[test]
     fn npm_config_file_defaults_support_optional_omit() {
         let project = test_dir("npm-config-file-optional-default");
         let user_config = project.join("user.npmrc");
@@ -28733,6 +28982,10 @@ mod tests {
                 ("npm_config_userconfig", None),
                 ("NPM_CONFIG_PRODUCTION", None),
                 ("npm_config_production", None),
+                ("NPM_CONFIG_ONLY", None),
+                ("npm_config_only", None),
+                ("NPM_CONFIG_ALSO", None),
+                ("npm_config_also", None),
                 ("NPM_CONFIG_OPTIONAL", None),
                 ("npm_config_optional", None),
                 ("NPM_CONFIG_OMIT", None),
@@ -28806,6 +29059,10 @@ mod tests {
                 ("npm_config_userconfig", None),
                 ("NPM_CONFIG_PRODUCTION", None),
                 ("npm_config_production", None),
+                ("NPM_CONFIG_ONLY", None),
+                ("npm_config_only", None),
+                ("NPM_CONFIG_ALSO", None),
+                ("npm_config_also", None),
                 ("NPM_CONFIG_OPTIONAL", None),
                 ("npm_config_optional", None),
                 ("NPM_CONFIG_OMIT", None),
@@ -28883,6 +29140,10 @@ mod tests {
                 ("npm_config_userconfig", None),
                 ("NPM_CONFIG_PRODUCTION", None),
                 ("npm_config_production", None),
+                ("NPM_CONFIG_ONLY", None),
+                ("npm_config_only", None),
+                ("NPM_CONFIG_ALSO", None),
+                ("npm_config_also", None),
                 ("NPM_CONFIG_OPTIONAL", None),
                 ("npm_config_optional", None),
                 ("NPM_CONFIG_OMIT", None),
@@ -31488,6 +31749,25 @@ verdict = "accepted"
             panic!("expected npm install action");
         };
         assert!(omit_optional);
+
+        let action =
+            parse_npm_compat_action(&args(&["install", "--only", "prod", "left-pad"])).unwrap();
+        let NpmCompatAction::Install { omit_dev, .. } = action else {
+            panic!("expected npm install action");
+        };
+        assert!(omit_dev);
+
+        let action = parse_npm_compat_action(&args(&[
+            "install",
+            "--production",
+            "--also=dev",
+            "left-pad",
+        ]))
+        .unwrap();
+        let NpmCompatAction::Install { omit_dev, .. } = action else {
+            panic!("expected npm install action");
+        };
+        assert!(!omit_dev);
 
         let action = parse_npm_compat_action(&args(&[
             "install",
