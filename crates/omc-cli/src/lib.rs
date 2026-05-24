@@ -22555,9 +22555,15 @@ fn parse_pip_install_args(args: &[String]) -> Result<PipCompatAction, OmcRegistr
                     "{arg} needs a group"
                 )));
             };
-            groups.push(pip_project_group_arg(group)?);
+            match pip_project_group_arg(group)? {
+                PipProjectGroupArg::Current(group) => groups.push(group),
+                PipProjectGroupArg::Local(requirement) => local_paths.push(requirement),
+            }
         } else if let Some(group) = arg.strip_prefix("--group=") {
-            groups.push(pip_project_group_arg(group)?);
+            match pip_project_group_arg(group)? {
+                PipProjectGroupArg::Current(group) => groups.push(group),
+                PipProjectGroupArg::Local(requirement) => local_paths.push(requirement),
+            }
         } else if arg == "--prefer-binary" {
         } else if arg == "--only-binary" || arg == "--no-binary" {
             index += 1;
@@ -22968,7 +22974,12 @@ fn pip_ignored_install_equals_flag(arg: &str) -> bool {
     .any(|prefix| arg.starts_with(prefix))
 }
 
-fn pip_project_group_arg(value: &str) -> Result<String, OmcRegistryError> {
+enum PipProjectGroupArg {
+    Current(String),
+    Local(PythonLocalRequirement),
+}
+
+fn pip_project_group_arg(value: &str) -> Result<PipProjectGroupArg, OmcRegistryError> {
     let value = value.trim();
     if value.is_empty() {
         return Err(OmcRegistryError::UnsupportedSpec(
@@ -22977,20 +22988,38 @@ fn pip_project_group_arg(value: &str) -> Result<String, OmcRegistryError> {
     }
     if let Some((path, group)) = value.rsplit_once(':') {
         let path = path.trim();
-        if !matches!(path, "" | "pyproject.toml" | "./pyproject.toml") {
-            return Err(OmcRegistryError::UnsupportedSpec(format!(
-                "pip install --group currently supports only groups from the current pyproject.toml, not `{path}`"
-            )));
-        }
         let group = normalize_extra(group);
         if group.is_empty() {
             return Err(OmcRegistryError::UnsupportedSpec(
                 "pip install --group needs a non-empty group".to_owned(),
             ));
         }
-        return Ok(group);
+        if matches!(path, "" | "pyproject.toml" | "./pyproject.toml") {
+            return Ok(PipProjectGroupArg::Current(group));
+        }
+        return Ok(PipProjectGroupArg::Local(PythonLocalRequirement::new(
+            pip_project_group_path(path)?,
+            BTreeSet::from([group]),
+        )));
     }
-    Ok(normalize_extra(value))
+    Ok(PipProjectGroupArg::Current(normalize_extra(value)))
+}
+
+fn pip_project_group_path(path: &str) -> Result<PathBuf, OmcRegistryError> {
+    if path.trim().is_empty() {
+        return Err(OmcRegistryError::UnsupportedSpec(
+            "pip install --group needs a non-empty pyproject path".to_owned(),
+        ));
+    }
+    let path = PathBuf::from(path);
+    if path.file_name().and_then(|name| name.to_str()) == Some("pyproject.toml") {
+        return Ok(path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| PathBuf::from(".")));
+    }
+    Ok(path)
 }
 
 fn pip_ignored_wheel_value_flag(arg: &str) -> bool {
@@ -28294,6 +28323,25 @@ verdict = "accepted"
             }
             other => panic!("expected pip install action, got {other:?}"),
         }
+        match parse_pip_compat_action(&args(&[
+            "install",
+            "--group",
+            "packages/tooling/pyproject.toml:Tools",
+        ]))
+        .unwrap()
+        {
+            PipCompatAction::Install(action) => {
+                assert_eq!(action.groups, Vec::<String>::new());
+                assert_eq!(
+                    action.local_paths,
+                    vec![PythonLocalRequirement::new(
+                        PathBuf::from("packages/tooling"),
+                        BTreeSet::from(["tools".to_owned()])
+                    )]
+                );
+            }
+            other => panic!("expected pip install action, got {other:?}"),
+        }
 
         let action = parse_pip_compat_action(&args(&[
             "download",
@@ -28614,6 +28662,95 @@ version = "0.1.0"
             fs::read_to_string(project.join(".omc").join("python").join("local-paths")).unwrap();
         assert!(local_paths.contains("groupdep/src"));
         assert!(local_paths.contains("src"));
+        fs::remove_dir_all(project).unwrap();
+    }
+
+    #[test]
+    fn pip_install_group_accepts_pyproject_path() {
+        let project = test_dir("pip-install-path-group-project");
+        fs::create_dir_all(
+            project
+                .join("packages")
+                .join("tooling")
+                .join("src")
+                .join("tooling"),
+        )
+        .unwrap();
+        fs::create_dir_all(
+            project
+                .join("packages")
+                .join("tooling")
+                .join("tooldep")
+                .join("src")
+                .join("tooldep"),
+        )
+        .unwrap();
+        fs::write(
+            project
+                .join("packages")
+                .join("tooling")
+                .join("src")
+                .join("tooling")
+                .join("__init__.py"),
+            "",
+        )
+        .unwrap();
+        fs::write(
+            project
+                .join("packages")
+                .join("tooling")
+                .join("tooldep")
+                .join("src")
+                .join("tooldep")
+                .join("__init__.py"),
+            "",
+        )
+        .unwrap();
+        fs::write(
+            project
+                .join("packages")
+                .join("tooling")
+                .join("pyproject.toml"),
+            r#"
+[project]
+name = "tooling"
+version = "0.1.0"
+
+[dependency-groups]
+tools = ["tooldep @ ./tooldep"]
+"#,
+        )
+        .unwrap();
+        fs::write(
+            project
+                .join("packages")
+                .join("tooling")
+                .join("tooldep")
+                .join("pyproject.toml"),
+            r#"
+[project]
+name = "tooldep"
+version = "0.1.0"
+"#,
+        )
+        .unwrap();
+
+        let status = run_pip_compat(
+            &project,
+            &args(&[
+                "install",
+                "--group",
+                "packages/tooling/pyproject.toml:Tools",
+                "--no-index",
+            ]),
+        )
+        .unwrap();
+
+        assert_eq!(status, ExitCode::SUCCESS);
+        let local_paths =
+            fs::read_to_string(project.join(".omc").join("python").join("local-paths")).unwrap();
+        assert!(local_paths.contains("packages/tooling/src"));
+        assert!(local_paths.contains("packages/tooling/tooldep/src"));
         fs::remove_dir_all(project).unwrap();
     }
 

@@ -208,6 +208,7 @@ cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip install --dry-
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip install --dry-run -e ../local-package
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip install requests==2.32.3 --report install-report.json --allow-all-host
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip install --pre some-package
+cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip install --group './packages/tooling/pyproject.toml:dev'
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip install requests==2.32.3 --allow-all-host
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip install -e ../local-package
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip install -e 'git+https://example.com/acme/pkg.git@main#egg=acme-pkg'
@@ -605,7 +606,8 @@ Supported now:
   lockfile; real `pip install --user` installs into Python's user
   site-packages through OMC-managed user state and mirrors generated scripts
   into the user bin directory; `pip install --group GROUP` installs current-project
-  `pyproject.toml` dependency groups through OMC's existing pyproject
+  `pyproject.toml` dependency groups, and path-qualified groups such as
+  `pip install --group './packages/tooling/pyproject.toml:dev'`, through OMC's existing pyproject
   resolver; `pip install --requirements-from-script FILE` installs PEP 723
   inline script dependencies through OMC; `pip list --user`,
   `pip freeze --user`, `pip inspect --user`, and `pip show --user` read
