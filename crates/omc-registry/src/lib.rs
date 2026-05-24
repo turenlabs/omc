@@ -10,7 +10,7 @@ use std::{env, fmt};
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use flate2::read::GzDecoder;
-use omc_cap::{Capability, Policy};
+use omc_cap::{Capability, FlowRule, LabelMatcher, Policy, Sink};
 use omc_format::{BehaviorType, CapOp, Function, HttpRequest, Module, Op, Value, VirtualPath};
 use omc_verify::{verify_module, VerifyFinding};
 use rand_core::OsRng;
@@ -329,6 +329,8 @@ pub struct ProjectInfo {
 pub struct ManifestPolicy {
     #[serde(default)]
     pub allow: Vec<String>,
+    #[serde(default, rename = "allow-flow")]
+    pub allow_flow: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -341,7 +343,7 @@ pub struct ManifestRegistries {
 
 impl ManifestPolicy {
     fn is_empty(&self) -> bool {
-        self.allow.is_empty()
+        self.allow.is_empty() && self.allow_flow.is_empty()
     }
 }
 
@@ -621,6 +623,7 @@ pub struct LinkOptions {
     pub project_dir: PathBuf,
     pub record_blocked: bool,
     pub allowed_capabilities: Vec<Capability>,
+    pub allowed_flows: Vec<FlowRule>,
     pub constraints: BTreeMap<String, String>,
     pub hashes: BTreeMap<String, BTreeSet<String>>,
     pub npm_integrities: BTreeMap<String, BTreeSet<String>>,
@@ -664,6 +667,7 @@ impl LinkOptions {
             project_dir: project_dir.into(),
             record_blocked: false,
             allowed_capabilities: Vec::new(),
+            allowed_flows: Vec::new(),
             constraints: BTreeMap::new(),
             hashes: BTreeMap::new(),
             npm_integrities: BTreeMap::new(),
@@ -1186,6 +1190,33 @@ pub fn add_manifest_policy_grants(
         }
     }
     manifest.policy.allow = existing.into_iter().collect();
+    fs::write(&manifest_path, toml::to_string_pretty(&manifest)?)?;
+    Ok(added)
+}
+
+pub fn add_manifest_policy_flows(
+    project_dir: impl AsRef<Path>,
+    flows: &[String],
+) -> Result<Vec<String>> {
+    let project_dir = project_dir.as_ref();
+    init_project(project_dir, None)?;
+
+    let manifest_path = project_dir.join(MANIFEST);
+    let mut manifest = read_manifest(&manifest_path)?;
+    let mut existing = manifest
+        .policy
+        .allow_flow
+        .iter()
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    let mut added = Vec::new();
+    for flow in flows {
+        let normalized = parse_flow_rule(flow)?.to_string();
+        if existing.insert(normalized.clone()) {
+            added.push(normalized);
+        }
+    }
+    manifest.policy.allow_flow = existing.into_iter().collect();
     fs::write(&manifest_path, toml::to_string_pretty(&manifest)?)?;
     Ok(added)
 }
@@ -2523,6 +2554,11 @@ fn link_package_inner(
         .iter()
         .cloned()
         .fold(Policy::pure(), Policy::allow_capability);
+    let policy = options
+        .allowed_flows
+        .iter()
+        .cloned()
+        .fold(policy, Policy::allow_flow_rule);
     let policy = if grants_all_host_capabilities(&options.allowed_capabilities) {
         policy.allow_all_flows()
     } else {
@@ -2718,6 +2754,9 @@ fn apply_manifest_config(manifest: &OmcManifest, options: &mut LinkOptions) -> R
         options
             .allowed_capabilities
             .push(parse_capability_grant(grant)?);
+    }
+    for flow in &manifest.policy.allow_flow {
+        options.allowed_flows.push(parse_flow_rule(flow)?);
     }
     let project_dir = options.project_dir.clone();
     for path in &manifest.npm_local_paths {
@@ -8104,6 +8143,48 @@ pub fn parse_capability_grant(value: &str) -> Result<Capability> {
         "http" | "network" => Ok(Capability::HttpHost(target)),
         "dns" => Ok(Capability::DnsHost(target)),
         "proc" | "proc.spawn" | "proc-spawn" => Ok(Capability::ProcSpawn(target)),
+        _ => Err(OmcRegistryError::UnsupportedSpec(value.to_owned())),
+    }
+}
+
+pub fn parse_flow_rule(value: &str) -> Result<FlowRule> {
+    let (from, to) = value
+        .split_once("->")
+        .ok_or_else(|| OmcRegistryError::UnsupportedSpec(value.to_owned()))?;
+    Ok(FlowRule::new(
+        parse_flow_label_matcher(from.trim())?,
+        parse_flow_sink(to.trim())?,
+    ))
+}
+
+fn parse_flow_label_matcher(value: &str) -> Result<LabelMatcher> {
+    if matches!(value, "*" | "any") {
+        return Ok(LabelMatcher::Any);
+    }
+    let (kind, target) = value
+        .split_once(':')
+        .ok_or_else(|| OmcRegistryError::UnsupportedSpec(value.to_owned()))?;
+    let target = target.to_owned();
+    match kind {
+        "env" | "env.read" | "env-read" => Ok(LabelMatcher::Env(target)),
+        "file" | "fs.read" | "fs-read" => Ok(LabelMatcher::File(target)),
+        "secret" => Ok(LabelMatcher::Secret(target)),
+        _ => Err(OmcRegistryError::UnsupportedSpec(value.to_owned())),
+    }
+}
+
+fn parse_flow_sink(value: &str) -> Result<Sink> {
+    if matches!(value, "eval" | "dynamic_eval" | "dynamic.eval") {
+        return Ok(Sink::Eval);
+    }
+    let (kind, target) = value
+        .split_once(':')
+        .ok_or_else(|| OmcRegistryError::UnsupportedSpec(value.to_owned()))?;
+    let target = target.to_owned();
+    match kind {
+        "network" | "http" => Ok(Sink::Network(target)),
+        "file" | "fs.write" | "fs-write" => Ok(Sink::File(target)),
+        "process" | "proc" | "proc.spawn" | "proc-spawn" => Ok(Sink::Process(target)),
         _ => Err(OmcRegistryError::UnsupportedSpec(value.to_owned())),
     }
 }
@@ -17065,6 +17146,7 @@ mod tests {
             npm_peer_local_paths: Vec::new(),
             policy: ManifestPolicy {
                 allow: vec!["http:api.example.com".to_owned()],
+                allow_flow: Vec::new(),
             },
             registries: ManifestRegistries::default(),
         };
@@ -17229,6 +17311,29 @@ mod tests {
                 "env.read:API_TOKEN".to_owned(),
                 "http:api.example.com".to_owned()
             ]
+        );
+    }
+
+    #[test]
+    fn adds_manifest_policy_flows() {
+        let dir = tempfile::tempdir().unwrap();
+        let added = add_manifest_policy_flows(
+            dir.path(),
+            &[
+                "env:API_TOKEN -> network:api.example.com".to_owned(),
+                "env:API_TOKEN->network:api.example.com".to_owned(),
+            ],
+        )
+        .unwrap();
+        let manifest = read_manifest(dir.path().join("omc.toml")).unwrap();
+
+        assert_eq!(
+            added,
+            vec!["env:API_TOKEN->network:api.example.com".to_owned()]
+        );
+        assert_eq!(
+            manifest.policy.allow_flow,
+            vec!["env:API_TOKEN->network:api.example.com".to_owned()]
         );
     }
 
@@ -21624,6 +21729,21 @@ wheels = [
     }
 
     #[test]
+    fn parses_flow_rules() {
+        assert_eq!(
+            parse_flow_rule("env:API_TOKEN -> network:api.example.com").unwrap(),
+            FlowRule::new(
+                LabelMatcher::Env("API_TOKEN".to_owned()),
+                Sink::Network("api.example.com".to_owned())
+            )
+        );
+        assert_eq!(
+            parse_flow_rule("*->dynamic.eval").unwrap(),
+            FlowRule::new(LabelMatcher::Any, Sink::Eval)
+        );
+    }
+
+    #[test]
     fn parses_npmrc_registry_and_auth_config() {
         let mut config = NpmConfig::default();
         parse_npmrc_content(
@@ -23764,6 +23884,7 @@ wheels = [
 
             [policy]
             allow = ["http:api.example.com", "env:API_TOKEN"]
+            allow-flow = ["env:API_TOKEN -> network:api.example.com"]
 
             [registries]
             pypi-index-url = "https://mirror.example/simple"
@@ -23779,6 +23900,10 @@ wheels = [
         assert!(options
             .allowed_capabilities
             .contains(&Capability::EnvRead("API_TOKEN".to_owned())));
+        assert!(options.allowed_flows.contains(&FlowRule::new(
+            LabelMatcher::Env("API_TOKEN".to_owned()),
+            Sink::Network("api.example.com".to_owned())
+        )));
         assert_eq!(
             options.pypi_index_url.as_deref(),
             Some("https://mirror.example/simple/")

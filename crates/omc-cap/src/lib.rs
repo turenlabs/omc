@@ -122,6 +122,21 @@ impl LabelMatcher {
     }
 }
 
+impl fmt::Display for LabelMatcher {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Any => f.write_str("*"),
+            Self::Env(name) => write!(f, "env:{name}"),
+            Self::File(path) => write!(f, "file:{path}"),
+            Self::Secret(name) => write!(f, "secret:{name}"),
+            Self::Token(TokenKind::Aws) => f.write_str("token:aws"),
+            Self::Token(TokenKind::GitHub) => f.write_str("token:github"),
+            Self::Token(TokenKind::Npm) => f.write_str("token:npm"),
+            Self::Token(TokenKind::Generic(name)) => write!(f, "token:{name}"),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FlowRule {
     pub from: LabelMatcher,
@@ -135,6 +150,12 @@ impl FlowRule {
 
     fn allows(&self, label: &Label, sink: &Sink) -> bool {
         self.from.matches(label) && self.to.matches(sink)
+    }
+}
+
+impl fmt::Display for FlowRule {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}->{}", self.from, self.to)
     }
 }
 
@@ -161,6 +182,11 @@ impl Policy {
 
     pub fn allow_flow(mut self, from: LabelMatcher, to: Sink) -> Self {
         self.allowed_flows.push(FlowRule::new(from, to));
+        self
+    }
+
+    pub fn allow_flow_rule(mut self, rule: FlowRule) -> Self {
+        self.allowed_flows.push(rule);
         self
     }
 

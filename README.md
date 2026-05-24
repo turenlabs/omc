@@ -383,6 +383,15 @@ Projects can persist approved grants in `omc.toml`:
 ```toml
 [policy]
 allow = ["http:api.example.com", "env:API_TOKEN"]
+allow-flow = ["env:API_TOKEN -> network:api.example.com"]
+```
+
+You can add the same persistent flow grants from the CLI:
+
+```bash
+cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo allow \
+  http:api.example.com env:API_TOKEN \
+  --flow 'env:API_TOKEN -> network:api.example.com'
 ```
 
 Projects can also persist PyPI index selection for `omc add` and
@@ -543,8 +552,8 @@ Supported now:
 - structured OMC microcode serialization inside generated package artifacts
 - local Ed25519 signatures for generated package artifacts, verified before
   locked package extraction
-- persistent `[policy].allow` grants in `omc.toml`
-- `omc allow` for editing persistent project policy grants
+- persistent `[policy].allow` and `[policy].allow-flow` grants in `omc.toml`
+- `omc allow` for editing persistent project capability and flow grants
 - `omc add`, `omc add --dev`, `omc add --optional`, `omc add --peer`, and
   `omc remove` for one or more OMC-managed dependencies, with `--npm` and
   `--pypi` shorthands for unprefixed specs

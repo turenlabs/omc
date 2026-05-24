@@ -12,19 +12,19 @@ use flate2::write::GzEncoder;
 use flate2::Compression;
 use omc_cap::Capability;
 use omc_registry::{
-    add_manifest_npm_local_paths, add_manifest_policy_grants, add_npm_dist_tag, add_npm_team_user,
-    add_package_graph, apply_pypi_binary_option, apply_pypi_environment_defaults,
-    check_pypi_distribution, compare_npm_versions, compare_pypi_versions, create_npm_team,
-    create_npm_token, deprecate_npm_package, destroy_npm_team, download_npm_package_tarball,
-    grant_npm_access, init_project, install_locked_packages,
-    install_locked_packages_with_python_target, install_locked_project, install_project,
-    install_python_project_local_import_paths, lock_project, mutate_npm_package_owner,
-    mutate_npm_package_star, parse_capability_grant, parse_npm_direct_archive_reference,
-    parse_pypi_direct_archive_reference, parse_pypi_vcs_requirement, publish_npm_package,
-    pypi_marker_applies, read_constraint_files, read_lockfile, read_manifest,
-    read_npm_access_collaborators, read_npm_access_packages, read_npm_access_status,
-    read_npm_config_snapshot_with_globalconfig, read_npm_org_users, read_npm_package_metadata,
-    read_npm_package_metadata_with_userconfig, read_npm_package_owners,
+    add_manifest_npm_local_paths, add_manifest_policy_flows, add_manifest_policy_grants,
+    add_npm_dist_tag, add_npm_team_user, add_package_graph, apply_pypi_binary_option,
+    apply_pypi_environment_defaults, check_pypi_distribution, compare_npm_versions,
+    compare_pypi_versions, create_npm_team, create_npm_token, deprecate_npm_package,
+    destroy_npm_team, download_npm_package_tarball, grant_npm_access, init_project,
+    install_locked_packages, install_locked_packages_with_python_target, install_locked_project,
+    install_project, install_python_project_local_import_paths, lock_project,
+    mutate_npm_package_owner, mutate_npm_package_star, parse_capability_grant,
+    parse_npm_direct_archive_reference, parse_pypi_direct_archive_reference,
+    parse_pypi_vcs_requirement, publish_npm_package, pypi_marker_applies, read_constraint_files,
+    read_lockfile, read_manifest, read_npm_access_collaborators, read_npm_access_packages,
+    read_npm_access_status, read_npm_config_snapshot_with_globalconfig, read_npm_org_users,
+    read_npm_package_metadata, read_npm_package_metadata_with_userconfig, read_npm_package_owners,
     read_npm_ping_with_userconfig, read_npm_profile, read_npm_search, read_npm_stars,
     read_npm_team_users, read_npm_teams, read_npm_token_list, read_npm_whoami,
     read_npm_workspace_packages, read_package_scripts, read_pip_config_snapshot,
@@ -156,6 +156,11 @@ enum Command {
     },
     #[command(about = "Persist capability grants in omc.toml policy")]
     Allow {
+        #[arg(
+            long = "flow",
+            help = "Persist a data-flow grant such as env:API_TOKEN->network:api.example.com"
+        )]
+        flows: Vec<String>,
         #[arg(help = "Capability grants such as http:api.example.com or env:API_TOKEN")]
         grants: Vec<String>,
     },
@@ -1512,18 +1517,22 @@ fn run() -> Result<ExitCode, OmcRegistryError> {
                 false,
             )?;
         }
-        Command::Allow { grants } => {
-            if grants.is_empty() {
+        Command::Allow { flows, grants } => {
+            if grants.is_empty() && flows.is_empty() {
                 return Err(OmcRegistryError::UnsupportedSpec(
                     "at least one grant is required".to_owned(),
                 ));
             }
             let added = add_manifest_policy_grants(&cli.project_dir, &grants)?;
-            if added.is_empty() {
+            let added_flows = add_manifest_policy_flows(&cli.project_dir, &flows)?;
+            if added.is_empty() && added_flows.is_empty() {
                 println!("policy unchanged");
             } else {
                 for grant in added {
                     println!("allowed {grant}");
+                }
+                for flow in added_flows {
+                    println!("allowed flow {flow}");
                 }
             }
         }
