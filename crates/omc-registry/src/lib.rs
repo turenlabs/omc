@@ -4902,11 +4902,8 @@ fn read_pylock_requirements(path: &Path) -> Result<ProjectRequirements> {
 
         let name = normalize_pypi_name(&package.name);
         let key = format!("pypi:{name}");
-        requirements.specs.push(PackageSpec::new(
-            Ecosystem::Pypi,
-            name,
-            Some(package.version.clone()),
-        ));
+        let spec = pylock_package_spec(&package, &name);
+        requirements.specs.push(spec);
         requirements
             .constraints
             .insert(key.clone(), package.version);
@@ -4919,6 +4916,24 @@ fn read_pylock_requirements(path: &Path) -> Result<ProjectRequirements> {
     }
 
     Ok(requirements)
+}
+
+fn pylock_package_spec(package: &PylockPackage, name: &str) -> PackageSpec {
+    let direct_url = package
+        .wheels
+        .first()
+        .and_then(|dist| dist.url.clone())
+        .or_else(|| package.sdist.as_ref().and_then(|dist| dist.url.clone()))
+        .or_else(|| package.archive.as_ref().and_then(|dist| dist.url.clone()));
+    if let Some(url) = direct_url {
+        PackageSpec::with_direct_url(Ecosystem::Pypi, name.to_owned(), url, BTreeSet::new())
+    } else {
+        PackageSpec::new(
+            Ecosystem::Pypi,
+            name.to_owned(),
+            Some(package.version.clone()),
+        )
+    }
 }
 
 fn collect_pylock_dist_hash(
@@ -5946,6 +5961,17 @@ fn read_requirements_file_inner(
         return Ok(());
     }
 
+    if is_pylock_requirements_file(path) {
+        if mode == RequirementsMode::Constraint {
+            return Err(OmcRegistryError::UnsupportedRequirement(format!(
+                "pylock requirements file `{}` cannot be used as a constraint file",
+                path.display()
+            )));
+        }
+        extend_project_requirements(discovered, read_pylock_requirements(path)?);
+        return Ok(());
+    }
+
     let base_dir = path.parent().unwrap_or_else(|| Path::new("."));
     for raw_line in requirement_logical_lines(&fs::read_to_string(path)?) {
         let line = raw_line.trim();
@@ -6187,6 +6213,13 @@ fn read_requirements_file_inner(
         }
     }
     Ok(())
+}
+
+fn is_pylock_requirements_file(path: &Path) -> bool {
+    let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+    name == "pylock.toml" || (name.starts_with("pylock.") && name.ends_with(".toml"))
 }
 
 fn requirement_logical_lines(content: &str) -> Vec<String> {
@@ -15517,6 +15550,7 @@ struct PylockPackage {
 
 #[derive(Debug, Default, Deserialize)]
 struct PylockDistribution {
+    url: Option<String>,
     #[serde(default)]
     hashes: BTreeMap<String, String>,
 }
@@ -19364,7 +19398,11 @@ wheels = [
         .unwrap();
 
         let requirements = read_pylock_requirements(&pylock).unwrap();
-        assert!(has_spec(&requirements.specs, "idna", "3.7"));
+        assert!(requirements.specs.iter().any(|spec| {
+            spec.name == "idna"
+                && spec.direct_url.as_deref()
+                    == Some("https://files.example/idna-3.7-py3-none-any.whl")
+        }));
         assert!(!requirements
             .specs
             .iter()
@@ -19379,6 +19417,48 @@ wheels = [
         assert_eq!(
             requirements.hashes.get("pypi:idna").cloned().unwrap(),
             BTreeSet::from([sdist, wheel])
+        );
+    }
+
+    #[test]
+    fn reads_pylock_from_explicit_requirements_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let pylock = dir.path().join("pylock.ci.toml");
+        fs::write(
+            &pylock,
+            r#"
+lock-version = "1.0"
+created-by = "test"
+
+[[packages]]
+name = "idna"
+version = "3.7"
+wheels = [
+  { url = "https://files.example/idna-3.7-py3-none-any.whl", hashes = { sha256 = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" } },
+]
+"#,
+        )
+        .unwrap();
+
+        let requirements = read_requirements_file(&pylock).unwrap();
+
+        assert!(requirements.specs.iter().any(|spec| {
+            spec.name == "idna"
+                && spec.direct_url.as_deref()
+                    == Some("https://files.example/idna-3.7-py3-none-any.whl")
+        }));
+        assert_eq!(
+            requirements
+                .constraints
+                .get("pypi:idna")
+                .map(String::as_str),
+            Some("3.7")
+        );
+        assert_eq!(
+            requirements.hashes.get("pypi:idna").cloned().unwrap(),
+            BTreeSet::from([
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_owned()
+            ])
         );
     }
 
@@ -19410,8 +19490,16 @@ wheels = [
         .unwrap();
 
         let discovered = discover_project_requirements(dir.path()).unwrap();
-        assert!(has_spec(&discovered.specs, "idna", "3.7"));
+        assert!(discovered.specs.iter().any(|spec| {
+            spec.name == "idna"
+                && spec.direct_url.as_deref()
+                    == Some("https://files.example/idna-3.7-py3-none-any.whl")
+        }));
         assert!(!discovered.specs.iter().any(|spec| spec.name == "wrong"));
+        assert_eq!(
+            discovered.constraints.get("pypi:idna").map(String::as_str),
+            Some("3.7")
+        );
         assert_eq!(
             discovered
                 .hashes

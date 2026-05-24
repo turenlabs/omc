@@ -5768,7 +5768,7 @@ fn pip_help_text(topic: Option<&str>) -> String {
             "pip install [<requirement>...]",
             &[
                 "Resolve, verify, lock, and install PyPI packages with OMC.",
-                "Supports requirements/constraints, inline script requirements, indexes, find-links, no-index, hashes, no-deps, install reports, dry-runs, binary policy, target dirs, local archives, local directories, editable paths, and editable VCS requirements.",
+                "Supports requirements/constraints, pylock.toml inputs, inline script requirements, indexes, find-links, no-index, hashes, no-deps, install reports, dry-runs, binary policy, target dirs, local archives, local directories, editable paths, and editable VCS requirements.",
             ],
         ),
         Some("lock") => pip_command_help(
