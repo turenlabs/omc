@@ -221,6 +221,7 @@ cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo python -m pip inst
 cargo run -p omc-cli --bin pip3 -- --omc-project-dir /tmp/omc-demo freeze
 cargo run -p omc-cli --bin python3 -- --omc-project-dir /tmp/omc-demo -m pip freeze
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip freeze
+cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip freeze -r requirements.txt
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip show requests
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip list --format=json
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip inspect
@@ -579,7 +580,9 @@ Supported now:
   requirements, without writing the current OMC manifest, lockfile, or
   site-packages; real `pip install --target DIR` installs into the requested
   target through transient OMC state without writing the current manifest or
-  lockfile; read-only `pip freeze --path DIR`, `pip list --path DIR`, and
+  lockfile; `pip freeze -r requirements.txt` preserves requirement-file order
+  and comments while appending additional frozen packages; read-only
+  `pip freeze --path DIR`, `pip list --path DIR`, and
   `pip inspect --path DIR` inspect target-directory `.dist-info` metadata,
   including `Requires-Dist` dependency metadata; generated pure-sdist
   `.dist-info/RECORD` files support `pip show -f`, and `pip show` reads

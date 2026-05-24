@@ -1185,6 +1185,7 @@ enum PipListFormat {
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 struct PipFreezeAction {
+    requirements: Vec<PathBuf>,
     paths: Vec<PathBuf>,
     exclude: Vec<String>,
     exclude_editable: bool,
@@ -3383,9 +3384,19 @@ fn run_pip_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
         }
         PipCompatAction::Freeze { action } => {
             if action.paths.is_empty() {
-                print_locked_freeze(project_dir, &action.exclude, action.exclude_editable)?
+                print_locked_freeze(
+                    project_dir,
+                    &action.exclude,
+                    action.exclude_editable,
+                    &action.requirements,
+                )?
             } else {
-                print_pip_path_freeze(project_dir, &action.paths, &action.exclude)?
+                print_pip_path_freeze(
+                    project_dir,
+                    &action.paths,
+                    &action.exclude,
+                    &action.requirements,
+                )?
             }
         }
         PipCompatAction::List {
@@ -3420,7 +3431,7 @@ fn run_pip_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
                 match format {
                     PipListFormat::Columns => print_locked_pip_list_columns(project_dir, &exclude)?,
                     PipListFormat::Freeze => {
-                        print_locked_freeze(project_dir, &exclude, exclude_editable)?
+                        print_locked_freeze(project_dir, &exclude, exclude_editable, &[])?
                     }
                     PipListFormat::Json => print_locked_pip_json(project_dir, &exclude)?,
                 }
@@ -12421,29 +12432,41 @@ fn print_locked_freeze(
     project_dir: &Path,
     exclude: &[String],
     exclude_editable: bool,
+    requirements: &[PathBuf],
 ) -> Result<(), OmcRegistryError> {
     let excluded = pip_excluded_names(exclude);
     let lock = read_lockfile(project_dir.join("omc.lock"))?;
+    let mut entries = Vec::new();
     for package in lock
         .packages
         .iter()
         .filter(|package| package.ecosystem == Ecosystem::Pypi)
         .filter(|package| !pip_name_excluded(&package.name, &excluded))
     {
-        println!("{}=={}", package.name, package.version);
+        entries.push(PipFrozenRequirement {
+            name: Some(normalize_pip_show_name(&package.name)),
+            line: format!("{}=={}", package.name, package.version),
+        });
     }
     for dependency in lock
         .python_vcs
         .iter()
         .filter(|dependency| !pip_name_excluded(&dependency.name, &excluded))
     {
-        println!("{}", pip_freeze_vcs_requirement(dependency));
+        entries.push(PipFrozenRequirement {
+            name: Some(normalize_pip_show_name(&dependency.name)),
+            line: pip_freeze_vcs_requirement(dependency),
+        });
     }
     if !exclude_editable {
         for requirement in pip_freeze_local_path_requirements(project_dir)? {
-            println!("{requirement}");
+            entries.push(PipFrozenRequirement {
+                name: None,
+                line: requirement,
+            });
         }
     }
+    print_pip_freeze_output(pip_freeze_output(project_dir, entries, requirements)?);
     Ok(())
 }
 
@@ -12451,11 +12474,173 @@ fn print_pip_path_freeze(
     project_dir: &Path,
     paths: &[PathBuf],
     exclude: &[String],
+    requirements: &[PathBuf],
 ) -> Result<(), OmcRegistryError> {
-    for package in read_pip_path_packages(project_dir, paths, exclude)? {
-        println!("{}=={}", package.name, package.version);
-    }
+    let entries = read_pip_path_packages(project_dir, paths, exclude)?
+        .into_iter()
+        .map(|package| PipFrozenRequirement {
+            name: Some(normalize_pip_show_name(&package.name)),
+            line: format!("{}=={}", package.name, package.version),
+        })
+        .collect::<Vec<_>>();
+    print_pip_freeze_output(pip_freeze_output(project_dir, entries, requirements)?);
     Ok(())
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PipFrozenRequirement {
+    name: Option<String>,
+    line: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+struct PipFreezeOutput {
+    warnings: Vec<String>,
+    lines: Vec<String>,
+}
+
+fn pip_freeze_output(
+    project_dir: &Path,
+    entries: Vec<PipFrozenRequirement>,
+    requirements: &[PathBuf],
+) -> Result<PipFreezeOutput, OmcRegistryError> {
+    if requirements.is_empty() {
+        return Ok(PipFreezeOutput {
+            warnings: Vec::new(),
+            lines: entries.into_iter().map(|entry| entry.line).collect(),
+        });
+    }
+
+    let mut by_name = BTreeMap::new();
+    for entry in &entries {
+        if let Some(name) = &entry.name {
+            by_name.insert(name.clone(), entry.line.clone());
+        }
+    }
+
+    let mut emitted = BTreeSet::new();
+    let mut emitted_lines = BTreeSet::new();
+    let mut output = PipFreezeOutput::default();
+    for requirement in requirements {
+        let path = absolutize_path(project_dir, requirement.clone());
+        let content = fs::read_to_string(&path)?;
+        for line in content.lines() {
+            if line.trim().is_empty() || line.trim_start().starts_with('#') {
+                emitted_lines.insert(line.to_owned());
+                output.lines.push(line.to_owned());
+                continue;
+            }
+
+            let Some(name) = pip_requirement_line_name(line) else {
+                emitted_lines.insert(line.to_owned());
+                output.lines.push(line.to_owned());
+                continue;
+            };
+            if let Some(frozen) = by_name.get(&name) {
+                if emitted.insert(name) {
+                    emitted_lines.insert(frozen.clone());
+                    output.lines.push(frozen.clone());
+                }
+            } else {
+                output.warnings.push(format!(
+                    "WARNING: Requirement file [{}] contains {}, but package '{}' is not installed",
+                    path.display(),
+                    line.trim(),
+                    name
+                ));
+            }
+        }
+    }
+
+    let remaining = entries
+        .into_iter()
+        .filter(|entry| {
+            if let Some(name) = entry.name.as_deref() {
+                !emitted.contains(name)
+            } else {
+                !emitted_lines.contains(&entry.line)
+            }
+        })
+        .map(|entry| entry.line)
+        .collect::<Vec<_>>();
+    if !remaining.is_empty() {
+        output
+            .lines
+            .push("## The following requirements were added by pip freeze:".to_owned());
+        output.lines.extend(remaining);
+    }
+
+    Ok(output)
+}
+
+fn print_pip_freeze_output(output: PipFreezeOutput) {
+    for warning in output.warnings {
+        eprintln!("{warning}");
+    }
+    for line in output.lines {
+        println!("{line}");
+    }
+}
+
+fn pip_requirement_line_name(line: &str) -> Option<String> {
+    let line = pip_requirement_without_inline_comment(line).trim();
+    if line.is_empty() || line.starts_with('#') {
+        return None;
+    }
+
+    let requirement = line
+        .strip_prefix("-e ")
+        .or_else(|| line.strip_prefix("--editable "))
+        .unwrap_or(line)
+        .trim();
+    if requirement.starts_with('-') {
+        return None;
+    }
+
+    if let Some(egg) = requirement.split_once("#egg=").map(|(_, egg)| egg) {
+        let egg = egg
+            .split('&')
+            .next()
+            .unwrap_or(egg)
+            .split(';')
+            .next()
+            .unwrap_or(egg)
+            .trim();
+        if !egg.is_empty() {
+            return Some(normalize_pip_show_name(egg));
+        }
+    }
+
+    let named_requirement = requirement
+        .split_once(" @ ")
+        .map(|(name, _)| name.trim())
+        .unwrap_or(requirement);
+    if named_requirement.contains("://")
+        || !named_requirement
+            .chars()
+            .next()
+            .is_some_and(|ch| ch.is_ascii_alphanumeric())
+    {
+        return None;
+    }
+    let name_end = named_requirement
+        .find(|ch: char| !(ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.')))
+        .unwrap_or(named_requirement.len());
+    if name_end == 0 {
+        return None;
+    }
+    Some(normalize_pip_show_name(&named_requirement[..name_end]))
+}
+
+fn pip_requirement_without_inline_comment(line: &str) -> &str {
+    let mut previous_was_whitespace = true;
+    for (index, ch) in line.char_indices() {
+        if ch == '#' && previous_was_whitespace {
+            return &line[..index];
+        }
+        previous_was_whitespace = ch.is_whitespace();
+    }
+    line
 }
 
 fn pip_freeze_local_path_requirements(project_dir: &Path) -> Result<Vec<String>, OmcRegistryError> {
@@ -20127,12 +20312,15 @@ fn parse_pip_freeze_args(args: &[String]) -> Result<PipFreezeAction, OmcRegistry
                 action.paths.push(PathBuf::from(value));
             } else if arg == "--exclude" {
                 action.exclude.push(value.clone());
+            } else {
+                action.requirements.push(PathBuf::from(value));
             }
         } else if let Some(path) = arg.strip_prefix("--path=") {
             action.paths.push(PathBuf::from(path));
         } else if let Some(exclude) = arg.strip_prefix("--exclude=") {
             action.exclude.push(exclude.to_owned());
-        } else if arg.starts_with("--requirement=") {
+        } else if let Some(requirement) = arg.strip_prefix("--requirement=") {
+            action.requirements.push(PathBuf::from(requirement));
         } else {
             return Err(unsupported_compat_arg("pip freeze", arg));
         }
@@ -26307,6 +26495,59 @@ version = "0.1.0"
     }
 
     #[test]
+    fn pip_freeze_requirement_files_preserve_order_and_comments() {
+        let project = test_dir("pip-freeze-requirement-order");
+        fs::write(
+            project.join("requirements.txt"),
+            "# pinned\nidna>=2 # inline note\n\nnot-installed-demo==1\ncharset-normalizer[unicode]\n-e ../local-package\n--find-links wheelhouse\n",
+        )
+        .unwrap();
+
+        let output = pip_freeze_output(
+            &project,
+            vec![
+                PipFrozenRequirement {
+                    name: Some("charset-normalizer".to_owned()),
+                    line: "charset-normalizer==3.3.2".to_owned(),
+                },
+                PipFrozenRequirement {
+                    name: Some("idna".to_owned()),
+                    line: "idna==3.7".to_owned(),
+                },
+                PipFrozenRequirement {
+                    name: Some("requests".to_owned()),
+                    line: "requests==2.32.3".to_owned(),
+                },
+                PipFrozenRequirement {
+                    name: None,
+                    line: "-e ../local-package".to_owned(),
+                },
+            ],
+            &[PathBuf::from("requirements.txt")],
+        )
+        .unwrap();
+
+        assert_eq!(
+            output.lines,
+            vec![
+                "# pinned",
+                "idna==3.7",
+                "",
+                "charset-normalizer==3.3.2",
+                "-e ../local-package",
+                "--find-links wheelhouse",
+                "## The following requirements were added by pip freeze:",
+                "requests==2.32.3",
+            ]
+        );
+        assert_eq!(output.warnings.len(), 1);
+        assert!(output.warnings[0].contains("not-installed-demo==1"));
+        assert!(output.warnings[0].contains("not-installed-demo"));
+
+        fs::remove_dir_all(project).unwrap();
+    }
+
+    #[test]
     fn parses_pip_uninstall_and_freeze() {
         assert_eq!(
             parse_pip_compat_action(&args(&["--version"])).unwrap(),
@@ -26614,6 +26855,7 @@ resolved_commit = "0123456789abcdef0123456789abcdef01234567"
             .unwrap(),
             PipCompatAction::Freeze {
                 action: PipFreezeAction {
+                    requirements: vec![PathBuf::from("requirements.txt")],
                     paths: vec![PathBuf::from("vendor")],
                     exclude: vec!["requests".to_owned()],
                     exclude_editable: false,
