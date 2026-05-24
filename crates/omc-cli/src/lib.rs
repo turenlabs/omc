@@ -1550,12 +1550,13 @@ fn run() -> Result<ExitCode, OmcRegistryError> {
             allow_flow,
             allow_all_host,
         } => {
-            remove_specs(
+            let _ = remove_specs(
                 &cli.project_dir,
                 &specs,
                 ecosystem_hint(npm, pypi),
                 CliPolicyArgs::new(&allow, &allow_flow, allow_all_host),
                 true,
+                false,
                 false,
                 false,
             )?;
@@ -2961,16 +2962,20 @@ fn run_npm_global_remove_compat(
 ) -> Result<(), OmcRegistryError> {
     let prefix = npm_global_prefix_path();
     let global_project_dir = npm_global_project_dir_from_prefix(&prefix);
-    remove_specs(
+    let removed = remove_specs(
         &global_project_dir,
         specs,
         Some(Ecosystem::Npm),
         CliPolicyArgs::new(allow, allow_flow, allow_all_host),
         true,
         false,
+        true,
         false,
     )?;
-    sync_npm_global_bins(&prefix, &global_project_dir)
+    if removed {
+        sync_npm_global_bins(&prefix, &global_project_dir)?;
+    }
+    Ok(())
 }
 
 fn npm_package_json_requirement_for_link_root(
@@ -3183,19 +3188,23 @@ fn run_npm_remove_workspace_compat(
     let specs = parse_package_specs(specs, Some(Ecosystem::Npm))?;
     let mut removed = Vec::new();
     for spec in &specs {
-        let removed_from_manifest = remove_manifest_dependency(project_dir, spec)?;
+        let removed_from_manifest = if !project_dir.join("omc.toml").exists() {
+            false
+        } else {
+            remove_manifest_dependency(project_dir, spec)?
+        };
         let mut removed_from_package_json = false;
         for target in &targets {
             removed_from_package_json |=
                 remove_npm_package_json_dependency_from_package_dir(target, &spec.name)?;
         }
         if !removed_from_manifest && !removed_from_package_json {
-            return Err(OmcRegistryError::UnsupportedSpec(format!(
-                "dependency `{}` is not in omc.toml or selected workspace package.json",
-                spec.package_key(),
-            )));
+            continue;
         }
         removed.push(spec.package_key());
+    }
+    if removed.is_empty() {
+        return Ok(ExitCode::SUCCESS);
     }
 
     let mut options = LinkOptions::new(project_dir);
@@ -3767,13 +3776,14 @@ fn run_npm_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
                     include_workspace_root,
                 );
             }
-            remove_specs(
+            let _ = remove_specs(
                 project_dir,
                 &specs,
                 Some(Ecosystem::Npm),
                 CliPolicyArgs::new(&allow, &allow_flow, allow_all_host),
                 true,
                 false,
+                true,
                 false,
             )?;
         }
@@ -4904,12 +4914,13 @@ fn run_pip_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
             if user {
                 return run_pip_uninstall_user(&specs, &allow, &allow_flow, allow_all_host);
             }
-            remove_specs(
+            let _ = remove_specs(
                 project_dir,
                 &specs,
                 Some(Ecosystem::Pypi),
                 CliPolicyArgs::new(&allow, &allow_flow, allow_all_host),
                 false,
+                true,
                 true,
                 true,
             )?;
@@ -15397,7 +15408,8 @@ fn remove_specs(
     update_npm_package_json: bool,
     allow_locked_pypi_removal: bool,
     missing_ok: bool,
-) -> Result<(), OmcRegistryError> {
+    warn_missing: bool,
+) -> Result<bool, OmcRegistryError> {
     let specs = parse_package_specs(specs, ecosystem_hint)?;
     let update_npm_package_json =
         update_npm_package_json && specs.iter().any(|spec| spec.ecosystem == Ecosystem::Npm);
@@ -15442,7 +15454,9 @@ fn remove_specs(
             && !removed_from_editable
         {
             if missing_ok {
-                eprintln!("WARNING: Skipping {} as it is not installed.", spec.name);
+                if warn_missing {
+                    eprintln!("WARNING: Skipping {} as it is not installed.", spec.name);
+                }
                 continue;
             }
             let sources = if update_npm_package_json && spec.ecosystem == Ecosystem::Npm {
@@ -15460,7 +15474,7 @@ fn remove_specs(
         removed.push(spec.package_key());
     }
     if removed.is_empty() {
-        return Ok(());
+        return Ok(false);
     }
 
     let mut install = if (removed_locked || !editable_removal.removed_names.is_empty())
@@ -15488,7 +15502,7 @@ fn remove_specs(
     }
     println!("removed {}", removed.join(", "));
     print_install_report(&install);
-    Ok(())
+    Ok(true)
 }
 
 #[derive(Default)]
@@ -28205,6 +28219,29 @@ mod tests {
     }
 
     #[test]
+    fn npm_global_remove_skips_missing_packages_like_npm() {
+        let project = test_dir("npm-global-remove-missing-project");
+        let prefix = test_dir("npm-global-remove-missing-prefix");
+
+        with_env_var("NPM_CONFIG_PREFIX", &prefix, || {
+            let status = run_npm_compat(
+                &project,
+                &args(&["uninstall", "--global", "definitely-not-installed"]),
+            )
+            .unwrap();
+            assert_eq!(status, ExitCode::SUCCESS);
+
+            let global_project = npm_global_project_dir_from_prefix(&prefix);
+            assert!(!global_project.join("omc.toml").exists());
+            assert!(!global_project.join("omc.lock").exists());
+            assert!(!prefix.join("bin").exists());
+        });
+
+        let _ = fs::remove_dir_all(project);
+        let _ = fs::remove_dir_all(prefix);
+    }
+
+    #[test]
     fn npm_install_saves_root_package_json_dependencies() {
         let project = test_dir("npm-install-root-package-json-project");
         fs::write(
@@ -28751,6 +28788,27 @@ mod tests {
     }
 
     #[test]
+    fn npm_remove_skips_missing_packages_like_npm() {
+        let project = test_dir("npm-remove-missing-package");
+        let package_json = r#"{"name":"root","version":"1.0.0"}"#;
+        fs::write(project.join("package.json"), package_json).unwrap();
+
+        let status =
+            run_npm_compat(&project, &args(&["uninstall", "definitely-not-installed"])).unwrap();
+
+        assert_eq!(status, ExitCode::SUCCESS);
+        assert_eq!(
+            fs::read_to_string(project.join("package.json")).unwrap(),
+            package_json
+        );
+        assert!(!project.join("omc.toml").exists());
+        assert!(!project.join("omc.lock").exists());
+        assert!(!project.join(".omc").exists());
+
+        let _ = fs::remove_dir_all(project);
+    }
+
+    #[test]
     fn npm_remove_updates_selected_workspace_package_json_dependencies() {
         let project = test_dir("npm-remove-workspace-package-json-project");
         fs::create_dir_all(project.join("packages/lib")).unwrap();
@@ -28790,6 +28848,46 @@ mod tests {
             .and_then(serde_json::Value::as_object)
             .unwrap();
         assert!(!lock_packages.contains_key("node_modules/left-pad"));
+
+        let _ = fs::remove_dir_all(project);
+    }
+
+    #[test]
+    fn npm_remove_workspace_skips_missing_packages_like_npm() {
+        let project = test_dir("npm-remove-workspace-missing-package");
+        fs::create_dir_all(project.join("packages/lib")).unwrap();
+        let root_package_json = r#"{"name":"root","version":"1.0.0","workspaces":["packages/*"]}"#;
+        let workspace_package_json = r#"{"name":"@demo/lib","version":"1.0.0"}"#;
+        fs::write(project.join("package.json"), root_package_json).unwrap();
+        fs::write(
+            project.join("packages/lib/package.json"),
+            workspace_package_json,
+        )
+        .unwrap();
+
+        let status = run_npm_compat(
+            &project,
+            &args(&[
+                "remove",
+                "definitely-not-installed",
+                "--workspace",
+                "@demo/lib",
+            ]),
+        )
+        .unwrap();
+
+        assert_eq!(status, ExitCode::SUCCESS);
+        assert_eq!(
+            fs::read_to_string(project.join("package.json")).unwrap(),
+            root_package_json
+        );
+        assert_eq!(
+            fs::read_to_string(project.join("packages/lib/package.json")).unwrap(),
+            workspace_package_json
+        );
+        assert!(!project.join("omc.toml").exists());
+        assert!(!project.join("omc.lock").exists());
+        assert!(!project.join("package-lock.json").exists());
 
         let _ = fs::remove_dir_all(project);
     }
