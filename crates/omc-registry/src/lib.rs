@@ -15635,6 +15635,9 @@ fn parse_requirements_binary_option(line: &str, mode: PypiBinaryMode) -> Option<
 fn parse_requirements_compatible_global_option(line: &str) -> bool {
     line == "--prefer-binary"
         || parse_requirements_option_value(line, &["--trusted-host=", "--trusted-host"]).is_some()
+        || parse_requirements_option_value(line, &["--use-feature=", "--use-feature"]).is_some()
+        || parse_requirements_option_value(line, &["--use-deprecated=", "--use-deprecated"])
+            .is_some()
 }
 
 fn parse_requirements_editable_value(line: &str) -> Option<String> {
@@ -19970,6 +19973,22 @@ packages:
                 assert!(has_spec(&discovered.specs, "idna", "==3.7"));
             },
         );
+    }
+
+    #[test]
+    fn accepts_requirements_use_feature_options() {
+        let dir = tempfile::tempdir().unwrap();
+        let requirements = dir.path().join("requirements.txt");
+        fs::write(
+            &requirements,
+            "--use-feature=truststore\n--use-feature fast-deps\n--use-deprecated legacy-resolver\nidna==3.7\n",
+        )
+        .unwrap();
+
+        let discovered = read_requirements_file(&requirements).unwrap();
+
+        assert_eq!(discovered.specs.len(), 1);
+        assert!(has_spec(&discovered.specs, "idna", "==3.7"));
     }
 
     #[test]
