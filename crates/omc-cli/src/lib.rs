@@ -1,5 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
-use std::io::{self, Read as _};
+use std::io::{self, Read as _, Write as _};
 use std::net::Ipv4Addr;
 use std::path::{Path, PathBuf};
 use std::process::{Command as ProcessCommand, ExitCode};
@@ -1200,6 +1200,7 @@ struct PipDownloadAction {
     requirements: Vec<PathBuf>,
     constraints: Vec<PathBuf>,
     archive_references: Vec<String>,
+    local_paths: Vec<PythonLocalRequirement>,
     index_url: Option<String>,
     extra_index_urls: Vec<String>,
     find_links: Vec<String>,
@@ -1782,6 +1783,7 @@ fn run_pip_lock(project_dir: &Path, action: PipLockAction) -> Result<ExitCode, O
     }
     apply_pip_compat_index_options(
         &mut options,
+        project_dir,
         index_url,
         extra_index_urls,
         find_links,
@@ -4485,6 +4487,7 @@ fn run_pip_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
                 options.project_extras = groups.into_iter().collect();
                 apply_pip_compat_index_options(
                     &mut options,
+                    project_dir,
                     index_url,
                     extra_index_urls,
                     find_links,
@@ -4511,6 +4514,7 @@ fn run_pip_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
                 options.project_extras = groups.into_iter().collect();
                 apply_pip_compat_index_options(
                     &mut options,
+                    project_dir,
                     index_url,
                     extra_index_urls,
                     find_links,
@@ -4566,10 +4570,10 @@ fn run_pip_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
             }
         }
         PipCompatAction::Download(action) => {
-            download_pip_packages(project_dir, *action)?;
+            download_pip_packages(project_dir, *action, PipArtifactCommand::Download)?;
         }
         PipCompatAction::Wheel(action) => {
-            download_pip_packages(project_dir, *action)?;
+            download_pip_packages(project_dir, *action, PipArtifactCommand::Wheel)?;
         }
         PipCompatAction::Uninstall {
             mut specs,
@@ -5291,6 +5295,7 @@ fn run_pip_install_dry_run(
     options.allowed_capabilities = parse_grants(&allow, allow_all_host)?;
     apply_pip_compat_index_options(
         &mut options,
+        project_dir,
         index_url,
         extra_index_urls,
         find_links,
@@ -5498,6 +5503,7 @@ fn run_pip_install_target(
     options.project_extras = groups.into_iter().collect();
     apply_pip_compat_index_options(
         &mut options,
+        project_dir,
         index_url,
         extra_index_urls,
         find_links,
@@ -5609,6 +5615,7 @@ fn run_pip_install_prefix(
     options.project_extras = groups.into_iter().collect();
     apply_pip_compat_index_options(
         &mut options,
+        project_dir,
         index_url,
         extra_index_urls,
         find_links,
@@ -5715,6 +5722,7 @@ fn run_pip_install_root(
     options.project_extras = groups.into_iter().collect();
     apply_pip_compat_index_options(
         &mut options,
+        project_dir,
         index_url,
         extra_index_urls,
         find_links,
@@ -5837,6 +5845,7 @@ fn run_pip_install_user(
     options.project_extras = groups.into_iter().collect();
     apply_pip_compat_index_options(
         &mut options,
+        project_dir,
         index_url,
         extra_index_urls,
         find_links,
@@ -10730,12 +10739,14 @@ fn pip_hash_digest(algorithm: PipHashAlgorithm, bytes: &[u8]) -> String {
 fn download_pip_packages(
     project_dir: &Path,
     action: PipDownloadAction,
+    command: PipArtifactCommand,
 ) -> Result<(), OmcRegistryError> {
     let PipDownloadAction {
         specs,
         requirements,
         constraints,
         archive_references,
+        mut local_paths,
         index_url,
         extra_index_urls,
         find_links,
@@ -10760,6 +10771,7 @@ fn download_pip_packages(
     options.allowed_capabilities = parse_grants(&allow, allow_all_host)?;
     apply_pip_compat_index_options(
         &mut options,
+        project_dir,
         index_url,
         extra_index_urls,
         find_links,
@@ -10783,40 +10795,78 @@ fn download_pip_packages(
     )?);
     if !options.requirement_files.is_empty() {
         let requirements = read_requirements_files(&options.requirement_files)?;
-        apply_pypi_download_requirements(&mut options, &mut resolved_specs, requirements)?;
+        apply_pypi_download_requirements(
+            &mut options,
+            &mut resolved_specs,
+            &mut local_paths,
+            requirements,
+            command == PipArtifactCommand::Wheel,
+        )?;
     }
     if !options.constraint_files.is_empty() {
         let constraints = read_constraint_files(&options.constraint_files)?;
-        apply_pypi_download_requirements(&mut options, &mut resolved_specs, constraints)?;
+        apply_pypi_download_requirements(
+            &mut options,
+            &mut resolved_specs,
+            &mut local_paths,
+            constraints,
+            false,
+        )?;
     }
-    if resolved_specs.is_empty() {
+    if resolved_specs.is_empty() && local_paths.is_empty() {
         return Err(OmcRegistryError::UnsupportedSpec(
             "pip download/wheel needs at least one package, archive, or requirement file"
                 .to_owned(),
         ));
     }
 
-    let mut reports = Vec::new();
-    for spec in &resolved_specs {
-        reports.extend(add_package_graph(spec, &options)?);
+    if !resolved_specs.is_empty() {
+        let mut reports = Vec::new();
+        for spec in &resolved_specs {
+            reports.extend(add_package_graph(spec, &options)?);
+        }
+        copy_downloaded_pypi_archives(project_dir, &destination, &reports)?;
     }
-    copy_downloaded_pypi_archives(project_dir, &destination, &reports)?;
+    if !local_paths.is_empty() {
+        if command != PipArtifactCommand::Wheel {
+            return Err(OmcRegistryError::UnsupportedSpec(
+                "pip download cannot build local directories; use pip wheel".to_owned(),
+            ));
+        }
+        build_pip_local_wheels(project_dir, &destination, &local_paths)?;
+    }
     Ok(())
 }
 
 fn apply_pypi_download_requirements(
     options: &mut LinkOptions,
     specs: &mut Vec<PackageSpec>,
+    local_paths: &mut Vec<PythonLocalRequirement>,
     requirements: ProjectRequirements,
+    allow_local_paths: bool,
 ) -> Result<(), OmcRegistryError> {
-    if !requirements.python_local_paths.is_empty()
-        || !requirements.python_local_requirements.is_empty()
-        || !requirements.python_vcs_requirements.is_empty()
-    {
+    if !requirements.python_vcs_requirements.is_empty() {
         return Err(OmcRegistryError::UnsupportedSpec(
             "this OMC compatibility path supports registry requirements and direct wheel/sdist archives; local directories and VCS requirements need a real install"
                 .to_owned(),
         ));
+    }
+    if !requirements.python_local_paths.is_empty()
+        || !requirements.python_local_requirements.is_empty()
+    {
+        if !allow_local_paths {
+            return Err(OmcRegistryError::UnsupportedSpec(
+                "this OMC compatibility path supports registry requirements and direct wheel/sdist archives; local directories need pip wheel"
+                    .to_owned(),
+            ));
+        }
+        local_paths.extend(
+            requirements
+                .python_local_paths
+                .into_iter()
+                .map(|path| PythonLocalRequirement::new(path, BTreeSet::new())),
+        );
+        local_paths.extend(requirements.python_local_requirements);
     }
 
     specs.extend(requirements.specs);
@@ -10939,6 +10989,612 @@ fn pypi_download_filename(package: &LockedPackage) -> String {
                 .map(str::to_owned)
         })
         .unwrap_or_else(|| format!("{}-{}.archive", package.name, package.version))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PipLocalWheelMetadata {
+    name: String,
+    version: String,
+    requires_dist: Vec<String>,
+    entry_points: Vec<PipLocalWheelEntryPoint>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PipLocalWheelEntryPoint {
+    group: String,
+    name: String,
+    target: String,
+}
+
+fn build_pip_local_wheels(
+    project_dir: &Path,
+    destination: &Path,
+    requirements: &[PythonLocalRequirement],
+) -> Result<(), OmcRegistryError> {
+    let mut built = 0usize;
+    let mut seen = BTreeSet::new();
+    for requirement in requirements {
+        let package_dir = absolutize_path(project_dir, requirement.path.clone());
+        let package_dir = fs::canonicalize(&package_dir).map_err(|error| {
+            OmcRegistryError::UnsupportedRequirement(format!(
+                "local wheel path `{}` could not be resolved: {error}",
+                requirement.path.display()
+            ))
+        })?;
+        if !package_dir.is_dir() {
+            return Err(OmcRegistryError::UnsupportedRequirement(format!(
+                "local wheel path `{}` must be a directory",
+                package_dir.display()
+            )));
+        }
+        if !seen.insert(package_dir.clone()) {
+            continue;
+        }
+
+        let metadata = read_pip_local_wheel_metadata(&package_dir, &requirement.extras)?;
+        let filename = pip_local_wheel_filename(&metadata);
+        let target = destination.join(filename);
+        write_pip_local_wheel(&package_dir, &metadata, &target)?;
+        println!("Created {}", target.display());
+        built += 1;
+    }
+    println!("Successfully built {built} local wheel(s)");
+    Ok(())
+}
+
+fn read_pip_local_wheel_metadata(
+    package_dir: &Path,
+    extras: &BTreeSet<String>,
+) -> Result<PipLocalWheelMetadata, OmcRegistryError> {
+    if let Some(metadata) = read_pyproject_wheel_metadata(package_dir, extras)? {
+        return Ok(metadata);
+    }
+    if let Some(metadata) = read_setup_cfg_wheel_metadata(package_dir, extras)? {
+        return Ok(metadata);
+    }
+    Err(OmcRegistryError::UnsupportedRequirement(format!(
+        "local wheel path `{}` must declare static name and version in pyproject.toml or setup.cfg",
+        package_dir.display()
+    )))
+}
+
+fn read_pyproject_wheel_metadata(
+    package_dir: &Path,
+    extras: &BTreeSet<String>,
+) -> Result<Option<PipLocalWheelMetadata>, OmcRegistryError> {
+    let path = package_dir.join("pyproject.toml");
+    if !path.exists() {
+        return Ok(None);
+    }
+    let pyproject = toml::from_str::<toml::Value>(&fs::read_to_string(path)?)?;
+    if let Some(project) = pyproject.get("project").and_then(toml::Value::as_table) {
+        let Some(name) = toml_table_string(project, "name") else {
+            return Ok(None);
+        };
+        let Some(version) = toml_table_string(project, "version") else {
+            return Ok(None);
+        };
+        let mut requires_dist = toml_string_array(project, "dependencies");
+        if let Some(optional) = project
+            .get("optional-dependencies")
+            .and_then(toml::Value::as_table)
+        {
+            for extra in extras {
+                if let Some(dependencies) = optional.get(extra).and_then(toml::Value::as_array) {
+                    requires_dist.extend(
+                        dependencies
+                            .iter()
+                            .filter_map(toml::Value::as_str)
+                            .map(str::to_owned),
+                    );
+                }
+            }
+        }
+        let mut entry_points = Vec::new();
+        collect_toml_script_table(project, "scripts", "console_scripts", &mut entry_points);
+        collect_toml_script_table(project, "gui-scripts", "gui_scripts", &mut entry_points);
+        return Ok(Some(PipLocalWheelMetadata {
+            name,
+            version,
+            requires_dist,
+            entry_points,
+        }));
+    }
+
+    if let Some(poetry) = pyproject
+        .get("tool")
+        .and_then(toml::Value::as_table)
+        .and_then(|tool| tool.get("poetry"))
+        .and_then(toml::Value::as_table)
+    {
+        let Some(name) = toml_table_string(poetry, "name") else {
+            return Ok(None);
+        };
+        let Some(version) = toml_table_string(poetry, "version") else {
+            return Ok(None);
+        };
+        let mut requires_dist = Vec::new();
+        if let Some(dependencies) = poetry.get("dependencies").and_then(toml::Value::as_table) {
+            for (name, dependency) in dependencies {
+                if name.eq_ignore_ascii_case("python") {
+                    continue;
+                }
+                if let Some(requirement) = poetry_dependency_requirement(name, dependency) {
+                    requires_dist.push(requirement);
+                }
+            }
+        }
+        let mut entry_points = Vec::new();
+        collect_poetry_script_table(poetry, &mut entry_points);
+        return Ok(Some(PipLocalWheelMetadata {
+            name,
+            version,
+            requires_dist,
+            entry_points,
+        }));
+    }
+
+    Ok(None)
+}
+
+fn read_setup_cfg_wheel_metadata(
+    package_dir: &Path,
+    extras: &BTreeSet<String>,
+) -> Result<Option<PipLocalWheelMetadata>, OmcRegistryError> {
+    let path = package_dir.join("setup.cfg");
+    if !path.exists() {
+        return Ok(None);
+    }
+    let sections = parse_pip_local_setup_cfg(&fs::read_to_string(path)?);
+    let metadata = sections.get("metadata");
+    let Some(name) = metadata.and_then(|section| setup_cfg_first_value(section, "name")) else {
+        return Ok(None);
+    };
+    let Some(version) = metadata.and_then(|section| setup_cfg_first_value(section, "version"))
+    else {
+        return Ok(None);
+    };
+    let mut requires_dist = sections
+        .get("options")
+        .and_then(|section| section.get("install_requires"))
+        .cloned()
+        .unwrap_or_default();
+    if let Some(extra_section) = sections.get("options.extras_require") {
+        for extra in extras {
+            if let Some(values) = extra_section.get(extra) {
+                requires_dist.extend(values.clone());
+            }
+        }
+    }
+    let mut entry_points = Vec::new();
+    if let Some(section) = sections.get("options.entry_points") {
+        for group in ["console_scripts", "gui_scripts"] {
+            if let Some(values) = section.get(group) {
+                entry_points.extend(
+                    values
+                        .iter()
+                        .filter_map(|value| pip_local_entry_point(group, value)),
+                );
+            }
+        }
+    }
+    Ok(Some(PipLocalWheelMetadata {
+        name,
+        version,
+        requires_dist,
+        entry_points,
+    }))
+}
+
+fn toml_table_string(table: &toml::value::Table, key: &str) -> Option<String> {
+    table
+        .get(key)
+        .and_then(toml::Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .map(|value| value.trim().to_owned())
+}
+
+fn toml_string_array(table: &toml::value::Table, key: &str) -> Vec<String> {
+    table
+        .get(key)
+        .and_then(toml::Value::as_array)
+        .map(|values| {
+            values
+                .iter()
+                .filter_map(toml::Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_owned)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn collect_toml_script_table(
+    table: &toml::value::Table,
+    key: &str,
+    group: &str,
+    entry_points: &mut Vec<PipLocalWheelEntryPoint>,
+) {
+    let Some(scripts) = table.get(key).and_then(toml::Value::as_table) else {
+        return;
+    };
+    entry_points.extend(scripts.iter().filter_map(|(name, target)| {
+        target
+            .as_str()
+            .and_then(|target| pip_local_script_entry(group, name, target))
+    }));
+}
+
+fn collect_poetry_script_table(
+    table: &toml::value::Table,
+    entry_points: &mut Vec<PipLocalWheelEntryPoint>,
+) {
+    let Some(scripts) = table.get("scripts").and_then(toml::Value::as_table) else {
+        return;
+    };
+    entry_points.extend(scripts.iter().filter_map(|(name, value)| {
+        let target = value.as_str().or_else(|| {
+            value
+                .as_table()
+                .and_then(|table| table.get("callable"))
+                .and_then(toml::Value::as_str)
+        })?;
+        pip_local_script_entry("console_scripts", name, target)
+    }));
+}
+
+fn poetry_dependency_requirement(name: &str, dependency: &toml::Value) -> Option<String> {
+    if let Some(version) = dependency.as_str() {
+        return Some(python_dependency_requirement(name, version));
+    }
+    let table = dependency.as_table()?;
+    let version = table
+        .get("version")
+        .and_then(toml::Value::as_str)
+        .unwrap_or_default();
+    if table.get("optional").and_then(toml::Value::as_bool) == Some(true) {
+        return None;
+    }
+    Some(python_dependency_requirement(name, version))
+}
+
+fn python_dependency_requirement(name: &str, version: &str) -> String {
+    let version = version.trim();
+    if version.is_empty() || version == "*" {
+        name.to_owned()
+    } else if version.starts_with(['<', '>', '=', '!', '~']) {
+        format!("{name}{version}")
+    } else {
+        format!("{name} {version}")
+    }
+}
+
+fn parse_pip_local_setup_cfg(content: &str) -> BTreeMap<String, BTreeMap<String, Vec<String>>> {
+    let mut sections = BTreeMap::<String, BTreeMap<String, Vec<String>>>::new();
+    let mut section = String::new();
+    let mut key = None::<String>;
+    for raw in content.lines() {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') || trimmed.starts_with(';') {
+            continue;
+        }
+        if trimmed.starts_with('[') && trimmed.ends_with(']') {
+            section = trimmed[1..trimmed.len() - 1].trim().to_ascii_lowercase();
+            key = None;
+            sections.entry(section.clone()).or_default();
+            continue;
+        }
+        if section.is_empty() {
+            continue;
+        }
+        if let Some((parsed_key, value)) = setup_cfg_assignment(trimmed) {
+            let parsed_key = parsed_key.to_ascii_lowercase();
+            key = Some(parsed_key.clone());
+            if !value.trim().is_empty() {
+                sections
+                    .entry(section.clone())
+                    .or_default()
+                    .entry(parsed_key)
+                    .or_default()
+                    .push(value.trim().to_owned());
+            } else {
+                sections
+                    .entry(section.clone())
+                    .or_default()
+                    .entry(parsed_key)
+                    .or_default();
+            }
+            continue;
+        }
+        if raw.chars().next().map(char::is_whitespace).unwrap_or(false) {
+            if let Some(key) = key.as_ref() {
+                sections
+                    .entry(section.clone())
+                    .or_default()
+                    .entry(key.clone())
+                    .or_default()
+                    .push(trimmed.to_owned());
+            }
+        }
+    }
+    sections
+}
+
+fn setup_cfg_assignment(value: &str) -> Option<(&str, &str)> {
+    value
+        .split_once('=')
+        .or_else(|| value.split_once(':'))
+        .map(|(key, value)| (key.trim(), value.trim()))
+        .filter(|(key, _)| !key.is_empty())
+}
+
+fn setup_cfg_first_value(section: &BTreeMap<String, Vec<String>>, key: &str) -> Option<String> {
+    section
+        .get(key)
+        .and_then(|values| values.iter().find(|value| !value.trim().is_empty()))
+        .map(|value| value.trim().to_owned())
+}
+
+fn pip_local_entry_point(group: &str, value: &str) -> Option<PipLocalWheelEntryPoint> {
+    let (name, target) = value.split_once('=')?;
+    pip_local_script_entry(group, name.trim(), target.trim())
+}
+
+fn pip_local_script_entry(
+    group: &str,
+    name: &str,
+    target: &str,
+) -> Option<PipLocalWheelEntryPoint> {
+    (!name.is_empty() && !target.is_empty()).then(|| PipLocalWheelEntryPoint {
+        group: group.to_owned(),
+        name: name.to_owned(),
+        target: target.to_owned(),
+    })
+}
+
+fn pip_local_wheel_filename(metadata: &PipLocalWheelMetadata) -> String {
+    format!(
+        "{}-{}-py3-none-any.whl",
+        python_wheel_component(&metadata.name),
+        python_wheel_version_component(&metadata.version)
+    )
+}
+
+fn python_wheel_component(value: &str) -> String {
+    let mut out = String::new();
+    let mut previous_separator = false;
+    for ch in value.chars() {
+        if ch.is_ascii_alphanumeric() {
+            out.push(ch.to_ascii_lowercase());
+            previous_separator = false;
+        } else if !previous_separator {
+            out.push('_');
+            previous_separator = true;
+        }
+    }
+    out.trim_matches('_').to_owned()
+}
+
+fn python_wheel_version_component(value: &str) -> String {
+    value
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '!' | '+') {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>()
+        .trim_matches('_')
+        .to_owned()
+}
+
+fn write_pip_local_wheel(
+    package_dir: &Path,
+    metadata: &PipLocalWheelMetadata,
+    target: &Path,
+) -> Result<(), OmcRegistryError> {
+    if let Some(parent) = target.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let file = fs::File::create(target)?;
+    let mut archive = zip::ZipWriter::new(file);
+    let options = zip::write::SimpleFileOptions::default()
+        .compression_method(zip::CompressionMethod::Deflated);
+    let import_root = pip_local_wheel_import_root(package_dir);
+    let mut record_paths = Vec::new();
+
+    for (archive_path, source) in pip_local_wheel_source_files(&import_root)? {
+        let bytes = fs::read(source)?;
+        write_wheel_file(&mut archive, &archive_path, &bytes, options)?;
+        record_paths.push(archive_path);
+    }
+
+    let dist_info = format!(
+        "{}-{}.dist-info",
+        python_wheel_component(&metadata.name),
+        python_wheel_version_component(&metadata.version)
+    );
+    let metadata_path = format!("{dist_info}/METADATA");
+    write_wheel_file(
+        &mut archive,
+        &metadata_path,
+        pip_local_wheel_metadata_content(metadata).as_bytes(),
+        options,
+    )?;
+    record_paths.push(metadata_path);
+
+    let wheel_path = format!("{dist_info}/WHEEL");
+    write_wheel_file(
+        &mut archive,
+        &wheel_path,
+        b"Wheel-Version: 1.0\nGenerator: omc\nRoot-Is-Purelib: true\nTag: py3-none-any\n",
+        options,
+    )?;
+    record_paths.push(wheel_path);
+
+    if !metadata.entry_points.is_empty() {
+        let entry_points_path = format!("{dist_info}/entry_points.txt");
+        write_wheel_file(
+            &mut archive,
+            &entry_points_path,
+            pip_local_wheel_entry_points_content(&metadata.entry_points).as_bytes(),
+            options,
+        )?;
+        record_paths.push(entry_points_path);
+    }
+
+    let record_path = format!("{dist_info}/RECORD");
+    record_paths.sort();
+    let mut record = record_paths
+        .iter()
+        .map(|path| format!("{path},,\n"))
+        .collect::<String>();
+    record.push_str(&format!("{record_path},,\n"));
+    write_wheel_file(&mut archive, &record_path, record.as_bytes(), options)?;
+    archive.finish()?;
+    Ok(())
+}
+
+fn pip_local_wheel_import_root(package_dir: &Path) -> PathBuf {
+    let src = package_dir.join("src");
+    if src.is_dir() {
+        src
+    } else {
+        package_dir.to_path_buf()
+    }
+}
+
+fn pip_local_wheel_source_files(
+    import_root: &Path,
+) -> Result<Vec<(String, PathBuf)>, OmcRegistryError> {
+    let mut files = Vec::new();
+    collect_pip_local_wheel_source_files(import_root, import_root, &mut files)?;
+    files.sort_by(|left, right| left.0.cmp(&right.0));
+    Ok(files)
+}
+
+fn collect_pip_local_wheel_source_files(
+    root: &Path,
+    current: &Path,
+    files: &mut Vec<(String, PathBuf)>,
+) -> Result<(), OmcRegistryError> {
+    let mut entries = fs::read_dir(current)?.collect::<std::result::Result<Vec<_>, _>>()?;
+    entries.sort_by_key(|entry| entry.file_name());
+    for entry in entries {
+        let path = entry.path();
+        let file_type = entry.file_type()?;
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if file_type.is_dir() {
+            if pip_local_wheel_skip_dir(&name) {
+                continue;
+            }
+            collect_pip_local_wheel_source_files(root, &path, files)?;
+        } else if file_type.is_file() {
+            let relative = path.strip_prefix(root).unwrap_or(&path);
+            if !pip_local_wheel_include_file(relative) {
+                continue;
+            }
+            files.push((wheel_archive_path(relative)?, path));
+        }
+    }
+    Ok(())
+}
+
+fn pip_local_wheel_skip_dir(name: &str) -> bool {
+    name.starts_with('.')
+        || matches!(
+            name,
+            "__pycache__" | "build" | "dist" | "venv" | ".venv" | ".omc"
+        )
+        || name.ends_with(".egg-info")
+        || name.ends_with(".dist-info")
+}
+
+fn pip_local_wheel_include_file(path: &Path) -> bool {
+    let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+    if name.ends_with(".pyc")
+        || name == "pyproject.toml"
+        || name == "setup.cfg"
+        || name == "setup.py"
+    {
+        return false;
+    }
+    true
+}
+
+fn wheel_archive_path(path: &Path) -> Result<String, OmcRegistryError> {
+    let mut parts = Vec::new();
+    for component in path.components() {
+        let std::path::Component::Normal(part) = component else {
+            return Err(OmcRegistryError::UnsafeArchivePath(
+                path.to_string_lossy().into_owned(),
+            ));
+        };
+        let Some(part) = part.to_str().filter(|part| !part.is_empty()) else {
+            return Err(OmcRegistryError::UnsafeArchivePath(
+                path.to_string_lossy().into_owned(),
+            ));
+        };
+        parts.push(part.to_owned());
+    }
+    if parts.is_empty() {
+        return Err(OmcRegistryError::UnsafeArchivePath(
+            path.to_string_lossy().into_owned(),
+        ));
+    }
+    Ok(parts.join("/"))
+}
+
+fn write_wheel_file<W: io::Write + io::Seek>(
+    archive: &mut zip::ZipWriter<W>,
+    path: &str,
+    bytes: &[u8],
+    options: zip::write::SimpleFileOptions,
+) -> Result<(), OmcRegistryError> {
+    archive.start_file(path, options)?;
+    archive.write_all(bytes)?;
+    Ok(())
+}
+
+fn pip_local_wheel_metadata_content(metadata: &PipLocalWheelMetadata) -> String {
+    let mut content = format!(
+        "Metadata-Version: 2.1\nName: {}\nVersion: {}\n",
+        metadata.name, metadata.version
+    );
+    for requirement in &metadata.requires_dist {
+        content.push_str("Requires-Dist: ");
+        content.push_str(requirement);
+        content.push('\n');
+    }
+    content
+}
+
+fn pip_local_wheel_entry_points_content(entry_points: &[PipLocalWheelEntryPoint]) -> String {
+    let mut by_group = BTreeMap::<String, Vec<&PipLocalWheelEntryPoint>>::new();
+    for entry in entry_points {
+        by_group.entry(entry.group.clone()).or_default().push(entry);
+    }
+    let mut content = String::new();
+    for (group, mut entries) in by_group {
+        entries.sort_by(|left, right| left.name.cmp(&right.name));
+        content.push('[');
+        content.push_str(&group);
+        content.push_str("]\n");
+        for entry in entries {
+            content.push_str(&entry.name);
+            content.push_str(" = ");
+            content.push_str(&entry.target);
+            content.push('\n');
+        }
+        content.push('\n');
+    }
+    content
 }
 
 fn print_npm_version(project_dir: &Path, action: NpmVersionAction) -> Result<(), OmcRegistryError> {
@@ -16922,6 +17578,7 @@ fn absolute_project_dir(project_dir: &Path) -> PathBuf {
 
 fn apply_pip_compat_index_options(
     options: &mut LinkOptions,
+    project_dir: &Path,
     index_url: Option<String>,
     extra_index_urls: Vec<String>,
     find_links: Vec<String>,
@@ -16931,8 +17588,21 @@ fn apply_pip_compat_index_options(
         options.pypi_index_url = index_url;
     }
     options.pypi_extra_index_urls.extend(extra_index_urls);
-    options.pypi_find_links.extend(find_links);
+    options.pypi_find_links.extend(
+        find_links
+            .into_iter()
+            .map(|source| normalize_pip_compat_find_links(project_dir, source)),
+    );
     options.pypi_no_index |= no_index;
+}
+
+fn normalize_pip_compat_find_links(project_dir: &Path, source: String) -> String {
+    if source.is_empty() || source.contains("://") {
+        return source;
+    }
+    absolutize_path(project_dir, PathBuf::from(source))
+        .to_string_lossy()
+        .into_owned()
 }
 
 fn apply_pip_environment_defaults_for_project(options: &mut LinkOptions, project_dir: &Path) {
@@ -24344,6 +25014,7 @@ fn parse_pip_artifact_args(
     let mut compatibility = PipCompatibilityTarget::default();
     let mut destination = PathBuf::from(".");
     let mut archive_references = Vec::new();
+    let mut local_paths = Vec::new();
     let mut filtered = Vec::new();
     let mut index = 0;
     while index < args.len() {
@@ -24529,13 +25200,14 @@ fn parse_pip_artifact_args(
         } else if is_pip_archive_arg(arg) {
             archive_references.push(arg.clone());
         } else if is_pip_local_directory_arg(arg) {
-            let (command, expected) = match command {
-                PipArtifactCommand::Download => ("download", "a wheel or sdist archive"),
-                PipArtifactCommand::Wheel => ("wheel", "a wheel or sdist archive"),
-            };
-            return Err(OmcRegistryError::UnsupportedSpec(format!(
-                "pip {command} cannot build local directory `{arg}`; pass {expected}"
-            )));
+            match command {
+                PipArtifactCommand::Download => {
+                    return Err(OmcRegistryError::UnsupportedSpec(format!(
+                        "pip download cannot build local directory `{arg}`; use pip wheel"
+                    )));
+                }
+                PipArtifactCommand::Wheel => local_paths.push(pip_local_path_arg(arg)?),
+            }
         } else {
             filtered.push(arg.clone());
         }
@@ -24554,6 +25226,7 @@ fn parse_pip_artifact_args(
         requirements,
         constraints,
         archive_references,
+        local_paths,
         index_url,
         extra_index_urls,
         find_links,
@@ -30923,6 +31596,7 @@ verdict = "accepted"
                 requirements: vec![PathBuf::from("requirements.txt")],
                 constraints: vec![PathBuf::from("constraints.txt")],
                 archive_references: Vec::new(),
+                local_paths: Vec::new(),
                 index_url: Some("https://mirror.example/simple".to_owned()),
                 extra_index_urls: Vec::new(),
                 find_links: vec!["vendor".to_owned()],
@@ -30980,6 +31654,7 @@ verdict = "accepted"
                 requirements: vec![PathBuf::from("requirements.txt")],
                 constraints: Vec::new(),
                 archive_references: Vec::new(),
+                local_paths: Vec::new(),
                 index_url: Some("https://mirror.example/simple".to_owned()),
                 extra_index_urls: Vec::new(),
                 find_links: vec!["vendor".to_owned()],
@@ -31009,6 +31684,7 @@ verdict = "accepted"
                 requirements: Vec::new(),
                 constraints: Vec::new(),
                 archive_references: vec!["./dist/source_pkg-1.0.0.tar.gz".to_owned()],
+                local_paths: Vec::new(),
                 index_url: None,
                 extra_index_urls: Vec::new(),
                 find_links: Vec::new(),
@@ -31024,6 +31700,34 @@ verdict = "accepted"
                 allow_all_host: false,
             }))
         );
+        assert_eq!(
+            parse_pip_compat_action(&args(&["wheel", "./local_pkg[dev]", "-w", "wheelhouse",]))
+                .unwrap(),
+            PipCompatAction::Wheel(Box::new(PipDownloadAction {
+                specs: Vec::new(),
+                requirements: Vec::new(),
+                constraints: Vec::new(),
+                archive_references: Vec::new(),
+                local_paths: vec![PythonLocalRequirement::new(
+                    PathBuf::from("./local_pkg"),
+                    BTreeSet::from(["dev".to_owned()])
+                )],
+                index_url: None,
+                extra_index_urls: Vec::new(),
+                find_links: Vec::new(),
+                no_index: false,
+                binary_all: None,
+                binary_packages: BTreeMap::new(),
+                require_hashes: false,
+                no_deps: false,
+                allow_prereleases: false,
+                compatibility: PipCompatibilityTarget::default(),
+                destination: PathBuf::from("wheelhouse"),
+                allow: Vec::new(),
+                allow_all_host: false,
+            }))
+        );
+        assert!(parse_pip_compat_action(&args(&["download", "./local_pkg"])).is_err());
     }
 
     #[test]
@@ -31127,6 +31831,89 @@ verdict = "accepted"
                 allow_all_host: false,
             }))
         );
+    }
+
+    #[test]
+    fn pip_wheel_builds_and_installs_local_directory_wheel() {
+        let project = test_dir("pip-wheel-local-project");
+        let local = test_dir("pip-wheel-local-package");
+        fs::create_dir_all(local.join("src").join("local_pkg")).unwrap();
+        fs::write(
+            local.join("src").join("local_pkg").join("__init__.py"),
+            "VALUE = 7\n\ndef main():\n    print(VALUE)\n",
+        )
+        .unwrap();
+        fs::write(
+            local.join("pyproject.toml"),
+            r#"
+[project]
+name = "local-pkg"
+version = "0.1.0"
+
+[project.scripts]
+local-cli = "local_pkg:main"
+"#,
+        )
+        .unwrap();
+
+        with_env_values(
+            &[
+                ("PIP_CONFIG_FILE", None),
+                ("PIP_INDEX_URL", None),
+                ("PIP_EXTRA_INDEX_URL", None),
+                ("PIP_FIND_LINKS", None),
+                ("PIP_NO_INDEX", None),
+                ("PIP_TARGET", None),
+                ("PIP_PREFIX", None),
+                ("PIP_ROOT", None),
+                ("PIP_USER", None),
+                ("PIP_DEST", None),
+                ("PIP_DESTINATION_DIR", None),
+                ("PIP_WHEEL_DIR", None),
+            ],
+            || {
+                let status = run_pip_compat(
+                    &project,
+                    &args(&["wheel", local.to_str().unwrap(), "-w", "wheelhouse"]),
+                )
+                .unwrap();
+                assert_eq!(status, ExitCode::SUCCESS);
+                assert!(project
+                    .join("wheelhouse")
+                    .join("local_pkg-0.1.0-py3-none-any.whl")
+                    .exists());
+
+                let status = run_pip_compat(
+                    &project,
+                    &args(&[
+                        "install",
+                        "--no-index",
+                        "--find-links",
+                        "wheelhouse",
+                        "local-pkg==0.1.0",
+                    ]),
+                )
+                .unwrap();
+                assert_eq!(status, ExitCode::SUCCESS);
+            },
+        );
+
+        assert!(project
+            .join(".omc")
+            .join("python")
+            .join("site-packages")
+            .join("local_pkg")
+            .join("__init__.py")
+            .exists());
+        assert!(project
+            .join(".omc")
+            .join("python")
+            .join("bin")
+            .join("local-cli")
+            .exists());
+
+        let _ = fs::remove_dir_all(project);
+        let _ = fs::remove_dir_all(local);
     }
 
     #[test]
