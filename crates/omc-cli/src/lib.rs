@@ -402,6 +402,9 @@ enum NpmCompatAction {
         allow: Vec<String>,
         allow_flow: Vec<String>,
         allow_all_host: bool,
+        workspaces: Vec<String>,
+        all_workspaces: bool,
+        include_workspace_root: bool,
     },
     Remove {
         specs: Vec<String>,
@@ -3902,7 +3905,17 @@ fn run_npm_ci_compat(
     allow: Vec<String>,
     allow_flow: Vec<String>,
     allow_all_host: bool,
+    workspaces: &[String],
+    all_workspaces: bool,
+    include_workspace_root: bool,
 ) -> Result<ExitCode, OmcRegistryError> {
+    validate_npm_workspace_selection(
+        project_dir,
+        workspaces,
+        all_workspaces,
+        include_workspace_root,
+        "npm ci",
+    )?;
     if dry_run {
         return run_npm_ci_dry_run(
             project_dir,
@@ -3923,6 +3936,30 @@ fn run_npm_ci_compat(
     };
     print_install_report(&install);
     Ok(ExitCode::SUCCESS)
+}
+
+fn validate_npm_workspace_selection(
+    project_dir: &Path,
+    workspaces: &[String],
+    all_workspaces: bool,
+    include_workspace_root: bool,
+    command: &str,
+) -> Result<(), OmcRegistryError> {
+    if workspaces.is_empty() && !all_workspaces && !include_workspace_root {
+        return Ok(());
+    }
+    let targets = npm_script_target_dirs(
+        project_dir,
+        workspaces,
+        all_workspaces,
+        include_workspace_root,
+    )?;
+    if targets.is_empty() {
+        return Err(OmcRegistryError::UnsupportedSpec(format!(
+            "{command} workspace selection did not match any package"
+        )));
+    }
+    Ok(())
 }
 
 fn run_npm_ci_dry_run(
@@ -4098,6 +4135,9 @@ fn run_npm_compat_with_cwd(
                     allow,
                     allow_flow,
                     allow_all_host,
+                    &script_workspaces,
+                    script_all_workspaces,
+                    script_include_workspace_root,
                 )?
             } else {
                 let mut request = NpmInstallCompatRequest {
@@ -4150,6 +4190,9 @@ fn run_npm_compat_with_cwd(
             allow,
             allow_flow,
             allow_all_host,
+            workspaces,
+            all_workspaces,
+            include_workspace_root,
         } => {
             return run_npm_ci_compat(
                 project_dir,
@@ -4160,6 +4203,9 @@ fn run_npm_compat_with_cwd(
                 allow,
                 allow_flow,
                 allow_all_host,
+                &workspaces,
+                all_workspaces,
+                include_workspace_root,
             )
         }
         NpmCompatAction::Remove {
@@ -21492,6 +21538,9 @@ fn parse_npm_compat_action(args: &[String]) -> Result<NpmCompatAction, OmcRegist
                 allow,
                 allow_flow,
                 allow_all_host,
+                workspaces,
+                all_workspaces,
+                include_workspace_root,
                 positionals,
                 ..
             } = parse_common_compat_flags(&args[1..], true)?;
@@ -21506,6 +21555,9 @@ fn parse_npm_compat_action(args: &[String]) -> Result<NpmCompatAction, OmcRegist
                 allow,
                 allow_flow,
                 allow_all_host,
+                workspaces,
+                all_workspaces,
+                include_workspace_root,
             })
         }
         "remove" | "uninstall" | "unlink" | "rm" | "r" | "un" => {
@@ -33149,6 +33201,63 @@ mod tests {
     }
 
     #[test]
+    fn npm_ci_validates_workspace_selection() {
+        let project = test_dir("npm-ci-workspace-selection");
+        fs::create_dir_all(project.join("packages/lib")).unwrap();
+        fs::write(
+            project.join("package.json"),
+            r#"{"name":"root","version":"1.0.0","workspaces":["packages/*"]}"#,
+        )
+        .unwrap();
+        fs::write(
+            project.join("packages/lib/package.json"),
+            r#"{"name":"@demo/lib","version":"1.0.0"}"#,
+        )
+        .unwrap();
+        fs::write(
+            project.join("package-lock.json"),
+            r#"{
+                "name": "root",
+                "version": "1.0.0",
+                "lockfileVersion": 3,
+                "requires": true,
+                "packages": {
+                    "": {
+                        "name": "root",
+                        "version": "1.0.0",
+                        "workspaces": ["packages/*"]
+                    },
+                    "packages/lib": {
+                        "name": "@demo/lib",
+                        "version": "1.0.0"
+                    }
+                }
+            }"#,
+        )
+        .unwrap();
+
+        let status = run_npm_compat(
+            &project,
+            &args(&["ci", "--workspace", "@demo/lib", "--dry-run"]),
+        )
+        .unwrap();
+        assert_eq!(status, ExitCode::SUCCESS);
+        assert!(!project.join("omc.lock").exists());
+        assert!(!project.join("node_modules").exists());
+
+        let error = run_npm_compat(
+            &project,
+            &args(&["ci", "--workspace", "@demo/missing", "--dry-run"]),
+        )
+        .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("npm workspace `@demo/missing` was not found"));
+
+        let _ = fs::remove_dir_all(project);
+    }
+
+    #[test]
     fn npm_ci_package_lock_rehydrates_after_omit_bootstrap() {
         let project = test_dir("npm-ci-omit-dev-bootstrap-project");
         let prod = test_dir("npm-ci-omit-dev-bootstrap-prod");
@@ -34965,13 +35074,41 @@ verdict = "accepted"
 
         let action = parse_npm_compat_action(&args(&["--dry-run", "ci", "--omit=dev"])).unwrap();
         let NpmCompatAction::Ci {
-            dry_run, omit_dev, ..
+            dry_run,
+            omit_dev,
+            workspaces,
+            all_workspaces,
+            include_workspace_root,
+            ..
         } = action
         else {
             panic!("expected npm ci action");
         };
         assert!(dry_run);
         assert!(omit_dev);
+        assert!(workspaces.is_empty());
+        assert!(!all_workspaces);
+        assert!(!include_workspace_root);
+
+        let action = parse_npm_compat_action(&args(&[
+            "ci",
+            "--workspace",
+            "@demo/lib",
+            "--include-workspace-root",
+        ]))
+        .unwrap();
+        let NpmCompatAction::Ci {
+            workspaces,
+            all_workspaces,
+            include_workspace_root,
+            ..
+        } = action
+        else {
+            panic!("expected npm ci action");
+        };
+        assert_eq!(workspaces, vec!["@demo/lib"]);
+        assert!(!all_workspaces);
+        assert!(include_workspace_root);
 
         let action = parse_npm_compat_action(&args(&[
             "install",

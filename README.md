@@ -667,7 +667,8 @@ Supported now:
   package bins into the prefix bin directory,
   `npm remove <pkg>` removes root `package.json` entries when present, and
   workspace-scoped `npm install`/`npm remove` update selected workspace
-  `package.json` files while installing the root OMC graph; common global npm flags such as
+  `package.json` files while installing the root OMC graph, and `npm ci`
+  validates workspace selectors before lockfile installs; common global npm flags such as
   `--silent`, `--loglevel`, `--cache`, and `--prefix` are accepted before the subcommand,
   and `--prefix PATH` / `--prefix=PATH` on `omc npm` commands switches the effective project directory
   before parsing the command,
