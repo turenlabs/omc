@@ -4924,6 +4924,12 @@ fn run_pip_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
                 project_dir,
                 requirements,
             )?);
+            if specs.is_empty() {
+                return Err(OmcRegistryError::UnsupportedSpec(
+                    "pip uninstall needs at least one package or non-empty requirement file"
+                        .to_owned(),
+                ));
+            }
             if user {
                 return run_pip_uninstall_user(&specs, &allow, &allow_flow, allow_all_host);
             }
@@ -34011,7 +34017,7 @@ version = "0.1.0"
                 fs::write(project.join(path), content).unwrap();
             }
 
-            let error = run_pip_compat(&project, &args(&command))
+            let error = with_clean_pip_env(|| run_pip_compat(&project, &args(&command)))
                 .expect_err("pip install without requested input should fail");
 
             assert!(error.to_string().contains("pip install needs at least one"));
@@ -34028,8 +34034,10 @@ version = "0.1.0"
         let project = test_dir("pip-install-empty-requirement-file");
         fs::write(project.join("requirements.txt"), "").unwrap();
 
-        let status = run_pip_compat(&project, &args(&["install", "-r", "requirements.txt"]))
-            .expect("explicit empty requirement files are valid pip input");
+        let status = with_clean_pip_env(|| {
+            run_pip_compat(&project, &args(&["install", "-r", "requirements.txt"]))
+        })
+        .expect("explicit empty requirement files are valid pip input");
 
         assert_eq!(status, ExitCode::SUCCESS);
         assert!(project.join("omc.toml").exists());
@@ -34075,10 +34083,12 @@ version = "0.1.0"
         )
         .unwrap();
 
-        let status = run_pip_compat(
-            &project,
-            &args(&["install", "--group", "Tools", "--no-index"]),
-        )
+        let status = with_clean_pip_env(|| {
+            run_pip_compat(
+                &project,
+                &args(&["install", "--group", "Tools", "--no-index"]),
+            )
+        })
         .unwrap();
 
         assert_eq!(status, ExitCode::SUCCESS);
@@ -34159,15 +34169,17 @@ version = "0.1.0"
         )
         .unwrap();
 
-        let status = run_pip_compat(
-            &project,
-            &args(&[
-                "install",
-                "--group",
-                "packages/tooling/pyproject.toml:Tools",
-                "--no-index",
-            ]),
-        )
+        let status = with_clean_pip_env(|| {
+            run_pip_compat(
+                &project,
+                &args(&[
+                    "install",
+                    "--group",
+                    "packages/tooling/pyproject.toml:Tools",
+                    "--no-index",
+                ]),
+            )
+        })
         .unwrap();
 
         assert_eq!(status, ExitCode::SUCCESS);
@@ -34193,7 +34205,10 @@ version = "0.1.0"
         )
         .unwrap();
 
-        let status = run_pip_compat(&project, &args(&["lock", "-o", "locks/pylock.toml"])).unwrap();
+        let status = with_clean_pip_env(|| {
+            run_pip_compat(&project, &args(&["lock", "-o", "locks/pylock.toml"]))
+        })
+        .unwrap();
 
         assert_eq!(status, ExitCode::SUCCESS);
         let pylock = fs::read_to_string(project.join("locks").join("pylock.toml")).unwrap();
@@ -35895,6 +35910,29 @@ resolved_commit = "0123456789abcdef0123456789abcdef01234567"
         .unwrap();
 
         assert_eq!(status, ExitCode::SUCCESS);
+        assert!(!project.join("omc.toml").exists());
+        assert!(!project.join("omc.lock").exists());
+        assert!(!project.join(".omc").exists());
+
+        let _ = fs::remove_dir_all(project);
+    }
+
+    #[test]
+    fn pip_uninstall_empty_requirement_file_errors_like_pip() {
+        let project = test_dir("pip-uninstall-empty-requirement-file");
+        fs::write(project.join("requirements.txt"), "\n# no packages\n").unwrap();
+
+        let error = with_clean_pip_env(|| {
+            run_pip_compat(
+                &project,
+                &args(&["uninstall", "-y", "-r", "requirements.txt"]),
+            )
+        })
+        .expect_err("empty uninstall requirement files should fail");
+
+        assert!(error
+            .to_string()
+            .contains("pip uninstall needs at least one package"));
         assert!(!project.join("omc.toml").exists());
         assert!(!project.join("omc.lock").exists());
         assert!(!project.join(".omc").exists());
