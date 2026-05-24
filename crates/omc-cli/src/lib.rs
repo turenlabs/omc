@@ -17788,7 +17788,10 @@ fn apply_project_runtime_env_for_cwd(
         .env("PATH", project_path_for_cwd(project_dir, cwd)?)
         .env("PYTHONPATH", project_python_path(project_dir)?)
         .env("PYTHONNOUSERSITE", "1")
-        .env("NODE_OPTIONS", "--preserve-symlinks")
+        .env(
+            "NODE_OPTIONS",
+            "--preserve-symlinks --preserve-symlinks-main",
+        )
         .env_remove("NODE_PATH");
     for key in [
         "PYTHONBREAKPOINT",

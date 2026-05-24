@@ -6996,7 +6996,7 @@ fn install_npm_direct_local_links(
             fs::create_dir_all(parent)?;
         }
         create_directory_link(path, &target)?;
-        count += install_npm_bins(path, name, bin_dir)?;
+        count += install_npm_bins(&target, name, bin_dir)?;
     }
     Ok(count)
 }
@@ -7046,7 +7046,7 @@ fn install_npm_workspace_links(
             fs::create_dir_all(parent)?;
         }
         create_directory_link(workspace_dir, &target)?;
-        count += install_npm_bins(workspace_dir, name, bin_dir)?;
+        count += install_npm_bins(&target, name, bin_dir)?;
     }
 
     Ok(count)
@@ -7072,7 +7072,7 @@ fn install_npm_local_dependency_links(
                 fs::create_dir_all(parent)?;
             }
             create_directory_link(&link.path, &target)?;
-            count += install_npm_bins(&link.path, &link.name, bin_dir)?;
+            count += install_npm_bins(&target, &link.name, bin_dir)?;
         }
     }
     Ok(count)
@@ -7989,7 +7989,14 @@ fn remove_path_if_exists(path: &Path) -> Result<()> {
 
 #[cfg(unix)]
 fn create_command_link(source: &Path, target: &Path) -> Result<()> {
-    std::os::unix::fs::symlink(source, target)?;
+    fs::write(
+        target,
+        format!(
+            "#!/bin/sh\n# OMC npm bin shim\nNODE_OPTIONS='--preserve-symlinks --preserve-symlinks-main'\nexport NODE_OPTIONS\nexec {} \"$@\"\n",
+            shell_single_quote(&source.to_string_lossy())
+        ),
+    )?;
+    make_executable(target)?;
     Ok(())
 }
 
@@ -8006,6 +8013,11 @@ fn create_command_link(source: &Path, target: &Path) -> Result<()> {
 fn create_directory_link(source: &Path, target: &Path) -> Result<()> {
     std::os::unix::fs::symlink(source, target)?;
     Ok(())
+}
+
+#[cfg(unix)]
+fn shell_single_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
 }
 
 #[cfg(not(unix))]
@@ -16807,6 +16819,7 @@ mod tests {
             r#"{
                 "name": "parent-pkg",
                 "version": "1.0.0",
+                "bin": { "parent-bin": "cli.js" },
                 "dependencies": {
                     "child-pkg": "file:./child-pkg",
                     "tar-dep": "file:./tar-dep-1.0.0.tgz"
@@ -16817,6 +16830,11 @@ mod tests {
         fs::write(
             parent.join("index.js"),
             "module.exports = require('child-pkg');\n",
+        )
+        .unwrap();
+        fs::write(
+            parent.join("cli.js"),
+            "#!/usr/bin/env node\nconsole.log(require('child-pkg'));\n",
         )
         .unwrap();
         fs::write(
@@ -16852,6 +16870,11 @@ mod tests {
             .packages
             .iter()
             .any(|package| package.name == "tar-dep"));
+        let output = Command::new(dir.path().join("node_modules/.bin/parent-bin"))
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "44");
     }
 
     #[test]
