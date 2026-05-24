@@ -27219,6 +27219,19 @@ fn parse_pip_artifact_args(
             || pip_global_ignored_bool_flag(arg)
             || arg.starts_with("--trusted-host=")
         {
+        } else if command == PipArtifactCommand::Wheel && (arg == "-e" || arg == "--editable") {
+            index += 1;
+            let Some(path) = args.get(index) else {
+                return Err(OmcRegistryError::UnsupportedSpec(format!(
+                    "{arg} needs a path"
+                )));
+            };
+            local_paths.push(pip_local_path_arg(path)?);
+        } else if command == PipArtifactCommand::Wheel && arg.starts_with("--editable=") {
+            let path = arg
+                .strip_prefix("--editable=")
+                .expect("checked editable option");
+            local_paths.push(pip_local_path_arg(path)?);
         } else if command == PipArtifactCommand::Wheel && pip_ignored_wheel_value_flag(arg) {
             index += 1;
             if args.get(index).is_none() {
@@ -36408,6 +36421,44 @@ verdict = "accepted"
             }))
         );
         assert_eq!(
+            parse_pip_compat_action(&args(&[
+                "wheel",
+                "-e",
+                "./local_pkg[dev]",
+                "--editable=./another_pkg",
+                "-w",
+                "wheelhouse",
+            ]))
+            .unwrap(),
+            PipCompatAction::Wheel(Box::new(PipDownloadAction {
+                specs: Vec::new(),
+                requirements: Vec::new(),
+                constraints: Vec::new(),
+                archive_references: Vec::new(),
+                local_paths: vec![
+                    PythonLocalRequirement::new(
+                        PathBuf::from("./local_pkg"),
+                        BTreeSet::from(["dev".to_owned()])
+                    ),
+                    PythonLocalRequirement::new(PathBuf::from("./another_pkg"), BTreeSet::new())
+                ],
+                index_url: None,
+                extra_index_urls: Vec::new(),
+                find_links: Vec::new(),
+                no_index: false,
+                binary_all: None,
+                binary_packages: BTreeMap::new(),
+                require_hashes: false,
+                no_deps: false,
+                allow_prereleases: false,
+                compatibility: PipCompatibilityTarget::default(),
+                destination: PathBuf::from("wheelhouse"),
+                allow: Vec::new(),
+                allow_flow: Vec::new(),
+                allow_all_host: false,
+            }))
+        );
+        assert_eq!(
             parse_pip_compat_action(&args(&["download", "./local_pkg"])).unwrap(),
             PipCompatAction::Download(Box::new(PipDownloadAction {
                 specs: Vec::new(),
@@ -36434,6 +36485,7 @@ verdict = "accepted"
                 allow_all_host: false,
             }))
         );
+        assert!(parse_pip_compat_action(&args(&["download", "-e", "./local_pkg"])).is_err());
     }
 
     #[test]
@@ -36543,6 +36595,60 @@ verdict = "accepted"
                 allow_all_host: false,
             }))
         );
+    }
+
+    #[test]
+    fn pip_wheel_accepts_editable_local_directory() {
+        let project = test_dir("pip-wheel-editable-local-project");
+        let local = test_dir("pip-wheel-editable-local-package");
+        fs::create_dir_all(local.join("src").join("editable_wheel")).unwrap();
+        fs::write(
+            local.join("src").join("editable_wheel").join("__init__.py"),
+            "VALUE = 5\n",
+        )
+        .unwrap();
+        fs::write(
+            local.join("pyproject.toml"),
+            r#"
+[project]
+name = "editable-wheel"
+version = "0.1.0"
+"#,
+        )
+        .unwrap();
+
+        with_env_values(
+            &[
+                ("PIP_CONFIG_FILE", None),
+                ("PIP_INDEX_URL", None),
+                ("PIP_EXTRA_INDEX_URL", None),
+                ("PIP_FIND_LINKS", None),
+                ("PIP_NO_INDEX", None),
+                ("PIP_WHEEL_DIR", None),
+            ],
+            || {
+                let status = run_pip_compat(
+                    &project,
+                    &args(&[
+                        "wheel",
+                        "-e",
+                        local.to_str().unwrap(),
+                        "-w",
+                        "wheelhouse",
+                        "--no-deps",
+                    ]),
+                )
+                .unwrap();
+                assert_eq!(status, ExitCode::SUCCESS);
+                assert!(project
+                    .join("wheelhouse")
+                    .join("editable_wheel-0.1.0-py3-none-any.whl")
+                    .exists());
+            },
+        );
+
+        let _ = fs::remove_dir_all(project);
+        let _ = fs::remove_dir_all(local);
     }
 
     #[test]

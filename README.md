@@ -230,6 +230,7 @@ cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip download -r re
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip download ../local-package -d wheelhouse --no-deps
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip download --only-binary=:all: --platform manylinux_2_28_x86_64 --python-version 3.11 --implementation cp --abi cp311 requests -d wheelhouse
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip wheel -r requirements.txt -w wheelhouse
+cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip wheel -e ../local-package -w wheelhouse --no-deps
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip wheel --no-binary=:all: ./dist/local_pkg-1.0.0.tar.gz -w wheelhouse
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo python -m pip install -e ../local-package
 cargo run -p omc-cli --bin pip3 -- --omc-project-dir /tmp/omc-demo freeze
@@ -535,7 +536,7 @@ Supported now:
   directory paths with selected extras, and common Python environment markers
 - `pip download` and `pip wheel` compatibility for registry requirements,
   requirement files, hashes, direct wheel archives, direct source
-  distributions, and static local directory wheels, including pip-style target compatibility flags
+  distributions, static local directory wheels, and editable local wheel inputs, including pip-style target compatibility flags
   `--platform`, `--python-version`, `--implementation`, and `--abi`;
   `pip download` and `pip wheel` populate the wheelhouse with safe local
   wheels when a build would otherwise be required and include registry and local path
