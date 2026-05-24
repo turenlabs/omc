@@ -23213,19 +23213,33 @@ fn normalize_pip_global_args(args: &[String]) -> Result<Vec<String>, OmcRegistry
 }
 
 fn pip_global_ignored_bool_flag(arg: &str) -> bool {
-    matches!(
-        arg,
-        "--disable-pip-version-check"
-            | "--no-cache-dir"
-            | "--isolated"
-            | "--require-virtualenv"
-            | "--no-color"
-            | "--no-input"
-            | "-q"
-            | "--quiet"
-            | "-v"
-            | "--verbose"
-    )
+    pip_ignored_verbosity_flag(arg)
+        || matches!(
+            arg,
+            "--disable-pip-version-check"
+                | "--no-cache-dir"
+                | "--isolated"
+                | "--require-virtualenv"
+                | "--no-color"
+                | "--no-input"
+        )
+}
+
+fn pip_ignored_verbosity_flag(arg: &str) -> bool {
+    matches!(arg, "-q" | "--quiet" | "-v" | "--verbose")
+        || pip_repeated_short_flag(arg, 'q')
+        || pip_repeated_short_flag(arg, 'v')
+}
+
+fn pip_verbose_flag(arg: &str) -> bool {
+    matches!(arg, "-v" | "--verbose") || pip_repeated_short_flag(arg, 'v')
+}
+
+fn pip_repeated_short_flag(arg: &str, flag: char) -> bool {
+    let Some(rest) = arg.strip_prefix('-') else {
+        return false;
+    };
+    rest.len() > 1 && !rest.starts_with('-') && rest.chars().all(|ch| ch == flag)
 }
 
 fn pip_global_ignored_value_flag(arg: &str) -> bool {
@@ -23392,11 +23406,8 @@ fn parse_pip_index_common_args(args: &[String]) -> Result<PipIndexArgs, OmcRegis
                 | "--isolated"
                 | "--no-cache-dir"
                 | "--ignore-requires-python"
-                | "-v"
-                | "--verbose"
-                | "-q"
-                | "--quiet"
-        ) {
+        ) || pip_ignored_verbosity_flag(arg)
+        {
         } else if pip_index_ignored_value_flag(arg) {
             index += 1;
             if args.get(index).is_none() {
@@ -23527,10 +23538,7 @@ fn parse_pip_config_common_args(args: &[String]) -> Result<PipConfigArgs, OmcReg
             location = PipConfigLocation::Site;
         } else if arg == "--global" {
             location = PipConfigLocation::Global;
-        } else if matches!(
-            arg.as_str(),
-            "--isolated" | "-v" | "--verbose" | "-q" | "--quiet"
-        ) {
+        } else if arg == "--isolated" || pip_ignored_verbosity_flag(arg) {
         } else if arg == "--editor" {
             index += 1;
             if args.get(index).is_none() {
@@ -23613,10 +23621,9 @@ fn parse_pip_uninstall_args(args: &[String]) -> Result<PipCompatAction, OmcRegis
             user = true;
         } else if arg == "--user=false" {
             user = false;
-        } else if matches!(
-            arg.as_str(),
-            "-y" | "--yes" | "--disable-pip-version-check" | "-v" | "--verbose" | "-q" | "--quiet"
-        ) {
+        } else if matches!(arg.as_str(), "-y" | "--yes" | "--disable-pip-version-check")
+            || pip_ignored_verbosity_flag(arg)
+        {
         } else {
             filtered.push(arg.clone());
         }
@@ -23648,10 +23655,7 @@ fn parse_pip_show_args(args: &[String]) -> Result<PipCompatAction, OmcRegistryEr
     let mut files = false;
     let mut user = false;
     for arg in args {
-        if matches!(
-            arg.as_str(),
-            "--disable-pip-version-check" | "-v" | "--verbose"
-        ) {
+        if arg == "--disable-pip-version-check" || pip_ignored_verbosity_flag(arg) {
             continue;
         }
         if matches!(arg.as_str(), "-f" | "--files") {
@@ -23695,10 +23699,7 @@ fn parse_pip_hash_args(args: &[String]) -> Result<PipCompatAction, OmcRegistryEr
             algorithm = parse_pip_hash_algorithm(value)?;
         } else if let Some(value) = arg.strip_prefix("--algorithm=") {
             algorithm = parse_pip_hash_algorithm(value)?;
-        } else if matches!(
-            arg.as_str(),
-            "--disable-pip-version-check" | "-v" | "--verbose" | "-q" | "--quiet"
-        ) {
+        } else if arg == "--disable-pip-version-check" || pip_ignored_verbosity_flag(arg) {
         } else if arg.starts_with('-') {
             return Err(unsupported_compat_arg("pip hash", arg));
         } else {
@@ -23728,10 +23729,7 @@ fn parse_pip_hash_algorithm(value: &str) -> Result<PipHashAlgorithm, OmcRegistry
 fn parse_pip_cache_args(args: &[String]) -> Result<PipCompatAction, OmcRegistryError> {
     let mut filtered = Vec::new();
     for arg in args {
-        if matches!(
-            arg.as_str(),
-            "--disable-pip-version-check" | "-v" | "--verbose" | "-q" | "--quiet"
-        ) {
+        if arg == "--disable-pip-version-check" || pip_ignored_verbosity_flag(arg) {
             continue;
         }
         if arg.starts_with('-') {
@@ -23802,10 +23800,7 @@ fn parse_pip_check_args(args: &[String]) -> Result<PipCompatAction, OmcRegistryE
             user = false;
             continue;
         }
-        if matches!(
-            arg.as_str(),
-            "--disable-pip-version-check" | "-v" | "--verbose"
-        ) {
+        if arg == "--disable-pip-version-check" || pip_ignored_verbosity_flag(arg) {
             continue;
         }
         return Err(unsupported_compat_arg("pip check", arg));
@@ -23824,14 +23819,12 @@ fn parse_pip_debug_args(args: &[String]) -> Result<PipCompatAction, OmcRegistryE
     let mut index = 0;
     while index < args.len() {
         let arg = &args[index];
-        if matches!(
-            arg.as_str(),
-            "-v" | "--verbose" | "--debug" | "--disable-pip-version-check"
-        ) {
-            if matches!(arg.as_str(), "-v" | "--verbose") {
+        if matches!(arg.as_str(), "--debug" | "--disable-pip-version-check")
+            || pip_ignored_verbosity_flag(arg)
+        {
+            if pip_verbose_flag(arg) {
                 action.verbose = true;
             }
-        } else if matches!(arg.as_str(), "-q" | "--quiet") {
         } else if arg == "--platform" {
             action.platform = Some(pip_debug_flag_value(args, &mut index, arg)?);
         } else if let Some(value) = arg.strip_prefix("--platform=") {
@@ -23901,10 +23894,9 @@ fn parse_pip_inspect_args(args: &[String]) -> Result<PipCompatAction, OmcRegistr
         let arg = &args[index];
         if arg == "--user" {
             user = true;
-        } else if matches!(
-            arg.as_str(),
-            "--local" | "--verbose" | "-v" | "--quiet" | "-q" | "--disable-pip-version-check"
-        ) {
+        } else if matches!(arg.as_str(), "--local" | "--disable-pip-version-check")
+            || pip_ignored_verbosity_flag(arg)
+        {
         } else if arg == "--path" {
             index += 1;
             let Some(path) = args.get(index) else {
@@ -23932,15 +23924,9 @@ fn parse_pip_freeze_args(args: &[String]) -> Result<PipFreezeAction, OmcRegistry
             action.user = true;
         } else if matches!(
             arg.as_str(),
-            "--all"
-                | "--local"
-                | "--exclude-editable"
-                | "--disable-pip-version-check"
-                | "-v"
-                | "--verbose"
-                | "-q"
-                | "--quiet"
-        ) {
+            "--all" | "--local" | "--exclude-editable" | "--disable-pip-version-check"
+        ) || pip_ignored_verbosity_flag(arg)
+        {
             if arg == "--exclude-editable" {
                 action.exclude_editable = true;
             }
@@ -24228,7 +24214,8 @@ fn parse_pip_install_args(args: &[String]) -> Result<PipCompatAction, OmcRegistr
                 | "--no-warn-script-location"
                 | "--no-warn-conflicts"
                 | "--no-clean"
-        ) {
+        ) || pip_ignored_verbosity_flag(arg)
+        {
         } else if pip_ignored_install_value_flag(arg) {
             index += 1;
             if args.get(index).is_none() {
@@ -24519,11 +24506,8 @@ fn parse_pip_artifact_args(
                     | "--use-pep517"
                     | "--no-use-pep517"
                     | "--no-clean"
-                    | "-v"
-                    | "--verbose"
-                    | "-q"
-                    | "--quiet"
             )
+            || pip_ignored_verbosity_flag(arg)
             || arg.starts_with("--trusted-host=")
         {
         } else if command == PipArtifactCommand::Wheel && pip_ignored_wheel_value_flag(arg) {
@@ -25364,14 +25348,9 @@ fn parse_pip_list_args(args: &[String]) -> Result<PipCompatAction, OmcRegistryEr
             user = true;
         } else if matches!(
             arg.as_str(),
-            "--local"
-                | "--disable-pip-version-check"
-                | "--ignore-requires-python"
-                | "-v"
-                | "--verbose"
-                | "-q"
-                | "--quiet"
-        ) {
+            "--local" | "--disable-pip-version-check" | "--ignore-requires-python"
+        ) || pip_ignored_verbosity_flag(arg)
+        {
         } else if arg == "-e" || arg == "--editable" {
             editable = PipEditableMode::Only;
         } else if arg == "--include-editable" {
@@ -30740,6 +30719,8 @@ verdict = "accepted"
             "--timeout",
             "5",
             "install",
+            "-q",
+            "-vv",
             "--no-color",
             "-r",
             "requirements.txt",
@@ -30907,6 +30888,8 @@ verdict = "accepted"
 
         let action = parse_pip_compat_action(&args(&[
             "download",
+            "-qq",
+            "--verbose",
             "-r",
             "requirements.txt",
             "-c",
@@ -30963,6 +30946,7 @@ verdict = "accepted"
 
         let action = parse_pip_compat_action(&args(&[
             "wheel",
+            "--quiet",
             "-r",
             "requirements.txt",
             "-w",
@@ -32674,7 +32658,7 @@ version = "0.2.0"
         assert_eq!(
             parse_pip_compat_action(&args(&[
                 "debug",
-                "--verbose",
+                "-vv",
                 "--platform",
                 "macosx_14_0_arm64",
                 "--python-version=3.12",
@@ -32926,7 +32910,7 @@ resolved_commit = "0123456789abcdef0123456789abcdef01234567"
             }
         );
         assert_eq!(
-            parse_pip_compat_action(&args(&["list", "--format=freeze"])).unwrap(),
+            parse_pip_compat_action(&args(&["list", "-qq", "--format=freeze"])).unwrap(),
             PipCompatAction::List {
                 format: PipListFormat::Freeze,
                 outdated: false,
@@ -33108,6 +33092,10 @@ resolved_commit = "0123456789abcdef0123456789abcdef01234567"
             }
         );
         assert!(parse_pip_compat_action(&args(&["index", "foo", "requests"])).is_err());
+        assert!(
+            parse_pip_compat_action(&args(&["index", "versions", "idna", "--bogus", "value"]))
+                .is_err()
+        );
         assert_eq!(
             parse_pip_compat_action(&args(&[
                 "config",
@@ -33125,7 +33113,7 @@ resolved_commit = "0123456789abcdef0123456789abcdef01234567"
             }
         );
         assert_eq!(
-            parse_pip_compat_action(&args(&["config", "list", "--verbose"])).unwrap(),
+            parse_pip_compat_action(&args(&["config", "list", "-vv"])).unwrap(),
             PipCompatAction::Config {
                 action: PipConfigAction::List { json: false },
             }
