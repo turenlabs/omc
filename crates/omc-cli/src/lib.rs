@@ -361,6 +361,7 @@ enum NpmCompatAction {
         package_lock: bool,
         lock_only: bool,
         dry_run: bool,
+        json: bool,
         npm_registry: Option<String>,
         allow: Vec<String>,
         allow_flow: Vec<String>,
@@ -385,6 +386,7 @@ enum NpmCompatAction {
         package_lock: bool,
         lock_only: bool,
         dry_run: bool,
+        json: bool,
         npm_registry: Option<String>,
         allow: Vec<String>,
         allow_flow: Vec<String>,
@@ -399,6 +401,7 @@ enum NpmCompatAction {
         omit_optional: bool,
         omit_peer: bool,
         dry_run: bool,
+        json: bool,
         allow: Vec<String>,
         allow_flow: Vec<String>,
         allow_all_host: bool,
@@ -1957,6 +1960,87 @@ fn print_install_report(install: &InstallReport) {
     );
 }
 
+fn print_npm_install_json_report(
+    project_dir: &Path,
+    reports: &[LinkReport],
+    install: Option<&InstallReport>,
+    dry_run: bool,
+    lock_only: bool,
+    local_paths: &[PathBuf],
+) -> Result<(), OmcRegistryError> {
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&npm_install_json_report(
+            project_dir,
+            reports,
+            install,
+            dry_run,
+            lock_only,
+            local_paths,
+        ))?
+    );
+    Ok(())
+}
+
+fn npm_install_json_report(
+    project_dir: &Path,
+    reports: &[LinkReport],
+    install: Option<&InstallReport>,
+    dry_run: bool,
+    lock_only: bool,
+    local_paths: &[PathBuf],
+) -> serde_json::Value {
+    let add = reports
+        .iter()
+        .filter(|report| report.locked.ecosystem == Ecosystem::Npm)
+        .map(|report| {
+            let path = npm_installed_package_dir(project_dir, &report.locked.name)
+                .unwrap_or_else(|_| project_dir.join("node_modules").join(&report.locked.name));
+            serde_json::json!({
+                "name": report.locked.name,
+                "version": report.locked.version,
+                "path": path,
+            })
+        })
+        .collect::<Vec<_>>();
+    let added = install
+        .map(|install| install.npm_packages)
+        .unwrap_or_else(|| add.len())
+        .max(add.len());
+    let local = local_paths
+        .iter()
+        .map(|path| serde_json::json!({ "path": path }))
+        .collect::<Vec<_>>();
+    let install_json = install.map(|install| {
+        serde_json::json!({
+            "npm": install.npm_packages,
+            "pypi": install.pypi_packages,
+            "npmBins": install.npm_bins,
+            "pythonScripts": install.python_scripts,
+            "nodeModules": install.node_modules,
+            "npmBinDir": install.npm_bin_dir,
+            "pythonBinDir": install.python_bin_dir,
+            "pythonSitePackages": install.python_site_packages,
+        })
+    });
+    serde_json::json!({
+        "add": add,
+        "added": added,
+        "audited": 0,
+        "change": [],
+        "changed": 0,
+        "funding": 0,
+        "remove": [],
+        "removed": 0,
+        "dryRun": dry_run,
+        "lockOnly": lock_only,
+        "omc": {
+            "install": install_json,
+            "localPaths": local,
+        },
+    })
+}
+
 fn write_pip_install_report(
     project_dir: &Path,
     report_path: Option<&Path>,
@@ -3047,6 +3131,7 @@ struct NpmInstallCompatRequest {
     package_lock: bool,
     lock_only: bool,
     dry_run: bool,
+    json: bool,
     npm_registry: Option<String>,
     allow: Vec<String>,
     allow_flow: Vec<String>,
@@ -3099,6 +3184,7 @@ fn run_npm_install_compat(
         package_lock,
         lock_only,
         dry_run,
+        json,
         npm_registry,
         allow,
         allow_flow,
@@ -3125,6 +3211,7 @@ fn run_npm_install_compat(
                 package_lock,
                 lock_only,
                 dry_run,
+                json,
                 npm_registry,
                 allow,
                 allow_flow,
@@ -3153,6 +3240,7 @@ fn run_npm_install_compat(
                 package_lock,
                 lock_only,
                 dry_run,
+                json,
                 npm_registry,
                 allow,
                 allow_flow,
@@ -3184,6 +3272,7 @@ fn run_npm_install_compat(
                 package_lock,
                 lock_only,
                 dry_run,
+                json,
                 npm_registry,
                 allow: Vec::new(),
                 allow_flow: Vec::new(),
@@ -3215,14 +3304,36 @@ fn run_npm_install_compat(
         }
         if lock_only {
             let reports = lock_npm_project_including_omitted(&options)?;
-            print_link_reports(&reports);
-            print_lock_only_report(project_dir);
+            if json {
+                print_npm_install_json_report(
+                    project_dir,
+                    &reports,
+                    None,
+                    false,
+                    true,
+                    &local_paths,
+                )?;
+            } else {
+                print_link_reports(&reports);
+                print_lock_only_report(project_dir);
+            }
             if package_lock {
                 sync_npm_package_lock(project_dir)?;
             }
         } else {
             let install = install_npm_project_with_complete_lock(&options)?;
-            print_install_report(&install);
+            if json {
+                print_npm_install_json_report(
+                    project_dir,
+                    &[],
+                    Some(&install),
+                    false,
+                    false,
+                    &local_paths,
+                )?;
+            } else {
+                print_install_report(&install);
+            }
             if package_lock {
                 sync_npm_package_lock(project_dir)?;
             }
@@ -3265,7 +3376,9 @@ fn run_npm_install_compat(
             all_reports.extend(reports);
         }
         prune_locked_package_versions(project_dir, &locked_packages_from_reports(&all_reports))?;
-        print_link_reports(&all_reports);
+        if !json {
+            print_link_reports(&all_reports);
+        }
         if save {
             save_root_npm_package_json_dependencies(
                 project_dir,
@@ -3276,7 +3389,18 @@ fn run_npm_install_compat(
             )?;
         }
         if lock_only {
-            print_lock_only_report(project_dir);
+            if json {
+                print_npm_install_json_report(
+                    project_dir,
+                    &all_reports,
+                    None,
+                    false,
+                    true,
+                    &local_paths,
+                )?;
+            } else {
+                print_lock_only_report(project_dir);
+            }
             if package_lock {
                 sync_npm_package_lock(project_dir)?;
             }
@@ -3291,8 +3415,19 @@ fn run_npm_install_compat(
         } else {
             install_npm_project_with_complete_lock(&options)?
         };
-        println!();
-        print_install_report(&install);
+        if json {
+            print_npm_install_json_report(
+                project_dir,
+                &all_reports,
+                Some(&install),
+                false,
+                false,
+                &local_paths,
+            )?;
+        } else {
+            println!();
+            print_install_report(&install);
+        }
         if package_lock {
             sync_npm_package_lock(project_dir)?;
         }
@@ -3441,6 +3576,7 @@ fn run_npm_install_workspace_compat(
         package_lock,
         lock_only,
         dry_run: _,
+        json,
         npm_registry,
         allow: _,
         allow_flow: _,
@@ -3473,8 +3609,19 @@ fn run_npm_install_workspace_compat(
     if specs.is_empty() && archive_references.is_empty() && local_paths.is_empty() {
         let install = if lock_only {
             let reports = lock_npm_project_including_omitted(&options)?;
-            print_link_reports(&reports);
-            print_lock_only_report(project_dir);
+            if json {
+                print_npm_install_json_report(
+                    project_dir,
+                    &reports,
+                    None,
+                    false,
+                    true,
+                    &local_paths,
+                )?;
+            } else {
+                print_link_reports(&reports);
+                print_lock_only_report(project_dir);
+            }
             if package_lock {
                 sync_npm_package_lock(project_dir)?;
             }
@@ -3482,7 +3629,18 @@ fn run_npm_install_workspace_compat(
         } else {
             install_npm_project_with_complete_lock(&options)?
         };
-        print_install_report(&install);
+        if json {
+            print_npm_install_json_report(
+                project_dir,
+                &[],
+                Some(&install),
+                false,
+                false,
+                &local_paths,
+            )?;
+        } else {
+            print_install_report(&install);
+        }
         if package_lock {
             sync_npm_package_lock(project_dir)?;
         }
@@ -3515,7 +3673,9 @@ fn run_npm_install_workspace_compat(
         all_reports.extend(reports);
     }
     prune_locked_package_versions(project_dir, &locked_packages_from_reports(&all_reports))?;
-    print_link_reports(&all_reports);
+    if !json {
+        print_link_reports(&all_reports);
+    }
 
     if save {
         for target in &targets {
@@ -3541,7 +3701,18 @@ fn run_npm_install_workspace_compat(
     }
 
     if lock_only {
-        print_lock_only_report(project_dir);
+        if json {
+            print_npm_install_json_report(
+                project_dir,
+                &all_reports,
+                None,
+                false,
+                true,
+                &local_paths,
+            )?;
+        } else {
+            print_lock_only_report(project_dir);
+        }
         if package_lock {
             sync_npm_package_lock(project_dir)?;
         }
@@ -3549,8 +3720,19 @@ fn run_npm_install_workspace_compat(
     }
 
     let install = install_npm_project_with_complete_lock(&options)?;
-    println!();
-    print_install_report(&install);
+    if json {
+        print_npm_install_json_report(
+            project_dir,
+            &all_reports,
+            Some(&install),
+            false,
+            false,
+            &local_paths,
+        )?;
+    } else {
+        println!();
+        print_install_report(&install);
+    }
     if package_lock {
         sync_npm_package_lock(project_dir)?;
     }
@@ -3696,6 +3878,7 @@ fn run_npm_link_compat(
                     package_lock: true,
                     lock_only,
                     dry_run,
+                    json: false,
                     npm_registry,
                     allow,
                     allow_flow,
@@ -3829,6 +4012,7 @@ fn run_npm_install_dry_run(
         package_lock: _,
         lock_only,
         dry_run: _,
+        json,
         npm_registry,
         allow,
         allow_flow,
@@ -3860,6 +4044,11 @@ fn run_npm_install_dry_run(
         for spec in &specs {
             reports.extend(add_package_graph(spec, &options)?);
         }
+    }
+
+    if json {
+        print_npm_install_json_report(project_dir, &reports, None, true, lock_only, &local_paths)?;
+        return Ok(ExitCode::SUCCESS);
     }
 
     if !reports.is_empty() {
@@ -3906,6 +4095,7 @@ fn run_npm_ci_compat(
     omit_optional: bool,
     omit_peer: bool,
     dry_run: bool,
+    json: bool,
     allow: Vec<String>,
     allow_flow: Vec<String>,
     allow_all_host: bool,
@@ -3926,6 +4116,7 @@ fn run_npm_ci_compat(
             omit_dev,
             omit_optional,
             omit_peer,
+            json,
             allow,
             allow_flow,
             allow_all_host,
@@ -3938,7 +4129,11 @@ fn run_npm_ci_compat(
         NpmCiLockSource::OmcLock => install_locked_project(&options)?,
         NpmCiLockSource::ProjectLock => install_npm_project_with_complete_lock(&options)?,
     };
-    print_install_report(&install);
+    if json {
+        print_npm_install_json_report(project_dir, &[], Some(&install), false, false, &[])?;
+    } else {
+        print_install_report(&install);
+    }
     Ok(ExitCode::SUCCESS)
 }
 
@@ -3971,6 +4166,7 @@ fn run_npm_ci_dry_run(
     omit_dev: bool,
     omit_optional: bool,
     omit_peer: bool,
+    json: bool,
     allow: Vec<String>,
     allow_flow: Vec<String>,
     allow_all_host: bool,
@@ -3991,6 +4187,10 @@ fn run_npm_ci_dry_run(
         NpmCiLockSource::OmcLock => install_locked_project(&options)?,
         NpmCiLockSource::ProjectLock => install_npm_project_with_complete_lock(&options)?,
     };
+    if json {
+        print_npm_install_json_report(project_dir, &[], Some(&install), true, false, &[])?;
+        return Ok(ExitCode::SUCCESS);
+    }
     println!(
         "dry-run: would install npm={} pypi={} npm_bins={} python_scripts={} node_modules={} python_site_packages={}",
         install.npm_packages,
@@ -4067,6 +4267,7 @@ fn run_npm_compat_with_cwd(
             package_lock,
             lock_only,
             dry_run,
+            json,
             npm_registry,
             allow,
             allow_flow,
@@ -4090,6 +4291,7 @@ fn run_npm_compat_with_cwd(
                 package_lock,
                 lock_only,
                 dry_run,
+                json,
                 npm_registry,
                 allow,
                 allow_flow,
@@ -4117,6 +4319,7 @@ fn run_npm_compat_with_cwd(
             package_lock,
             lock_only,
             dry_run,
+            json,
             npm_registry,
             allow,
             allow_flow,
@@ -4136,6 +4339,7 @@ fn run_npm_compat_with_cwd(
                     omit_optional,
                     omit_peer,
                     dry_run,
+                    json,
                     allow,
                     allow_flow,
                     allow_all_host,
@@ -4159,6 +4363,7 @@ fn run_npm_compat_with_cwd(
                     package_lock,
                     lock_only,
                     dry_run,
+                    json,
                     npm_registry,
                     allow,
                     allow_flow,
@@ -4191,6 +4396,7 @@ fn run_npm_compat_with_cwd(
             omit_optional,
             omit_peer,
             dry_run,
+            json,
             allow,
             allow_flow,
             allow_all_host,
@@ -4204,6 +4410,7 @@ fn run_npm_compat_with_cwd(
                 omit_optional,
                 omit_peer,
                 dry_run,
+                json,
                 allow,
                 allow_flow,
                 allow_all_host,
@@ -8057,7 +8264,7 @@ fn npm_help_text(topic: Option<&str>) -> String {
             &[
                 "Resolve, verify, lock, and install npm packages with OMC.",
                 "Aliases: i, add, update, up, upgrade, udpate.",
-                "Common flags: --save, --no-save, --save-dev, --save-optional, --save-peer, --only=prod|dev, --also=dev, --no-optional, --omit=dev|optional|peer, --include=dev|optional|peer, --workspace, --workspaces, --include-workspace-root, --package-lock-only, --prefer-offline, --prefer-online, --dry-run, --registry, --allow, --allow-all-host.",
+                "Common flags: --save, --no-save, --save-dev, --save-optional, --save-peer, --only=prod|dev, --also=dev, --no-optional, --omit=dev|optional|peer, --include=dev|optional|peer, --workspace, --workspaces, --include-workspace-root, --package-lock-only, --prefer-offline, --prefer-online, --dry-run, --json, --registry, --allow, --allow-all-host.",
                 "Direct local inputs are supported for .tgz archives and local package directories.",
                 "Workspace installs save dependencies into selected workspace package.json files and install the root OMC graph.",
             ],
@@ -8075,7 +8282,7 @@ fn npm_help_text(topic: Option<&str>) -> String {
             "npm ci",
             &[
                 "Install the exact OMC lockfile state.",
-                "Common flags: --dry-run, --only=prod|dev, --also=dev, --no-optional, --prefer-offline, --prefer-online, --omit=dev|optional|peer, --include=dev|optional|peer, --allow, --allow-all-host.",
+                "Common flags: --dry-run, --json, --only=prod|dev, --also=dev, --no-optional, --prefer-offline, --prefer-online, --omit=dev|optional|peer, --include=dev|optional|peer, --allow, --allow-all-host.",
             ],
         ),
         Some("install-test") => npm_command_help(
@@ -21555,6 +21762,7 @@ fn parse_npm_compat_action(args: &[String]) -> Result<NpmCompatAction, OmcRegist
             package_lock: true,
             lock_only: false,
             dry_run: false,
+            json: false,
             npm_registry: None,
             allow: Vec::new(),
             allow_flow: Vec::new(),
@@ -21584,6 +21792,7 @@ fn parse_npm_compat_action(args: &[String]) -> Result<NpmCompatAction, OmcRegist
                 omit_optional,
                 omit_peer,
                 dry_run,
+                json,
                 allow,
                 allow_flow,
                 allow_all_host,
@@ -21601,6 +21810,7 @@ fn parse_npm_compat_action(args: &[String]) -> Result<NpmCompatAction, OmcRegist
                 omit_optional,
                 omit_peer,
                 dry_run,
+                json,
                 allow,
                 allow_flow,
                 allow_all_host,
@@ -22418,10 +22628,27 @@ fn npm_global_arg_supported_by_command(command: &str, arg: &str) -> bool {
                 | "shrinkwrap"
         );
     }
-    if arg == "--json" || arg.starts_with("--json=") {
+    if matches!(arg, "--json" | "--no-json") || arg.starts_with("--json=") {
         return matches!(
             command,
-            "version"
+            "install"
+                | "i"
+                | "in"
+                | "ins"
+                | "inst"
+                | "insta"
+                | "instal"
+                | "isnt"
+                | "isnta"
+                | "isntal"
+                | "isntall"
+                | "add"
+                | "update"
+                | "up"
+                | "upgrade"
+                | "udpate"
+                | "ci"
+                | "version"
                 | "run"
                 | "run-script"
                 | "list"
@@ -22526,6 +22753,7 @@ fn npm_global_preserved_bool_flag(arg: &str) -> bool {
     matches!(
         arg,
         "--json"
+            | "--no-json"
             | "--global"
             | "-g"
             | "--dry-run"
@@ -23241,6 +23469,7 @@ fn parse_npm_install_args(
         package_lock,
         lock_only,
         dry_run: _,
+        json,
         npm_registry,
         allow,
         allow_flow,
@@ -23274,6 +23503,7 @@ fn parse_npm_install_args(
         package_lock,
         lock_only,
         dry_run,
+        json,
         npm_registry,
         allow,
         allow_flow,
@@ -23457,6 +23687,7 @@ fn parse_npm_install_test_args(
             omit_optional,
             omit_peer,
             dry_run,
+            json,
             allow,
             allow_flow,
             allow_all_host,
@@ -23485,6 +23716,7 @@ fn parse_npm_install_test_args(
             lock_only: false,
             package_lock: true,
             dry_run,
+            json,
             npm_registry: None,
             allow,
             allow_flow,
@@ -23512,6 +23744,7 @@ fn parse_npm_install_test_args(
         package_lock,
         lock_only,
         dry_run,
+        json,
         npm_registry,
         allow,
         allow_flow,
@@ -23544,6 +23777,7 @@ fn parse_npm_install_test_args(
         package_lock,
         lock_only,
         dry_run,
+        json,
         npm_registry,
         allow,
         allow_flow,
@@ -30185,6 +30419,7 @@ struct CommonCompatFlags {
     package_lock: bool,
     lock_only: bool,
     dry_run: bool,
+    json: bool,
     npm_registry: Option<String>,
     allow: Vec<String>,
     allow_flow: Vec<String>,
@@ -30209,6 +30444,7 @@ impl Default for CommonCompatFlags {
             package_lock: true,
             lock_only: false,
             dry_run: false,
+            json: false,
             npm_registry: None,
             allow: Vec::new(),
             allow_flow: Vec::new(),
@@ -30258,6 +30494,10 @@ fn parse_common_compat_flags(
             parsed.dry_run = npm_bool_flag_value(arg, "--dry-run").unwrap_or(false);
         } else if npm_mode && arg == "--no-dry-run" {
             parsed.dry_run = false;
+        } else if npm_mode && npm_bool_flag_value(arg, "--json").is_some() {
+            parsed.json = npm_bool_flag_value(arg, "--json").unwrap_or(false);
+        } else if npm_mode && arg == "--no-json" {
+            parsed.json = false;
         } else if npm_mode
             && matches!(
                 arg.as_str(),
@@ -33421,6 +33661,61 @@ mod tests {
     }
 
     #[test]
+    fn npm_install_json_report_includes_npm_compatible_counts_and_omc_details() {
+        let project = test_dir("npm-install-json-report-shape");
+        let install = InstallReport {
+            npm_packages: 2,
+            pypi_packages: 1,
+            npm_bins: 1,
+            python_scripts: 1,
+            node_modules: project.join("node_modules"),
+            npm_bin_dir: project.join("node_modules/.bin"),
+            python_site_packages: project.join(".omc/python/site-packages"),
+            python_bin_dir: project.join(".omc/python/bin"),
+        };
+
+        let report = npm_install_json_report(
+            &project,
+            &[],
+            Some(&install),
+            true,
+            false,
+            &[PathBuf::from("../local-pkg")],
+        );
+
+        assert_eq!(report["added"], 2);
+        assert_eq!(report["audited"], 0);
+        assert_eq!(report["dryRun"], true);
+        assert_eq!(report["lockOnly"], false);
+        assert_eq!(report["omc"]["install"]["npm"], 2);
+        assert_eq!(report["omc"]["install"]["pypi"], 1);
+        assert_eq!(report["omc"]["install"]["npmBins"], 1);
+        assert_eq!(report["omc"]["localPaths"][0]["path"], "../local-pkg");
+
+        let _ = fs::remove_dir_all(project);
+    }
+
+    #[test]
+    fn npm_install_json_dry_run_accepts_local_tarball_without_project_writes() {
+        let project = test_dir("npm-install-json-dry-run-local-tarball");
+        let tarball = write_npm_fixture_tarball(&project, "json-pkg", "1.0.0");
+
+        let status = run_npm_compat(
+            &project,
+            &args(&["install", "--dry-run", "--json", tarball.to_str().unwrap()]),
+        )
+        .unwrap();
+
+        assert_eq!(status, ExitCode::SUCCESS);
+        assert!(!project.join("omc.toml").exists());
+        assert!(!project.join("omc.lock").exists());
+        assert!(!project.join("package-lock.json").exists());
+        assert!(!project.join("node_modules").exists());
+
+        let _ = fs::remove_dir_all(project);
+    }
+
+    #[test]
     fn npm_install_omit_preserves_omitted_packages_in_locks() {
         let project = test_dir("npm-install-omit-preserves-locks");
         write_npm_fixture_tarball(&project, "prod-pkg", "1.0.0");
@@ -34458,6 +34753,7 @@ verdict = "accepted"
                 package_lock: true,
                 lock_only: false,
                 dry_run: false,
+                json: false,
                 npm_registry: Some("https://registry.example.invalid/npm".to_owned()),
                 allow: Vec::new(),
                 allow_flow: Vec::new(),
@@ -34669,6 +34965,7 @@ verdict = "accepted"
                 package_lock: false,
                 lock_only: false,
                 dry_run: true,
+                json: false,
                 npm_registry: Some("https://registry.example.invalid/npm".to_owned()),
                 allow: Vec::new(),
                 allow_flow: Vec::new(),
@@ -34793,6 +35090,7 @@ verdict = "accepted"
                 package_lock: true,
                 lock_only: false,
                 dry_run: false,
+                json: false,
                 npm_registry: None,
                 allow: Vec::new(),
                 allow_flow: Vec::new(),
@@ -34820,6 +35118,7 @@ verdict = "accepted"
                 package_lock: true,
                 lock_only: false,
                 dry_run: false,
+                json: false,
                 npm_registry: None,
                 allow: Vec::new(),
                 allow_flow: Vec::new(),
@@ -34856,6 +35155,7 @@ verdict = "accepted"
                 package_lock: true,
                 lock_only: false,
                 dry_run: false,
+                json: false,
                 npm_registry: None,
                 allow: Vec::new(),
                 allow_flow: Vec::new(),
@@ -34990,6 +35290,7 @@ verdict = "accepted"
                 package_lock: false,
                 lock_only: false,
                 dry_run: false,
+                json: false,
                 npm_registry: None,
                 allow: Vec::new(),
                 allow_flow: Vec::new(),
@@ -35059,6 +35360,7 @@ verdict = "accepted"
                 package_lock: true,
                 lock_only: true,
                 dry_run: false,
+                json: false,
                 npm_registry: None,
                 allow: Vec::new(),
                 allow_flow: Vec::new(),
@@ -35088,6 +35390,39 @@ verdict = "accepted"
         assert_eq!(specs, vec!["left-pad".to_owned()]);
         assert!(dry_run);
         assert!(lock_only);
+
+        let action =
+            parse_npm_compat_action(&args(&["install", "--dry-run", "--json", "left-pad"]))
+                .unwrap();
+        let NpmCompatAction::Install {
+            specs,
+            dry_run,
+            json,
+            ..
+        } = action
+        else {
+            panic!("expected npm install action");
+        };
+        assert_eq!(specs, vec!["left-pad".to_owned()]);
+        assert!(dry_run);
+        assert!(json);
+
+        let action =
+            parse_npm_compat_action(&args(&["--json", "install", "--dry-run", "left-pad"]))
+                .unwrap();
+        let NpmCompatAction::Install { dry_run, json, .. } = action else {
+            panic!("expected npm install action");
+        };
+        assert!(dry_run);
+        assert!(json);
+
+        let action =
+            parse_npm_compat_action(&args(&["install", "--json", "--no-json", "left-pad"]))
+                .unwrap();
+        let NpmCompatAction::Install { json, .. } = action else {
+            panic!("expected npm install action");
+        };
+        assert!(!json);
 
         let action = parse_npm_compat_action(&args(&[
             "install",
@@ -35138,6 +35473,13 @@ verdict = "accepted"
         assert!(workspaces.is_empty());
         assert!(!all_workspaces);
         assert!(!include_workspace_root);
+
+        let action = parse_npm_compat_action(&args(&["ci", "--json", "--dry-run"])).unwrap();
+        let NpmCompatAction::Ci { dry_run, json, .. } = action else {
+            panic!("expected npm ci action");
+        };
+        assert!(dry_run);
+        assert!(json);
 
         let action = parse_npm_compat_action(&args(&[
             "ci",
@@ -35217,6 +35559,7 @@ verdict = "accepted"
                 package_lock: true,
                 lock_only: false,
                 dry_run: false,
+                json: false,
                 npm_registry: None,
                 allow: Vec::new(),
                 allow_flow: Vec::new(),
@@ -35339,6 +35682,7 @@ verdict = "accepted"
                 package_lock: true,
                 lock_only: false,
                 dry_run: false,
+                json: false,
                 npm_registry: Some("https://registry.example.invalid/npm".to_owned()),
                 allow: Vec::new(),
                 allow_flow: Vec::new(),
@@ -35375,6 +35719,7 @@ verdict = "accepted"
                 package_lock: true,
                 lock_only: false,
                 dry_run: true,
+                json: false,
                 npm_registry: None,
                 allow: Vec::new(),
                 allow_flow: Vec::new(),
@@ -35412,6 +35757,7 @@ verdict = "accepted"
                 package_lock: true,
                 lock_only: true,
                 dry_run: false,
+                json: false,
                 npm_registry: Some("https://registry.example.invalid/npm".to_owned()),
                 allow: Vec::new(),
                 allow_flow: Vec::new(),
@@ -35439,6 +35785,7 @@ verdict = "accepted"
                 package_lock: true,
                 lock_only: false,
                 dry_run: false,
+                json: false,
                 npm_registry: None,
                 allow: Vec::new(),
                 allow_flow: Vec::new(),
@@ -35465,6 +35812,7 @@ verdict = "accepted"
                 package_lock: true,
                 lock_only: false,
                 dry_run: true,
+                json: false,
                 npm_registry: None,
                 allow: Vec::new(),
                 allow_flow: Vec::new(),
