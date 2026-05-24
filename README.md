@@ -375,7 +375,8 @@ Fine-grained grants are supported too:
 ```bash
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo add npm:some-client@1.0.0 \
   --allow http:api.example.com \
-  --allow env:API_TOKEN
+  --allow env:API_TOKEN \
+  --allow-flow 'env:API_TOKEN -> network:api.example.com'
 ```
 
 Projects can persist approved grants in `omc.toml`:
@@ -552,7 +553,9 @@ Supported now:
 - structured OMC microcode serialization inside generated package artifacts
 - local Ed25519 signatures for generated package artifacts, verified before
   locked package extraction
-- persistent `[policy].allow` and `[policy].allow-flow` grants in `omc.toml`
+- persistent `[policy].allow` / `[policy].allow-flow` grants in `omc.toml`
+  and one-shot `--allow` / `--allow-flow` grants on `omc add`, `omc install`,
+  `omc ci`, `omc remove`, and npm/pip compatibility installs
 - `omc allow` for editing persistent project capability and flow grants
 - `omc add`, `omc add --dev`, `omc add --optional`, `omc add --peer`, and
   `omc remove` for one or more OMC-managed dependencies, with `--npm` and

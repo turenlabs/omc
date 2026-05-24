@@ -19,7 +19,7 @@ use omc_registry::{
     destroy_npm_team, download_npm_package_tarball, grant_npm_access, init_project,
     install_locked_packages, install_locked_packages_with_python_target, install_locked_project,
     install_project, install_python_project_local_import_paths, lock_project,
-    mutate_npm_package_owner, mutate_npm_package_star, parse_capability_grant,
+    mutate_npm_package_owner, mutate_npm_package_star, parse_capability_grant, parse_flow_rule,
     parse_npm_direct_archive_reference, parse_pypi_direct_archive_reference,
     parse_pypi_vcs_requirement, publish_npm_package, pypi_marker_applies, read_constraint_files,
     read_lockfile, read_manifest, read_npm_access_collaborators, read_npm_access_packages,
@@ -123,6 +123,11 @@ enum Command {
             help = "Grant a capability, e.g. http:api.example.com, env:API_TOKEN, fs-read:*, proc:*"
         )]
         allow: Vec<String>,
+        #[arg(
+            long = "allow-flow",
+            help = "Grant a data flow, e.g. env:API_TOKEN->network:api.example.com"
+        )]
+        allow_flow: Vec<String>,
         #[arg(long, help = "Grant all host capabilities for compatibility testing")]
         allow_all_host: bool,
     },
@@ -151,6 +156,11 @@ enum Command {
             help = "Grant a capability while reinstalling remaining dependencies"
         )]
         allow: Vec<String>,
+        #[arg(
+            long = "allow-flow",
+            help = "Grant a data flow while reinstalling remaining dependencies"
+        )]
+        allow_flow: Vec<String>,
         #[arg(long, help = "Grant all host capabilities for compatibility testing")]
         allow_all_host: bool,
     },
@@ -171,6 +181,11 @@ enum Command {
             help = "Grant a capability, e.g. http:api.example.com, env:API_TOKEN, fs-read:*, proc:*"
         )]
         allow: Vec<String>,
+        #[arg(
+            long = "allow-flow",
+            help = "Grant a data flow, e.g. env:API_TOKEN->network:api.example.com"
+        )]
+        allow_flow: Vec<String>,
         #[arg(
             long = "extra",
             help = "Install a pyproject.toml optional dependency group"
@@ -212,6 +227,11 @@ enum Command {
             help = "Grant a capability, e.g. http:api.example.com, env:API_TOKEN, fs-read:*, proc:*"
         )]
         allow: Vec<String>,
+        #[arg(
+            long = "allow-flow",
+            help = "Grant a data flow, e.g. env:API_TOKEN->network:api.example.com"
+        )]
+        allow_flow: Vec<String>,
         #[arg(
             long = "extra",
             help = "Install a pyproject.toml optional dependency group"
@@ -329,6 +349,7 @@ enum NpmCompatAction {
         dry_run: bool,
         npm_registry: Option<String>,
         allow: Vec<String>,
+        allow_flow: Vec<String>,
         allow_all_host: bool,
         workspaces: Vec<String>,
         all_workspaces: bool,
@@ -350,6 +371,7 @@ enum NpmCompatAction {
         dry_run: bool,
         npm_registry: Option<String>,
         allow: Vec<String>,
+        allow_flow: Vec<String>,
         allow_all_host: bool,
         workspaces: Vec<String>,
         all_workspaces: bool,
@@ -361,12 +383,14 @@ enum NpmCompatAction {
         omit_optional: bool,
         omit_peer: bool,
         allow: Vec<String>,
+        allow_flow: Vec<String>,
         allow_all_host: bool,
     },
     Remove {
         specs: Vec<String>,
         global: bool,
         allow: Vec<String>,
+        allow_flow: Vec<String>,
         allow_all_host: bool,
         workspaces: Vec<String>,
         all_workspaces: bool,
@@ -379,6 +403,7 @@ enum NpmCompatAction {
         omit_optional: bool,
         omit_peer: bool,
         allow: Vec<String>,
+        allow_flow: Vec<String>,
         allow_all_host: bool,
     },
     RunScript {
@@ -578,6 +603,7 @@ struct NpmCreateAction {
     args: Vec<String>,
     npm_registry: Option<String>,
     allow: Vec<String>,
+    allow_flow: Vec<String>,
     allow_all_host: bool,
 }
 
@@ -590,6 +616,7 @@ struct NpmExecAction {
     prefer_project_bin: bool,
     npm_registry: Option<String>,
     allow: Vec<String>,
+    allow_flow: Vec<String>,
     allow_all_host: bool,
 }
 
@@ -1057,6 +1084,7 @@ enum PipCompatAction {
         requirements: Vec<PathBuf>,
         user: bool,
         allow: Vec<String>,
+        allow_flow: Vec<String>,
         allow_all_host: bool,
     },
     Show {
@@ -1191,6 +1219,7 @@ struct PipInstallAction {
     user: bool,
     vcs_requirements: Vec<PythonVcsRequirement>,
     allow: Vec<String>,
+    allow_flow: Vec<String>,
     allow_all_host: bool,
 }
 
@@ -1219,6 +1248,7 @@ struct PipDownloadAction {
     compatibility: PipCompatibilityTarget,
     destination: PathBuf,
     allow: Vec<String>,
+    allow_flow: Vec<String>,
     allow_all_host: bool,
 }
 
@@ -1477,12 +1507,13 @@ fn run() -> Result<ExitCode, OmcRegistryError> {
             peer,
             record_blocked,
             allow,
+            allow_flow,
             allow_all_host,
         } => {
             let specs = parse_package_specs(&specs, ecosystem_hint(npm, pypi))?;
             let mut options = LinkOptions::new(&cli.project_dir);
             options.record_blocked = record_blocked;
-            options.allowed_capabilities = parse_grants(&allow, allow_all_host)?;
+            apply_cli_policy_options(&mut options, &allow, &allow_flow, allow_all_host)?;
             options.save_dependency_kind = dependency_kind_from_booleans(dev, optional, peer);
 
             let mut all_reports = Vec::new();
@@ -1505,14 +1536,14 @@ fn run() -> Result<ExitCode, OmcRegistryError> {
             pypi,
             specs,
             allow,
+            allow_flow,
             allow_all_host,
         } => {
             remove_specs(
                 &cli.project_dir,
                 &specs,
                 ecosystem_hint(npm, pypi),
-                &allow,
-                allow_all_host,
+                CliPolicyArgs::new(&allow, &allow_flow, allow_all_host),
                 true,
                 false,
             )?;
@@ -1538,6 +1569,7 @@ fn run() -> Result<ExitCode, OmcRegistryError> {
         }
         Command::Install {
             allow,
+            allow_flow,
             extra,
             requirements,
             constraints,
@@ -1549,7 +1581,7 @@ fn run() -> Result<ExitCode, OmcRegistryError> {
         } => {
             let options = install_options(
                 &cli.project_dir,
-                &allow,
+                CliPolicyArgs::new(&allow, &allow_flow, allow_all_host),
                 extra,
                 requirements,
                 constraints,
@@ -1558,7 +1590,6 @@ fn run() -> Result<ExitCode, OmcRegistryError> {
                     optional: omit_optional,
                     peer: omit_peer,
                 },
-                allow_all_host,
             )?;
             let install = if locked {
                 install_locked_project(&options)?
@@ -1569,6 +1600,7 @@ fn run() -> Result<ExitCode, OmcRegistryError> {
         }
         Command::Ci {
             allow,
+            allow_flow,
             extra,
             requirements,
             constraints,
@@ -1579,7 +1611,7 @@ fn run() -> Result<ExitCode, OmcRegistryError> {
         } => {
             let options = install_options(
                 &cli.project_dir,
-                &allow,
+                CliPolicyArgs::new(&allow, &allow_flow, allow_all_host),
                 extra,
                 requirements,
                 constraints,
@@ -1588,7 +1620,6 @@ fn run() -> Result<ExitCode, OmcRegistryError> {
                     optional: omit_optional,
                     peer: omit_peer,
                 },
-                allow_all_host,
             )?;
             let install = install_locked_project(&options)?;
             print_install_report(&install);
@@ -1631,15 +1662,19 @@ fn run() -> Result<ExitCode, OmcRegistryError> {
 
 fn install_options(
     project_dir: &Path,
-    allow: &[String],
+    policy: CliPolicyArgs<'_>,
     extra: Vec<String>,
     requirements: Vec<PathBuf>,
     constraints: Vec<PathBuf>,
     omit: DependencyOmit,
-    allow_all_host: bool,
 ) -> Result<LinkOptions, OmcRegistryError> {
     let mut options = LinkOptions::new(project_dir);
-    options.allowed_capabilities = parse_grants(allow, allow_all_host)?;
+    apply_cli_policy_options(
+        &mut options,
+        policy.allow,
+        policy.allow_flow,
+        policy.allow_all_host,
+    )?;
     options.project_extras = extra
         .into_iter()
         .map(|extra| normalize_extra(&extra))
@@ -1661,6 +1696,23 @@ struct DependencyOmit {
     dev: bool,
     optional: bool,
     peer: bool,
+}
+
+#[derive(Clone, Copy)]
+struct CliPolicyArgs<'a> {
+    allow: &'a [String],
+    allow_flow: &'a [String],
+    allow_all_host: bool,
+}
+
+impl<'a> CliPolicyArgs<'a> {
+    fn new(allow: &'a [String], allow_flow: &'a [String], allow_all_host: bool) -> Self {
+        Self {
+            allow,
+            allow_flow,
+            allow_all_host,
+        }
+    }
 }
 
 fn apply_dependency_omit_flags(
@@ -1751,6 +1803,7 @@ fn run_pip_lock(project_dir: &Path, action: PipLockAction) -> Result<ExitCode, O
         user,
         vcs_requirements,
         allow,
+        allow_flow,
         allow_all_host,
     } = action.install;
 
@@ -1778,7 +1831,7 @@ fn run_pip_lock(project_dir: &Path, action: PipLockAction) -> Result<ExitCode, O
     let temp_project = TempOmcProject::empty("pip-lock")?;
     let mut options = LinkOptions::new(temp_project.path());
     options.save_manifest_dependency = false;
-    options.allowed_capabilities = parse_grants(&allow, allow_all_host)?;
+    apply_cli_policy_options(&mut options, &allow, &allow_flow, allow_all_host)?;
     options.requirement_files = absolutize_paths(project_dir, requirements);
     options.constraint_files = absolutize_paths(project_dir, constraints);
     options.python_local_requirements =
@@ -2443,7 +2496,12 @@ fn run_npm_exec(project_dir: &Path, action: NpmExecAction) -> Result<ExitCode, O
     let specs = parse_package_specs(&action.packages, Some(Ecosystem::Npm))?;
 
     let mut options = LinkOptions::new(temp_project.path());
-    options.allowed_capabilities = parse_grants(&action.allow, action.allow_all_host)?;
+    apply_cli_policy_options(
+        &mut options,
+        &action.allow,
+        &action.allow_flow,
+        action.allow_all_host,
+    )?;
     options.npm_registry_url = action.npm_registry;
     options.discover_project_requirements = false;
     options.save_manifest_dependency = true;
@@ -2533,7 +2591,12 @@ fn run_npm_create(
     let temp_project = TempOmcProject::empty("npm-create")?;
 
     let mut options = LinkOptions::new(temp_project.path());
-    options.allowed_capabilities = parse_grants(&action.allow, action.allow_all_host)?;
+    apply_cli_policy_options(
+        &mut options,
+        &action.allow,
+        &action.allow_flow,
+        action.allow_all_host,
+    )?;
     options.npm_registry_url = action.npm_registry;
     options.discover_project_requirements = false;
     options.save_manifest_dependency = true;
@@ -2564,6 +2627,7 @@ struct NpmInstallCompatRequest {
     dry_run: bool,
     npm_registry: Option<String>,
     allow: Vec<String>,
+    allow_flow: Vec<String>,
     allow_all_host: bool,
     workspaces: Vec<String>,
     all_workspaces: bool,
@@ -2588,6 +2652,7 @@ enum NpmLinkAction {
         dry_run: bool,
         npm_registry: Option<String>,
         allow: Vec<String>,
+        allow_flow: Vec<String>,
         allow_all_host: bool,
     },
 }
@@ -2611,6 +2676,7 @@ fn run_npm_install_compat(
         dry_run,
         npm_registry,
         allow,
+        allow_flow,
         allow_all_host,
         workspaces,
         all_workspaces,
@@ -2634,6 +2700,7 @@ fn run_npm_install_compat(
                 dry_run,
                 npm_registry,
                 allow,
+                allow_flow,
                 allow_all_host,
                 workspaces,
                 all_workspaces,
@@ -2659,6 +2726,7 @@ fn run_npm_install_compat(
                 dry_run,
                 npm_registry,
                 allow,
+                allow_flow,
                 allow_all_host,
                 workspaces,
                 all_workspaces,
@@ -2667,6 +2735,7 @@ fn run_npm_install_compat(
         );
     }
     let allowed_capabilities = parse_grants(&allow, allow_all_host)?;
+    let allowed_flows = parse_flow_grants(&allow_flow)?;
     let workspace_mode = !workspaces.is_empty() || all_workspaces || include_workspace_root;
     if workspace_mode {
         return run_npm_install_workspace_compat(
@@ -2686,17 +2755,20 @@ fn run_npm_install_compat(
                 dry_run,
                 npm_registry,
                 allow: Vec::new(),
+                allow_flow: Vec::new(),
                 allow_all_host: false,
                 workspaces,
                 all_workspaces,
                 include_workspace_root,
             },
             allowed_capabilities,
+            allowed_flows,
         );
     }
     if specs.is_empty() && archive_references.is_empty() {
         let mut options = LinkOptions::new(project_dir);
         options.allowed_capabilities = allowed_capabilities;
+        options.allowed_flows = allowed_flows;
         options.npm_registry_url = npm_registry.clone();
         apply_dependency_omit_flags(&mut options, omit_dev, omit_optional, omit_peer);
         options.npm_local_paths = absolutize_paths(project_dir, local_paths.clone());
@@ -2720,6 +2792,7 @@ fn run_npm_install_compat(
     } else {
         let mut options = LinkOptions::new(project_dir);
         options.allowed_capabilities = allowed_capabilities;
+        options.allowed_flows = allowed_flows;
         options.npm_registry_url = npm_registry.clone();
         options.save_manifest_dependency = save;
         options.save_dependency_kind = dependency_kind;
@@ -2801,6 +2874,7 @@ fn run_npm_global_install_compat(
 fn run_npm_global_remove_compat(
     specs: &[String],
     allow: &[String],
+    allow_flow: &[String],
     allow_all_host: bool,
 ) -> Result<(), OmcRegistryError> {
     let prefix = npm_global_prefix_path();
@@ -2809,8 +2883,7 @@ fn run_npm_global_remove_compat(
         &global_project_dir,
         specs,
         Some(Ecosystem::Npm),
-        allow,
-        allow_all_host,
+        CliPolicyArgs::new(allow, allow_flow, allow_all_host),
         true,
         false,
     )?;
@@ -2879,6 +2952,7 @@ fn run_npm_install_workspace_compat(
     project_dir: &Path,
     request: NpmInstallCompatRequest,
     allowed_capabilities: Vec<Capability>,
+    allowed_flows: Vec<omc_cap::FlowRule>,
 ) -> Result<ExitCode, OmcRegistryError> {
     let NpmInstallCompatRequest {
         specs,
@@ -2895,6 +2969,7 @@ fn run_npm_install_workspace_compat(
         dry_run: _,
         npm_registry,
         allow: _,
+        allow_flow: _,
         allow_all_host: _,
         workspaces,
         all_workspaces,
@@ -2915,6 +2990,7 @@ fn run_npm_install_workspace_compat(
 
     let mut options = LinkOptions::new(project_dir);
     options.allowed_capabilities = allowed_capabilities;
+    options.allowed_flows = allowed_flows;
     options.npm_registry_url = npm_registry;
     options.save_manifest_dependency = false;
     apply_dependency_omit_flags(&mut options, omit_dev, omit_optional, omit_peer);
@@ -2984,8 +3060,7 @@ fn run_npm_install_workspace_compat(
 fn run_npm_remove_workspace_compat(
     project_dir: &Path,
     specs: &[String],
-    allow: &[String],
-    allow_all_host: bool,
+    policy: CliPolicyArgs<'_>,
     workspaces: &[String],
     all_workspaces: bool,
     include_workspace_root: bool,
@@ -3021,7 +3096,12 @@ fn run_npm_remove_workspace_compat(
     }
 
     let mut options = LinkOptions::new(project_dir);
-    options.allowed_capabilities = parse_grants(allow, allow_all_host)?;
+    apply_cli_policy_options(
+        &mut options,
+        policy.allow,
+        policy.allow_flow,
+        policy.allow_all_host,
+    )?;
     options.discover_project_requirements = true;
     let install = install_project(&options)?;
     println!("removed {}", removed.join(", "));
@@ -3063,6 +3143,7 @@ fn run_npm_link_compat(
             dry_run,
             npm_registry,
             allow,
+            allow_flow,
             allow_all_host,
         } => {
             for path in &local_paths {
@@ -3098,6 +3179,7 @@ fn run_npm_link_compat(
                     dry_run,
                     npm_registry,
                     allow,
+                    allow_flow,
                     allow_all_host,
                     workspaces: Vec::new(),
                     all_workspaces: false,
@@ -3228,6 +3310,7 @@ fn run_npm_install_dry_run(
         dry_run: _,
         npm_registry,
         allow,
+        allow_flow,
         allow_all_host,
         workspaces: _,
         all_workspaces: _,
@@ -3238,7 +3321,7 @@ fn run_npm_install_dry_run(
     let mut options = LinkOptions::new(dry_run_project.path());
     options.save_manifest_dependency = false;
     options.discover_project_requirements = specs.is_empty() && archive_references.is_empty();
-    options.allowed_capabilities = parse_grants(&allow, allow_all_host)?;
+    apply_cli_policy_options(&mut options, &allow, &allow_flow, allow_all_host)?;
     options.npm_registry_url = npm_registry.clone();
     apply_dependency_omit_flags(&mut options, omit_dev, omit_optional, omit_peer);
 
@@ -3302,10 +3385,11 @@ fn run_npm_ci_compat(
     omit_optional: bool,
     omit_peer: bool,
     allow: Vec<String>,
+    allow_flow: Vec<String>,
     allow_all_host: bool,
 ) -> Result<ExitCode, OmcRegistryError> {
     let mut options = LinkOptions::new(project_dir);
-    options.allowed_capabilities = parse_grants(&allow, allow_all_host)?;
+    apply_cli_policy_options(&mut options, &allow, &allow_flow, allow_all_host)?;
     apply_dependency_omit_flags(&mut options, omit_dev, omit_optional, omit_peer);
     let install = install_locked_project(&options)?;
     print_install_report(&install);
@@ -3337,6 +3421,7 @@ fn run_npm_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
             dry_run,
             npm_registry,
             allow,
+            allow_flow,
             allow_all_host,
             workspaces,
             all_workspaces,
@@ -3359,6 +3444,7 @@ fn run_npm_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
                     dry_run,
                     npm_registry,
                     allow,
+                    allow_flow,
                     allow_all_host,
                     workspaces,
                     all_workspaces,
@@ -3382,6 +3468,7 @@ fn run_npm_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
             dry_run,
             npm_registry,
             allow,
+            allow_flow,
             allow_all_host,
             workspaces,
             all_workspaces,
@@ -3398,6 +3485,7 @@ fn run_npm_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
                     omit_optional,
                     omit_peer,
                     allow,
+                    allow_flow,
                     allow_all_host,
                 )?
             } else {
@@ -3418,6 +3506,7 @@ fn run_npm_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
                         dry_run,
                         npm_registry,
                         allow,
+                        allow_flow,
                         allow_all_host,
                         workspaces,
                         all_workspaces,
@@ -3446,6 +3535,7 @@ fn run_npm_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
             omit_optional,
             omit_peer,
             allow,
+            allow_flow,
             allow_all_host,
         } => {
             return run_npm_ci_compat(
@@ -3454,6 +3544,7 @@ fn run_npm_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
                 omit_optional,
                 omit_peer,
                 allow,
+                allow_flow,
                 allow_all_host,
             )
         }
@@ -3461,6 +3552,7 @@ fn run_npm_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
             specs,
             global,
             allow,
+            allow_flow,
             allow_all_host,
             workspaces,
             all_workspaces,
@@ -3472,15 +3564,14 @@ fn run_npm_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
                         "npm global remove does not support workspace selection".to_owned(),
                     ));
                 }
-                run_npm_global_remove_compat(&specs, &allow, allow_all_host)?;
+                run_npm_global_remove_compat(&specs, &allow, &allow_flow, allow_all_host)?;
                 return Ok(ExitCode::SUCCESS);
             }
             if !workspaces.is_empty() || all_workspaces || include_workspace_root {
                 return run_npm_remove_workspace_compat(
                     project_dir,
                     &specs,
-                    &allow,
-                    allow_all_host,
+                    CliPolicyArgs::new(&allow, &allow_flow, allow_all_host),
                     &workspaces,
                     all_workspaces,
                     include_workspace_root,
@@ -3490,8 +3581,7 @@ fn run_npm_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
                 project_dir,
                 &specs,
                 Some(Ecosystem::Npm),
-                &allow,
-                allow_all_host,
+                CliPolicyArgs::new(&allow, &allow_flow, allow_all_host),
                 true,
                 false,
             )?;
@@ -3503,10 +3593,11 @@ fn run_npm_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
             omit_optional,
             omit_peer,
             allow,
+            allow_flow,
             allow_all_host,
         } => {
             let mut options = LinkOptions::new(project_dir);
-            options.allowed_capabilities = parse_grants(&allow, allow_all_host)?;
+            apply_cli_policy_options(&mut options, &allow, &allow_flow, allow_all_host)?;
             apply_dependency_omit_flags(&mut options, omit_dev, omit_optional, omit_peer);
             let install = install_locked_project(&options)?;
             print_npm_maintenance_report(command, &packages, &install);
@@ -4484,12 +4575,12 @@ fn run_pip_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
                 user: _,
                 vcs_requirements,
                 allow,
+                allow_flow,
                 allow_all_host,
             } = action;
-            let allowed_capabilities = parse_grants(&allow, allow_all_host)?;
             if specs.is_empty() && archive_references.is_empty() && script_requirements.is_empty() {
                 let mut options = LinkOptions::new(project_dir);
-                options.allowed_capabilities = allowed_capabilities;
+                apply_cli_policy_options(&mut options, &allow, &allow_flow, allow_all_host)?;
                 options.requirement_files = absolutize_paths(project_dir, requirements);
                 options.constraint_files = absolutize_paths(project_dir, constraints);
                 options.python_local_requirements =
@@ -4516,7 +4607,7 @@ fn run_pip_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
                 write_pip_install_report(project_dir, report.as_deref(), &install)?;
             } else {
                 let mut options = LinkOptions::new(project_dir);
-                options.allowed_capabilities = allowed_capabilities;
+                apply_cli_policy_options(&mut options, &allow, &allow_flow, allow_all_host)?;
                 options.requirement_files = absolutize_paths(project_dir, requirements);
                 options.constraint_files = absolutize_paths(project_dir, constraints);
                 options.python_local_requirements =
@@ -4590,6 +4681,7 @@ fn run_pip_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
             requirements,
             user,
             allow,
+            allow_flow,
             allow_all_host,
         } => {
             specs.extend(pip_uninstall_specs_from_requirements(
@@ -4597,14 +4689,13 @@ fn run_pip_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
                 requirements,
             )?);
             if user {
-                return run_pip_uninstall_user(&specs, &allow, allow_all_host);
+                return run_pip_uninstall_user(&specs, &allow, &allow_flow, allow_all_host);
             }
             remove_specs(
                 project_dir,
                 &specs,
                 Some(Ecosystem::Pypi),
-                &allow,
-                allow_all_host,
+                CliPolicyArgs::new(&allow, &allow_flow, allow_all_host),
                 false,
                 true,
             )?;
@@ -5262,6 +5353,7 @@ fn run_pip_install_dry_run(
         user,
         vcs_requirements,
         allow,
+        allow_flow,
         allow_all_host,
     } = action;
 
@@ -5302,7 +5394,7 @@ fn run_pip_install_dry_run(
     let mut options = LinkOptions::new(dry_run_project.path());
     options.save_manifest_dependency = false;
     options.discover_project_requirements = !groups.is_empty();
-    options.allowed_capabilities = parse_grants(&allow, allow_all_host)?;
+    apply_cli_policy_options(&mut options, &allow, &allow_flow, allow_all_host)?;
     apply_pip_compat_index_options(
         &mut options,
         project_dir,
@@ -5496,6 +5588,7 @@ fn run_pip_install_target(
         user: _,
         vcs_requirements,
         allow,
+        allow_flow,
         allow_all_host,
     } = action;
     let target = target.ok_or_else(|| {
@@ -5505,7 +5598,7 @@ fn run_pip_install_target(
     let target_project = TempOmcProject::new("pip-target", project_dir)?;
     let mut options = LinkOptions::new(target_project.path());
     options.discover_project_requirements = !groups.is_empty();
-    options.allowed_capabilities = parse_grants(&allow, allow_all_host)?;
+    apply_cli_policy_options(&mut options, &allow, &allow_flow, allow_all_host)?;
     options.requirement_files = absolutize_paths(project_dir, requirements);
     options.constraint_files = absolutize_paths(project_dir, constraints);
     options.python_local_requirements =
@@ -5605,6 +5698,7 @@ fn run_pip_install_prefix(
         user: _,
         vcs_requirements,
         allow,
+        allow_flow,
         allow_all_host,
     } = action;
     let prefix = prefix.ok_or_else(|| {
@@ -5617,7 +5711,7 @@ fn run_pip_install_prefix(
     let prefix_project = TempOmcProject::new("pip-prefix", project_dir)?;
     let mut options = LinkOptions::new(prefix_project.path());
     options.discover_project_requirements = !groups.is_empty();
-    options.allowed_capabilities = parse_grants(&allow, allow_all_host)?;
+    apply_cli_policy_options(&mut options, &allow, &allow_flow, allow_all_host)?;
     options.requirement_files = absolutize_paths(project_dir, requirements);
     options.constraint_files = absolutize_paths(project_dir, constraints);
     options.python_local_requirements =
@@ -5714,6 +5808,7 @@ fn run_pip_install_root(
         user: _,
         vcs_requirements,
         allow,
+        allow_flow,
         allow_all_host,
     } = action;
     let root = root.ok_or_else(|| {
@@ -5724,7 +5819,7 @@ fn run_pip_install_root(
     let root_project = TempOmcProject::new("pip-root", project_dir)?;
     let mut options = LinkOptions::new(root_project.path());
     options.discover_project_requirements = !groups.is_empty();
-    options.allowed_capabilities = parse_grants(&allow, allow_all_host)?;
+    apply_cli_policy_options(&mut options, &allow, &allow_flow, allow_all_host)?;
     options.requirement_files = absolutize_paths(project_dir, requirements);
     options.constraint_files = absolutize_paths(project_dir, constraints);
     options.python_local_requirements =
@@ -5821,6 +5916,7 @@ fn run_pip_install_user(
         user: _,
         vcs_requirements,
         allow,
+        allow_flow,
         allow_all_host,
     } = action;
 
@@ -5847,7 +5943,7 @@ fn run_pip_install_user(
     };
     fs::create_dir_all(&state_project)?;
     let mut options = LinkOptions::new(&state_project);
-    options.allowed_capabilities = parse_grants(&allow, allow_all_host)?;
+    apply_cli_policy_options(&mut options, &allow, &allow_flow, allow_all_host)?;
     options.requirement_files = absolutize_paths(project_dir, requirements);
     options.constraint_files = absolutize_paths(project_dir, constraints);
     options.python_local_requirements =
@@ -5916,6 +6012,7 @@ fn run_pip_install_user(
 fn run_pip_uninstall_user(
     specs: &[String],
     allow: &[String],
+    allow_flow: &[String],
     allow_all_host: bool,
 ) -> Result<ExitCode, OmcRegistryError> {
     if specs.is_empty() {
@@ -5958,7 +6055,7 @@ fn run_pip_uninstall_user(
     clean_pip_user_site_before_reinstall(&user_paths, previous_lock.as_ref())?;
     let install = if removed_manifest || !editable_removal.removed_names.is_empty() {
         let mut options = LinkOptions::new(&user_paths.state_project);
-        options.allowed_capabilities = parse_grants(allow, allow_all_host)?;
+        apply_cli_policy_options(&mut options, allow, allow_flow, allow_all_host)?;
         options.python_target_dir = Some(user_paths.site_packages.clone());
         install_project(&options)?
     } else if removed_locked {
@@ -10769,6 +10866,7 @@ fn download_pip_packages(
         compatibility,
         destination,
         allow,
+        allow_flow,
         allow_all_host,
     } = action;
 
@@ -10778,7 +10876,7 @@ fn download_pip_packages(
     let mut options = LinkOptions::new(project_dir);
     options.save_manifest_dependency = false;
     options.discover_project_requirements = false;
-    options.allowed_capabilities = parse_grants(&allow, allow_all_host)?;
+    apply_cli_policy_options(&mut options, &allow, &allow_flow, allow_all_host)?;
     apply_pip_compat_index_options(
         &mut options,
         project_dir,
@@ -14741,8 +14839,7 @@ fn remove_specs(
     project_dir: &Path,
     specs: &[String],
     ecosystem_hint: Option<Ecosystem>,
-    allow: &[String],
-    allow_all_host: bool,
+    policy: CliPolicyArgs<'_>,
     update_npm_package_json: bool,
     allow_locked_pypi_removal: bool,
 ) -> Result<(), OmcRegistryError> {
@@ -14807,7 +14904,12 @@ fn remove_specs(
         install_locked_packages(project_dir)?
     } else {
         let mut options = LinkOptions::new(project_dir);
-        options.allowed_capabilities = parse_grants(allow, allow_all_host)?;
+        apply_cli_policy_options(
+            &mut options,
+            policy.allow,
+            policy.allow_flow,
+            policy.allow_all_host,
+        )?;
         options.discover_project_requirements = update_npm_package_json;
         install_project(&options)?
     };
@@ -18273,6 +18375,7 @@ fn parse_npm_compat_action(args: &[String]) -> Result<NpmCompatAction, OmcRegist
             dry_run: false,
             npm_registry: None,
             allow: Vec::new(),
+            allow_flow: Vec::new(),
             allow_all_host: false,
             workspaces: Vec::new(),
             all_workspaces: false,
@@ -18297,6 +18400,7 @@ fn parse_npm_compat_action(args: &[String]) -> Result<NpmCompatAction, OmcRegist
                 omit_optional,
                 omit_peer,
                 allow,
+                allow_flow,
                 allow_all_host,
                 positionals,
                 ..
@@ -18309,6 +18413,7 @@ fn parse_npm_compat_action(args: &[String]) -> Result<NpmCompatAction, OmcRegist
                 omit_optional,
                 omit_peer,
                 allow,
+                allow_flow,
                 allow_all_host,
             })
         }
@@ -18328,6 +18433,7 @@ fn parse_npm_compat_action(args: &[String]) -> Result<NpmCompatAction, OmcRegist
             }
             let CommonCompatFlags {
                 allow,
+                allow_flow,
                 allow_all_host,
                 workspaces,
                 all_workspaces,
@@ -18344,6 +18450,7 @@ fn parse_npm_compat_action(args: &[String]) -> Result<NpmCompatAction, OmcRegist
                 specs: positionals,
                 global,
                 allow,
+                allow_flow,
                 allow_all_host,
                 workspaces,
                 all_workspaces,
@@ -19265,6 +19372,7 @@ fn parse_npm_maintenance_args(
         omit_optional,
         omit_peer,
         allow,
+        allow_flow,
         allow_all_host,
         positionals,
         ..
@@ -19279,6 +19387,7 @@ fn parse_npm_maintenance_args(
         omit_optional,
         omit_peer,
         allow,
+        allow_flow,
         allow_all_host,
     })
 }
@@ -19336,6 +19445,7 @@ fn parse_npm_rebuild_args(args: &[String]) -> Result<NpmCompatAction, OmcRegistr
         omit_optional,
         omit_peer,
         allow,
+        allow_flow,
         allow_all_host,
         positionals,
         ..
@@ -19348,6 +19458,7 @@ fn parse_npm_rebuild_args(args: &[String]) -> Result<NpmCompatAction, OmcRegistr
         omit_optional,
         omit_peer,
         allow,
+        allow_flow,
         allow_all_host,
     })
 }
@@ -19425,6 +19536,7 @@ fn parse_npm_init_args(
     let mut create_args = Vec::new();
     let mut npm_registry = None;
     let mut allow = Vec::new();
+    let mut allow_flow = Vec::new();
     let mut allow_all_host = false;
     let mut index = 0;
     while index < args.len() {
@@ -19471,6 +19583,10 @@ fn parse_npm_init_args(
             allow.push(npm_init_flag_value(args, &mut index, arg)?);
         } else if let Some(value) = arg.strip_prefix("--allow=") {
             allow.push(value.to_owned());
+        } else if arg == "--allow-flow" {
+            allow_flow.push(npm_init_flag_value(args, &mut index, arg)?);
+        } else if let Some(value) = arg.strip_prefix("--allow-flow=") {
+            allow_flow.push(value.to_owned());
         } else if arg == "--allow-all-host" {
             allow_all_host = true;
         } else if matches!(arg.as_str(), "--silent" | "-s") {
@@ -19497,11 +19613,14 @@ fn parse_npm_init_args(
                 args: create_args,
                 npm_registry,
                 allow,
+                allow_flow,
                 allow_all_host,
             },
         });
     }
-    if command != "init" && (npm_registry.is_some() || !allow.is_empty() || allow_all_host) {
+    if command != "init"
+        && (npm_registry.is_some() || !allow.is_empty() || !allow_flow.is_empty() || allow_all_host)
+    {
         return Err(OmcRegistryError::UnsupportedSpec(format!(
             "npm {command} capability and registry flags need an initializer package"
         )));
@@ -19659,6 +19778,7 @@ fn parse_npm_install_args(
         lock_only,
         npm_registry,
         allow,
+        allow_flow,
         allow_all_host,
         workspaces,
         all_workspaces,
@@ -19687,6 +19807,7 @@ fn parse_npm_install_args(
         dry_run,
         npm_registry,
         allow,
+        allow_flow,
         allow_all_host,
         workspaces,
         all_workspaces,
@@ -19752,6 +19873,7 @@ fn parse_npm_link_args(args: &[String]) -> Result<NpmCompatAction, OmcRegistryEr
         lock_only,
         npm_registry,
         allow,
+        allow_flow,
         allow_all_host,
         positionals,
         ..
@@ -19777,6 +19899,7 @@ fn parse_npm_link_args(args: &[String]) -> Result<NpmCompatAction, OmcRegistryEr
             dry_run,
             npm_registry,
             allow,
+            allow_flow,
             allow_all_host,
         },
     })
@@ -19824,6 +19947,7 @@ fn parse_npm_install_test_args(
             omit_optional,
             omit_peer,
             allow,
+            allow_flow,
             allow_all_host,
             workspaces,
             all_workspaces,
@@ -19850,6 +19974,7 @@ fn parse_npm_install_test_args(
             dry_run: false,
             npm_registry: None,
             allow,
+            allow_flow,
             allow_all_host,
             workspaces,
             all_workspaces,
@@ -19874,6 +19999,7 @@ fn parse_npm_install_test_args(
         dry_run,
         npm_registry,
         allow,
+        allow_flow,
         allow_all_host,
         workspaces,
         all_workspaces,
@@ -19903,6 +20029,7 @@ fn parse_npm_install_test_args(
         dry_run,
         npm_registry,
         allow,
+        allow_flow,
         allow_all_host,
         workspaces,
         all_workspaces,
@@ -23531,6 +23658,7 @@ fn parse_npm_exec_args(
     let mut no_install = false;
     let mut npm_registry = None;
     let mut allow = Vec::new();
+    let mut allow_flow = Vec::new();
     let mut allow_all_host = false;
     let mut filtered = Vec::new();
     let mut index = 0;
@@ -23580,6 +23708,16 @@ fn parse_npm_exec_args(
             allow.push(grant.clone());
         } else if let Some(grant) = arg.strip_prefix("--allow=") {
             allow.push(grant.to_owned());
+        } else if arg == "--allow-flow" {
+            index += 1;
+            let Some(flow) = args.get(index) else {
+                return Err(OmcRegistryError::UnsupportedSpec(
+                    "--allow-flow needs a data-flow grant".to_owned(),
+                ));
+            };
+            allow_flow.push(flow.clone());
+        } else if let Some(flow) = arg.strip_prefix("--allow-flow=") {
+            allow_flow.push(flow.to_owned());
         } else if arg == "--allow-all-host" {
             allow_all_host = true;
         } else if matches!(arg.as_str(), "--cache" | "--userconfig") {
@@ -23617,6 +23755,7 @@ fn parse_npm_exec_args(
         prefer_project_bin,
         npm_registry,
         allow,
+        allow_flow,
         allow_all_host,
     })
 }
@@ -24474,6 +24613,7 @@ fn parse_pip_uninstall_args(args: &[String]) -> Result<PipCompatAction, OmcRegis
 
     let CommonCompatFlags {
         allow,
+        allow_flow,
         allow_all_host,
         positionals,
         ..
@@ -24488,6 +24628,7 @@ fn parse_pip_uninstall_args(args: &[String]) -> Result<PipCompatAction, OmcRegis
         requirements,
         user,
         allow,
+        allow_flow,
         allow_all_host,
     })
 }
@@ -25080,6 +25221,7 @@ fn parse_pip_install_args(args: &[String]) -> Result<PipCompatAction, OmcRegistr
 
     let CommonCompatFlags {
         allow,
+        allow_flow,
         allow_all_host,
         positionals,
         ..
@@ -25111,6 +25253,7 @@ fn parse_pip_install_args(args: &[String]) -> Result<PipCompatAction, OmcRegistr
         user,
         vcs_requirements,
         allow,
+        allow_flow,
         allow_all_host,
     })))
 }
@@ -25388,6 +25531,7 @@ fn parse_pip_artifact_args(
 
     let CommonCompatFlags {
         allow,
+        allow_flow,
         allow_all_host,
         positionals,
         ..
@@ -25411,6 +25555,7 @@ fn parse_pip_artifact_args(
         compatibility,
         destination,
         allow,
+        allow_flow,
         allow_all_host,
     };
     Ok(match command {
@@ -25697,6 +25842,7 @@ struct CommonCompatFlags {
     lock_only: bool,
     npm_registry: Option<String>,
     allow: Vec<String>,
+    allow_flow: Vec<String>,
     allow_all_host: bool,
     workspaces: Vec<String>,
     all_workspaces: bool,
@@ -25717,6 +25863,7 @@ impl Default for CommonCompatFlags {
             lock_only: false,
             npm_registry: None,
             allow: Vec::new(),
+            allow_flow: Vec::new(),
             allow_all_host: false,
             workspaces: Vec::new(),
             all_workspaces: false,
@@ -25747,6 +25894,16 @@ fn parse_common_compat_flags(
             parsed.allow.push(grant.clone());
         } else if let Some(grant) = arg.strip_prefix("--allow=") {
             parsed.allow.push(grant.to_owned());
+        } else if arg == "--allow-flow" {
+            index += 1;
+            let Some(flow) = args.get(index) else {
+                return Err(OmcRegistryError::UnsupportedSpec(
+                    "--allow-flow needs a data-flow grant".to_owned(),
+                ));
+            };
+            parsed.allow_flow.push(flow.clone());
+        } else if let Some(flow) = arg.strip_prefix("--allow-flow=") {
+            parsed.allow_flow.push(flow.to_owned());
         } else if arg == "--allow-all-host" {
             parsed.allow_all_host = true;
         } else if npm_mode && matches!(arg.as_str(), "-D" | "--save-dev" | "--dev") {
@@ -26368,6 +26525,24 @@ fn parse_grants(
     }
 
     Ok(grants)
+}
+
+fn parse_flow_grants(allow_flow: &[String]) -> Result<Vec<omc_cap::FlowRule>, OmcRegistryError> {
+    allow_flow
+        .iter()
+        .map(|flow| parse_flow_rule(flow))
+        .collect()
+}
+
+fn apply_cli_policy_options(
+    options: &mut LinkOptions,
+    allow: &[String],
+    allow_flow: &[String],
+    allow_all_host: bool,
+) -> Result<(), OmcRegistryError> {
+    options.allowed_capabilities = parse_grants(allow, allow_all_host)?;
+    options.allowed_flows = parse_flow_grants(allow_flow)?;
+    Ok(())
 }
 
 fn parse_package_specs(
@@ -27595,6 +27770,7 @@ mod tests {
                 dry_run: false,
                 npm_registry: Some("https://registry.example.invalid/npm".to_owned()),
                 allow: Vec::new(),
+                allow_flow: Vec::new(),
                 allow_all_host: false,
                 workspaces: Vec::new(),
                 all_workspaces: false,
@@ -27665,6 +27841,7 @@ mod tests {
                     args: Vec::new(),
                     npm_registry: None,
                     allow: Vec::new(),
+                    allow_flow: Vec::new(),
                     allow_all_host: false,
                 },
             }
@@ -27693,6 +27870,7 @@ mod tests {
                     ],
                     npm_registry: Some("https://registry.example.invalid/npm".to_owned()),
                     allow: vec!["fs.write:*".to_owned()],
+                    allow_flow: Vec::new(),
                     allow_all_host: true,
                 },
             }
@@ -27792,11 +27970,32 @@ mod tests {
                 dry_run: true,
                 npm_registry: Some("https://registry.example.invalid/npm".to_owned()),
                 allow: Vec::new(),
+                allow_flow: Vec::new(),
                 allow_all_host: true,
                 workspaces: Vec::new(),
                 all_workspaces: false,
                 include_workspace_root: false,
             }
+        );
+
+        let action = parse_npm_compat_action(&args(&[
+            "install",
+            "--allow=env:API_TOKEN",
+            "--allow-flow",
+            "env:API_TOKEN->network:api.example.com",
+            "flow-client",
+        ]))
+        .unwrap();
+        let NpmCompatAction::Install {
+            allow, allow_flow, ..
+        } = action
+        else {
+            panic!("expected npm install action");
+        };
+        assert_eq!(allow, vec!["env:API_TOKEN".to_owned()]);
+        assert_eq!(
+            allow_flow,
+            vec!["env:API_TOKEN->network:api.example.com".to_owned()]
         );
 
         let exact =
@@ -27830,6 +28029,7 @@ mod tests {
                 dry_run: false,
                 npm_registry: None,
                 allow: Vec::new(),
+                allow_flow: Vec::new(),
                 allow_all_host: false,
                 workspaces: Vec::new(),
                 all_workspaces: false,
@@ -27854,6 +28054,7 @@ mod tests {
                 dry_run: false,
                 npm_registry: None,
                 allow: Vec::new(),
+                allow_flow: Vec::new(),
                 allow_all_host: false,
                 workspaces: Vec::new(),
                 all_workspaces: false,
@@ -27887,6 +28088,7 @@ mod tests {
                 dry_run: false,
                 npm_registry: None,
                 allow: Vec::new(),
+                allow_flow: Vec::new(),
                 allow_all_host: false,
                 workspaces: Vec::new(),
                 all_workspaces: false,
@@ -27916,6 +28118,7 @@ mod tests {
                     dry_run: true,
                     npm_registry: None,
                     allow: Vec::new(),
+                    allow_flow: Vec::new(),
                     allow_all_host: false,
                 },
             }
@@ -27943,6 +28146,7 @@ mod tests {
                     dry_run: false,
                     npm_registry: Some("https://registry.example.invalid/npm".to_owned()),
                     allow: Vec::new(),
+                    allow_flow: Vec::new(),
                     allow_all_host: false,
                 },
             }
@@ -27973,6 +28177,7 @@ mod tests {
                     dry_run: true,
                     npm_registry: None,
                     allow: Vec::new(),
+                    allow_flow: Vec::new(),
                     allow_all_host: false,
                 },
             }
@@ -28006,6 +28211,7 @@ mod tests {
                 dry_run: false,
                 npm_registry: None,
                 allow: Vec::new(),
+                allow_flow: Vec::new(),
                 allow_all_host: false,
                 workspaces: Vec::new(),
                 all_workspaces: false,
@@ -28034,6 +28240,7 @@ mod tests {
                 dry_run: false,
                 npm_registry: None,
                 allow: Vec::new(),
+                allow_flow: Vec::new(),
                 allow_all_host: false,
                 workspaces: Vec::new(),
                 all_workspaces: false,
@@ -28119,6 +28326,7 @@ mod tests {
                 dry_run: false,
                 npm_registry: None,
                 allow: Vec::new(),
+                allow_flow: Vec::new(),
                 allow_all_host: false,
                 workspaces: vec!["@demo/lib".to_owned()],
                 all_workspaces: false,
@@ -28139,6 +28347,7 @@ mod tests {
                 specs: vec!["left-pad".to_owned()],
                 global: false,
                 allow: Vec::new(),
+                allow_flow: Vec::new(),
                 allow_all_host: false,
                 workspaces: vec!["@demo/lib".to_owned()],
                 all_workspaces: false,
@@ -28172,6 +28381,7 @@ mod tests {
                 dry_run: false,
                 npm_registry: Some("https://registry.example.invalid/npm".to_owned()),
                 allow: Vec::new(),
+                allow_flow: Vec::new(),
                 allow_all_host: false,
                 workspaces: Vec::new(),
                 all_workspaces: false,
@@ -28198,6 +28408,7 @@ mod tests {
                 dry_run: false,
                 npm_registry: None,
                 allow: Vec::new(),
+                allow_flow: Vec::new(),
                 allow_all_host: false,
                 workspaces: Vec::new(),
                 all_workspaces: false,
@@ -28232,6 +28443,7 @@ mod tests {
                 dry_run: false,
                 npm_registry: Some("https://registry.example.invalid/npm".to_owned()),
                 allow: Vec::new(),
+                allow_flow: Vec::new(),
                 allow_all_host: false,
                 workspaces: Vec::new(),
                 all_workspaces: false,
@@ -28256,6 +28468,7 @@ mod tests {
                 dry_run: false,
                 npm_registry: None,
                 allow: Vec::new(),
+                allow_flow: Vec::new(),
                 allow_all_host: false,
                 workspaces: Vec::new(),
                 all_workspaces: false,
@@ -28386,6 +28599,7 @@ mod tests {
                     prefer_project_bin: false,
                     npm_registry: None,
                     allow: Vec::new(),
+                    allow_flow: Vec::new(),
                     allow_all_host: false,
                 },
             }
@@ -28407,6 +28621,7 @@ mod tests {
                     prefer_project_bin: false,
                     npm_registry: None,
                     allow: Vec::new(),
+                    allow_flow: Vec::new(),
                     allow_all_host: false,
                 },
             }
@@ -28432,6 +28647,7 @@ mod tests {
                     prefer_project_bin: false,
                     npm_registry: None,
                     allow: Vec::new(),
+                    allow_flow: Vec::new(),
                     allow_all_host: false,
                 },
             }
@@ -28455,6 +28671,7 @@ mod tests {
                     prefer_project_bin: false,
                     npm_registry: None,
                     allow: Vec::new(),
+                    allow_flow: Vec::new(),
                     allow_all_host: false,
                 },
             }
@@ -28470,6 +28687,7 @@ mod tests {
                     prefer_project_bin: true,
                     npm_registry: None,
                     allow: Vec::new(),
+                    allow_flow: Vec::new(),
                     allow_all_host: false,
                 },
             }
@@ -28485,6 +28703,7 @@ mod tests {
                     prefer_project_bin: true,
                     npm_registry: None,
                     allow: Vec::new(),
+                    allow_flow: Vec::new(),
                     allow_all_host: false,
                 },
             }
@@ -28511,6 +28730,7 @@ mod tests {
                     prefer_project_bin: false,
                     npm_registry: Some("https://registry.example".to_owned()),
                     allow: vec!["env:TOOL_TOKEN".to_owned()],
+                    allow_flow: Vec::new(),
                     allow_all_host: true,
                 },
             }
@@ -28533,6 +28753,7 @@ mod tests {
                     prefer_project_bin: false,
                     npm_registry: None,
                     allow: Vec::new(),
+                    allow_flow: Vec::new(),
                     allow_all_host: false,
                 },
             }
@@ -28814,6 +29035,7 @@ mod tests {
                 omit_optional: false,
                 omit_peer: false,
                 allow: Vec::new(),
+                allow_flow: Vec::new(),
                 allow_all_host: true,
             }
         );
@@ -28827,6 +29049,7 @@ mod tests {
                 omit_optional: false,
                 omit_peer: false,
                 allow: Vec::new(),
+                allow_flow: Vec::new(),
                 allow_all_host: false,
             }
         );
@@ -28846,6 +29069,7 @@ mod tests {
                 omit_optional: false,
                 omit_peer: false,
                 allow: Vec::new(),
+                allow_flow: Vec::new(),
                 allow_all_host: false,
             }
         );
@@ -31667,9 +31891,28 @@ verdict = "accepted"
                 user: false,
                 vcs_requirements: Vec::new(),
                 allow: Vec::new(),
+                allow_flow: Vec::new(),
                 allow_all_host: true,
             }))
         );
+
+        match parse_pip_compat_action(&args(&[
+            "install",
+            "--allow=env:API_TOKEN",
+            "--allow-flow=env:API_TOKEN->network:api.example.com",
+            "requests==2.32.3",
+        ]))
+        .unwrap()
+        {
+            PipCompatAction::Install(action) => {
+                assert_eq!(action.allow, vec!["env:API_TOKEN".to_owned()]);
+                assert_eq!(
+                    action.allow_flow,
+                    vec!["env:API_TOKEN->network:api.example.com".to_owned()]
+                );
+            }
+            other => panic!("expected pip install action, got {other:?}"),
+        }
 
         match parse_pip_compat_action(&args(&["install", "--user", "requests==2.32.3"])).unwrap() {
             PipCompatAction::Install(action) => {
@@ -31786,6 +32029,7 @@ verdict = "accepted"
                 },
                 destination: PathBuf::from("wheelhouse"),
                 allow: vec!["http:files.example".to_owned()],
+                allow_flow: Vec::new(),
                 allow_all_host: false,
             }))
         );
@@ -31839,6 +32083,7 @@ verdict = "accepted"
                 compatibility: PipCompatibilityTarget::default(),
                 destination: PathBuf::from("wheelhouse"),
                 allow: vec!["http:files.example".to_owned()],
+                allow_flow: Vec::new(),
                 allow_all_host: false,
             }))
         );
@@ -31869,6 +32114,7 @@ verdict = "accepted"
                 compatibility: PipCompatibilityTarget::default(),
                 destination: PathBuf::from("wheelhouse"),
                 allow: Vec::new(),
+                allow_flow: Vec::new(),
                 allow_all_host: false,
             }))
         );
@@ -31896,6 +32142,7 @@ verdict = "accepted"
                 compatibility: PipCompatibilityTarget::default(),
                 destination: PathBuf::from("wheelhouse"),
                 allow: Vec::new(),
+                allow_flow: Vec::new(),
                 allow_all_host: false,
             }))
         );
@@ -31947,6 +32194,7 @@ verdict = "accepted"
                 user: false,
                 vcs_requirements: Vec::new(),
                 allow: Vec::new(),
+                allow_flow: Vec::new(),
                 allow_all_host: false,
             }))
         );
@@ -32000,6 +32248,7 @@ verdict = "accepted"
                     },
                 ],
                 allow: Vec::new(),
+                allow_flow: Vec::new(),
                 allow_all_host: false,
             }))
         );
@@ -32283,6 +32532,7 @@ version = "0.1.0"
                 user: false,
                 vcs_requirements: Vec::new(),
                 allow: Vec::new(),
+                allow_flow: Vec::new(),
                 allow_all_host: false,
             },
         )
@@ -32819,6 +33069,7 @@ verdict = "accepted"
                 user: false,
                 vcs_requirements: Vec::new(),
                 allow: Vec::new(),
+                allow_flow: Vec::new(),
                 allow_all_host: false,
             }))
         );
@@ -33682,6 +33933,7 @@ version = "0.2.0"
                 requirements: Vec::new(),
                 user: false,
                 allow: Vec::new(),
+                allow_flow: Vec::new(),
                 allow_all_host: false,
             }
         );
@@ -33704,6 +33956,7 @@ version = "0.2.0"
                 ],
                 user: false,
                 allow: Vec::new(),
+                allow_flow: Vec::new(),
                 allow_all_host: false,
             }
         );
@@ -33714,6 +33967,7 @@ version = "0.2.0"
                 requirements: Vec::new(),
                 user: true,
                 allow: Vec::new(),
+                allow_flow: Vec::new(),
                 allow_all_host: false,
             }
         );
