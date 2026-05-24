@@ -628,6 +628,7 @@ pub struct LinkOptions {
     pub allowed_capabilities: Vec<Capability>,
     pub allowed_flows: Vec<FlowRule>,
     pub constraints: BTreeMap<String, String>,
+    pub npm_overrides: BTreeMap<String, String>,
     pub hashes: BTreeMap<String, BTreeSet<String>>,
     pub npm_integrities: BTreeMap<String, BTreeSet<String>>,
     pub npm_resolved: BTreeMap<String, String>,
@@ -678,6 +679,7 @@ impl LinkOptions {
             allowed_capabilities: Vec::new(),
             allowed_flows: Vec::new(),
             constraints: BTreeMap::new(),
+            npm_overrides: BTreeMap::new(),
             hashes: BTreeMap::new(),
             npm_integrities: BTreeMap::new(),
             npm_resolved: BTreeMap::new(),
@@ -819,6 +821,7 @@ pub struct InstallReport {
 pub struct ProjectRequirements {
     pub specs: Vec<PackageSpec>,
     pub constraints: BTreeMap<String, String>,
+    pub npm_overrides: BTreeMap<String, String>,
     pub hashes: BTreeMap<String, BTreeSet<String>>,
     pub npm_integrities: BTreeMap<String, BTreeSet<String>>,
     pub npm_resolved: BTreeMap<String, String>,
@@ -871,6 +874,7 @@ fn extend_project_requirements(
 ) {
     target.specs.extend(requirements.specs);
     target.constraints.extend(requirements.constraints);
+    target.npm_overrides.extend(requirements.npm_overrides);
     target.hashes.extend(requirements.hashes);
     target.npm_integrities.extend(requirements.npm_integrities);
     target.npm_resolved.extend(requirements.npm_resolved);
@@ -916,6 +920,7 @@ fn apply_project_requirements_to_options(
 ) {
     specs.extend(requirements.specs);
     options.constraints.extend(requirements.constraints);
+    options.npm_overrides.extend(requirements.npm_overrides);
     options.hashes.extend(requirements.hashes);
     options.npm_integrities.extend(requirements.npm_integrities);
     options.npm_resolved.extend(requirements.npm_resolved);
@@ -1176,7 +1181,9 @@ pub fn check_pypi_lock(lock: &OmcLock) -> Vec<PypiCheckIssue> {
             if spec.ecosystem != Ecosystem::Pypi {
                 continue;
             }
-            if find_locked_package_for_spec(lock, &spec, &constraints, &hashes).is_some() {
+            if find_locked_package_for_spec(lock, &spec, &constraints, &BTreeMap::new(), &hashes)
+                .is_some()
+            {
                 continue;
             }
 
@@ -1546,7 +1553,7 @@ fn resolve_npm_local_path_requirements(options: &mut LinkOptions) -> Result<Vec<
         }
         let package =
             serde_json::from_str::<ProjectPackageJson>(&fs::read_to_string(&package_json)?)?;
-        collect_package_json_constraints(&package, &mut options.constraints);
+        collect_package_json_overrides(&package, &mut options.npm_overrides);
         specs.extend(package_json_dependency_specs(
             package.clone(),
             selection,
@@ -2074,9 +2081,14 @@ fn locked_reachable_package_keys(
 ) -> Result<BTreeSet<String>> {
     let mut retained = BTreeSet::new();
     for spec in specs {
-        let package =
-            find_locked_package_for_spec(lock, spec, &options.constraints, &options.hashes)
-                .ok_or_else(|| OmcRegistryError::LockfileOutOfDate(spec.requested()))?;
+        let package = find_locked_package_for_spec(
+            lock,
+            spec,
+            &options.constraints,
+            &options.npm_overrides,
+            &options.hashes,
+        )
+        .ok_or_else(|| OmcRegistryError::LockfileOutOfDate(spec.requested()))?;
         collect_locked_dependencies(lock, package, options, &mut retained)?;
     }
     Ok(retained)
@@ -2098,17 +2110,26 @@ fn collect_locked_dependencies(
 
     for dependency in &package.dependencies {
         let spec = PackageSpec::parse(dependency)?;
-        let dependency =
-            find_locked_package_for_spec(lock, &spec, &BTreeMap::new(), &BTreeMap::new())
-                .ok_or_else(|| OmcRegistryError::LockfileOutOfDate(spec.requested()))?;
+        let dependency = find_locked_package_for_spec(
+            lock,
+            &spec,
+            &BTreeMap::new(),
+            &options.npm_overrides,
+            &BTreeMap::new(),
+        )
+        .ok_or_else(|| OmcRegistryError::LockfileOutOfDate(spec.requested()))?;
         collect_locked_dependencies(lock, dependency, options, retained)?;
     }
     if options.include_optional_dependencies {
         for dependency in &package.optional_dependencies {
             let spec = PackageSpec::parse(dependency)?;
-            if let Some(dependency) =
-                find_locked_package_for_spec(lock, &spec, &BTreeMap::new(), &BTreeMap::new())
-            {
+            if let Some(dependency) = find_locked_package_for_spec(
+                lock,
+                &spec,
+                &BTreeMap::new(),
+                &options.npm_overrides,
+                &BTreeMap::new(),
+            ) {
                 collect_locked_dependencies(lock, dependency, options, retained)?;
             }
         }
@@ -2116,9 +2137,14 @@ fn collect_locked_dependencies(
     if options.include_peer_dependencies {
         for dependency in &package.peer_dependencies {
             let spec = PackageSpec::parse(dependency)?;
-            let dependency =
-                find_locked_package_for_spec(lock, &spec, &BTreeMap::new(), &BTreeMap::new())
-                    .ok_or_else(|| OmcRegistryError::LockfileOutOfDate(spec.requested()))?;
+            let dependency = find_locked_package_for_spec(
+                lock,
+                &spec,
+                &BTreeMap::new(),
+                &options.npm_overrides,
+                &BTreeMap::new(),
+            )
+            .ok_or_else(|| OmcRegistryError::LockfileOutOfDate(spec.requested()))?;
             collect_locked_dependencies(lock, dependency, options, retained)?;
         }
     }
@@ -2134,6 +2160,7 @@ fn find_locked_package_for_spec<'a>(
     lock: &'a OmcLock,
     spec: &PackageSpec,
     constraints: &BTreeMap<String, String>,
+    npm_overrides: &BTreeMap<String, String>,
     hashes: &BTreeMap<String, BTreeSet<String>>,
 ) -> Option<&'a LockedPackage> {
     lock.packages
@@ -2146,7 +2173,7 @@ fn find_locked_package_for_spec<'a>(
                 .map(|url| package.source_url == url)
                 .unwrap_or(true)
         })
-        .filter(|package| locked_package_version_matches(package, spec, constraints))
+        .filter(|package| locked_package_version_matches(package, spec, constraints, npm_overrides))
         .filter(|package| {
             hashes
                 .get(&spec.constraint_key())
@@ -2170,13 +2197,14 @@ fn locked_package_version_matches(
     package: &LockedPackage,
     spec: &PackageSpec,
     constraints: &BTreeMap<String, String>,
+    npm_overrides: &BTreeMap<String, String>,
 ) -> bool {
     match spec.ecosystem {
         Ecosystem::Npm => {
             let Ok((_, requirement)) = npm_registry_name_and_requirement(spec) else {
                 return false;
             };
-            constrained_npm_requirement(spec, requirement.as_deref(), constraints)
+            effective_npm_requirement(spec, requirement.as_deref(), constraints, npm_overrides)
                 .as_deref()
                 .map(|requirement| npm_version_satisfies(&package.version, requirement))
                 .unwrap_or(true)
@@ -3583,7 +3611,7 @@ fn read_package_json_requirements(
     let base_dir = path.parent().unwrap_or_else(|| Path::new("."));
     let workspaces = package.workspaces.clone();
     let mut requirements = ProjectRequirements::default();
-    collect_package_json_constraints(&package, &mut requirements.constraints);
+    collect_package_json_overrides(&package, &mut requirements.npm_overrides);
     requirements
         .specs
         .extend(package_json_dependency_specs(package, selection, base_dir)?);
@@ -3593,7 +3621,7 @@ fn read_package_json_requirements(
             let workspace_base_dir = package_json.parent().unwrap_or(base_dir);
             let package =
                 serde_json::from_str::<ProjectPackageJson>(&fs::read_to_string(&package_json)?)?;
-            collect_package_json_constraints(&package, &mut requirements.constraints);
+            collect_package_json_overrides(&package, &mut requirements.npm_overrides);
             requirements.specs.extend(package_json_dependency_specs(
                 package,
                 selection,
@@ -3643,12 +3671,12 @@ fn package_json_dependency_specs(
     Ok(specs)
 }
 
-fn collect_package_json_constraints(
+fn collect_package_json_overrides(
     package: &ProjectPackageJson,
-    constraints: &mut BTreeMap<String, String>,
+    overrides: &mut BTreeMap<String, String>,
 ) {
-    collect_npm_override_constraints(&package.overrides, constraints);
-    collect_npm_resolution_constraints(&package.resolutions, constraints);
+    collect_npm_override_constraints(&package.overrides, overrides);
+    collect_npm_resolution_constraints(&package.resolutions, overrides);
 }
 
 fn collect_npm_override_constraints(
@@ -4452,6 +4480,7 @@ fn npm_requirements_from_lock_maps(
     ProjectRequirements {
         specs: Vec::new(),
         constraints,
+        npm_overrides: BTreeMap::new(),
         hashes: BTreeMap::new(),
         npm_integrities,
         npm_resolved,
@@ -9392,8 +9421,12 @@ fn resolve_npm(
 
     let (registry_name, version_requirement) = npm_registry_name_and_requirement(spec)?;
     let install_name = spec.name.clone();
-    let constrained_requirement =
-        constrained_npm_requirement(spec, version_requirement.as_deref(), &options.constraints);
+    let constrained_requirement = effective_npm_requirement(
+        spec,
+        version_requirement.as_deref(),
+        &options.constraints,
+        &options.npm_overrides,
+    );
     if options.npm_offline {
         return resolve_npm_offline_locked_package(
             spec,
@@ -13982,6 +14015,18 @@ fn constrained_npm_requirement(
     }
 }
 
+fn effective_npm_requirement(
+    spec: &PackageSpec,
+    requirement: Option<&str>,
+    constraints: &BTreeMap<String, String>,
+    npm_overrides: &BTreeMap<String, String>,
+) -> Option<String> {
+    npm_overrides
+        .get(&spec.constraint_key())
+        .cloned()
+        .or_else(|| constrained_npm_requirement(spec, requirement, constraints))
+}
+
 fn constrained_requirement(
     spec: &PackageSpec,
     constraints: &BTreeMap<String, String>,
@@ -17974,7 +18019,7 @@ mod tests {
     }
 
     #[test]
-    fn reads_package_json_overrides_and_resolutions_as_constraints() {
+    fn reads_package_json_overrides_and_resolutions_as_overrides() {
         let dir = tempfile::tempdir().unwrap();
         let package_json = dir.path().join("package.json");
         fs::write(
@@ -17999,40 +18044,41 @@ mod tests {
                 .unwrap();
         assert_eq!(
             requirements
-                .constraints
+                .npm_overrides
                 .get("npm:left-pad")
                 .map(String::as_str),
             Some("1.3.0")
         );
         assert_eq!(
             requirements
-                .constraints
+                .npm_overrides
                 .get("npm:@scope/pkg")
                 .map(String::as_str),
             Some("2.1.0")
         );
         assert_eq!(
             requirements
-                .constraints
+                .npm_overrides
                 .get("npm:transitive")
                 .map(String::as_str),
             Some("3.0.0")
         );
         assert_eq!(
             requirements
-                .constraints
+                .npm_overrides
                 .get("npm:ansi-regex")
                 .map(String::as_str),
             Some("5.0.1")
         );
         assert_eq!(
             requirements
-                .constraints
+                .npm_overrides
                 .get("npm:@demo/tool")
                 .map(String::as_str),
             Some("4.0.0")
         );
-        assert!(!requirements.constraints.contains_key("npm:ignored"));
+        assert!(!requirements.npm_overrides.contains_key("npm:ignored"));
+        assert!(requirements.constraints.is_empty());
     }
 
     #[test]
@@ -19776,6 +19822,12 @@ packages:
         assert_eq!(
             constrained_npm_requirement(&spec, spec.version.as_deref(), &constraints).as_deref(),
             Some("^3.0.0,3.0.1")
+        );
+        let overrides = BTreeMap::from([("npm:is-odd".to_owned(), "4.0.0".to_owned())]);
+        assert_eq!(
+            effective_npm_requirement(&spec, spec.version.as_deref(), &constraints, &overrides)
+                .as_deref(),
+            Some("4.0.0")
         );
 
         let alias = PackageSpec::new(
