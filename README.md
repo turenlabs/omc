@@ -26,6 +26,9 @@ host OS, network, filesystem, secrets
 This repository currently contains the runtime seed, not a full npm or Python
 frontend.
 
+For the longer architecture contract, see
+[docs/oss-microcode-runtime.md](docs/oss-microcode-runtime.md).
+
 ## Workspace
 
 ```text
