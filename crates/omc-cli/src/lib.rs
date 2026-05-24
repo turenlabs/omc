@@ -4059,7 +4059,10 @@ fn run_npm_compat_with_cwd(
         NpmCompatAction::Fund { action } => print_npm_fund(project_dir, action)?,
         NpmCompatAction::Cache { action } => print_npm_cache(project_dir, action)?,
         NpmCompatAction::Pkg { action } => print_npm_pkg(project_dir, action)?,
-        NpmCompatAction::Pack { action } => print_npm_pack(project_dir, action)?,
+        NpmCompatAction::Pack { mut action } => {
+            absolutize_npm_pack_action_paths(invocation_cwd, &mut action);
+            print_npm_pack(project_dir, action)?
+        }
         NpmCompatAction::Publish { action } => print_npm_publish(project_dir, action)?,
         NpmCompatAction::Unpublish { action } => print_npm_unpublish(project_dir, action)?,
         NpmCompatAction::Deprecate { action } => print_npm_deprecate(project_dir, action)?,
@@ -5514,6 +5517,15 @@ fn absolutize_npm_link_action_paths(base_dir: &Path, action: &mut NpmLinkAction)
     *archive_references =
         absolutize_npm_archive_references(base_dir, std::mem::take(archive_references));
     *local_paths = absolutize_paths(base_dir, std::mem::take(local_paths));
+}
+
+fn absolutize_npm_pack_action_paths(base_dir: &Path, action: &mut NpmPackAction) {
+    action.destination = absolutize_path(base_dir, std::mem::take(&mut action.destination));
+    for package in &mut action.packages {
+        if let NpmPackInput::Local(path) = package {
+            *path = absolutize_path(base_dir, std::mem::take(path));
+        }
+    }
 }
 
 fn absolutize_pip_lock_action_paths(base_dir: &Path, action: &mut PipLockAction) {
@@ -35204,6 +35216,39 @@ verdict = "accepted"
         )
         .unwrap();
         assert!(!dir.join("dry").exists());
+    }
+
+    #[test]
+    fn direct_npm_pack_resolves_local_paths_from_invocation_cwd() {
+        let project = test_dir("direct-npm-pack-local-project");
+        let invocation_cwd = project.join("packages/app/src");
+        let local_package = invocation_cwd.join("vendor/packme");
+        fs::create_dir_all(&local_package).unwrap();
+        fs::write(
+            project.join("package.json"),
+            r#"{ "name": "root", "version": "1.0.0" }"#,
+        )
+        .unwrap();
+        fs::write(
+            local_package.join("package.json"),
+            r#"{ "name": "pack-me", "version": "1.2.3" }"#,
+        )
+        .unwrap();
+        fs::write(local_package.join("index.js"), "module.exports = 1;\n").unwrap();
+
+        let status = run_npm_compat_with_cwd(
+            &project,
+            &args(&["pack", "./vendor/packme", "--pack-destination", "packed"]),
+            &invocation_cwd,
+        )
+        .unwrap();
+
+        assert_eq!(status, ExitCode::SUCCESS);
+        let tarball = invocation_cwd.join("packed/pack-me-1.2.3.tgz");
+        assert!(tarball.exists());
+        assert!(!project.join("packed/pack-me-1.2.3.tgz").exists());
+        let manifest = npm_manifest_from_tarball(&fs::read(tarball).unwrap()).unwrap();
+        assert_eq!(npm_package_json_name(&manifest).unwrap(), "pack-me");
     }
 
     #[test]
