@@ -7,6 +7,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use std::{env, ffi::OsString, fs};
 
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
+use chrono::{Duration, SecondsFormat, Utc};
 use clap::{Parser, Subcommand};
 use flate2::write::GzEncoder;
 use flate2::Compression;
@@ -4970,6 +4971,9 @@ fn npm_environment_default_args() -> Vec<String> {
     if let Some(save_prefix) = npm_config_env("save-prefix") {
         args.push(format!("--save-prefix={save_prefix}"));
     }
+    if let Some(min_release_age) = npm_config_env("min-release-age") {
+        args.push(format!("--min-release-age={min_release_age}"));
+    }
     if let Some(before) = npm_config_env("before") {
         args.push(format!("--before={before}"));
     }
@@ -5095,6 +5099,7 @@ fn npm_cli_default_config_key(key: &str) -> bool {
             | "save-exact"
             | "save-bundle"
             | "save-prefix"
+            | "min-release-age"
             | "before"
     )
 }
@@ -5206,6 +5211,12 @@ fn append_npm_default_args_from_config(values: &BTreeMap<String, String>, args: 
         .filter(|value| !value.trim().is_empty())
     {
         args.push(format!("--save-prefix={save_prefix}"));
+    }
+    if let Some(min_release_age) = values
+        .get("min-release-age")
+        .filter(|value| !value.trim().is_empty())
+    {
+        args.push(format!("--min-release-age={min_release_age}"));
     }
     if let Some(before) = values
         .get("before")
@@ -8407,7 +8418,7 @@ fn npm_help_text(topic: Option<&str>) -> String {
             &[
                 "Resolve, verify, lock, and install npm packages with OMC.",
                 "Aliases: i, add, update, up, upgrade, udpate.",
-                "Common flags: --save, --no-save, --save-dev, --save-optional, --save-peer, --only=prod|dev, --also=dev, --no-optional, --omit=dev|optional|peer, --include=dev|optional|peer, --workspace, --workspaces, --include-workspace-root, --package-lock-only, --prefer-offline, --prefer-online, --dry-run, --json, --tag, --before, --engine-strict, --offline, --install-links, --registry, --allow, --allow-all-host.",
+                "Common flags: --save, --no-save, --save-dev, --save-optional, --save-peer, --only=prod|dev, --also=dev, --no-optional, --omit=dev|optional|peer, --include=dev|optional|peer, --workspace, --workspaces, --include-workspace-root, --package-lock-only, --prefer-offline, --prefer-online, --dry-run, --json, --tag, --before, --min-release-age, --engine-strict, --offline, --install-links, --registry, --allow, --allow-all-host.",
                 "Direct local inputs are supported for .tgz archives and local package directories.",
                 "Workspace installs save dependencies into selected workspace package.json files and install the root OMC graph.",
             ],
@@ -22577,6 +22588,29 @@ fn npm_global_arg_supported_by_command(command: &str, arg: &str) -> bool {
                 | "it"
         );
     }
+    if matches!(arg, "--min-release-age") || arg.starts_with("--min-release-age=") {
+        return matches!(
+            command,
+            "install"
+                | "i"
+                | "in"
+                | "ins"
+                | "inst"
+                | "insta"
+                | "instal"
+                | "isnt"
+                | "isnta"
+                | "isntal"
+                | "isntall"
+                | "add"
+                | "update"
+                | "up"
+                | "upgrade"
+                | "udpate"
+                | "install-test"
+                | "it"
+        );
+    }
     if matches!(arg, "--engine-strict" | "--no-engine-strict")
         || arg.starts_with("--engine-strict=")
     {
@@ -23108,6 +23142,7 @@ fn npm_global_preserved_value_flag(arg: &str) -> bool {
             | "--auth-token"
             | "--tag"
             | "--before"
+            | "--min-release-age"
             | "--access"
             | "--provenance-file"
             | "--scope"
@@ -23178,6 +23213,7 @@ fn npm_global_preserved_equals_flag(arg: &str) -> bool {
         "--auth-token=",
         "--tag=",
         "--before=",
+        "--min-release-age=",
         "--access=",
         "--dry-run=",
         "--force=",
@@ -23744,6 +23780,16 @@ fn parse_npm_install_args(
             npm_before = Some(normalize_npm_before(value)?);
         } else if let Some(value) = arg.strip_prefix("--before=") {
             npm_before = Some(normalize_npm_before(value)?);
+        } else if arg == "--min-release-age" {
+            index += 1;
+            let Some(value) = args.get(index) else {
+                return Err(OmcRegistryError::UnsupportedSpec(
+                    "--min-release-age needs a value".to_owned(),
+                ));
+            };
+            npm_before = Some(npm_min_release_age_before(value)?);
+        } else if let Some(value) = arg.strip_prefix("--min-release-age=") {
+            npm_before = Some(npm_min_release_age_before(value)?);
         } else if let Some(value) = npm_global_location_flag_value(args, &mut index, arg)? {
             global = value;
         } else if is_npm_archive_arg(arg) {
@@ -23850,6 +23896,33 @@ fn normalize_npm_before(value: &str) -> Result<String, OmcRegistryError> {
         ));
     }
     Ok(value.to_owned())
+}
+
+fn npm_min_release_age_before(value: &str) -> Result<String, OmcRegistryError> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Err(OmcRegistryError::UnsupportedSpec(
+            "npm --min-release-age needs a numeric day value".to_owned(),
+        ));
+    }
+    let days = value.parse::<f64>().map_err(|_| {
+        OmcRegistryError::UnsupportedSpec(format!(
+            "unsupported npm --min-release-age value `{value}`"
+        ))
+    })?;
+    if !days.is_finite() || days < 0.0 {
+        return Err(OmcRegistryError::UnsupportedSpec(format!(
+            "unsupported npm --min-release-age value `{value}`"
+        )));
+    }
+    let millis = (days * 86_400_000.0).round();
+    if millis > i64::MAX as f64 {
+        return Err(OmcRegistryError::UnsupportedSpec(format!(
+            "unsupported npm --min-release-age value `{value}`"
+        )));
+    }
+    let cutoff = Utc::now() - Duration::milliseconds(millis as i64);
+    Ok(cutoff.to_rfc3339_opts(SecondsFormat::Millis, true))
 }
 
 fn npm_install_specs_with_tag(
@@ -31916,6 +31989,8 @@ mod tests {
                 ("npm_config_engine_strict", None),
                 ("NPM_CONFIG_OFFLINE", None),
                 ("npm_config_offline", None),
+                ("NPM_CONFIG_MIN_RELEASE_AGE", None),
+                ("npm_config_min_release_age", None),
                 ("NPM_CONFIG_BEFORE", None),
                 ("npm_config_before", None),
             ],
@@ -31980,6 +32055,8 @@ mod tests {
                 ("npm_config_engine_strict", None),
                 ("NPM_CONFIG_OFFLINE", None),
                 ("npm_config_offline", None),
+                ("NPM_CONFIG_MIN_RELEASE_AGE", None),
+                ("npm_config_min_release_age", None),
                 ("NPM_CONFIG_BEFORE", None),
                 ("npm_config_before", None),
             ],
@@ -32041,6 +32118,8 @@ mod tests {
                 ("npm_config_engine_strict", None),
                 ("NPM_CONFIG_OFFLINE", None),
                 ("npm_config_offline", None),
+                ("NPM_CONFIG_MIN_RELEASE_AGE", None),
+                ("npm_config_min_release_age", None),
                 ("NPM_CONFIG_BEFORE", None),
                 ("npm_config_before", None),
             ],
@@ -32102,6 +32181,8 @@ mod tests {
                 ("npm_config_engine_strict", None),
                 ("NPM_CONFIG_OFFLINE", None),
                 ("npm_config_offline", None),
+                ("NPM_CONFIG_MIN_RELEASE_AGE", None),
+                ("npm_config_min_release_age", None),
                 ("NPM_CONFIG_BEFORE", None),
                 ("npm_config_before", None),
             ],
@@ -32174,6 +32255,8 @@ mod tests {
                 ("npm_config_engine_strict", None),
                 ("NPM_CONFIG_OFFLINE", Some("true")),
                 ("npm_config_offline", None),
+                ("NPM_CONFIG_MIN_RELEASE_AGE", Some("7")),
+                ("npm_config_min_release_age", None),
                 ("NPM_CONFIG_BEFORE", Some("2025-01-01")),
                 ("npm_config_before", None),
             ],
@@ -32193,6 +32276,7 @@ mod tests {
                         "--save-exact",
                         "--no-save",
                         "--save-prefix=~",
+                        "--min-release-age=7",
                         "--before=2025-01-01",
                         "install",
                         "left-pad",
@@ -32279,6 +32363,8 @@ mod tests {
                 ("npm_config_engine_strict", None),
                 ("NPM_CONFIG_OFFLINE", None),
                 ("npm_config_offline", None),
+                ("NPM_CONFIG_MIN_RELEASE_AGE", None),
+                ("npm_config_min_release_age", None),
                 ("NPM_CONFIG_BEFORE", None),
                 ("npm_config_before", None),
             ],
@@ -32346,6 +32432,8 @@ mod tests {
                 ("npm_config_engine_strict", None),
                 ("NPM_CONFIG_OFFLINE", None),
                 ("npm_config_offline", None),
+                ("NPM_CONFIG_MIN_RELEASE_AGE", None),
+                ("npm_config_min_release_age", None),
                 ("NPM_CONFIG_BEFORE", None),
                 ("npm_config_before", None),
             ],
@@ -32398,7 +32486,7 @@ mod tests {
         .unwrap();
         fs::write(
             project.join(".npmrc"),
-            "omit=dev,peer\ninclude=peer\nglobal=true\ndry-run=true\npackage-lock-only=true\nengine-strict=true\noffline=true\n",
+            "omit=dev,peer\ninclude=peer\nglobal=true\ndry-run=true\npackage-lock-only=true\nengine-strict=true\noffline=true\nmin-release-age=7\n",
         )
         .unwrap();
 
@@ -32452,6 +32540,8 @@ mod tests {
                 ("npm_config_engine_strict", None),
                 ("NPM_CONFIG_OFFLINE", None),
                 ("npm_config_offline", None),
+                ("NPM_CONFIG_MIN_RELEASE_AGE", None),
+                ("npm_config_min_release_age", None),
                 ("NPM_CONFIG_BEFORE", None),
                 ("npm_config_before", None),
             ],
@@ -32472,6 +32562,7 @@ mod tests {
                         "--save-exact",
                         "--no-save",
                         "--save-prefix=~",
+                        "--min-release-age=7",
                         "install",
                         "left-pad",
                     ])
@@ -32582,6 +32673,8 @@ mod tests {
                 ("npm_config_engine_strict", None),
                 ("NPM_CONFIG_OFFLINE", None),
                 ("npm_config_offline", None),
+                ("NPM_CONFIG_MIN_RELEASE_AGE", None),
+                ("npm_config_min_release_age", None),
                 ("NPM_CONFIG_BEFORE", None),
                 ("npm_config_before", None),
             ],
@@ -32663,6 +32756,8 @@ mod tests {
                 ("npm_config_engine_strict", None),
                 ("NPM_CONFIG_OFFLINE", None),
                 ("npm_config_offline", None),
+                ("NPM_CONFIG_MIN_RELEASE_AGE", None),
+                ("npm_config_min_release_age", None),
                 ("NPM_CONFIG_BEFORE", None),
                 ("npm_config_before", None),
             ],
@@ -32746,6 +32841,8 @@ mod tests {
                 ("npm_config_engine_strict", None),
                 ("NPM_CONFIG_OFFLINE", None),
                 ("npm_config_offline", None),
+                ("NPM_CONFIG_MIN_RELEASE_AGE", None),
+                ("npm_config_min_release_age", None),
                 ("NPM_CONFIG_BEFORE", None),
                 ("npm_config_before", None),
             ],
@@ -32833,6 +32930,8 @@ mod tests {
                 ("npm_config_engine_strict", None),
                 ("NPM_CONFIG_OFFLINE", None),
                 ("npm_config_offline", None),
+                ("NPM_CONFIG_MIN_RELEASE_AGE", None),
+                ("npm_config_min_release_age", None),
                 ("NPM_CONFIG_BEFORE", None),
                 ("npm_config_before", None),
             ],
@@ -35954,6 +36053,27 @@ verdict = "accepted"
             panic!("expected npm install action");
         };
         assert_eq!(npm_before.as_deref(), Some("2025-01-01"));
+
+        let before_parse = Utc::now();
+        let action =
+            parse_npm_compat_action(&args(&["install", "--min-release-age=7", "left-pad"]))
+                .unwrap();
+        let after_parse = Utc::now();
+        let NpmCompatAction::Install { npm_before, .. } = action else {
+            panic!("expected npm install action");
+        };
+        let cutoff = chrono::DateTime::parse_from_rfc3339(npm_before.as_deref().unwrap())
+            .unwrap()
+            .with_timezone(&Utc);
+        assert!(cutoff >= before_parse - Duration::days(7) - Duration::seconds(1));
+        assert!(cutoff <= after_parse - Duration::days(7) + Duration::seconds(1));
+
+        let error =
+            parse_npm_compat_action(&args(&["install", "--min-release-age=7d", "left-pad"]))
+                .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("unsupported npm --min-release-age value"));
 
         let action =
             parse_npm_compat_action(&args(&["install", "--engine-strict", "left-pad"])).unwrap();
