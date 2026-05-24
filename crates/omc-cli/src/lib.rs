@@ -6202,7 +6202,8 @@ struct PipPrefixPaths {
 }
 
 fn pip_prefix_paths(project_dir: &Path, prefix: PathBuf) -> PipPrefixPaths {
-    let prefix = absolutize_path(project_dir, prefix);
+    let project_dir = project_dir_for_user_paths(project_dir);
+    let prefix = absolutize_path(&project_dir, prefix);
     let python_tag = pip_prefix_python_tag().unwrap_or_else(|| "python".to_owned());
     PipPrefixPaths {
         site_packages: prefix.join("lib").join(python_tag).join("site-packages"),
@@ -6211,13 +6212,14 @@ fn pip_prefix_paths(project_dir: &Path, prefix: PathBuf) -> PipPrefixPaths {
 }
 
 fn pip_default_scheme_paths(project_dir: &Path, root: &Path) -> PipPrefixPaths {
+    let project_dir = project_dir_for_user_paths(project_dir);
     let paths = pip_default_scheme_paths_from_python().unwrap_or_else(|| PipPrefixPaths {
         site_packages: PathBuf::from("lib").join("python").join("site-packages"),
         bin_dir: PathBuf::from("bin"),
     });
     PipPrefixPaths {
-        site_packages: pip_apply_root(project_dir, Some(root), paths.site_packages),
-        bin_dir: pip_apply_root(project_dir, Some(root), paths.bin_dir),
+        site_packages: pip_apply_root(&project_dir, Some(root), paths.site_packages),
+        bin_dir: pip_apply_root(&project_dir, Some(root), paths.bin_dir),
     }
 }
 
@@ -6250,15 +6252,17 @@ fn pip_default_scheme_paths_from_python() -> Option<PipPrefixPaths> {
 }
 
 fn pip_rooted_project_path(project_dir: &Path, root: Option<&Path>, path: PathBuf) -> PathBuf {
-    let path = absolutize_path(project_dir, path);
-    pip_apply_root(project_dir, root, path)
+    let project_dir = project_dir_for_user_paths(project_dir);
+    let path = absolutize_path(&project_dir, path);
+    pip_apply_root(&project_dir, root, path)
 }
 
 fn pip_apply_root(project_dir: &Path, root: Option<&Path>, path: PathBuf) -> PathBuf {
     let Some(root) = root else {
         return path;
     };
-    let root = absolutize_path(project_dir, root.to_path_buf());
+    let project_dir = project_dir_for_user_paths(project_dir);
+    let root = absolutize_path(&project_dir, root.to_path_buf());
     if path.is_absolute() {
         let relative = path
             .components()
@@ -18165,6 +18169,16 @@ fn absolutize_path(project_dir: &Path, path: PathBuf) -> PathBuf {
     }
 }
 
+fn project_dir_for_user_paths(project_dir: &Path) -> PathBuf {
+    if project_dir.is_absolute() {
+        project_dir.to_path_buf()
+    } else {
+        env::current_dir()
+            .map(|cwd| cwd.join(project_dir))
+            .unwrap_or_else(|_| project_dir.to_path_buf())
+    }
+}
+
 fn absolute_project_dir(project_dir: &Path) -> PathBuf {
     if let Ok(path) = fs::canonicalize(project_dir) {
         return path;
@@ -28038,6 +28052,17 @@ mod tests {
         let _ = fs::remove_dir_all(project);
         let _ = fs::remove_dir_all(prod);
         let _ = fs::remove_dir_all(dev);
+    }
+
+    #[test]
+    fn relative_project_paths_resolve_user_paths_from_current_directory() {
+        let vendor = pip_rooted_project_path(Path::new("."), None, PathBuf::from("vendor"));
+
+        assert!(vendor.is_absolute());
+        assert_eq!(
+            vendor.file_name().and_then(|name| name.to_str()),
+            Some("vendor")
+        );
     }
 
     #[test]
