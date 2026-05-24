@@ -1161,6 +1161,7 @@ struct PipInstallAction {
     no_deps: bool,
     allow_prereleases: bool,
     target: Option<PathBuf>,
+    user: bool,
     vcs_requirements: Vec<PythonVcsRequirement>,
     allow: Vec<String>,
     allow_all_host: bool,
@@ -3392,8 +3393,16 @@ fn run_pip_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
         PipCompatAction::Completion { shell } => print_pip_completion(shell),
         PipCompatAction::Install(action) => {
             let action = *action;
+            if action.user && action.target.is_some() {
+                return Err(OmcRegistryError::UnsupportedSpec(
+                    "pip install cannot combine --user and --target".to_owned(),
+                ));
+            }
             if action.dry_run {
                 return run_pip_install_dry_run(project_dir, action);
+            }
+            if action.user {
+                return run_pip_install_user(project_dir, action);
             }
             if action.target.is_some() {
                 return run_pip_install_target(project_dir, action);
@@ -3418,6 +3427,7 @@ fn run_pip_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
                 no_deps,
                 allow_prereleases,
                 target,
+                user: _,
                 vcs_requirements,
                 allow,
                 allow_all_host,
@@ -4168,12 +4178,20 @@ fn run_pip_install_dry_run(
         no_deps,
         allow_prereleases,
         target,
+        user,
         vcs_requirements,
         allow,
         allow_all_host,
     } = action;
 
     let dry_run_project = TempOmcProject::new("pip-dry-run", project_dir)?;
+    let dry_run_target = if user {
+        Some(pip_user_paths()?.site_packages)
+    } else {
+        target
+            .as_ref()
+            .map(|path| absolutize_path(project_dir, path.clone()))
+    };
     let mut options = LinkOptions::new(dry_run_project.path());
     options.save_manifest_dependency = false;
     options.discover_project_requirements = !groups.is_empty();
@@ -4238,7 +4256,7 @@ fn run_pip_install_dry_run(
         print_link_reports(&reports);
 
         let mut install = install_project(&manifest_options)?;
-        rewrite_pip_dry_run_install_paths(project_dir, target.as_deref(), &mut install);
+        rewrite_pip_dry_run_install_paths(project_dir, dry_run_target.as_deref(), &mut install);
         println!();
         println!(
             "dry-run: would install pypi={} local_paths={} vcs={} groups={} python_site_packages={}",
@@ -4267,7 +4285,7 @@ fn run_pip_install_dry_run(
         print_link_reports(&reports);
 
         let mut install = install_project(&options)?;
-        rewrite_pip_dry_run_install_paths(project_dir, target.as_deref(), &mut install);
+        rewrite_pip_dry_run_install_paths(project_dir, dry_run_target.as_deref(), &mut install);
         println!();
         println!(
             "dry-run: would install pypi={} local_paths={} vcs={} python_site_packages={}",
@@ -4295,14 +4313,12 @@ fn run_pip_install_dry_run(
         .iter()
         .filter(|report| report.locked.ecosystem == Ecosystem::Pypi)
         .count();
-    let python_site_packages = target
-        .map(|path| absolutize_path(project_dir, path))
-        .unwrap_or_else(|| {
-            project_dir
-                .join(".omc")
-                .join("python")
-                .join("site-packages")
-        });
+    let python_site_packages = dry_run_target.unwrap_or_else(|| {
+        project_dir
+            .join(".omc")
+            .join("python")
+            .join("site-packages")
+    });
     let install = InstallReport {
         npm_packages: 0,
         pypi_packages,
@@ -4352,6 +4368,7 @@ fn run_pip_install_target(
         no_deps,
         allow_prereleases,
         target,
+        user: _,
         vcs_requirements,
         allow,
         allow_all_host,
@@ -4424,6 +4441,290 @@ fn run_pip_install_target(
         &install,
     )?;
     Ok(ExitCode::SUCCESS)
+}
+
+fn run_pip_install_user(
+    project_dir: &Path,
+    action: PipInstallAction,
+) -> Result<ExitCode, OmcRegistryError> {
+    let PipInstallAction {
+        specs,
+        requirements,
+        constraints,
+        script_requirements,
+        groups,
+        report,
+        dry_run: _,
+        archive_references,
+        local_paths,
+        index_url,
+        extra_index_urls,
+        find_links,
+        no_index,
+        binary_all,
+        binary_packages,
+        require_hashes,
+        no_deps,
+        allow_prereleases,
+        target: _,
+        user: _,
+        vcs_requirements,
+        allow,
+        allow_all_host,
+    } = action;
+
+    let user_paths = pip_user_paths()?;
+    fs::create_dir_all(&user_paths.state_project)?;
+    let mut options = LinkOptions::new(&user_paths.state_project);
+    options.allowed_capabilities = parse_grants(&allow, allow_all_host)?;
+    options.requirement_files = absolutize_paths(project_dir, requirements);
+    options.constraint_files = absolutize_paths(project_dir, constraints);
+    options.python_local_requirements =
+        absolutize_python_local_requirements(project_dir, local_paths);
+    options.project_extras = groups.into_iter().collect();
+    apply_pip_compat_index_options(
+        &mut options,
+        index_url,
+        extra_index_urls,
+        find_links,
+        no_index,
+    );
+    options.pypi_require_hashes = require_hashes;
+    options.pypi_include_dependencies = !no_deps;
+    options.pypi_allow_prereleases = allow_prereleases;
+    options.pypi_binary_all = binary_all;
+    options.pypi_binary_packages = binary_packages;
+    options.python_target_dir = Some(user_paths.site_packages.clone());
+    options.python_vcs_requirements = vcs_requirements;
+
+    let mut resolved_specs = parse_package_specs(&specs, Some(Ecosystem::Pypi))?;
+    resolved_specs.extend(parse_pip_archive_references(
+        project_dir,
+        &archive_references,
+        &mut options,
+    )?);
+    if !script_requirements.is_empty() {
+        let requirements =
+            read_script_requirement_files(&absolutize_paths(project_dir, script_requirements))?;
+        apply_pypi_install_requirements(&mut options, &mut resolved_specs, requirements);
+    }
+    let requested_count = resolved_specs.len()
+        + options.requirement_files.len()
+        + options.python_local_paths.len()
+        + options.python_local_requirements.len()
+        + options.python_vcs_requirements.len()
+        + options.project_extras.len();
+    if requested_count == 0 {
+        return Err(OmcRegistryError::UnsupportedSpec(
+            "pip install --user needs at least one package, archive, local path, VCS requirement, or requirement file"
+                .to_owned(),
+        ));
+    }
+
+    let mut reports = Vec::new();
+    for spec in &resolved_specs {
+        reports.extend(add_package_graph(spec, &options)?);
+    }
+    print_link_reports(&reports);
+
+    let install = install_project(&options)?;
+    sync_pip_user_script_local_paths(&user_paths)?;
+    sync_pip_user_scripts(&user_paths)?;
+    println!();
+    print_install_report(&install);
+    write_pip_install_report_from(
+        &user_paths.state_project,
+        project_dir,
+        report.as_deref(),
+        &install,
+    )?;
+    Ok(ExitCode::SUCCESS)
+}
+
+#[derive(Debug, Clone)]
+struct PipUserPaths {
+    site_packages: PathBuf,
+    bin_dir: PathBuf,
+    state_project: PathBuf,
+}
+
+fn pip_user_paths() -> Result<PipUserPaths, OmcRegistryError> {
+    let (base, site_packages) =
+        pip_user_paths_from_python().unwrap_or_else(pip_user_paths_fallback);
+    let bin_dir = pip_user_bin_dir(&base);
+    let state_project = base.join(".omc").join("pip-user");
+    Ok(PipUserPaths {
+        site_packages,
+        bin_dir,
+        state_project,
+    })
+}
+
+fn pip_user_paths_from_python() -> Option<(PathBuf, PathBuf)> {
+    let output = ProcessCommand::new("python3")
+        .arg("-c")
+        .arg(
+            "import json, site; print(json.dumps({'base': site.USER_BASE, 'site': site.USER_SITE}))",
+        )
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let value = serde_json::from_slice::<serde_json::Value>(&output.stdout).ok()?;
+    let base = value
+        .get("base")
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)?;
+    let site_packages = value
+        .get("site")
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)?;
+    Some((base, site_packages))
+}
+
+fn pip_user_paths_fallback() -> (PathBuf, PathBuf) {
+    let base = env::var_os("PYTHONUSERBASE")
+        .map(PathBuf::from)
+        .filter(|path| !path.as_os_str().is_empty())
+        .or_else(pip_default_user_base)
+        .unwrap_or_else(|| PathBuf::from(".omc").join("pip-user-base"));
+    let site_packages = base.join("lib").join("python").join("site-packages");
+    (base, site_packages)
+}
+
+#[cfg(windows)]
+fn pip_default_user_base() -> Option<PathBuf> {
+    env::var_os("APPDATA")
+        .map(PathBuf::from)
+        .filter(|path| !path.as_os_str().is_empty())
+        .map(|path| path.join("Python"))
+}
+
+#[cfg(not(windows))]
+fn pip_default_user_base() -> Option<PathBuf> {
+    env::var_os("HOME")
+        .map(PathBuf::from)
+        .filter(|path| !path.as_os_str().is_empty())
+        .map(|home| home.join(".local"))
+}
+
+#[cfg(windows)]
+fn pip_user_bin_dir(base: &Path) -> PathBuf {
+    base.join("Scripts")
+}
+
+#[cfg(not(windows))]
+fn pip_user_bin_dir(base: &Path) -> PathBuf {
+    base.join("bin")
+}
+
+fn sync_pip_user_scripts(paths: &PipUserPaths) -> Result<(), OmcRegistryError> {
+    let source_bin = paths.site_packages.join("bin");
+    fs::create_dir_all(&paths.bin_dir)?;
+    remove_stale_pip_user_scripts(&paths.bin_dir, &source_bin)?;
+    if !source_bin.exists() {
+        return Ok(());
+    }
+    for entry in fs::read_dir(&source_bin)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        let Some(name) = name.to_str().filter(|name| cli_bin_name_is_safe(name)) else {
+            continue;
+        };
+        let source = entry.path();
+        let metadata = fs::symlink_metadata(&source)?;
+        if metadata.is_dir() && !metadata.file_type().is_symlink() {
+            continue;
+        }
+        let target = paths.bin_dir.join(name);
+        remove_cli_path_if_exists(&target)?;
+        create_pip_user_script_link(&source, &target)?;
+    }
+    Ok(())
+}
+
+fn sync_pip_user_script_local_paths(paths: &PipUserPaths) -> Result<(), OmcRegistryError> {
+    let script_marker = paths.site_packages.join(".omc-local-paths");
+    let install_marker = if paths
+        .site_packages
+        .file_name()
+        .and_then(|name| name.to_str())
+        == Some("site-packages")
+    {
+        let parent = paths.site_packages.parent().ok_or_else(|| {
+            OmcRegistryError::UnsupportedSpec("missing python user site directory".to_owned())
+        })?;
+        parent.join("local-paths")
+    } else {
+        script_marker.clone()
+    };
+    if install_marker == script_marker {
+        return Ok(());
+    }
+    if install_marker.exists() {
+        fs::copy(&install_marker, script_marker)?;
+    } else {
+        remove_cli_path_if_exists(&script_marker)?;
+    }
+    Ok(())
+}
+
+fn remove_stale_pip_user_scripts(
+    target_bin: &Path,
+    source_bin: &Path,
+) -> Result<(), OmcRegistryError> {
+    if !target_bin.exists() {
+        return Ok(());
+    }
+    for entry in fs::read_dir(target_bin)? {
+        let entry = entry?;
+        let path = entry.path();
+        if pip_user_script_owned_by_omc(&path, source_bin)? {
+            remove_cli_path_if_exists(&path)?;
+        }
+    }
+    Ok(())
+}
+
+fn pip_user_script_owned_by_omc(path: &Path, source_bin: &Path) -> Result<bool, OmcRegistryError> {
+    let metadata = fs::symlink_metadata(path)?;
+    if metadata.file_type().is_symlink() {
+        let target = fs::read_link(path)?;
+        let target = if target.is_absolute() {
+            target
+        } else {
+            path.parent().unwrap_or_else(|| Path::new("")).join(target)
+        };
+        return Ok(target.starts_with(source_bin));
+    }
+    if metadata.is_file() {
+        let content = fs::read_to_string(path).unwrap_or_default();
+        return Ok(content.contains("OMC pip user script shim")
+            && content.contains(&source_bin.display().to_string()));
+    }
+    Ok(false)
+}
+
+#[cfg(unix)]
+fn create_pip_user_script_link(source: &Path, target: &Path) -> Result<(), OmcRegistryError> {
+    std::os::unix::fs::symlink(source, target)?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn create_pip_user_script_link(source: &Path, target: &Path) -> Result<(), OmcRegistryError> {
+    fs::write(
+        target,
+        format!(
+            "@echo off\r\nREM OMC pip user script shim {}\r\n\"{}\" %*\r\n",
+            source.parent().unwrap_or_else(|| Path::new("")).display(),
+            source.display()
+        ),
+    )?;
+    Ok(())
 }
 
 fn rewrite_pip_dry_run_install_paths(
@@ -5684,10 +5985,7 @@ fn sync_npm_global_bins(prefix: &Path, global_project_dir: &Path) -> Result<(), 
     for entry in fs::read_dir(&source_bin)? {
         let entry = entry?;
         let name = entry.file_name();
-        let Some(name) = name
-            .to_str()
-            .filter(|name| npm_global_bin_name_is_safe(name))
-        else {
+        let Some(name) = name.to_str().filter(|name| cli_bin_name_is_safe(name)) else {
             continue;
         };
         let source = entry.path();
@@ -5738,7 +6036,7 @@ fn npm_global_bin_owned_by_omc(path: &Path, source_bin: &Path) -> Result<bool, O
     Ok(false)
 }
 
-fn npm_global_bin_name_is_safe(name: &str) -> bool {
+fn cli_bin_name_is_safe(name: &str) -> bool {
     !name.is_empty() && !name.contains('/') && !name.contains('\\') && name != "." && name != ".."
 }
 
@@ -21780,6 +22078,7 @@ fn parse_pip_install_args(args: &[String]) -> Result<PipCompatAction, OmcRegistr
     let mut no_deps = false;
     let mut allow_prereleases = false;
     let mut target = None;
+    let mut user = false;
     let mut groups = Vec::new();
     let mut archive_references = Vec::new();
     let mut local_paths = Vec::new();
@@ -21878,6 +22177,10 @@ fn parse_pip_install_args(args: &[String]) -> Result<PipCompatAction, OmcRegistr
             target = Some(PathBuf::from(path));
         } else if let Some(path) = arg.strip_prefix("--target=") {
             target = Some(PathBuf::from(path));
+        } else if matches!(arg.as_str(), "--user" | "--user=true") {
+            user = true;
+        } else if arg == "--user=false" {
+            user = false;
         } else if arg == "--group" {
             index += 1;
             let Some(group) = args.get(index) else {
@@ -21947,7 +22250,6 @@ fn parse_pip_install_args(args: &[String]) -> Result<PipCompatAction, OmcRegistr
             "--upgrade"
                 | "-U"
                 | "-I"
-                | "--user"
                 | "--break-system-packages"
                 | "--disable-pip-version-check"
                 | "--no-cache-dir"
@@ -22012,6 +22314,7 @@ fn parse_pip_install_args(args: &[String]) -> Result<PipCompatAction, OmcRegistr
         no_deps,
         allow_prereleases,
         target,
+        user,
         vcs_requirements,
         allow,
         allow_all_host,
@@ -27606,11 +27909,21 @@ verdict = "accepted"
                 no_deps: true,
                 allow_prereleases: true,
                 target: Some(PathBuf::from("vendor")),
+                user: false,
                 vcs_requirements: Vec::new(),
                 allow: Vec::new(),
                 allow_all_host: true,
             }))
         );
+
+        match parse_pip_compat_action(&args(&["install", "--user", "requests==2.32.3"])).unwrap() {
+            PipCompatAction::Install(action) => {
+                assert!(action.user);
+                assert_eq!(action.specs, vec!["requests==2.32.3"]);
+                assert_eq!(action.target, None);
+            }
+            other => panic!("expected pip install action, got {other:?}"),
+        }
 
         let action = parse_pip_compat_action(&args(&[
             "download",
@@ -27774,6 +28087,7 @@ verdict = "accepted"
                 no_deps: false,
                 allow_prereleases: false,
                 target: None,
+                user: false,
                 vcs_requirements: Vec::new(),
                 allow: Vec::new(),
                 allow_all_host: false,
@@ -27808,6 +28122,7 @@ verdict = "accepted"
                 no_deps: false,
                 allow_prereleases: false,
                 target: None,
+                user: false,
                 vcs_requirements: vec![
                     PythonVcsRequirement {
                         name: "demo".to_owned(),
@@ -27868,6 +28183,7 @@ version = "0.1.0"
                 no_deps: false,
                 allow_prereleases: false,
                 target: None,
+                user: false,
                 vcs_requirements: Vec::new(),
                 allow: Vec::new(),
                 allow_all_host: false,
@@ -28061,6 +28377,76 @@ print("ok")
     }
 
     #[test]
+    fn pip_install_user_uses_python_user_base() {
+        let project = test_dir("pip-user-project");
+        let local = test_dir("pip-user-local");
+        let user_base = test_dir("pip-user-base");
+        let src = local.join("src");
+        fs::create_dir_all(src.join("demoedit")).unwrap();
+        fs::write(
+            src.join("demoedit").join("__init__.py"),
+            "def main():\n    print('user-cli-ok')\n",
+        )
+        .unwrap();
+        fs::write(
+            local.join("setup.cfg"),
+            "[metadata]\nname = demoedit\nversion = 0.1.0\n[options.entry_points]\nconsole_scripts =\n    demo-cli = demoedit:main\n",
+        )
+        .unwrap();
+
+        with_env_var("PYTHONUSERBASE", &user_base, || {
+            let status = run_pip_compat(
+                &project,
+                &args(&[
+                    "install",
+                    "--user",
+                    "--no-index",
+                    "-e",
+                    local.to_str().unwrap(),
+                ]),
+            )
+            .unwrap();
+
+            assert_eq!(status, ExitCode::SUCCESS);
+            let paths = pip_user_paths().unwrap();
+            assert_eq!(paths.state_project, user_base.join(".omc").join("pip-user"));
+            assert!(paths.state_project.exists());
+            let canonical_src = fs::canonicalize(&src).unwrap();
+            let local_paths_file = paths.site_packages.parent().unwrap().join("local-paths");
+            let local_paths = fs::read_to_string(&local_paths_file).unwrap();
+            assert_eq!(local_paths, format!("{}\n", canonical_src.display()));
+            assert_eq!(
+                fs::read_to_string(paths.site_packages.join(".omc-local-paths")).unwrap(),
+                local_paths
+            );
+
+            let source_script = paths.site_packages.join("bin").join("demo-cli");
+            let user_script = paths.bin_dir.join("demo-cli");
+            assert!(source_script.exists());
+            assert!(user_script.exists());
+
+            #[cfg(unix)]
+            {
+                assert_eq!(fs::read_link(&user_script).unwrap(), source_script);
+                let output = ProcessCommand::new(&user_script).output().unwrap();
+                assert!(output.status.success());
+                assert_eq!(String::from_utf8_lossy(&output.stdout), "user-cli-ok\n");
+            }
+
+            #[cfg(not(unix))]
+            {
+                let shim = fs::read_to_string(&user_script).unwrap();
+                assert!(shim.contains("OMC pip user script shim"));
+                assert!(shim.contains(&source_script.display().to_string()));
+            }
+        });
+
+        fs::remove_dir_all(project).unwrap();
+        fs::remove_dir_all(local).unwrap();
+        fs::remove_dir_all(user_base).unwrap();
+    }
+
+    #[test]
     fn parses_pip_install_archive_references() {
         assert_eq!(
             parse_pip_compat_action(&args(&[
@@ -28092,6 +28478,7 @@ print("ok")
                 no_deps: false,
                 allow_prereleases: false,
                 target: None,
+                user: false,
                 vcs_requirements: Vec::new(),
                 allow: Vec::new(),
                 allow_all_host: false,

@@ -213,6 +213,7 @@ cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip install -e ../
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip install -e 'git+https://example.com/acme/pkg.git@main#egg=acme-pkg'
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip install --no-deps ./dist/local_pkg-1.0.0-py3-none-any.whl
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip install --target vendor ./dist/local_pkg-1.0.0.tar.gz
+cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip install --user -e ../local-package
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip install ./dist/local_pkg-1.0.0-py3-none-any.whl
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip download -r requirements.txt -d wheelhouse
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip wheel -r requirements.txt -w wheelhouse
@@ -314,6 +315,7 @@ support lock-only npm compatibility installs that update omc.toml/omc.lock
 without extracting node_modules
 install npm packages into node_modules
 install PyPI wheels and pure Python sdists into .omc/python/site-packages
+install pip --user packages into Python's user site-packages through OMC-managed user state and mirror generated scripts into the user bin directory
 verify cached archive sha256 from omc.lock before extracting locked installs
 install npm package bins, including root project bins, into node_modules/.bin
 link npm workspace/local directory packages into node_modules and node_modules/.bin
@@ -594,7 +596,9 @@ Supported now:
   requirements, without writing the current OMC manifest, lockfile, or
   site-packages; real `pip install --target DIR` installs into the requested
   target through transient OMC state without writing the current manifest or
-  lockfile; `pip install --group GROUP` installs current-project
+  lockfile; real `pip install --user` installs into Python's user
+  site-packages through OMC-managed user state and mirrors generated scripts
+  into the user bin directory; `pip install --group GROUP` installs current-project
   `pyproject.toml` dependency groups through OMC's existing pyproject
   resolver; `pip install --requirements-from-script FILE` installs PEP 723
   inline script dependencies through OMC; `pip freeze -r requirements.txt`
