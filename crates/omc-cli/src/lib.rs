@@ -19756,7 +19756,11 @@ fn pip_freeze_local_path_entries_from_file(
         .filter(|line| !line.is_empty())
         .collect::<BTreeSet<_>>()
     {
-        let name = pip_local_editable_package(Path::new(path))?
+        let import_path = Path::new(path);
+        if pip_freeze_is_omc_vcs_import_path(import_path) {
+            continue;
+        }
+        let name = pip_local_editable_package(import_path)?
             .map(|package| normalize_pip_show_name(&package.name));
         if name
             .as_ref()
@@ -19770,6 +19774,22 @@ fn pip_freeze_local_path_entries_from_file(
         });
     }
     Ok(entries)
+}
+
+fn pip_freeze_is_omc_vcs_import_path(path: &Path) -> bool {
+    let mut state = 0;
+    for component in path
+        .components()
+        .filter_map(|component| component.as_os_str().to_str())
+    {
+        state = match (state, component) {
+            (_, ".omc") => 1,
+            (1, "python") => 2,
+            (2, "vcs") => return true,
+            _ => 0,
+        };
+    }
+    false
 }
 
 fn pip_freeze_vcs_requirement(dependency: &LockedPythonVcsDependency) -> String {
@@ -43575,6 +43595,49 @@ verdict = "accepted"
         let output =
             pip_freeze_output(&project, entries, &[PathBuf::from("requirements.txt")]).unwrap();
         assert_eq!(output.lines, vec![format!("-e {}", src.display())]);
+
+        fs::remove_dir_all(project).unwrap();
+        fs::remove_dir_all(local).unwrap();
+    }
+
+    #[test]
+    fn pip_freeze_hides_omc_managed_vcs_local_paths() {
+        let project = test_dir("pip-freeze-vcs-local-paths-project");
+        let local = test_dir("pip-freeze-vcs-local-paths-local");
+        let local_src = local.join("src");
+        let vcs_src = project
+            .join(".omc")
+            .join("python")
+            .join("vcs")
+            .join("vcsdemo")
+            .join("abcdef")
+            .join("src");
+        fs::create_dir_all(local_src.join("demoedit")).unwrap();
+        fs::create_dir_all(&vcs_src).unwrap();
+        fs::write(local_src.join("demoedit").join("__init__.py"), "").unwrap();
+        fs::write(
+            local.join("pyproject.toml"),
+            r#"[project]
+name = "demoedit"
+version = "0.1.2"
+"#,
+        )
+        .unwrap();
+        fs::write(
+            project.join(".omc").join("python").join("local-paths"),
+            format!("{}\n{}\n", vcs_src.display(), local_src.display()),
+        )
+        .unwrap();
+
+        assert!(pip_freeze_is_omc_vcs_import_path(&vcs_src));
+        assert!(!pip_freeze_is_omc_vcs_import_path(&local_src));
+        assert_eq!(
+            pip_freeze_local_path_entries(&project, &BTreeSet::new()).unwrap(),
+            vec![PipFrozenRequirement {
+                name: Some("demoedit".to_owned()),
+                line: format!("-e {}", local_src.display()),
+            }]
+        );
 
         fs::remove_dir_all(project).unwrap();
         fs::remove_dir_all(local).unwrap();
