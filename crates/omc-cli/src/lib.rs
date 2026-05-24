@@ -5110,6 +5110,7 @@ fn pip_cli_default_config_key(key: &str) -> bool {
             | "report"
             | "requirement"
             | "constraint"
+            | "build-constraint"
             | "no-deps"
             | "require-hashes"
             | "no-binary"
@@ -5147,6 +5148,7 @@ fn append_pip_default_args_from_config(
     if install_like || artifact_like {
         append_pip_token_args_from_config(values, args, "requirement", "--requirement");
         append_pip_token_args_from_config(values, args, "constraint", "--constraint");
+        append_pip_token_args_from_config(values, args, "build-constraint", "--build-constraint");
         append_pip_bool_arg_from_config(values, args, "no-deps", "--no-deps", "--no-deps=false");
         append_pip_bool_arg_from_config(
             values,
@@ -5281,6 +5283,9 @@ fn pip_environment_default_args(command: &str) -> Vec<String> {
         }
         for constraint in pip_config_env_tokens("constraint") {
             args.push(format!("--constraint={constraint}"));
+        }
+        for constraint in pip_config_env_tokens("build-constraint") {
+            args.push(format!("--build-constraint={constraint}"));
         }
         append_pip_bool_arg_from_env(&mut args, "no-deps", "--no-deps", "--no-deps=false");
         append_pip_bool_arg_from_env(
@@ -8555,23 +8560,23 @@ fn pip_help_text(topic: Option<&str>) -> String {
             "pip install [<requirement>...]",
             &[
                 "Resolve, verify, lock, and install PyPI packages with OMC.",
-                "Supports requirements/constraints, pylock.toml inputs, inline script requirements, indexes, find-links, no-index, hashes, no-deps, install reports, dry-runs, binary policy, target dirs, local archives, local directories, editable paths, and editable VCS requirements.",
+                "Supports requirements/constraints, build constraints, pylock.toml inputs, inline script requirements, indexes, find-links, no-index, hashes, no-deps, install reports, dry-runs, binary policy, target dirs, local archives, local directories, editable paths, and editable VCS requirements.",
             ],
         ),
         Some("lock") => pip_command_help(
             "pip lock [<requirement>...]",
             &[
                 "Resolve and verify PyPI requirements with OMC, then write a pylock.toml-style lock file without installing packages.",
-                "Supports install-style requirements, constraints, inline script requirements, indexes, find-links, hashes, no-deps, local paths, editable VCS requirements, --group, and -o/--output.",
+                "Supports install-style requirements, constraints, build constraints, inline script requirements, indexes, find-links, hashes, no-deps, local paths, editable VCS requirements, --group, and -o/--output.",
             ],
         ),
         Some("download") => pip_command_help(
             "pip download [<requirement>...]",
-            &["Download locked PyPI archives into a destination directory. Shares install-style requirement and index flags."],
+            &["Download locked PyPI archives into a destination directory. Shares install-style requirement, build-constraint, and index flags."],
         ),
         Some("wheel") => pip_command_help(
             "pip wheel [<requirement>...]",
-            &["Populate a wheelhouse with resolved wheel artifacts, falling back to source distributions when no wheel is available. Shares install-style requirement and index flags; OMC does not execute source builds."],
+            &["Populate a wheelhouse with resolved wheel artifacts, falling back to source distributions when no wheel is available. Shares install-style requirement, build-constraint, and index flags; OMC does not execute source builds."],
         ),
         Some("uninstall") => pip_command_help(
             "pip uninstall <package>...",
@@ -29465,6 +29470,7 @@ fn pip_ignored_install_value_flag(arg: &str) -> bool {
     matches!(
         arg,
         "--progress-bar"
+            | "--build-constraint"
             | "--upgrade-strategy"
             | "--src"
             | "-C"
@@ -29489,6 +29495,7 @@ fn pip_ignored_install_value_flag(arg: &str) -> bool {
 fn pip_ignored_install_equals_flag(arg: &str) -> bool {
     [
         "--progress-bar=",
+        "--build-constraint=",
         "--upgrade-strategy=",
         "--src=",
         "-C=",
@@ -29605,6 +29612,7 @@ fn pip_ignored_download_value_flag(arg: &str) -> bool {
     matches!(
         arg,
         "--progress-bar"
+            | "--build-constraint"
             | "--retries"
             | "--timeout"
             | "--exists-action"
@@ -29622,6 +29630,7 @@ fn pip_ignored_download_value_flag(arg: &str) -> bool {
 fn pip_ignored_download_equals_flag(arg: &str) -> bool {
     [
         "--progress-bar=",
+        "--build-constraint=",
         "--retries=",
         "--timeout=",
         "--exists-action=",
@@ -30774,6 +30783,7 @@ mod tests {
                 ("PIP_FIND_LINKS", None),
                 ("PIP_REQUIREMENT", None),
                 ("PIP_CONSTRAINT", None),
+                ("PIP_BUILD_CONSTRAINT", None),
                 ("PIP_NO_INDEX", None),
                 ("PIP_TARGET", None),
                 ("PIP_PREFIX", None),
@@ -30784,6 +30794,7 @@ mod tests {
                 ("PIP_REPORT", None),
                 ("PIP_REQUIREMENT", None),
                 ("PIP_CONSTRAINT", None),
+                ("PIP_BUILD_CONSTRAINT", None),
                 ("PIP_NO_DEPS", None),
                 ("PIP_REQUIRE_HASHES", None),
                 ("PIP_NO_BINARY", None),
@@ -31723,6 +31734,7 @@ mod tests {
                     Some("requirements/base.txt 'requirements/dev requirements.txt'"),
                 ),
                 ("PIP_CONSTRAINT", Some("constraints/base.txt")),
+                ("PIP_BUILD_CONSTRAINT", Some("build-constraints/base.txt")),
                 ("PIP_NO_DEPS", Some("1")),
                 ("PIP_REQUIRE_HASHES", Some("yes")),
                 ("PIP_NO_BINARY", Some(":all:")),
@@ -31756,6 +31768,7 @@ mod tests {
                         "--requirement=requirements/base.txt",
                         "--requirement=requirements/dev requirements.txt",
                         "--constraint=constraints/base.txt",
+                        "--build-constraint=build-constraints/base.txt",
                         "--no-deps",
                         "--require-hashes",
                         "--no-binary=:all:",
@@ -31828,6 +31841,7 @@ mod tests {
                 ("PIP_REPORT", None),
                 ("PIP_REQUIREMENT", None),
                 ("PIP_CONSTRAINT", None),
+                ("PIP_BUILD_CONSTRAINT", None),
                 ("PIP_NO_DEPS", None),
                 ("PIP_REQUIRE_HASHES", None),
                 ("PIP_NO_BINARY", None),
@@ -31875,6 +31889,7 @@ mod tests {
                 ("PIP_REPORT", None),
                 ("PIP_REQUIREMENT", None),
                 ("PIP_CONSTRAINT", None),
+                ("PIP_BUILD_CONSTRAINT", None),
                 ("PIP_NO_DEPS", None),
                 ("PIP_REQUIRE_HASHES", None),
                 ("PIP_NO_BINARY", None),
@@ -31918,6 +31933,7 @@ mod tests {
                 ("PIP_REPORT", None),
                 ("PIP_REQUIREMENT", None),
                 ("PIP_CONSTRAINT", None),
+                ("PIP_BUILD_CONSTRAINT", None),
                 ("PIP_NO_DEPS", None),
                 ("PIP_REQUIRE_HASHES", None),
                 ("PIP_NO_BINARY", None),
@@ -31958,6 +31974,7 @@ mod tests {
                 ("PIP_REPORT", None),
                 ("PIP_REQUIREMENT", None),
                 ("PIP_CONSTRAINT", None),
+                ("PIP_BUILD_CONSTRAINT", None),
                 ("PIP_NO_DEPS", Some("true")),
                 ("PIP_REQUIRE_HASHES", None),
                 ("PIP_NO_BINARY", None),
@@ -32001,6 +32018,7 @@ mod tests {
                 ("PIP_REPORT", None),
                 ("PIP_REQUIREMENT", None),
                 ("PIP_CONSTRAINT", None),
+                ("PIP_BUILD_CONSTRAINT", None),
                 ("PIP_NO_DEPS", None),
                 ("PIP_REQUIRE_HASHES", None),
                 ("PIP_NO_BINARY", None),
@@ -32038,6 +32056,7 @@ mod tests {
                 ("PIP_REPORT", Some("report.json")),
                 ("PIP_REQUIREMENT", Some("requirements.txt")),
                 ("PIP_CONSTRAINT", Some("constraints.txt")),
+                ("PIP_BUILD_CONSTRAINT", Some("build-constraints.txt")),
                 ("PIP_NO_DEPS", Some("true")),
                 ("PIP_REQUIRE_HASHES", Some("true")),
                 ("PIP_NO_BINARY", Some(":all:")),
@@ -38711,7 +38730,7 @@ verdict = "accepted"
         .unwrap();
         fs::write(
             project.join("pip.conf"),
-            "[install]\ntarget = vendor\ndry-run = true\nupgrade = true\nreport = report.json\nrequirement = requirements/base.txt 'requirements/dev requirements.txt'\nconstraint = constraints/base.txt\nonly-binary = idna\n[download]\ndest = wheelhouse\n[wheel]\nwheel-dir = wheels\n[global]\nplatform = macosx_14_0_arm64 manylinux_2_28_x86_64\nabi = cp312 abi3\n",
+            "[install]\ntarget = vendor\ndry-run = true\nupgrade = true\nreport = report.json\nrequirement = requirements/base.txt 'requirements/dev requirements.txt'\nconstraint = constraints/base.txt\nbuild-constraint = build-constraints/base.txt\nonly-binary = idna\n[download]\ndest = wheelhouse\n[wheel]\nwheel-dir = wheels\n[global]\nplatform = macosx_14_0_arm64 manylinux_2_28_x86_64\nabi = cp312 abi3\n",
         )
         .unwrap();
 
@@ -38734,6 +38753,7 @@ verdict = "accepted"
                 ("PIP_REPORT", None),
                 ("PIP_REQUIREMENT", None),
                 ("PIP_CONSTRAINT", None),
+                ("PIP_BUILD_CONSTRAINT", None),
                 ("PIP_NO_DEPS", None),
                 ("PIP_REQUIRE_HASHES", None),
                 ("PIP_NO_BINARY", None),
@@ -38762,6 +38782,7 @@ verdict = "accepted"
                         "--requirement=requirements/base.txt",
                         "--requirement=requirements/dev requirements.txt",
                         "--constraint=constraints/base.txt",
+                        "--build-constraint=build-constraints/base.txt",
                         "--no-deps",
                         "--require-hashes",
                         "--only-binary=idna",
@@ -38964,6 +38985,8 @@ verdict = "accepted"
             "--use-feature",
             "truststore",
             "--use-deprecated=legacy-resolver",
+            "--build-constraint",
+            "build-constraints.txt",
             "--ignore-requires-python",
             "--no-build-isolation",
             "--check-build-dependencies",
@@ -39136,6 +39159,8 @@ verdict = "accepted"
             "requirements.txt",
             "-c",
             "constraints.txt",
+            "--build-constraint",
+            "build-constraints.txt",
             "--dest",
             "wheelhouse",
             "--index-url=https://mirror.example/simple",
@@ -39213,6 +39238,7 @@ verdict = "accepted"
             "--require-hashes",
             "--no-deps",
             "--check-build-dependencies",
+            "--build-constraint=build-constraints.txt",
             "--no-clean",
             "--no-verify",
             "-C",
@@ -40294,6 +40320,7 @@ print("ok")
                 ("PIP_FIND_LINKS", None),
                 ("PIP_REQUIREMENT", None),
                 ("PIP_CONSTRAINT", None),
+                ("PIP_BUILD_CONSTRAINT", None),
                 ("PIP_NO_INDEX", None),
                 ("PIP_TARGET", None),
                 ("PIP_PREFIX", None),
