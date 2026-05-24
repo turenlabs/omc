@@ -6704,6 +6704,8 @@ fn run_pip_install_dry_run(
     options.project_extras = groups.into_iter().collect();
     options.python_vcs_requirements = vcs_requirements;
 
+    let had_requirement_sources =
+        !options.requirement_files.is_empty() || !script_requirements.is_empty();
     let mut resolved_specs = parse_package_specs(&specs, Some(Ecosystem::Pypi))?;
     resolved_specs.extend(parse_pip_archive_references(
         project_dir,
@@ -6731,6 +6733,36 @@ fn run_pip_install_dry_run(
         && vcs_count == 0
         && options.project_extras.is_empty()
     {
+        if had_requirement_sources {
+            let python_site_packages = dry_run_target.unwrap_or_else(|| {
+                project_dir
+                    .join(".omc")
+                    .join("python")
+                    .join("site-packages")
+            });
+            let install = InstallReport {
+                npm_packages: 0,
+                pypi_packages: 0,
+                npm_bins: 0,
+                python_scripts: 0,
+                node_modules: project_dir.join("node_modules"),
+                npm_bin_dir: project_dir.join("node_modules").join(".bin"),
+                python_bin_dir: dry_run_bin_dir.unwrap_or_else(|| python_site_packages.join("bin")),
+                python_site_packages,
+            };
+            println!();
+            println!(
+                "dry-run: would install pypi=0 python_site_packages={}",
+                install.python_site_packages.display()
+            );
+            write_pip_install_report_from(
+                dry_run_project.path(),
+                project_dir,
+                report.as_deref(),
+                &install,
+            )?;
+            return Ok(ExitCode::SUCCESS);
+        }
         return Err(OmcRegistryError::UnsupportedSpec(
             "pip install --dry-run needs at least one package, archive, local path, VCS requirement, or requirement file"
                 .to_owned(),
@@ -12767,6 +12799,7 @@ fn download_pip_packages(
     options.pypi_binary_all = binary_all;
     options.pypi_binary_packages = binary_packages;
     apply_pip_compatibility_target(&mut options, compatibility);
+    let had_requirement_sources = !options.requirement_files.is_empty();
 
     let mut resolved_specs = parse_package_specs(&specs, Some(Ecosystem::Pypi))?;
     resolved_specs.extend(parse_pip_archive_references(
@@ -12795,6 +12828,9 @@ fn download_pip_packages(
         )?;
     }
     if resolved_specs.is_empty() && local_paths.is_empty() {
+        if had_requirement_sources {
+            return Ok(());
+        }
         return Err(OmcRegistryError::UnsupportedSpec(
             "pip download/wheel needs at least one package, archive, or requirement file"
                 .to_owned(),
@@ -40062,6 +40098,55 @@ version = "0.1.0"
         assert_eq!(status, ExitCode::SUCCESS);
         assert!(project.join("omc.toml").exists());
         assert!(project.join("omc.lock").exists());
+
+        let _ = fs::remove_dir_all(project);
+    }
+
+    #[test]
+    fn pip_install_dry_run_accepts_empty_requirement_file() {
+        for (name, content) in [
+            ("pip-install-dry-run-empty-requirement-file", ""),
+            (
+                "pip-install-dry-run-marker-skipped-requirement-file",
+                "idna==3.7; python_version < '2'\n",
+            ),
+        ] {
+            let project = test_dir(name);
+            fs::write(project.join("requirements.txt"), content).unwrap();
+
+            let status = with_clean_pip_env(|| {
+                run_pip_compat(
+                    &project,
+                    &args(&["install", "--dry-run", "-r", "requirements.txt"]),
+                )
+            })
+            .expect("explicit empty dry-run requirement files are valid pip input");
+
+            assert_eq!(status, ExitCode::SUCCESS);
+            assert!(!project.join("omc.toml").exists());
+            assert!(!project.join("omc.lock").exists());
+            assert!(!project.join(".omc").exists());
+
+            let _ = fs::remove_dir_all(project);
+        }
+    }
+
+    #[test]
+    fn pip_download_accepts_explicit_empty_requirement_file() {
+        let project = test_dir("pip-download-empty-requirement-file");
+        fs::write(project.join("requirements.txt"), "").unwrap();
+
+        let status = with_clean_pip_env(|| {
+            run_pip_compat(
+                &project,
+                &args(&["download", "-r", "requirements.txt", "-d", "wheelhouse"]),
+            )
+        })
+        .expect("explicit empty download requirement files are valid pip input");
+
+        assert_eq!(status, ExitCode::SUCCESS);
+        assert!(project.join("wheelhouse").exists());
+        assert_eq!(fs::read_dir(project.join("wheelhouse")).unwrap().count(), 0);
 
         let _ = fs::remove_dir_all(project);
     }
