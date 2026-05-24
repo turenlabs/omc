@@ -281,7 +281,9 @@ nearest ancestor with an OMC, npm, or Python project marker; use
 `--omc-project-dir PATH` for an explicit project root. The Python shims run a
 host interpreter with OMC's isolated import path; set `OMC_HOST_PYTHON` if the
 host `python3` is not discoverable outside the OMC shim directory. The Node shim
-uses the same model; set `OMC_HOST_NODE` if needed.
+uses the same model; set `OMC_HOST_NODE` if needed. Direct `pip` and
+`python -m pip` commands keep resolving relative CLI paths from the invocation
+directory while using the discovered project for OMC state.
 
 For existing projects, `install` reads normal project files:
 

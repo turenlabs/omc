@@ -1423,7 +1423,9 @@ fn run_entry() -> Result<ExitCode, OmcRegistryError> {
                 &npx_compat_args(invocation.args),
                 &invocation.cwd,
             ),
-            DirectCompatMode::Pip => run_pip_compat(&invocation.project_dir, &invocation.args),
+            DirectCompatMode::Pip => {
+                run_pip_compat_with_cwd(&invocation.project_dir, &invocation.args, &invocation.cwd)
+            }
             DirectCompatMode::Python => {
                 run_python_in_cwd(&invocation.project_dir, &invocation.cwd, &invocation.args)
             }
@@ -2243,7 +2245,7 @@ fn run_python_in_cwd(
     args: &[String],
 ) -> Result<ExitCode, OmcRegistryError> {
     if let Some(pip_args) = python_pip_module_args(args) {
-        return run_pip_compat(project_dir, pip_args);
+        return run_pip_compat_with_cwd(project_dir, pip_args, cwd);
     }
     if let Some(twine_args) = python_twine_module_args(args) {
         return run_twine_compat(project_dir, twine_args);
@@ -5092,6 +5094,14 @@ fn shell_like_tokens(value: &str) -> Vec<String> {
 }
 
 fn run_pip_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRegistryError> {
+    run_pip_compat_with_cwd(project_dir, args, project_dir)
+}
+
+fn run_pip_compat_with_cwd(
+    project_dir: &Path,
+    args: &[String],
+    invocation_cwd: &Path,
+) -> Result<ExitCode, OmcRegistryError> {
     if pip_auto_complete_requested() {
         print_pip_auto_completion(project_dir)?;
         return Ok(ExitCode::SUCCESS);
@@ -5102,10 +5112,12 @@ fn run_pip_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
         PipCompatAction::Help { topic } => print_pip_help(topic.as_deref()),
         PipCompatAction::Version => println!("pip {} from OMC", env!("CARGO_PKG_VERSION")),
         PipCompatAction::Completion { shell } => print_pip_completion(shell),
-        PipCompatAction::Lock(action) => {
+        PipCompatAction::Lock(mut action) => {
+            absolutize_pip_lock_action_paths(invocation_cwd, &mut action);
             return run_pip_lock(project_dir, *action);
         }
-        PipCompatAction::Install(action) => {
+        PipCompatAction::Install(mut action) => {
+            absolutize_pip_install_action_paths(invocation_cwd, &mut action);
             let action = *action;
             if action.user && action.target.is_some() {
                 return Err(OmcRegistryError::UnsupportedSpec(
@@ -5279,10 +5291,12 @@ fn run_pip_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
                 write_pip_install_report(project_dir, report.as_deref(), &install)?;
             }
         }
-        PipCompatAction::Download(action) => {
+        PipCompatAction::Download(mut action) => {
+            absolutize_pip_download_action_paths(invocation_cwd, &mut action);
             download_pip_packages(project_dir, *action, PipArtifactCommand::Download)?;
         }
-        PipCompatAction::Wheel(action) => {
+        PipCompatAction::Wheel(mut action) => {
+            absolutize_pip_download_action_paths(invocation_cwd, &mut action);
             download_pip_packages(project_dir, *action, PipArtifactCommand::Wheel)?;
         }
         PipCompatAction::Uninstall {
@@ -5294,7 +5308,7 @@ fn run_pip_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
             allow_all_host,
         } => {
             specs.extend(pip_uninstall_specs_from_requirements(
-                project_dir,
+                invocation_cwd,
                 requirements,
             )?);
             if specs.is_empty() {
@@ -5321,25 +5335,25 @@ fn run_pip_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
         }
         PipCompatAction::Show { specs, files, user } => {
             if user {
-                let paths = pip_effective_scope_paths(&[], true)?;
+                let paths = pip_effective_scope_paths(invocation_cwd, &[], true)?;
                 return print_pip_path_show(project_dir, &paths, &specs, files);
             }
             return print_locked_pip_show(project_dir, &specs, files);
         }
         PipCompatAction::Hash { algorithm, paths } => {
-            print_pip_hash(project_dir, algorithm, paths)?
+            print_pip_hash(invocation_cwd, algorithm, paths)?
         }
         PipCompatAction::Cache { action } => print_pip_cache(project_dir, action)?,
         PipCompatAction::Check { user } => {
             if user {
-                let paths = pip_effective_scope_paths(&[], true)?;
+                let paths = pip_effective_scope_paths(invocation_cwd, &[], true)?;
                 return print_pip_path_check(project_dir, &paths);
             }
             return print_locked_pip_check(project_dir);
         }
         PipCompatAction::Debug { action } => print_pip_debug(project_dir, action)?,
         PipCompatAction::Inspect { paths, user } => {
-            let paths = pip_effective_scope_paths(&paths, user)?;
+            let paths = pip_effective_scope_paths(invocation_cwd, &paths, user)?;
             if paths.is_empty() {
                 print_locked_pip_inspect(project_dir)?
             } else {
@@ -5347,13 +5361,14 @@ fn run_pip_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
             }
         }
         PipCompatAction::Freeze { action } => {
-            let paths = pip_effective_scope_paths(&action.paths, action.user)?;
+            let paths = pip_effective_scope_paths(invocation_cwd, &action.paths, action.user)?;
+            let requirements = absolutize_paths(invocation_cwd, action.requirements);
             if paths.is_empty() {
                 print_locked_freeze(
                     project_dir,
                     &action.exclude,
                     action.exclude_editable,
-                    &action.requirements,
+                    &requirements,
                 )?
             } else {
                 print_pip_path_freeze(
@@ -5361,7 +5376,7 @@ fn run_pip_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
                     &paths,
                     &action.exclude,
                     action.exclude_editable,
-                    &action.requirements,
+                    &requirements,
                 )?
             }
         }
@@ -5380,7 +5395,8 @@ fn run_pip_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
             no_index,
             allow_prereleases,
         } => {
-            let paths = pip_effective_scope_paths(&paths, user)?;
+            let paths = pip_effective_scope_paths(invocation_cwd, &paths, user)?;
+            let find_links = absolutize_pip_find_links(invocation_cwd, find_links);
             if outdated || uptodate {
                 print_pip_outdated(
                     project_dir,
@@ -5460,7 +5476,7 @@ fn run_pip_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
             PipIndexSearchOptions {
                 index_url,
                 extra_index_urls,
-                find_links,
+                find_links: absolutize_pip_find_links(invocation_cwd, find_links),
                 no_index,
                 allow_prereleases,
                 compatibility,
@@ -5471,6 +5487,80 @@ fn run_pip_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
     }
 
     Ok(ExitCode::SUCCESS)
+}
+
+fn absolutize_pip_lock_action_paths(base_dir: &Path, action: &mut PipLockAction) {
+    absolutize_pip_install_action_paths(base_dir, &mut action.install);
+    action.output = absolutize_path(base_dir, std::mem::take(&mut action.output));
+}
+
+fn absolutize_pip_install_action_paths(base_dir: &Path, action: &mut PipInstallAction) {
+    action.requirements = absolutize_paths(base_dir, std::mem::take(&mut action.requirements));
+    action.constraints = absolutize_paths(base_dir, std::mem::take(&mut action.constraints));
+    action.script_requirements =
+        absolutize_paths(base_dir, std::mem::take(&mut action.script_requirements));
+    action.report = action
+        .report
+        .take()
+        .map(|path| absolutize_path(base_dir, path));
+    action.archive_references =
+        absolutize_pip_archive_references(base_dir, std::mem::take(&mut action.archive_references));
+    action.local_paths =
+        absolutize_python_local_requirements(base_dir, std::mem::take(&mut action.local_paths));
+    action.find_links = absolutize_pip_find_links(base_dir, std::mem::take(&mut action.find_links));
+    action.target = action
+        .target
+        .take()
+        .map(|path| absolutize_path(base_dir, path));
+    action.prefix = action
+        .prefix
+        .take()
+        .map(|path| absolutize_path(base_dir, path));
+    action.root = action
+        .root
+        .take()
+        .map(|path| absolutize_path(base_dir, path));
+}
+
+fn absolutize_pip_download_action_paths(base_dir: &Path, action: &mut PipDownloadAction) {
+    action.requirements = absolutize_paths(base_dir, std::mem::take(&mut action.requirements));
+    action.constraints = absolutize_paths(base_dir, std::mem::take(&mut action.constraints));
+    action.archive_references =
+        absolutize_pip_archive_references(base_dir, std::mem::take(&mut action.archive_references));
+    action.local_paths =
+        absolutize_python_local_requirements(base_dir, std::mem::take(&mut action.local_paths));
+    action.find_links = absolutize_pip_find_links(base_dir, std::mem::take(&mut action.find_links));
+    action.destination = absolutize_path(base_dir, std::mem::take(&mut action.destination));
+}
+
+fn absolutize_pip_archive_references(base_dir: &Path, references: Vec<String>) -> Vec<String> {
+    references
+        .into_iter()
+        .map(|reference| {
+            let (source, fragment) = reference
+                .split_once('#')
+                .map(|(source, fragment)| (source, Some(fragment)))
+                .unwrap_or((reference.as_str(), None));
+            if source.contains("://") || source.contains(" @ ") || Path::new(source).is_absolute() {
+                return reference;
+            }
+            let mut absolute = absolutize_path(base_dir, PathBuf::from(source))
+                .to_string_lossy()
+                .into_owned();
+            if let Some(fragment) = fragment {
+                absolute.push('#');
+                absolute.push_str(fragment);
+            }
+            absolute
+        })
+        .collect()
+}
+
+fn absolutize_pip_find_links(base_dir: &Path, find_links: Vec<String>) -> Vec<String> {
+    find_links
+        .into_iter()
+        .map(|source| normalize_pip_compat_find_links(base_dir, source))
+        .collect()
 }
 
 fn run_twine_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRegistryError> {
@@ -17262,13 +17352,18 @@ fn print_pip_path_freeze(
 }
 
 fn pip_effective_scope_paths(
+    base_dir: &Path,
     paths: &[PathBuf],
     user: bool,
 ) -> Result<Vec<PathBuf>, OmcRegistryError> {
     if user && paths.is_empty() {
         Ok(vec![pip_user_paths()?.site_packages])
     } else {
-        Ok(paths.to_vec())
+        Ok(paths
+            .iter()
+            .cloned()
+            .map(|path| absolutize_path(base_dir, path))
+            .collect())
     }
 }
 
@@ -31345,6 +31440,29 @@ verdict = "accepted"
     }
 
     #[test]
+    fn direct_pip_hash_resolves_relative_paths_from_invocation_cwd() {
+        let project = test_dir("direct-pip-hash-project");
+        let invocation_cwd = project.join("nested").join("work");
+        fs::create_dir_all(&invocation_cwd).unwrap();
+        fs::write(
+            invocation_cwd.join("demo-1.0.0-py3-none-any.whl"),
+            b"wheel bytes",
+        )
+        .unwrap();
+
+        let status = run_pip_compat_with_cwd(
+            &project,
+            &args(&["hash", "demo-1.0.0-py3-none-any.whl"]),
+            &invocation_cwd,
+        )
+        .unwrap();
+
+        assert_eq!(status, ExitCode::SUCCESS);
+
+        let _ = fs::remove_dir_all(project);
+    }
+
+    #[test]
     fn parses_npm_install_compat_flags() {
         assert_eq!(
             parse_npm_compat_action(&args(&["--version"])).unwrap(),
@@ -37347,7 +37465,7 @@ print("ok")
             assert!(source_script.exists());
             assert!(user_script.exists());
 
-            let scope_paths = pip_effective_scope_paths(&[], true).unwrap();
+            let scope_paths = pip_effective_scope_paths(&project, &[], true).unwrap();
             assert_eq!(scope_paths, vec![paths.site_packages.clone()]);
             let packages =
                 read_pip_path_packages(&project, &scope_paths, &[], PipEditableMode::Include)
