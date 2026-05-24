@@ -19961,7 +19961,7 @@ fn parse_npm_path_args(command: &str, args: &[String]) -> Result<bool, OmcRegist
 }
 
 fn parse_npm_maintenance_args(
-    command: &str,
+    _command: &str,
     maintenance: NpmMaintenanceCommand,
     args: &[String],
 ) -> Result<NpmCompatAction, OmcRegistryError> {
@@ -19994,12 +19994,9 @@ fn parse_npm_maintenance_args(
         positionals,
         ..
     } = parse_common_compat_flags(&filtered, true)?;
-    if !positionals.is_empty() {
-        return Err(unsupported_compat_arg(command, &positionals[0]));
-    }
     Ok(NpmCompatAction::Maintenance {
         command: maintenance,
-        packages: Vec::new(),
+        packages: positionals,
         omit_dev,
         omit_optional,
         omit_peer,
@@ -28893,6 +28890,26 @@ mod tests {
     }
 
     #[test]
+    fn npm_maintenance_accepts_package_args_like_npm() {
+        for command in ["prune", "dedupe"] {
+            let project = test_dir(&format!("npm-maintenance-package-arg-{command}"));
+            fs::write(
+                project.join("package.json"),
+                r#"{"name":"root","version":"1.0.0"}"#,
+            )
+            .unwrap();
+
+            let status = run_npm_compat(&project, &args(&[command, "left-pad"])).unwrap();
+
+            assert_eq!(status, ExitCode::SUCCESS);
+            assert!(project.join("omc.toml").exists());
+            assert!(project.join("omc.lock").exists());
+
+            let _ = fs::remove_dir_all(project);
+        }
+    }
+
+    #[test]
     fn parses_direct_compat_project_dir_prefix() {
         assert_eq!(
             parse_direct_compat_invocation(
@@ -30428,11 +30445,12 @@ mod tests {
                 "--omit=dev",
                 "--loglevel=silent",
                 "--allow-all-host",
+                "left-pad",
             ]))
             .unwrap(),
             NpmCompatAction::Maintenance {
                 command: NpmMaintenanceCommand::Prune,
-                packages: Vec::new(),
+                packages: vec!["left-pad".to_owned()],
                 omit_dev: true,
                 omit_optional: false,
                 omit_peer: false,
@@ -30442,11 +30460,17 @@ mod tests {
             }
         );
         assert_eq!(
-            parse_npm_compat_action(&args(&["dedupe", "--dry-run", "--cache", "/tmp/npm-cache"]))
-                .unwrap(),
+            parse_npm_compat_action(&args(&[
+                "dedupe",
+                "--dry-run",
+                "--cache",
+                "/tmp/npm-cache",
+                "left-pad",
+            ]))
+            .unwrap(),
             NpmCompatAction::Maintenance {
                 command: NpmMaintenanceCommand::Dedupe,
-                packages: Vec::new(),
+                packages: vec!["left-pad".to_owned()],
                 omit_dev: false,
                 omit_optional: false,
                 omit_peer: false,
