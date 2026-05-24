@@ -8097,6 +8097,7 @@ pub struct NpmPackageMetadata {
     pub version: String,
     pub dist_tags: BTreeMap<String, String>,
     pub versions: Vec<String>,
+    pub root: serde_json::Value,
     pub manifest: serde_json::Value,
 }
 
@@ -8631,6 +8632,7 @@ pub fn read_npm_package_metadata_with_userconfig(
         version,
         dist_tags,
         versions: root.versions.keys().cloned().collect(),
+        root: root_value,
         manifest,
     })
 }

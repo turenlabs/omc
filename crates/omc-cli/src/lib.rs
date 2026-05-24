@@ -8104,25 +8104,163 @@ fn npm_view_field_value(
     metadata: &omc_registry::NpmPackageMetadata,
     field: &str,
 ) -> Option<serde_json::Value> {
-    match field {
-        "name" => Some(serde_json::Value::String(metadata.name.clone())),
-        "version" => Some(serde_json::Value::String(metadata.version.clone())),
-        "versions" => serde_json::to_value(&metadata.versions).ok(),
-        "dist-tags" | "distTags" => serde_json::to_value(&metadata.dist_tags).ok(),
-        _ => metadata
-            .manifest
-            .pointer(&json_pointer_for_dotted_field(field))
-            .cloned(),
+    let tokens = npm_view_selector_tokens(field)?;
+    npm_view_select_value(&npm_view_metadata_value(metadata), &tokens, String::new())
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum NpmViewSelectorToken {
+    Field(String),
+    Index(usize),
+}
+
+fn npm_view_metadata_value(metadata: &omc_registry::NpmPackageMetadata) -> serde_json::Value {
+    let mut object = serde_json::Map::new();
+    if let serde_json::Value::Object(root) = &metadata.root {
+        object.extend(root.clone());
+    }
+    if let serde_json::Value::Object(manifest) = &metadata.manifest {
+        object.extend(manifest.clone());
+    }
+    object.insert(
+        "name".to_owned(),
+        serde_json::Value::String(metadata.name.clone()),
+    );
+    object.insert(
+        "version".to_owned(),
+        serde_json::Value::String(metadata.version.clone()),
+    );
+    if let Ok(versions) = serde_json::to_value(&metadata.versions) {
+        object.insert("versions".to_owned(), versions);
+    }
+    if let Ok(dist_tags) = serde_json::to_value(&metadata.dist_tags) {
+        object.insert("dist-tags".to_owned(), dist_tags.clone());
+        object.insert("distTags".to_owned(), dist_tags);
+    }
+    serde_json::Value::Object(object)
+}
+
+fn npm_view_selector_tokens(field: &str) -> Option<Vec<NpmViewSelectorToken>> {
+    if field.trim().is_empty() {
+        return None;
+    }
+
+    let mut tokens = Vec::new();
+    for segment in field.split('.') {
+        if segment.is_empty() {
+            return None;
+        }
+        npm_view_selector_segment_tokens(segment, &mut tokens)?;
+    }
+    Some(tokens)
+}
+
+fn npm_view_selector_segment_tokens(
+    mut segment: &str,
+    tokens: &mut Vec<NpmViewSelectorToken>,
+) -> Option<()> {
+    loop {
+        let Some(bracket_start) = segment.find('[') else {
+            if !segment.is_empty() {
+                tokens.push(NpmViewSelectorToken::Field(segment.to_owned()));
+            }
+            return Some(());
+        };
+
+        let field = &segment[..bracket_start];
+        if !field.is_empty() {
+            tokens.push(NpmViewSelectorToken::Field(field.to_owned()));
+        }
+
+        let after_open = &segment[bracket_start + 1..];
+        let bracket_end = after_open.find(']')?;
+        let bracket = after_open[..bracket_end].trim();
+        tokens.push(npm_view_bracket_token(bracket)?);
+
+        segment = &after_open[bracket_end + 1..];
+        if segment.is_empty() {
+            return Some(());
+        }
+        if !segment.starts_with('[') {
+            return None;
+        }
     }
 }
 
-fn json_pointer_for_dotted_field(field: &str) -> String {
-    let mut pointer = String::new();
-    for part in field.split('.') {
-        pointer.push('/');
-        pointer.push_str(&part.replace('~', "~0").replace('/', "~1"));
+fn npm_view_bracket_token(raw: &str) -> Option<NpmViewSelectorToken> {
+    let value = raw
+        .strip_prefix('"')
+        .and_then(|value| value.strip_suffix('"'))
+        .or_else(|| {
+            raw.strip_prefix('\'')
+                .and_then(|value| value.strip_suffix('\''))
+        })
+        .unwrap_or(raw);
+    if value.is_empty() {
+        return None;
     }
-    pointer
+    if value.chars().all(|ch| ch.is_ascii_digit()) {
+        return value.parse().ok().map(NpmViewSelectorToken::Index);
+    }
+    Some(NpmViewSelectorToken::Field(value.to_owned()))
+}
+
+fn npm_view_select_value(
+    value: &serde_json::Value,
+    tokens: &[NpmViewSelectorToken],
+    path: String,
+) -> Option<serde_json::Value> {
+    let Some((token, rest)) = tokens.split_first() else {
+        return Some(value.clone());
+    };
+
+    match (value, token) {
+        (serde_json::Value::Object(object), NpmViewSelectorToken::Field(field)) => {
+            object.get(field).and_then(|value| {
+                npm_view_select_value(value, rest, npm_view_append_field(&path, field))
+            })
+        }
+        (serde_json::Value::Array(values), NpmViewSelectorToken::Index(index)) => values
+            .get(*index)
+            .and_then(|value| npm_view_select_value(value, rest, format!("{path}[{index}]"))),
+        (serde_json::Value::Object(object), NpmViewSelectorToken::Index(index)) => object
+            .get(&index.to_string())
+            .and_then(|value| npm_view_select_value(value, rest, format!("{path}[{index}]"))),
+        (serde_json::Value::Array(values), NpmViewSelectorToken::Field(_)) => {
+            let suffix = npm_view_selector_suffix(tokens);
+            let mut projected = serde_json::Map::new();
+            for (index, item) in values.iter().enumerate() {
+                let item_path = format!("{path}[{index}]");
+                if let Some(value) = npm_view_select_value(item, tokens, item_path.clone()) {
+                    projected.insert(format!("{item_path}{suffix}"), value);
+                }
+            }
+            (!projected.is_empty()).then_some(serde_json::Value::Object(projected))
+        }
+        _ => None,
+    }
+}
+
+fn npm_view_append_field(path: &str, field: &str) -> String {
+    if path.is_empty() {
+        field.to_owned()
+    } else {
+        format!("{path}.{field}")
+    }
+}
+
+fn npm_view_selector_suffix(tokens: &[NpmViewSelectorToken]) -> String {
+    let mut suffix = String::new();
+    for token in tokens {
+        match token {
+            NpmViewSelectorToken::Field(field) => {
+                suffix.push('.');
+                suffix.push_str(field);
+            }
+            NpmViewSelectorToken::Index(index) => suffix.push_str(&format!("[{index}]")),
+        }
+    }
+    suffix
 }
 
 fn npm_view_text_value(value: &serde_json::Value) -> String {
@@ -9540,6 +9678,7 @@ fn npm_diff_local_package_tarball(root: &Path) -> Result<NpmPackageTarball, OmcR
             version: pack.version,
             dist_tags: BTreeMap::new(),
             versions: Vec::new(),
+            root: serde_json::Value::Null,
             manifest,
         },
         bytes,
@@ -9588,6 +9727,7 @@ fn npm_diff_tarball_from_bytes(bytes: Vec<u8>) -> Result<NpmPackageTarball, OmcR
             version,
             dist_tags: BTreeMap::new(),
             versions: Vec::new(),
+            root: serde_json::Value::Null,
             manifest,
         },
         bytes,
@@ -24140,6 +24280,59 @@ mod tests {
     }
 
     #[test]
+    fn selects_npm_view_fields_from_packument_metadata() {
+        let metadata = omc_registry::NpmPackageMetadata {
+            name: "left-pad".to_owned(),
+            version: "1.3.0".to_owned(),
+            dist_tags: BTreeMap::from([("latest".to_owned(), "1.3.0".to_owned())]),
+            versions: vec!["0.0.0".to_owned(), "1.3.0".to_owned()],
+            root: serde_json::json!({
+                "time": {
+                    "modified": "2024-04-16T05:01:57.431Z",
+                },
+                "maintainers": [
+                    {"name": "sebmck", "email": "sebmck@gmail.com"},
+                    {"name": "stevemao", "email": "maochenyan@gmail.com"},
+                ],
+            }),
+            manifest: serde_json::json!({
+                "dist": {
+                    "tarball": "https://registry.npmjs.org/left-pad/-/left-pad-1.3.0.tgz",
+                },
+                "repository": {
+                    "url": "git+ssh://git@github.com/stevemao/left-pad.git",
+                },
+            }),
+        };
+
+        assert_eq!(
+            npm_view_field_value(&metadata, "time.modified"),
+            Some(serde_json::json!("2024-04-16T05:01:57.431Z"))
+        );
+        assert_eq!(
+            npm_view_field_value(&metadata, "versions[0]"),
+            Some(serde_json::json!("0.0.0"))
+        );
+        assert_eq!(
+            npm_view_field_value(&metadata, "dist-tags[latest]"),
+            Some(serde_json::json!("1.3.0"))
+        );
+        assert_eq!(
+            npm_view_field_value(&metadata, "maintainers.name"),
+            Some(serde_json::json!({
+                "maintainers[0].name": "sebmck",
+                "maintainers[1].name": "stevemao",
+            }))
+        );
+        assert_eq!(
+            npm_view_field_value(&metadata, "repository.url"),
+            Some(serde_json::json!(
+                "git+ssh://git@github.com/stevemao/left-pad.git"
+            ))
+        );
+    }
+
+    #[test]
     fn maps_npm_create_initializers_to_packages() {
         assert_eq!(
             npm_create_package_spec("vite@latest").unwrap(),
@@ -24829,6 +25022,7 @@ verdict = "accepted"
                     version: version.to_owned(),
                     dist_tags: BTreeMap::new(),
                     versions: Vec::new(),
+                    root: serde_json::Value::Null,
                     manifest,
                 },
                 bytes,

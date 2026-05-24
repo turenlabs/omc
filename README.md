@@ -193,6 +193,8 @@ cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm dist-tag add l
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm dist-tag rm left-pad beta --otp 123456
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm sbom --sbom-format=cyclonedx
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm view left-pad version
+cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm view left-pad time.modified --json
+cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm view left-pad 'versions[0]' --json
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm repo left-pad --browser=false
 cargo run -p omc-cli --bin npx -- --omc-project-dir /tmp/omc-demo eslint -- .
 cargo run -p omc-cli --bin npx -- --omc-project-dir /tmp/omc-demo --allow-all-host semver@7.6.3 1.2.3
@@ -521,7 +523,8 @@ Supported now:
   `star`, `unstar`, `stars`, `ping`, `whoami`, `login` / `adduser`, `logout`,
   `token list/create/revoke`, `profile get/set`, `owner ls/add/rm`,
   `access list/get/set/grant/revoke`, `org set/rm/ls`, `team create/destroy/add/rm/ls`, `dist-tag ls/add/rm`, `sbom --sbom-format=cyclonedx|spdx`, `config get/set/delete/list`, `get`,
-  `view` / `info` / `show`, `query`, `docs`, `repo`, `bugs`, `home`,
+  `view` / `info` / `show`, including registry-root fields, dotted selectors,
+  bracket selectors, and projected array fields; `query`, `docs`, `repo`, `bugs`, `home`,
   `list` / `ls` / `ll` / `la`, including `--json`, common depth/omit/workspace
   flags, and package-name filters; `explain` / `why`,
   and `outdated` / `outdated --json` flows without delegating to npm, plus a direct
