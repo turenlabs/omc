@@ -6793,6 +6793,7 @@ fn install_lock_with_python_target(
     }
     remove_path_if_exists(&python_sdists_dir)?;
     remove_path_if_exists(&python_local_paths)?;
+    let python_bin_dir_existed = python_bin_dir.exists();
 
     fs::create_dir_all(&node_modules)?;
     fs::create_dir_all(&npm_bin_dir)?;
@@ -6837,6 +6838,7 @@ fn install_lock_with_python_target(
                     &report.python_site_packages,
                     &report.python_bin_dir,
                     overwrite_existing,
+                    python_bin_dir_existed,
                 )?;
                 report.pypi_packages += 1;
             }
@@ -6893,7 +6895,7 @@ fn install_python_local_paths(
         local_paths_file,
         format!("{}\n", lines.into_iter().collect::<Vec<_>>().join("\n")),
     )?;
-    install_python_entry_point_scripts(&entry_points, bin_dir, true)
+    install_python_entry_point_scripts(&entry_points, bin_dir, true, false)
 }
 
 pub fn install_python_project_local_import_paths(
@@ -7326,6 +7328,7 @@ fn install_pypi_package(
     site_packages: &Path,
     bin_dir: &Path,
     overwrite_existing: bool,
+    bin_dir_existed: bool,
 ) -> Result<usize> {
     let archive_path = project_dir.join(&package.archive);
     if archive_path.extension().and_then(|ext| ext.to_str()) == Some("whl") {
@@ -7335,6 +7338,7 @@ fn install_pypi_package(
             site_packages,
             bin_dir,
             overwrite_existing,
+            bin_dir_existed,
         );
     }
     if archive_path
@@ -7349,6 +7353,7 @@ fn install_pypi_package(
             site_packages,
             bin_dir,
             overwrite_existing,
+            bin_dir_existed,
         );
     }
 
@@ -7363,6 +7368,7 @@ fn install_pypi_wheel_package(
     site_packages: &Path,
     bin_dir: &Path,
     overwrite_existing: bool,
+    bin_dir_existed: bool,
 ) -> Result<usize> {
     let archive_path = project_dir.join(&package.archive);
     if archive_path.extension().and_then(|ext| ext.to_str()) != Some("whl") {
@@ -7411,7 +7417,7 @@ fn install_pypi_wheel_package(
         }
     }
 
-    install_python_entry_points(&entry_points, bin_dir, overwrite_existing)
+    install_python_entry_points(&entry_points, bin_dir, overwrite_existing, bin_dir_existed)
 }
 
 fn install_pypi_sdist_package(
@@ -7420,6 +7426,7 @@ fn install_pypi_sdist_package(
     site_packages: &Path,
     bin_dir: &Path,
     overwrite_existing: bool,
+    bin_dir_existed: bool,
 ) -> Result<usize> {
     let source_dir = project_dir
         .join(".omc")
@@ -7449,7 +7456,7 @@ fn install_pypi_sdist_package(
         copy_python_sdist_import_tree(&import_root, site_packages, overwrite_existing)?;
     write_python_sdist_dist_info(site_packages, package, installed_files)?;
     let entry_points = read_python_local_entry_points(&source_dir)?;
-    install_python_entry_point_scripts(&entry_points, bin_dir, overwrite_existing)
+    install_python_entry_point_scripts(&entry_points, bin_dir, overwrite_existing, bin_dir_existed)
 }
 
 fn write_python_sdist_dist_info(
@@ -7955,20 +7962,22 @@ fn install_python_entry_points(
     entry_points: &[String],
     bin_dir: &Path,
     overwrite_existing: bool,
+    bin_dir_existed: bool,
 ) -> Result<usize> {
     let entries = entry_points
         .iter()
         .flat_map(|content| parse_python_entry_points(content))
         .collect::<Vec<_>>();
-    install_python_entry_point_scripts(&entries, bin_dir, overwrite_existing)
+    install_python_entry_point_scripts(&entries, bin_dir, overwrite_existing, bin_dir_existed)
 }
 
 fn install_python_entry_point_scripts(
     entry_points: &[PythonEntryPoint],
     bin_dir: &Path,
     overwrite_existing: bool,
+    bin_dir_existed: bool,
 ) -> Result<usize> {
-    if !overwrite_existing && bin_dir.exists() {
+    if !overwrite_existing && bin_dir_existed {
         return Ok(0);
     }
     fs::create_dir_all(bin_dir)?;
@@ -19279,7 +19288,7 @@ print("hi")
         write_signed_artifact_for_test(dir.path(), &new_package);
 
         let target = dir.path().join("vendor");
-        install_lock_with_python_target(
+        let report = install_lock_with_python_target(
             dir.path(),
             &OmcLock {
                 version: 1,
@@ -19288,9 +19297,10 @@ print("hi")
             },
             Some(&target),
             None,
-            true,
+            false,
         )
         .unwrap();
+        assert_eq!(report.python_scripts, 1);
         assert!(target.join("bin").join("old-cli").exists());
 
         install_lock_with_python_target(
