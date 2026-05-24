@@ -20577,6 +20577,8 @@ fn pip_global_ignored_bool_flag(arg: &str) -> bool {
             | "--no-cache-dir"
             | "--isolated"
             | "--require-virtualenv"
+            | "--no-color"
+            | "--no-input"
             | "-q"
             | "--quiet"
             | "-v"
@@ -21461,6 +21463,8 @@ fn parse_pip_install_args(args: &[String]) -> Result<PipCompatAction, OmcRegistr
                 | "--no-use-pep517"
                 | "--compile"
                 | "--no-compile"
+                | "--no-color"
+                | "--no-input"
                 | "--no-warn-script-location"
                 | "--no-warn-conflicts"
         ) {
@@ -26757,10 +26761,12 @@ verdict = "accepted"
     fn parses_pip_install_requirements_and_indexes() {
         let action = parse_pip_compat_action(&args(&[
             "--disable-pip-version-check",
+            "--no-input",
             "--quiet",
             "--timeout",
             "5",
             "install",
+            "--no-color",
             "-r",
             "requirements.txt",
             "-c",
