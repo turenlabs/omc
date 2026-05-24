@@ -634,6 +634,7 @@ pub struct LinkOptions {
     pub npm_registry_url: Option<String>,
     pub npm_before: Option<String>,
     pub npm_engine_strict: bool,
+    pub npm_offline: bool,
     pub pypi_binary_all: Option<PypiBinaryMode>,
     pub pypi_binary_packages: BTreeMap<String, PypiBinaryMode>,
     pub pypi_index_url: Option<String>,
@@ -683,6 +684,7 @@ impl LinkOptions {
             npm_registry_url: None,
             npm_before: None,
             npm_engine_strict: false,
+            npm_offline: false,
             pypi_binary_all: None,
             pypi_binary_packages: BTreeMap::new(),
             pypi_index_url: None,
@@ -9390,6 +9392,17 @@ fn resolve_npm(
 
     let (registry_name, version_requirement) = npm_registry_name_and_requirement(spec)?;
     let install_name = spec.name.clone();
+    let constrained_requirement =
+        constrained_npm_requirement(spec, version_requirement.as_deref(), &options.constraints);
+    if options.npm_offline {
+        return resolve_npm_offline_locked_package(
+            spec,
+            &install_name,
+            constrained_requirement.as_deref(),
+            options,
+        )?
+        .ok_or_else(|| npm_offline_missing_lock_error(spec));
+    }
     if options.npm_before.is_none() {
         if let Some(resolved) = resolve_npm_lockfile_tarball(
             spec,
@@ -9404,8 +9417,6 @@ fn resolve_npm(
     let npm_config = read_npm_config_for_options(&options.project_dir, options)?;
     let registry = npm_config.registry_for(&registry_name);
     let encoded = urlencoding::encode(&registry_name);
-    let constrained_requirement =
-        constrained_npm_requirement(spec, version_requirement.as_deref(), &options.constraints);
     let npm_before = options.npm_before.as_deref();
     let version = match constrained_requirement.as_deref() {
         Some(requirement) if is_exact_npm_version(requirement) && npm_before.is_none() => {
@@ -12558,6 +12569,11 @@ fn resolve_npm_direct_tarball(
         .clone()
         .ok_or_else(|| OmcRegistryError::UnsupportedSpec(spec.requested()))?;
     let (local_path, filename) = npm_direct_tarball_source(&source_url, &spec.name)?;
+    if options.npm_offline && local_path.is_none() {
+        return Err(OmcRegistryError::UnsupportedSpec(format!(
+            "npm --offline cannot download direct tarball `{source_url}`"
+        )));
+    }
     let preliminary = ResolvedPackage {
         ecosystem: Ecosystem::Npm,
         name: spec.name.clone(),
@@ -12665,6 +12681,82 @@ fn resolve_npm_lockfile_tarball(
         )?));
     }
     Ok(None)
+}
+
+fn resolve_npm_offline_locked_package(
+    spec: &PackageSpec,
+    install_name: &str,
+    version_requirement: Option<&str>,
+    options: &LinkOptions,
+) -> Result<Option<ResolvedPackage>> {
+    let lockfile = options.project_dir.join(LOCKFILE);
+    if !lockfile.exists() {
+        return Ok(None);
+    }
+    let lock = read_lockfile(&lockfile)?;
+    let Some(locked) = lock
+        .packages
+        .iter()
+        .filter(|package| package.ecosystem == Ecosystem::Npm)
+        .filter(|package| package.name == install_name)
+        .filter(|package| {
+            npm_locked_package_matches_requirement(&package.version, version_requirement)
+        })
+        .max_by(|left, right| compare_npm_versions(&left.version, &right.version))
+    else {
+        return Ok(None);
+    };
+    let archive_path = options.project_dir.join(&locked.archive);
+    if !archive_path.exists() {
+        return Err(OmcRegistryError::UnsupportedSpec(format!(
+            "npm --offline requires cached archive `{}` for {}",
+            locked.archive,
+            spec.requested()
+        )));
+    }
+    let filename = Path::new(&locked.archive)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("package.tgz")
+        .to_owned();
+
+    Ok(Some(ResolvedPackage {
+        ecosystem: Ecosystem::Npm,
+        name: install_name.to_owned(),
+        version: locked.version.clone(),
+        source_url: locked.source_url.clone(),
+        download_url: None,
+        local_path: Some(archive_path),
+        filename,
+        expected_sha256: Some(locked.sha256.clone()),
+        expected_sha1: None,
+        expected_integrity: None,
+        npm_direct_tarball: true,
+        pypi_direct_wheel: false,
+        npm_scripts: BTreeMap::new(),
+        platform_compatible: true,
+        dependencies: Vec::new(),
+    }))
+}
+
+fn npm_locked_package_matches_requirement(version: &str, requirement: Option<&str>) -> bool {
+    let Some(requirement) = requirement.map(str::trim).filter(|value| !value.is_empty()) else {
+        return true;
+    };
+    if npm_version_satisfies(version, requirement) {
+        return true;
+    }
+    Version::parse(requirement).is_err()
+        && !requirement.starts_with(['^', '~', '>', '<', '='])
+        && !requirement.contains(' ')
+        && !requirement.contains(',')
+}
+
+fn npm_offline_missing_lock_error(spec: &PackageSpec) -> OmcRegistryError {
+    OmcRegistryError::UnsupportedSpec(format!(
+        "npm --offline requires {} to already be locked in omc.lock with a cached archive",
+        spec.requested()
+    ))
 }
 
 fn npm_direct_tarball_package(
@@ -19134,6 +19226,71 @@ packages:
             "https://registry.example.invalid/left-pad-1.3.0.tgz?lock=1"
         );
         assert_eq!(resolved.version, "1.3.0");
+    }
+
+    #[test]
+    fn resolves_npm_offline_from_cached_omc_lock() {
+        let dir = tempfile::tempdir().unwrap();
+        let archive_bytes = b"cached npm archive";
+        let mut locked = locked_package_for_test(Ecosystem::Npm, "offline-pkg", "1.0.0");
+        locked.archive = ".omc/cache/npm/offline-pkg/1.0.0/offline-pkg.tgz".to_owned();
+        locked.sha256 = sha256_hex(archive_bytes);
+        let archive_path = dir.path().join(&locked.archive);
+        fs::create_dir_all(archive_path.parent().unwrap()).unwrap();
+        fs::write(&archive_path, archive_bytes).unwrap();
+        fs::write(
+            dir.path().join("omc.lock"),
+            toml::to_string_pretty(&OmcLock {
+                version: 1,
+                packages: vec![locked.clone()],
+                python_vcs: Vec::new(),
+            })
+            .unwrap(),
+        )
+        .unwrap();
+
+        let mut options = LinkOptions::new(dir.path());
+        options.npm_offline = true;
+        let spec = PackageSpec::parse("npm:offline-pkg@^1.0.0").unwrap();
+        let resolved =
+            resolve_npm_offline_locked_package(&spec, "offline-pkg", Some("^1.0.0"), &options)
+                .unwrap()
+                .unwrap();
+
+        assert!(resolved.npm_direct_tarball);
+        assert_eq!(resolved.version, "1.0.0");
+        assert_eq!(
+            resolved.expected_sha256.as_deref(),
+            Some(locked.sha256.as_str())
+        );
+        assert_eq!(resolved.local_path.as_deref(), Some(archive_path.as_path()));
+    }
+
+    #[test]
+    fn rejects_npm_offline_when_locked_archive_is_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let locked = locked_package_for_test(Ecosystem::Npm, "offline-pkg", "1.0.0");
+        fs::write(
+            dir.path().join("omc.lock"),
+            toml::to_string_pretty(&OmcLock {
+                version: 1,
+                packages: vec![locked],
+                python_vcs: Vec::new(),
+            })
+            .unwrap(),
+        )
+        .unwrap();
+
+        let mut options = LinkOptions::new(dir.path());
+        options.npm_offline = true;
+        let spec = PackageSpec::parse("npm:offline-pkg@^1.0.0").unwrap();
+        let error =
+            resolve_npm_offline_locked_package(&spec, "offline-pkg", Some("^1.0.0"), &options)
+                .unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("npm --offline requires cached archive"));
     }
 
     #[test]
