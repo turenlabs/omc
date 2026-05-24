@@ -2889,11 +2889,28 @@ fn read_pip_config(project_dir: &Path) -> Result<PipConfig> {
             &mut config,
         )?;
     }
+    if let Some(xdg) = env::var_os("XDG_CONFIG_HOME") {
+        read_pip_config_into(
+            &PathBuf::from(xdg).join("pip").join("pip.conf"),
+            &mut config,
+        )?;
+    }
     read_pip_config_into(&project_dir.join("pip.conf"), &mut config)?;
     if let Some(path) = env::var_os("PIP_CONFIG_FILE") {
-        read_pip_config_into(&PathBuf::from(path), &mut config)?;
+        read_pip_config_into(
+            &resolve_pip_config_file_path(project_dir, PathBuf::from(path)),
+            &mut config,
+        )?;
     }
     Ok(config)
+}
+
+fn resolve_pip_config_file_path(project_dir: &Path, path: PathBuf) -> PathBuf {
+    if path.is_absolute() {
+        path
+    } else {
+        project_dir.join(path)
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -16087,6 +16104,40 @@ mod tests {
             .success());
     }
 
+    fn with_env_lock<T>(f: impl FnOnce() -> T) -> T {
+        static ENV_MUTEX: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+        let _guard = ENV_MUTEX
+            .get_or_init(|| std::sync::Mutex::new(()))
+            .lock()
+            .unwrap();
+        f()
+    }
+
+    fn with_env_values<T>(values: &[(&str, Option<&str>)], f: impl FnOnce() -> T) -> T {
+        with_env_lock(|| {
+            let old_values = values
+                .iter()
+                .map(|(key, _)| (*key, env::var_os(key)))
+                .collect::<Vec<_>>();
+            for (key, value) in values {
+                if let Some(value) = value {
+                    env::set_var(key, value);
+                } else {
+                    env::remove_var(key);
+                }
+            }
+            let result = f();
+            for (key, old) in old_values {
+                if let Some(old) = old {
+                    env::set_var(key, old);
+                } else {
+                    env::remove_var(key);
+                }
+            }
+            result
+        })
+    }
+
     #[test]
     fn parses_npm_specs() {
         let spec = PackageSpec::parse("npm:left-pad@1.3.0").unwrap();
@@ -23800,6 +23851,61 @@ wheels = [
         );
         assert!(config.no_index);
         assert!(config.allow_prereleases);
+    }
+
+    #[test]
+    fn reads_xdg_and_project_relative_pip_config_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path().join("project");
+        let home = dir.path().join("home");
+        let xdg = dir.path().join("xdg");
+        fs::create_dir_all(project.join("ci")).unwrap();
+        fs::create_dir_all(home.join(".config").join("pip")).unwrap();
+        fs::create_dir_all(xdg.join("pip")).unwrap();
+
+        fs::write(
+            xdg.join("pip").join("pip.conf"),
+            "[global]\nextra-index-url = https://xdg-extra.example/simple\nfind-links = ./xdg-wheelhouse\n",
+        )
+        .unwrap();
+        fs::write(
+            project.join("pip.conf"),
+            "[global]\nindex-url = https://project.example/simple\n",
+        )
+        .unwrap();
+        fs::write(
+            project.join("ci").join("pip.conf"),
+            "[global]\nindex-url = https://override.example/simple\nconstraint = constraints/prod.txt\n",
+        )
+        .unwrap();
+
+        with_env_values(
+            &[
+                ("HOME", Some(home.to_str().unwrap())),
+                ("XDG_CONFIG_HOME", Some(xdg.to_str().unwrap())),
+                ("PIP_CONFIG_FILE", Some("ci/pip.conf")),
+            ],
+            || {
+                let config = read_pip_config(&project).unwrap();
+                assert_eq!(
+                    config.index_url.as_deref(),
+                    Some("https://override.example/simple/")
+                );
+                assert!(config
+                    .extra_index_urls
+                    .contains(&"https://xdg-extra.example/simple/".to_owned()));
+                assert!(config.find_links.contains(
+                    &xdg.join("pip")
+                        .join(".")
+                        .join("xdg-wheelhouse")
+                        .to_string_lossy()
+                        .into_owned()
+                ));
+                assert!(config
+                    .constraint_files
+                    .contains(&project.join("ci").join("constraints").join("prod.txt")));
+            },
+        );
     }
 
     #[test]

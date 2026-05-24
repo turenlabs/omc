@@ -395,9 +395,10 @@ pypi-extra-index-urls = ["https://packages.example/simple"]
 ```
 
 If the project does not set a PyPI index, OMC also honors pip-style
-global/project/user `pip.conf`, `PIP_CONFIG_FILE`, `PIP_INDEX_URL`, and
-`PIP_EXTRA_INDEX_URL` settings. Wheelhouse settings such as `find-links`,
-`requirement`, `constraint`, `no-index`, prerelease opt-in, `PIP_FIND_LINKS`,
+global/project/user `pip.conf`, `XDG_CONFIG_HOME/pip/pip.conf`,
+project-relative `PIP_CONFIG_FILE`, `PIP_INDEX_URL`, and `PIP_EXTRA_INDEX_URL`
+settings. Wheelhouse settings such as `find-links`, `requirement`,
+`constraint`, `no-index`, prerelease opt-in, `PIP_FIND_LINKS`,
 `PIP_REQUIREMENT`, `PIP_CONSTRAINT`, `PIP_NO_INDEX`, and `PIP_PRE` feed the
 same offline resolver.
 
@@ -432,7 +433,8 @@ Supported now:
   `save-exact`, and `save-prefix`
 - project `omc.toml` PyPI simple-index support for `pypi-index-url` and
   `pypi-extra-index-urls`
-- global/project/user `pip.conf` and `PIP_CONFIG_FILE` PyPI support for `index-url`,
+- global/project/user `pip.conf`, `XDG_CONFIG_HOME/pip/pip.conf`, and
+  project-relative `PIP_CONFIG_FILE` PyPI support for `index-url`,
   `extra-index-url`, `find-links`, `requirement`, `constraint`, `no-index`,
   `no-binary`, and `only-binary`
 - global/project/user `pip.conf` install/download/wheel/index defaults for
