@@ -4619,6 +4619,8 @@ fn pip_cli_default_config_key(key: &str) -> bool {
             | "dry-run"
             | "upgrade"
             | "report"
+            | "requirement"
+            | "constraint"
             | "no-deps"
             | "require-hashes"
             | "no-binary"
@@ -4654,6 +4656,8 @@ fn append_pip_default_args_from_config(
     }
 
     if install_like || artifact_like {
+        append_pip_token_args_from_config(values, args, "requirement", "--requirement");
+        append_pip_token_args_from_config(values, args, "constraint", "--constraint");
         append_pip_bool_arg_from_config(values, args, "no-deps", "--no-deps", "--no-deps=false");
         append_pip_bool_arg_from_config(
             values,
@@ -4783,6 +4787,12 @@ fn pip_environment_default_args(command: &str) -> Vec<String> {
     }
 
     if install_like || artifact_like {
+        for requirement in pip_config_env_tokens("requirement") {
+            args.push(format!("--requirement={requirement}"));
+        }
+        for constraint in pip_config_env_tokens("constraint") {
+            args.push(format!("--constraint={constraint}"));
+        }
         append_pip_bool_arg_from_env(&mut args, "no-deps", "--no-deps", "--no-deps=false");
         append_pip_bool_arg_from_env(
             &mut args,
@@ -28156,6 +28166,8 @@ mod tests {
                 ("PIP_DRY_RUN", None),
                 ("PIP_UPGRADE", None),
                 ("PIP_REPORT", None),
+                ("PIP_REQUIREMENT", None),
+                ("PIP_CONSTRAINT", None),
                 ("PIP_NO_DEPS", None),
                 ("PIP_REQUIRE_HASHES", None),
                 ("PIP_NO_BINARY", None),
@@ -28769,6 +28781,11 @@ mod tests {
                 ("PIP_DRY_RUN", Some("true")),
                 ("PIP_UPGRADE", Some("yes")),
                 ("PIP_REPORT", Some("report.json")),
+                (
+                    "PIP_REQUIREMENT",
+                    Some("requirements/base.txt 'requirements/dev requirements.txt'"),
+                ),
+                ("PIP_CONSTRAINT", Some("constraints/base.txt")),
                 ("PIP_NO_DEPS", Some("1")),
                 ("PIP_REQUIRE_HASHES", Some("yes")),
                 ("PIP_NO_BINARY", Some(":all:")),
@@ -28799,6 +28816,9 @@ mod tests {
                         "--dry-run",
                         "--upgrade",
                         "--report=report.json",
+                        "--requirement=requirements/base.txt",
+                        "--requirement=requirements/dev requirements.txt",
+                        "--constraint=constraints/base.txt",
                         "--no-deps",
                         "--require-hashes",
                         "--no-binary=:all:",
@@ -28825,6 +28845,17 @@ mod tests {
                 assert!(action.dry_run);
                 assert!(action.upgrade);
                 assert_eq!(action.report, Some(PathBuf::from("report.json")));
+                assert_eq!(
+                    action.requirements,
+                    vec![
+                        PathBuf::from("requirements/base.txt"),
+                        PathBuf::from("requirements/dev requirements.txt")
+                    ]
+                );
+                assert_eq!(
+                    action.constraints,
+                    vec![PathBuf::from("constraints/base.txt")]
+                );
                 assert!(action.no_deps);
                 assert!(action.require_hashes);
                 assert!(action.allow_prereleases);
@@ -28858,6 +28889,8 @@ mod tests {
                 ("PIP_DRY_RUN", None),
                 ("PIP_UPGRADE", None),
                 ("PIP_REPORT", None),
+                ("PIP_REQUIREMENT", None),
+                ("PIP_CONSTRAINT", None),
                 ("PIP_NO_DEPS", None),
                 ("PIP_REQUIRE_HASHES", None),
                 ("PIP_NO_BINARY", None),
@@ -28903,6 +28936,8 @@ mod tests {
                 ("PIP_DRY_RUN", None),
                 ("PIP_UPGRADE", None),
                 ("PIP_REPORT", None),
+                ("PIP_REQUIREMENT", None),
+                ("PIP_CONSTRAINT", None),
                 ("PIP_NO_DEPS", None),
                 ("PIP_REQUIRE_HASHES", None),
                 ("PIP_NO_BINARY", None),
@@ -28944,6 +28979,8 @@ mod tests {
                 ("PIP_DRY_RUN", None),
                 ("PIP_UPGRADE", None),
                 ("PIP_REPORT", None),
+                ("PIP_REQUIREMENT", None),
+                ("PIP_CONSTRAINT", None),
                 ("PIP_NO_DEPS", None),
                 ("PIP_REQUIRE_HASHES", None),
                 ("PIP_NO_BINARY", None),
@@ -28982,6 +29019,8 @@ mod tests {
                 ("PIP_DRY_RUN", None),
                 ("PIP_UPGRADE", None),
                 ("PIP_REPORT", None),
+                ("PIP_REQUIREMENT", None),
+                ("PIP_CONSTRAINT", None),
                 ("PIP_NO_DEPS", Some("true")),
                 ("PIP_REQUIRE_HASHES", None),
                 ("PIP_NO_BINARY", None),
@@ -29023,6 +29062,8 @@ mod tests {
                 ("PIP_DRY_RUN", None),
                 ("PIP_UPGRADE", None),
                 ("PIP_REPORT", None),
+                ("PIP_REQUIREMENT", None),
+                ("PIP_CONSTRAINT", None),
                 ("PIP_NO_DEPS", None),
                 ("PIP_REQUIRE_HASHES", None),
                 ("PIP_NO_BINARY", None),
@@ -29058,6 +29099,8 @@ mod tests {
                 ("PIP_DRY_RUN", Some("true")),
                 ("PIP_UPGRADE", Some("true")),
                 ("PIP_REPORT", Some("report.json")),
+                ("PIP_REQUIREMENT", Some("requirements.txt")),
+                ("PIP_CONSTRAINT", Some("constraints.txt")),
                 ("PIP_NO_DEPS", Some("true")),
                 ("PIP_REQUIRE_HASHES", Some("true")),
                 ("PIP_NO_BINARY", Some(":all:")),
@@ -34777,7 +34820,7 @@ verdict = "accepted"
         .unwrap();
         fs::write(
             project.join("pip.conf"),
-            "[install]\ntarget = vendor\ndry-run = true\nupgrade = true\nreport = report.json\nonly-binary = idna\n[download]\ndest = wheelhouse\n[wheel]\nwheel-dir = wheels\n[global]\nplatform = macosx_14_0_arm64 manylinux_2_28_x86_64\nabi = cp312 abi3\n",
+            "[install]\ntarget = vendor\ndry-run = true\nupgrade = true\nreport = report.json\nrequirement = requirements/base.txt 'requirements/dev requirements.txt'\nconstraint = constraints/base.txt\nonly-binary = idna\n[download]\ndest = wheelhouse\n[wheel]\nwheel-dir = wheels\n[global]\nplatform = macosx_14_0_arm64 manylinux_2_28_x86_64\nabi = cp312 abi3\n",
         )
         .unwrap();
 
@@ -34798,6 +34841,8 @@ verdict = "accepted"
                 ("PIP_DRY_RUN", None),
                 ("PIP_UPGRADE", None),
                 ("PIP_REPORT", None),
+                ("PIP_REQUIREMENT", None),
+                ("PIP_CONSTRAINT", None),
                 ("PIP_NO_DEPS", None),
                 ("PIP_REQUIRE_HASHES", None),
                 ("PIP_NO_BINARY", None),
@@ -34823,6 +34868,9 @@ verdict = "accepted"
                         "--dry-run",
                         "--upgrade",
                         "--report=report.json",
+                        "--requirement=requirements/base.txt",
+                        "--requirement=requirements/dev requirements.txt",
+                        "--constraint=constraints/base.txt",
                         "--no-deps",
                         "--require-hashes",
                         "--only-binary=idna",
@@ -34842,6 +34890,17 @@ verdict = "accepted"
                 assert!(action.dry_run);
                 assert!(action.upgrade);
                 assert_eq!(action.report, Some(PathBuf::from("report.json")));
+                assert_eq!(
+                    action.requirements,
+                    vec![
+                        PathBuf::from("requirements/base.txt"),
+                        PathBuf::from("requirements/dev requirements.txt")
+                    ]
+                );
+                assert_eq!(
+                    action.constraints,
+                    vec![PathBuf::from("constraints/base.txt")]
+                );
                 assert!(action.no_deps);
                 assert!(action.require_hashes);
                 assert!(action.allow_prereleases);
@@ -36076,6 +36135,125 @@ print("ok")
             .any(|package| package.name == "constraint-pkg" && package.version == "2.0.0"));
 
         fs::remove_dir_all(project).unwrap();
+    }
+
+    #[test]
+    fn pip_install_explicit_spec_uses_pip_conf_constraint_before_resolution() {
+        let project = test_dir("pip-install-config-constraint-project");
+        let home = test_dir("pip-install-config-constraint-home");
+        let xdg = test_dir("pip-install-config-constraint-xdg");
+        let global = test_dir("pip-install-config-constraint-global");
+        let global_config = global.join("pip.conf");
+        let dist = project.join("dist");
+        fs::create_dir_all(&dist).unwrap();
+        fs::write(
+            dist.join("constraint_pkg-1.0.0.tar.gz"),
+            pypi_sdist_for_test(
+                "constraint_pkg-1.0.0",
+                &[
+                    (
+                        "PKG-INFO",
+                        "Metadata-Version: 2.1\nName: constraint-pkg\nVersion: 1.0.0\n",
+                    ),
+                    ("constraint_pkg/__init__.py", "VALUE = 'constrained'\n"),
+                ],
+            ),
+        )
+        .unwrap();
+        fs::write(
+            dist.join("constraint_pkg-2.0.0.tar.gz"),
+            pypi_sdist_for_test(
+                "constraint_pkg-2.0.0",
+                &[
+                    (
+                        "PKG-INFO",
+                        "Metadata-Version: 2.1\nName: constraint-pkg\nVersion: 2.0.0\n",
+                    ),
+                    ("constraint_pkg/__init__.py", "VALUE = 'latest'\n"),
+                ],
+            ),
+        )
+        .unwrap();
+        fs::write(project.join("constraints.txt"), "constraint-pkg==1.0.0\n").unwrap();
+        fs::write(
+            project.join("pip.conf"),
+            "[install]\nconstraint = constraints.txt\n",
+        )
+        .unwrap();
+
+        let status = with_env_values(
+            &[
+                ("HOME", Some(home.to_str().unwrap())),
+                ("XDG_CONFIG_HOME", Some(xdg.to_str().unwrap())),
+                (
+                    "OMC_TEST_PIP_GLOBAL_CONFIG_FILE",
+                    Some(global_config.to_str().unwrap()),
+                ),
+                ("PIP_CONFIG_FILE", None),
+                ("PIP_INDEX_URL", None),
+                ("PIP_EXTRA_INDEX_URL", None),
+                ("PIP_FIND_LINKS", None),
+                ("PIP_REQUIREMENT", None),
+                ("PIP_CONSTRAINT", None),
+                ("PIP_NO_INDEX", None),
+                ("PIP_TARGET", None),
+                ("PIP_PREFIX", None),
+                ("PIP_ROOT", None),
+                ("PIP_USER", None),
+                ("PIP_DRY_RUN", None),
+                ("PIP_UPGRADE", None),
+                ("PIP_REPORT", None),
+                ("PIP_NO_DEPS", None),
+                ("PIP_REQUIRE_HASHES", None),
+                ("PIP_NO_BINARY", None),
+                ("PIP_ONLY_BINARY", None),
+                ("PIP_PRE", None),
+                ("PIP_PLATFORM", None),
+                ("PIP_PYTHON_VERSION", None),
+                ("PIP_IMPLEMENTATION", None),
+                ("PIP_ABI", None),
+                ("PIP_DEST", None),
+                ("PIP_DESTINATION_DIR", None),
+                ("PIP_WHEEL_DIR", None),
+            ],
+            || {
+                run_pip_compat(
+                    &project,
+                    &args(&[
+                        "install",
+                        "--no-index",
+                        "--find-links",
+                        "dist",
+                        "--no-deps",
+                        "constraint-pkg>=1",
+                    ]),
+                )
+            },
+        )
+        .unwrap();
+
+        assert_eq!(status, ExitCode::SUCCESS);
+        assert_eq!(
+            fs::read_to_string(
+                project.join(".omc/python/site-packages/constraint_pkg/__init__.py")
+            )
+            .unwrap(),
+            "VALUE = 'constrained'\n"
+        );
+        let lock = read_lockfile(project.join("omc.lock")).unwrap();
+        assert!(lock
+            .packages
+            .iter()
+            .any(|package| package.name == "constraint-pkg" && package.version == "1.0.0"));
+        assert!(!lock
+            .packages
+            .iter()
+            .any(|package| package.name == "constraint-pkg" && package.version == "2.0.0"));
+
+        fs::remove_dir_all(project).unwrap();
+        fs::remove_dir_all(home).unwrap();
+        fs::remove_dir_all(xdg).unwrap();
+        fs::remove_dir_all(global).unwrap();
     }
 
     #[test]
