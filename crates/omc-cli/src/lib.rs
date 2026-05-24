@@ -2833,7 +2833,9 @@ fn run_npm_install_compat(
             let reports = lock_npm_project_including_omitted(&options)?;
             print_link_reports(&reports);
             print_lock_only_report(project_dir);
-            sync_npm_package_lock(project_dir)?;
+            if package_lock {
+                sync_npm_package_lock(project_dir)?;
+            }
         } else {
             let install = install_npm_project_with_complete_lock(&options)?;
             print_install_report(&install);
@@ -2890,7 +2892,9 @@ fn run_npm_install_compat(
         }
         if lock_only {
             print_lock_only_report(project_dir);
-            sync_npm_package_lock(project_dir)?;
+            if package_lock {
+                sync_npm_package_lock(project_dir)?;
+            }
             return Ok(ExitCode::SUCCESS);
         }
         let install = if options.npm_local_paths.is_empty() {
@@ -3070,7 +3074,9 @@ fn run_npm_install_workspace_compat(
             let reports = lock_npm_project_including_omitted(&options)?;
             print_link_reports(&reports);
             print_lock_only_report(project_dir);
-            sync_npm_package_lock(project_dir)?;
+            if package_lock {
+                sync_npm_package_lock(project_dir)?;
+            }
             return Ok(ExitCode::SUCCESS);
         } else {
             install_npm_project_with_complete_lock(&options)?
@@ -3128,7 +3134,9 @@ fn run_npm_install_workspace_compat(
 
     if lock_only {
         print_lock_only_report(project_dir);
-        sync_npm_package_lock(project_dir)?;
+        if package_lock {
+            sync_npm_package_lock(project_dir)?;
+        }
         return Ok(ExitCode::SUCCESS);
     }
 
@@ -20270,11 +20278,13 @@ fn parse_npm_install_args(
         positionals,
     } = parse_common_compat_flags(&filtered, true)?;
 
+    let explicit_no_save = save_explicit && !save;
     let save = if npm_update_defaults_to_no_save(command) && !save_explicit {
         false
     } else {
         save
     };
+    let package_lock = (package_lock || lock_only) && !explicit_no_save;
 
     Ok(NpmCompatAction::Install {
         specs: positionals,
@@ -26415,6 +26425,13 @@ fn parse_common_compat_flags(
             parsed.dependency_kind = ManifestDependencyKind::Production;
             parsed.save = true;
             parsed.save_explicit = true;
+        } else if npm_mode && arg == "--save=false" {
+            parsed.save = false;
+            parsed.save_explicit = true;
+        } else if npm_mode && arg == "--save=true" {
+            parsed.dependency_kind = ManifestDependencyKind::Production;
+            parsed.save = true;
+            parsed.save_explicit = true;
         } else if npm_mode && matches!(arg.as_str(), "--save-exact" | "-E" | "--save-exact=true") {
             parsed.save_prefix.clear();
         } else if npm_mode && arg == "--save-exact=false" {
@@ -28367,6 +28384,65 @@ mod tests {
     }
 
     #[test]
+    fn npm_install_no_save_skips_package_lock_file() {
+        let project = test_dir("npm-install-no-save-skips-package-lock");
+        let tarball = write_npm_fixture_tarball(&project, "prod-pkg", "1.0.0");
+        fs::write(
+            project.join("package.json"),
+            r#"{
+                "name": "root",
+                "version": "1.0.0"
+            }"#,
+        )
+        .unwrap();
+
+        let status = run_npm_compat(
+            &project,
+            &args(&["install", tarball.to_str().unwrap(), "--no-save"]),
+        )
+        .unwrap();
+
+        assert_eq!(status, ExitCode::SUCCESS);
+        assert!(project.join("node_modules/prod-pkg/index.js").exists());
+        assert!(!project.join("package-lock.json").exists());
+        let package_json = read_npm_pkg_json(&project.join("package.json")).unwrap();
+        assert!(package_json
+            .get("dependencies")
+            .and_then(serde_json::Value::as_object)
+            .is_none_or(|dependencies| !dependencies.contains_key("prod-pkg")));
+
+        let _ = fs::remove_dir_all(project);
+
+        let project = test_dir("npm-install-save-false-lock-only");
+        let tarball = write_npm_fixture_tarball(&project, "prod-pkg", "1.0.0");
+        fs::write(
+            project.join("package.json"),
+            r#"{
+                "name": "root",
+                "version": "1.0.0"
+            }"#,
+        )
+        .unwrap();
+
+        let status = run_npm_compat(
+            &project,
+            &args(&[
+                "install",
+                tarball.to_str().unwrap(),
+                "--save=false",
+                "--package-lock-only",
+            ]),
+        )
+        .unwrap();
+
+        assert_eq!(status, ExitCode::SUCCESS);
+        assert!(!project.join("node_modules").exists());
+        assert!(!project.join("package-lock.json").exists());
+
+        let _ = fs::remove_dir_all(project);
+    }
+
+    #[test]
     fn npm_no_save_specs_reuse_existing_manifest_requirements() {
         let project = test_dir("npm-no-save-existing-manifest-requirements");
         fs::write(
@@ -29113,7 +29189,7 @@ mod tests {
                 omit_dev: false,
                 omit_optional: true,
                 omit_peer: true,
-                package_lock: true,
+                package_lock: false,
                 lock_only: false,
                 dry_run: false,
                 npm_registry: None,
@@ -29207,6 +29283,38 @@ mod tests {
         };
         assert!(!dry_run);
         assert!(!lock_only);
+
+        let action = parse_npm_compat_action(&args(&[
+            "install",
+            "--save=false",
+            "--package-lock=true",
+            "left-pad",
+        ]))
+        .unwrap();
+        let NpmCompatAction::Install {
+            save, package_lock, ..
+        } = action
+        else {
+            panic!("expected npm install action");
+        };
+        assert!(!save);
+        assert!(!package_lock);
+
+        let action = parse_npm_compat_action(&args(&[
+            "install",
+            "--save=false",
+            "--save=true",
+            "left-pad",
+        ]))
+        .unwrap();
+        let NpmCompatAction::Install {
+            save, package_lock, ..
+        } = action
+        else {
+            panic!("expected npm install action");
+        };
+        assert!(save);
+        assert!(package_lock);
 
         let action = parse_npm_compat_action(&args(&[
             "install",
