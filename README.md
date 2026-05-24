@@ -592,7 +592,8 @@ Supported now:
   includes OMC-recorded target-directory editable installs unless
   `--exclude-editable` is passed; generated pure-sdist
   `.dist-info/RECORD` files support `pip show -f`, and `pip show` reads
-  installed summary, homepage, author, license, and requirement metadata; scope flags
+  installed summary, homepage, author, license, and requirement metadata,
+  including OMC-recorded editable local paths; scope flags
   such as `--all`, `--local`, `--user`, `--exclude`, and
   `--editable`, `--include-editable`, and `--exclude-editable` filter local
   editable installs recorded by OMC, and `pip list --not-required` filters to

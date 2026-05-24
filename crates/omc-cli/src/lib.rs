@@ -12964,10 +12964,11 @@ fn pip_local_editable_package(
     let Some((name, version)) = read_python_project_identity(&project_root)? else {
         return Ok(None);
     };
+    let metadata = read_python_project_show_metadata(&project_root)?;
     Ok(Some(InstalledPythonPackage {
         name,
         version,
-        dependencies: Vec::new(),
+        dependencies: metadata.requires,
         metadata_location: None,
         editable_project_location: Some(import_path.to_path_buf()),
     }))
@@ -13017,6 +13018,33 @@ fn read_python_project_identity(
     Ok(None)
 }
 
+fn read_python_project_show_metadata(
+    project_root: &Path,
+) -> Result<PipShowMetadata, OmcRegistryError> {
+    let pyproject = project_root.join("pyproject.toml");
+    if pyproject.exists() {
+        let metadata = read_pyproject_show_metadata(&pyproject)?;
+        if !metadata.is_empty() {
+            return Ok(metadata);
+        }
+    }
+
+    let setup_cfg = project_root.join("setup.cfg");
+    if setup_cfg.exists() {
+        let metadata = read_setup_cfg_show_metadata(&setup_cfg)?;
+        if !metadata.is_empty() {
+            return Ok(metadata);
+        }
+    }
+
+    let setup_py = project_root.join("setup.py");
+    if setup_py.exists() {
+        return read_setup_py_show_metadata(&setup_py);
+    }
+
+    Ok(PipShowMetadata::default())
+}
+
 fn read_pyproject_identity(path: &Path) -> Result<Option<(String, String)>, OmcRegistryError> {
     let pyproject = fs::read_to_string(path)?;
     let value = toml::from_str::<toml::Value>(&pyproject)?;
@@ -13046,6 +13074,68 @@ fn python_project_identity_from_table(
         .and_then(|value| value.as_str())
         .unwrap_or("0.0.0");
     Some((name.to_owned(), version.to_owned()))
+}
+
+fn read_pyproject_show_metadata(path: &Path) -> Result<PipShowMetadata, OmcRegistryError> {
+    let pyproject = fs::read_to_string(path)?;
+    let value = toml::from_str::<toml::Value>(&pyproject)?;
+    let Some(project) = value.get("project").and_then(|value| value.as_table()) else {
+        return Ok(PipShowMetadata::default());
+    };
+    Ok(PipShowMetadata {
+        summary: project
+            .get("description")
+            .and_then(|value| value.as_str())
+            .map(str::to_owned),
+        home_page: project
+            .get("urls")
+            .and_then(|value| value.as_table())
+            .and_then(|urls| {
+                urls.get("Homepage")
+                    .or_else(|| urls.get("homepage"))
+                    .or_else(|| urls.get("Home-page"))
+            })
+            .and_then(|value| value.as_str())
+            .map(str::to_owned),
+        author: project
+            .get("authors")
+            .and_then(|value| value.as_array())
+            .and_then(|authors| authors.first())
+            .and_then(|author| author.get("name"))
+            .and_then(|value| value.as_str())
+            .map(str::to_owned),
+        author_email: project
+            .get("authors")
+            .and_then(|value| value.as_array())
+            .and_then(|authors| authors.first())
+            .and_then(|author| author.get("email"))
+            .and_then(|value| value.as_str())
+            .map(str::to_owned),
+        license: project
+            .get("license")
+            .and_then(python_project_license_value),
+        requires: project
+            .get("dependencies")
+            .and_then(|value| value.as_array())
+            .into_iter()
+            .flatten()
+            .filter_map(|value| value.as_str())
+            .filter_map(pip_installed_dependency_name)
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect(),
+    })
+}
+
+fn python_project_license_value(value: &toml::Value) -> Option<String> {
+    if let Some(license) = value.as_str() {
+        return Some(license.to_owned());
+    }
+    value
+        .as_table()
+        .and_then(|table| table.get("text").or_else(|| table.get("file")))
+        .and_then(|value| value.as_str())
+        .map(str::to_owned)
 }
 
 fn read_setup_cfg_identity(path: &Path) -> Result<Option<(String, String)>, OmcRegistryError> {
@@ -13080,6 +13170,59 @@ fn read_setup_cfg_identity(path: &Path) -> Result<Option<(String, String)>, OmcR
     Ok(name.map(|name| (name, version.unwrap_or_else(|| "0.0.0".to_owned()))))
 }
 
+fn read_setup_cfg_show_metadata(path: &Path) -> Result<PipShowMetadata, OmcRegistryError> {
+    let content = fs::read_to_string(path)?;
+    let mut section = String::new();
+    let mut metadata = PipShowMetadata::default();
+    let mut install_requires = false;
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('[') && trimmed.ends_with(']') {
+            section = trimmed
+                .trim_start_matches('[')
+                .trim_end_matches(']')
+                .to_ascii_lowercase();
+            install_requires = false;
+            continue;
+        }
+        if trimmed.is_empty() || trimmed.starts_with('#') || trimmed.starts_with(';') {
+            continue;
+        }
+        if section == "metadata" {
+            if let Some((key, value)) = trimmed.split_once('=') {
+                match key.trim().to_ascii_lowercase().as_str() {
+                    "summary" | "description" => metadata.summary = Some(value.trim().to_owned()),
+                    "home_page" | "home-page" | "url" => {
+                        metadata.home_page = Some(value.trim().to_owned())
+                    }
+                    "author" => metadata.author = Some(value.trim().to_owned()),
+                    "author_email" | "author-email" => {
+                        metadata.author_email = Some(value.trim().to_owned())
+                    }
+                    "license" | "license_expression" | "license-expression" => {
+                        metadata.license = Some(value.trim().to_owned())
+                    }
+                    _ => {}
+                }
+            }
+        } else if section == "options" {
+            if install_requires && (line.starts_with(' ') || line.starts_with('\t')) {
+                push_pip_show_requirement_names(trimmed, &mut metadata.requires);
+            } else if let Some((key, value)) = trimmed.split_once('=') {
+                install_requires = key.trim().eq_ignore_ascii_case("install_requires");
+                if install_requires {
+                    push_pip_show_requirement_names(value.trim(), &mut metadata.requires);
+                }
+            } else if install_requires {
+                push_pip_show_requirement_names(trimmed, &mut metadata.requires);
+            }
+        }
+    }
+    metadata.requires.sort();
+    metadata.requires.dedup();
+    Ok(metadata)
+}
+
 fn read_setup_py_identity(path: &Path) -> Result<Option<(String, String)>, OmcRegistryError> {
     let content = fs::read_to_string(path)?;
     let Some(name) = setup_py_string_arg(&content, "name") else {
@@ -13087,6 +13230,50 @@ fn read_setup_py_identity(path: &Path) -> Result<Option<(String, String)>, OmcRe
     };
     let version = setup_py_string_arg(&content, "version").unwrap_or_else(|| "0.0.0".to_owned());
     Ok(Some((name, version)))
+}
+
+fn read_setup_py_show_metadata(path: &Path) -> Result<PipShowMetadata, OmcRegistryError> {
+    let content = fs::read_to_string(path)?;
+    Ok(PipShowMetadata {
+        summary: setup_py_string_arg(&content, "description"),
+        home_page: setup_py_string_arg(&content, "url"),
+        author: setup_py_string_arg(&content, "author"),
+        author_email: setup_py_string_arg(&content, "author_email"),
+        license: setup_py_string_arg(&content, "license"),
+        requires: setup_py_install_requires(&content),
+    })
+}
+
+fn setup_py_install_requires(content: &str) -> Vec<String> {
+    let Some(start) = content.find("install_requires") else {
+        return Vec::new();
+    };
+    let Some(list_start) = content[start..].find('[').map(|offset| start + offset + 1) else {
+        return Vec::new();
+    };
+    let Some(list_end) = content[list_start..]
+        .find(']')
+        .map(|offset| list_start + offset)
+    else {
+        return Vec::new();
+    };
+    let mut requires = Vec::new();
+    for item in content[list_start..list_end].split(',') {
+        let requirement = item.trim().trim_matches('"').trim_matches('\'');
+        push_pip_show_requirement_names(requirement, &mut requires);
+    }
+    requires.sort();
+    requires.dedup();
+    requires
+}
+
+fn push_pip_show_requirement_names(requirement: &str, requires: &mut Vec<String>) {
+    if requirement.is_empty() {
+        return;
+    }
+    if let Some(name) = pip_installed_dependency_name(requirement) {
+        requires.push(name);
+    }
 }
 
 fn setup_py_string_arg(content: &str, arg: &str) -> Option<String> {
@@ -13269,7 +13456,7 @@ fn print_locked_pip_inspect(project_dir: &Path) -> Result<(), OmcRegistryError> 
         .join(".omc")
         .join("python")
         .join("site-packages");
-    let installed = lock
+    let mut installed = lock
         .packages
         .into_iter()
         .filter(|package| package.ecosystem == Ecosystem::Pypi)
@@ -13289,6 +13476,12 @@ fn print_locked_pip_inspect(project_dir: &Path) -> Result<(), OmcRegistryError> 
             }))
         })
         .collect::<Result<Vec<_>, OmcRegistryError>>()?;
+    installed.extend(
+        pip_project_local_path_packages(project_dir, &[])?
+            .into_iter()
+            .map(pip_inspect_installed_package)
+            .collect::<Vec<_>>(),
+    );
     let value = serde_json::json!({
         "version": "1",
         "pip_version": format!("omc-{}", env!("CARGO_PKG_VERSION")),
@@ -13315,12 +13508,13 @@ fn pip_path_inspect_entries(
     project_dir: &Path,
     paths: &[PathBuf],
 ) -> Result<Vec<serde_json::Value>, OmcRegistryError> {
-    read_pip_path_packages(project_dir, paths, &[], PipEditableMode::Exclude)?
+    read_pip_path_packages(project_dir, paths, &[], PipEditableMode::Include)?
         .into_iter()
         .map(|package| {
             let metadata_location = package
                 .metadata_location
                 .as_ref()
+                .or(package.editable_project_location.as_ref())
                 .map(|path| path.display().to_string())
                 .unwrap_or_default();
             let installer = package
@@ -13341,6 +13535,25 @@ fn pip_path_inspect_entries(
             }))
         })
         .collect()
+}
+
+fn pip_inspect_installed_package(package: InstalledPythonPackage) -> serde_json::Value {
+    let metadata_location = package
+        .metadata_location
+        .as_ref()
+        .or(package.editable_project_location.as_ref())
+        .map(|path| path.display().to_string())
+        .unwrap_or_default();
+    serde_json::json!({
+        "metadata": {
+            "name": package.name,
+            "version": package.version,
+        },
+        "metadata_location": metadata_location,
+        "installer": "omc",
+        "requested": false,
+        "dependencies": package.dependencies,
+    })
 }
 
 fn read_pip_installer(dist_info: &Path) -> Result<String, OmcRegistryError> {
@@ -13629,22 +13842,34 @@ fn print_locked_pip_show(
         .into_iter()
         .filter(|package| package.ecosystem == Ecosystem::Pypi)
         .collect::<Vec<_>>();
+    let editable_packages = pip_project_local_path_packages(project_dir, &[])?;
     let mut missing = Vec::new();
     let mut printed = false;
     for spec in specs {
         let normalized = normalize_pip_show_name(spec);
-        let Some(package) = packages
+        if let Some(package) = packages
             .iter()
             .find(|package| normalize_pip_show_name(&package.name) == normalized)
-        else {
-            missing.push(spec.clone());
+        {
+            if printed {
+                println!("---");
+            }
+            print_pip_show_package(project_dir, package, &packages, include_files)?;
+            printed = true;
             continue;
-        };
-        if printed {
-            println!("---");
         }
-        print_pip_show_package(project_dir, package, &packages, include_files)?;
-        printed = true;
+        if let Some(package) = editable_packages
+            .iter()
+            .find(|package| normalize_pip_show_name(&package.name) == normalized)
+        {
+            if printed {
+                println!("---");
+            }
+            print_pip_show_editable_package(package, &packages, include_files)?;
+            printed = true;
+            continue;
+        }
+        missing.push(spec.clone());
     }
 
     if !missing.is_empty() {
@@ -13734,6 +13959,45 @@ fn print_pip_show_package(
     Ok(())
 }
 
+fn print_pip_show_editable_package(
+    package: &InstalledPythonPackage,
+    packages: &[LockedPackage],
+    include_files: bool,
+) -> Result<(), OmcRegistryError> {
+    let location = package
+        .editable_project_location
+        .as_ref()
+        .cloned()
+        .unwrap_or_default();
+    let metadata = read_python_project_show_metadata(&pip_editable_project_root(&location))?;
+    let requires = if metadata.requires.is_empty() {
+        package.dependencies.clone()
+    } else {
+        metadata.requires
+    };
+    println!("Name: {}", package.name);
+    println!("Version: {}", package.version);
+    println!("Summary: {}", metadata.summary.unwrap_or_default());
+    println!("Home-page: {}", metadata.home_page.unwrap_or_default());
+    println!("Author: {}", metadata.author.unwrap_or_default());
+    println!(
+        "Author-email: {}",
+        metadata.author_email.unwrap_or_default()
+    );
+    println!("License: {}", metadata.license.unwrap_or_default());
+    println!("Location: {}", location.display());
+    println!("Requires: {}", requires.join(", "));
+    println!(
+        "Required-by: {}",
+        pip_required_by_package_name(&package.name, packages).join(", ")
+    );
+    if include_files {
+        println!("Files:");
+        println!("Cannot locate RECORD or installed-files.txt");
+    }
+    Ok(())
+}
+
 #[derive(Debug, Default, PartialEq, Eq)]
 struct PipShowMetadata {
     summary: Option<String>,
@@ -13742,6 +14006,17 @@ struct PipShowMetadata {
     author_email: Option<String>,
     license: Option<String>,
     requires: Vec<String>,
+}
+
+impl PipShowMetadata {
+    fn is_empty(&self) -> bool {
+        self.summary.is_none()
+            && self.home_page.is_none()
+            && self.author.is_none()
+            && self.author_email.is_none()
+            && self.license.is_none()
+            && self.requires.is_empty()
+    }
 }
 
 fn read_pip_show_metadata(
@@ -13795,10 +14070,14 @@ fn pip_dependency_names(package: &LockedPackage) -> Vec<String> {
 }
 
 fn pip_required_by_names(package: &LockedPackage, packages: &[LockedPackage]) -> Vec<String> {
-    let target = normalize_pip_show_name(&package.name);
+    pip_required_by_package_name(&package.name, packages)
+}
+
+fn pip_required_by_package_name(name: &str, packages: &[LockedPackage]) -> Vec<String> {
+    let target = normalize_pip_show_name(name);
     packages
         .iter()
-        .filter(|candidate| candidate.name != package.name)
+        .filter(|candidate| normalize_pip_show_name(&candidate.name) != target)
         .filter(|candidate| {
             candidate
                 .dependencies
@@ -27065,6 +27344,62 @@ version = "0.1.2"
                 .unwrap()
                 .is_empty()
         );
+
+        fs::remove_dir_all(project).unwrap();
+        fs::remove_dir_all(local).unwrap();
+    }
+
+    #[test]
+    fn pip_show_and_inspect_read_editable_local_path_metadata() {
+        let project = test_dir("pip-show-editable-project");
+        let local = test_dir("pip-show-editable-local");
+        let src = local.join("src");
+        fs::create_dir_all(src.join("demoedit")).unwrap();
+        fs::write(src.join("demoedit").join("__init__.py"), "").unwrap();
+        fs::write(
+            local.join("setup.cfg"),
+            "[metadata]\nname = demoedit\nversion = 0.1.2\nsummary = Demo editable\nhome_page = https://example.invalid/demo\nauthor = Alice\nlicense = MIT\n[options]\ninstall_requires =\n    idna>=3\n",
+        )
+        .unwrap();
+        fs::create_dir_all(project.join(".omc").join("python")).unwrap();
+        fs::write(
+            project.join(".omc").join("python").join("local-paths"),
+            format!("{}\n", src.display()),
+        )
+        .unwrap();
+        fs::create_dir_all(project.join("vendor")).unwrap();
+        fs::write(
+            project.join("vendor").join(".omc-local-paths"),
+            format!("{}\n", src.display()),
+        )
+        .unwrap();
+
+        let metadata = read_python_project_show_metadata(&local).unwrap();
+        assert_eq!(metadata.summary.as_deref(), Some("Demo editable"));
+        assert_eq!(
+            metadata.home_page.as_deref(),
+            Some("https://example.invalid/demo")
+        );
+        assert_eq!(metadata.author.as_deref(), Some("Alice"));
+        assert_eq!(metadata.license.as_deref(), Some("MIT"));
+        assert_eq!(metadata.requires, vec!["idna".to_owned()]);
+
+        assert_eq!(
+            pip_project_local_path_packages(&project, &[]).unwrap(),
+            vec![InstalledPythonPackage {
+                name: "demoedit".to_owned(),
+                version: "0.1.2".to_owned(),
+                dependencies: vec!["idna".to_owned()],
+                metadata_location: None,
+                editable_project_location: Some(src.clone()),
+            }]
+        );
+        let inspect = pip_path_inspect_entries(&project, &[PathBuf::from("vendor")]).unwrap();
+        assert_eq!(inspect.len(), 1);
+        assert_eq!(inspect[0]["metadata"]["name"], "demoedit");
+        assert_eq!(inspect[0]["metadata"]["version"], "0.1.2");
+        assert_eq!(inspect[0]["dependencies"][0], "idna");
+        assert_eq!(inspect[0]["metadata_location"], src.display().to_string());
 
         fs::remove_dir_all(project).unwrap();
         fs::remove_dir_all(local).unwrap();
