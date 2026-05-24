@@ -16651,13 +16651,28 @@ fn npm_global_arg_supported_by_command(command: &str, arg: &str) -> bool {
     {
         return matches!(command, "publish" | "dist-tag" | "dist-tags");
     }
-    if matches!(arg, "--dry-run" | "--provenance" | "--no-provenance")
-        || arg.starts_with("--dry-run=")
+    if matches!(
+        arg,
+        "--dry-run" | "--no-dry-run" | "--provenance" | "--no-provenance"
+    ) || arg.starts_with("--dry-run=")
         || arg.starts_with("--provenance=")
     {
         return matches!(
             command,
-            "publish" | "unpublish" | "deprecate" | "undeprecate" | "link" | "ln"
+            "install"
+                | "i"
+                | "add"
+                | "update"
+                | "up"
+                | "upgrade"
+                | "install-test"
+                | "it"
+                | "publish"
+                | "unpublish"
+                | "deprecate"
+                | "undeprecate"
+                | "link"
+                | "ln"
         );
     }
     if matches!(arg, "--force" | "-f") || arg.starts_with("--force=") {
@@ -16691,7 +16706,21 @@ fn npm_global_arg_supported_by_command(command: &str, arg: &str) -> bool {
         return matches!(command, "diff");
     }
     if matches!(arg, "--package-lock-only") || arg.starts_with("--package-lock-only=") {
-        return matches!(command, "sbom" | "link" | "ln" | "query");
+        return matches!(
+            command,
+            "install"
+                | "i"
+                | "add"
+                | "update"
+                | "up"
+                | "upgrade"
+                | "install-test"
+                | "it"
+                | "link"
+                | "ln"
+                | "sbom"
+                | "query"
+        );
     }
     if matches!(arg, "--expect-results" | "--no-expect-results")
         || arg.starts_with("--expect-results=")
@@ -16905,6 +16934,7 @@ fn npm_global_preserved_bool_flag(arg: &str) -> bool {
             | "--global"
             | "-g"
             | "--dry-run"
+            | "--no-dry-run"
             | "--force"
             | "-f"
             | "--provenance"
@@ -17472,8 +17502,10 @@ fn parse_npm_install_args(
     let mut index = 0;
     while index < args.len() {
         let arg = &args[index];
-        if arg == "--dry-run" {
-            dry_run = true;
+        if let Some(value) = npm_bool_flag_value(arg, "--dry-run") {
+            dry_run = value;
+        } else if arg == "--no-dry-run" {
+            dry_run = false;
         } else if matches!(arg.as_str(), "--global" | "-g") {
             global = true;
         } else if arg == "--global=false" {
@@ -17549,6 +17581,18 @@ fn npm_update_defaults_to_no_save(command: &str) -> bool {
     matches!(command, "update" | "up" | "upgrade")
 }
 
+fn npm_bool_flag_value(arg: &str, flag: &str) -> Option<bool> {
+    if arg == flag {
+        return Some(true);
+    }
+    let value = arg.strip_prefix(flag)?.strip_prefix('=')?;
+    match value {
+        "true" => Some(true),
+        "false" => Some(false),
+        _ => None,
+    }
+}
+
 fn parse_npm_link_args(args: &[String]) -> Result<NpmCompatAction, OmcRegistryError> {
     let explicit_save = npm_link_explicit_save(args);
     let mut archive_references = Vec::new();
@@ -17558,8 +17602,10 @@ fn parse_npm_link_args(args: &[String]) -> Result<NpmCompatAction, OmcRegistryEr
     let mut index = 0;
     while index < args.len() {
         let arg = &args[index];
-        if arg == "--dry-run" {
-            dry_run = true;
+        if let Some(value) = npm_bool_flag_value(arg, "--dry-run") {
+            dry_run = value;
+        } else if arg == "--no-dry-run" {
+            dry_run = false;
         } else if matches!(arg.as_str(), "--global" | "-g") {
         } else if is_npm_archive_arg(arg) {
             archive_references.push(arg.clone());
@@ -23532,8 +23578,6 @@ fn parse_common_compat_flags(
                 .strip_prefix("--save-prefix=")
                 .expect("checked save-prefix option");
             parsed.save_prefix = prefix.to_owned();
-        } else if npm_mode && arg == "--package-lock-only" {
-            parsed.lock_only = true;
         } else if npm_mode && arg == "--registry" {
             index += 1;
             let Some(registry) = args.get(index) else {
@@ -23543,6 +23587,11 @@ fn parse_common_compat_flags(
             };
             parsed.npm_registry = Some(registry.clone());
         } else if npm_mode {
+            if let Some(lock_only) = npm_bool_flag_value(arg, "--package-lock-only") {
+                parsed.lock_only = lock_only;
+                index += 1;
+                continue;
+            }
             if let Some(registry) = arg.strip_prefix("--registry=") {
                 parsed.npm_registry = Some(registry.to_owned());
                 index += 1;
@@ -25177,6 +25226,58 @@ mod tests {
                 include_workspace_root: false,
             }
         );
+
+        let action = parse_npm_compat_action(&args(&[
+            "--dry-run",
+            "--package-lock-only",
+            "install",
+            "left-pad",
+        ]))
+        .unwrap();
+        let NpmCompatAction::Install {
+            specs,
+            dry_run,
+            lock_only,
+            ..
+        } = action
+        else {
+            panic!("expected npm install action");
+        };
+        assert_eq!(specs, vec!["left-pad".to_owned()]);
+        assert!(dry_run);
+        assert!(lock_only);
+
+        let action = parse_npm_compat_action(&args(&[
+            "install",
+            "--dry-run=true",
+            "--package-lock-only=true",
+            "left-pad",
+        ]))
+        .unwrap();
+        let NpmCompatAction::Install {
+            dry_run, lock_only, ..
+        } = action
+        else {
+            panic!("expected npm install action");
+        };
+        assert!(dry_run);
+        assert!(lock_only);
+
+        let action = parse_npm_compat_action(&args(&[
+            "--dry-run=false",
+            "--package-lock-only=false",
+            "install",
+            "left-pad",
+        ]))
+        .unwrap();
+        let NpmCompatAction::Install {
+            dry_run, lock_only, ..
+        } = action
+        else {
+            panic!("expected npm install action");
+        };
+        assert!(!dry_run);
+        assert!(!lock_only);
 
         let action = parse_npm_compat_action(&args(&[
             "install",
