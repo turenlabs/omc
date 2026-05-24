@@ -588,7 +588,9 @@ Supported now:
   and comments while appending additional frozen packages; read-only
   `pip freeze --path DIR`, `pip list --path DIR`, and
   `pip inspect --path DIR` inspect target-directory `.dist-info` metadata,
-  including `Requires-Dist` dependency metadata; generated pure-sdist
+  including `Requires-Dist` dependency metadata, and `pip freeze --path DIR`
+  includes OMC-recorded target-directory editable installs unless
+  `--exclude-editable` is passed; generated pure-sdist
   `.dist-info/RECORD` files support `pip show -f`, and `pip show` reads
   installed summary, homepage, author, license, and requirement metadata; scope flags
   such as `--all`, `--local`, `--user`, `--exclude`, and

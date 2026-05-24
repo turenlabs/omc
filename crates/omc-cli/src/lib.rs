@@ -3414,6 +3414,7 @@ fn run_pip_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
                     project_dir,
                     &action.paths,
                     &action.exclude,
+                    action.exclude_editable,
                     &action.requirements,
                 )?
             }
@@ -12518,12 +12519,7 @@ fn print_locked_freeze(
         });
     }
     if !exclude_editable {
-        for requirement in pip_freeze_local_path_requirements(project_dir)? {
-            entries.push(PipFrozenRequirement {
-                name: None,
-                line: requirement,
-            });
-        }
+        entries.extend(pip_freeze_local_path_entries(project_dir, &excluded)?);
     }
     print_pip_freeze_output(pip_freeze_output(project_dir, entries, requirements)?);
     Ok(())
@@ -12533,13 +12529,20 @@ fn print_pip_path_freeze(
     project_dir: &Path,
     paths: &[PathBuf],
     exclude: &[String],
+    exclude_editable: bool,
     requirements: &[PathBuf],
 ) -> Result<(), OmcRegistryError> {
+    let excluded = pip_excluded_names(exclude);
     let entries = read_pip_path_packages(project_dir, paths, exclude, PipEditableMode::Exclude)?
         .into_iter()
         .map(|package| PipFrozenRequirement {
             name: Some(normalize_pip_show_name(&package.name)),
             line: format!("{}=={}", package.name, package.version),
+        })
+        .chain(if exclude_editable {
+            Vec::new()
+        } else {
+            pip_freeze_path_local_entries(project_dir, paths, &excluded)?
         })
         .collect::<Vec<_>>();
     print_pip_freeze_output(pip_freeze_output(project_dir, entries, requirements)?);
@@ -12615,7 +12618,7 @@ fn pip_freeze_output(
         .into_iter()
         .filter(|entry| {
             if let Some(name) = entry.name.as_deref() {
-                !emitted.contains(name)
+                !emitted.contains(name) && !emitted_lines.contains(&entry.line)
             } else {
                 !emitted_lines.contains(&entry.line)
             }
@@ -12702,20 +12705,75 @@ fn pip_requirement_without_inline_comment(line: &str) -> &str {
     line
 }
 
+#[cfg(test)]
 fn pip_freeze_local_path_requirements(project_dir: &Path) -> Result<Vec<String>, OmcRegistryError> {
     let local_paths_file = project_dir.join(".omc").join("python").join("local-paths");
+    Ok(
+        pip_freeze_local_path_entries_from_file(local_paths_file, &BTreeSet::new())?
+            .into_iter()
+            .map(|entry| entry.line)
+            .collect(),
+    )
+}
+
+fn pip_freeze_local_path_entries(
+    project_dir: &Path,
+    excluded: &BTreeSet<String>,
+) -> Result<Vec<PipFrozenRequirement>, OmcRegistryError> {
+    pip_freeze_local_path_entries_from_file(
+        project_dir.join(".omc").join("python").join("local-paths"),
+        excluded,
+    )
+}
+
+fn pip_freeze_path_local_entries(
+    project_dir: &Path,
+    paths: &[PathBuf],
+    excluded: &BTreeSet<String>,
+) -> Result<Vec<PipFrozenRequirement>, OmcRegistryError> {
+    let mut entries = Vec::new();
+    for path in paths {
+        let site_packages = absolutize_path(project_dir, path.clone());
+        entries.extend(pip_freeze_local_path_entries_from_file(
+            site_packages.join(".omc-local-paths"),
+            excluded,
+        )?);
+    }
+    entries.sort_by(|left, right| left.line.cmp(&right.line));
+    entries.dedup_by(|left, right| left.line == right.line);
+    Ok(entries)
+}
+
+fn pip_freeze_local_path_entries_from_file(
+    local_paths_file: PathBuf,
+    excluded: &BTreeSet<String>,
+) -> Result<Vec<PipFrozenRequirement>, OmcRegistryError> {
     let content = match fs::read_to_string(local_paths_file) {
         Ok(content) => content,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
         Err(error) => return Err(error.into()),
     };
-    let requirements = content
+    let mut entries = Vec::new();
+    for path in content
         .lines()
         .map(str::trim)
         .filter(|line| !line.is_empty())
-        .map(|path| format!("-e {path}"))
-        .collect::<BTreeSet<_>>();
-    Ok(requirements.into_iter().collect())
+        .collect::<BTreeSet<_>>()
+    {
+        let name = pip_local_editable_package(Path::new(path))?
+            .map(|package| normalize_pip_show_name(&package.name));
+        if name
+            .as_ref()
+            .is_some_and(|name| excluded.contains(name.as_str()))
+        {
+            continue;
+        }
+        entries.push(PipFrozenRequirement {
+            name,
+            line: format!("-e {path}"),
+        });
+    }
+    Ok(entries)
 }
 
 fn pip_freeze_vcs_requirement(dependency: &LockedPythonVcsDependency) -> String {
@@ -26907,6 +26965,67 @@ version = "0.1.0"
         fs::remove_dir_all(project).unwrap();
         fs::remove_dir_all(local_a).unwrap();
         fs::remove_dir_all(local_b).unwrap();
+    }
+
+    #[test]
+    fn pip_freeze_names_and_filters_editable_local_paths() {
+        let project = test_dir("pip-freeze-editable-filter-project");
+        let local = test_dir("pip-freeze-editable-filter-local");
+        let src = local.join("src");
+        fs::create_dir_all(src.join("demoedit")).unwrap();
+        fs::write(src.join("demoedit").join("__init__.py"), "").unwrap();
+        fs::write(
+            local.join("setup.cfg"),
+            "[metadata]\nname = demoedit\nversion = 0.1.2\n",
+        )
+        .unwrap();
+        fs::create_dir_all(project.join(".omc").join("python")).unwrap();
+        fs::write(
+            project.join(".omc").join("python").join("local-paths"),
+            format!("{}\n", src.display()),
+        )
+        .unwrap();
+
+        let entries = pip_freeze_local_path_entries(&project, &BTreeSet::new()).unwrap();
+        assert_eq!(
+            entries,
+            vec![PipFrozenRequirement {
+                name: Some("demoedit".to_owned()),
+                line: format!("-e {}", src.display()),
+            }]
+        );
+        assert!(
+            pip_freeze_local_path_entries(&project, &BTreeSet::from(["demoedit".to_owned()]))
+                .unwrap()
+                .is_empty()
+        );
+        let target = project.join("vendor");
+        fs::create_dir_all(&target).unwrap();
+        fs::write(
+            target.join(".omc-local-paths"),
+            format!("{}\n", src.display()),
+        )
+        .unwrap();
+        assert_eq!(
+            pip_freeze_path_local_entries(&project, &[PathBuf::from("vendor")], &BTreeSet::new())
+                .unwrap(),
+            vec![PipFrozenRequirement {
+                name: Some("demoedit".to_owned()),
+                line: format!("-e {}", src.display()),
+            }]
+        );
+
+        fs::write(
+            project.join("requirements.txt"),
+            format!("-e {}\n", src.display()),
+        )
+        .unwrap();
+        let output =
+            pip_freeze_output(&project, entries, &[PathBuf::from("requirements.txt")]).unwrap();
+        assert_eq!(output.lines, vec![format!("-e {}", src.display())]);
+
+        fs::remove_dir_all(project).unwrap();
+        fs::remove_dir_all(local).unwrap();
     }
 
     #[test]
