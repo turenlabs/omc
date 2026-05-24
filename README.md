@@ -317,9 +317,10 @@ download the registry artifact without executing it
 use global/project/user `.npmrc` registry, scoped registry, auth token settings,
 npm globalconfig/userconfig env vars, npm registry env vars, and npm
 install-mode `.npmrc`/env defaults such as `production`, `omit`, `include`,
-`global`, `dry-run`, `package-lock-only`, `save`, `save-exact`,
-`save-bundle`, `save-prefix`, `NODE_ENV=production`, `NPM_CONFIG_PRODUCTION`,
-`NPM_CONFIG_OMIT`, and `NPM_CONFIG_INCLUDE`
+`global`, `dry-run`, `package-lock-only`, `save`, `save-prod`, `save-dev`,
+`save-optional`, `save-peer`, `save-exact`, `save-bundle`, `save-prefix`,
+`NODE_ENV=production`, `NPM_CONFIG_PRODUCTION`, `NPM_CONFIG_OMIT`, and
+`NPM_CONFIG_INCLUDE`
 use `omc.toml` PyPI simple-index settings for OMC-managed PyPI adds
 use project/user `pip.conf` PyPI simple-index settings when no project index is set
 use `PIP_INDEX_URL` / `PIP_EXTRA_INDEX_URL` when no project PyPI index is set
@@ -446,7 +447,8 @@ Supported now:
   `NPM_CONFIG_USERCONFIG` / `npm_config_userconfig` user `.npmrc` path selection
 - global, project, and user `.npmrc` install defaults for `production`, `only`,
   `omit`, `include`, `global`, `dry-run`, `package-lock-only`, `save`,
-  `save-exact`, `save-bundle`, and `save-prefix`
+  `save-prod`, `save-dev`, `save-optional`, `save-peer`, `save-exact`,
+  `save-bundle`, and `save-prefix`
 - project `omc.toml` PyPI simple-index support for `pypi-index-url` and
   `pypi-extra-index-urls`
 - global/project/user `pip.conf`, `XDG_CONFIG_HOME/pip/pip.conf`, and
@@ -485,7 +487,8 @@ Supported now:
   dependencies declared by those local packages; local package directories
   installed with `-D` are omitted by `--omit-dev`
 - npm save-location flags for OMC manifests: `--save-prod`/`-P`,
-  `--save-dev`/`-D`, `--save-optional`/`-O`, and `--save-peer`
+  `--save-dev`/`-D`, `--save-optional`/`-O`, and `--save-peer`, including
+  `=true`, `=false`, and `--no-save-*` boolean forms
 - npm bundled-save flags for package metadata: `--save-bundle`,
   `--save-bundled`, `-B`, `--no-save-bundle`, and `--no-save-bundled`
 - npm omit/include flags for install selection:
@@ -494,6 +497,8 @@ Supported now:
   `NPM_CONFIG_PRODUCTION`, `NPM_CONFIG_OMIT`, `NPM_CONFIG_INCLUDE`,
   `NPM_CONFIG_GLOBAL`, `NPM_CONFIG_DRY_RUN`,
   `NPM_CONFIG_PACKAGE_LOCK_ONLY`, `NPM_CONFIG_SAVE`,
+  `NPM_CONFIG_SAVE_PROD`, `NPM_CONFIG_SAVE_DEV`,
+  `NPM_CONFIG_SAVE_OPTIONAL`, `NPM_CONFIG_SAVE_PEER`,
   `NPM_CONFIG_SAVE_EXACT`, `NPM_CONFIG_SAVE_BUNDLE`, and
   `NPM_CONFIG_SAVE_PREFIX`
 - production-style `omc install --omit-dev` installs
