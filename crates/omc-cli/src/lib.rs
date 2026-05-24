@@ -8418,7 +8418,7 @@ fn npm_help_text(topic: Option<&str>) -> String {
             &[
                 "Resolve, verify, lock, and install npm packages with OMC.",
                 "Aliases: i, add, update, up, upgrade, udpate.",
-                "Common flags: --save, --no-save, --save-dev, --save-optional, --save-peer, --only=prod|dev, --also=dev, --no-optional, --omit=dev|optional|peer, --include=dev|optional|peer, --workspace, --workspaces, --include-workspace-root, --package-lock-only, --prefer-offline, --prefer-online, --dry-run, --json, --tag, --before, --min-release-age, --engine-strict, --offline, --install-links, --registry, --allow, --allow-all-host.",
+                "Common flags: --save, --no-save, --save-dev, --save-optional, --save-peer, --only=prod|dev, --also=dev, --no-optional, --omit=dev|optional|peer, --include=dev|optional|peer, --workspace, --workspaces, --include-workspace-root, --package-lock-only, --prefer-offline, --prefer-online, --prefer-dedupe, --dry-run, --json, --tag, --before, --min-release-age, --engine-strict, --offline, --install-links, --registry, --allow, --allow-all-host.",
                 "Direct local inputs are supported for .tgz archives and local package directories.",
                 "Workspace installs save dependencies into selected workspace package.json files and install the root OMC graph.",
             ],
@@ -23303,6 +23303,10 @@ fn npm_global_ignored_bool_flag(arg: &str) -> bool {
             | "--no-color"
             | "--color=false"
             | "--foreground-scripts"
+            | "--prefer-dedupe"
+            | "--prefer-dedupe=true"
+            | "--prefer-dedupe=false"
+            | "--no-prefer-dedupe"
     )
 }
 
@@ -23311,7 +23315,7 @@ fn npm_global_ignored_value_flag(arg: &str) -> bool {
 }
 
 fn npm_global_ignored_equals_flag(arg: &str) -> bool {
-    ["--cache=", "--loglevel="]
+    ["--cache=", "--loglevel=", "--prefer-dedupe="]
         .iter()
         .any(|prefix| arg.starts_with(prefix))
 }
@@ -31299,6 +31303,10 @@ fn ignored_compat_flag(npm_mode: bool, arg: &str) -> bool {
                 | "--engine-strict=false"
                 | "--prefer-offline"
                 | "--prefer-online"
+                | "--prefer-dedupe"
+                | "--prefer-dedupe=true"
+                | "--prefer-dedupe=false"
+                | "--no-prefer-dedupe"
                 | "--install-links"
                 | "--no-install-links"
         ) || ignored_npm_equals_flag(arg)
@@ -31322,6 +31330,7 @@ fn ignored_npm_equals_flag(arg: &str) -> bool {
         "--progress=",
         "--color=",
         "--install-links=",
+        "--prefer-dedupe=",
     ]
     .iter()
     .any(|prefix| arg.starts_with(prefix))
@@ -35551,6 +35560,9 @@ verdict = "accepted"
             "--strict-peer-deps=false",
             "--prefer-offline",
             "--prefer-online",
+            "--prefer-dedupe",
+            "--prefer-dedupe=false",
+            "--no-prefer-dedupe",
             "--foreground-scripts",
             "--dry-run",
             "--allow-all-host",
@@ -35595,6 +35607,13 @@ verdict = "accepted"
             panic!("expected npm install action");
         };
         assert!(global);
+        assert_eq!(specs, vec!["left-pad".to_owned()]);
+
+        let action =
+            parse_npm_compat_action(&args(&["--prefer-dedupe", "install", "left-pad"])).unwrap();
+        let NpmCompatAction::Install { specs, .. } = action else {
+            panic!("expected npm install action");
+        };
         assert_eq!(specs, vec!["left-pad".to_owned()]);
 
         let action =
