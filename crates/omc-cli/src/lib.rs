@@ -4063,10 +4063,16 @@ fn run_npm_compat_with_cwd(
             absolutize_npm_pack_action_paths(invocation_cwd, &mut action);
             print_npm_pack(project_dir, action)?
         }
-        NpmCompatAction::Publish { action } => print_npm_publish(project_dir, action)?,
+        NpmCompatAction::Publish { mut action } => {
+            absolutize_npm_publish_action_paths(invocation_cwd, &mut action);
+            print_npm_publish(project_dir, action)?
+        }
         NpmCompatAction::Unpublish { action } => print_npm_unpublish(project_dir, action)?,
         NpmCompatAction::Deprecate { action } => print_npm_deprecate(project_dir, action)?,
-        NpmCompatAction::Diff { action } => print_npm_diff(project_dir, action)?,
+        NpmCompatAction::Diff { mut action } => {
+            absolutize_npm_diff_action_paths(invocation_cwd, &mut action)?;
+            print_npm_diff(project_dir, action)?
+        }
         NpmCompatAction::Search { action } => print_npm_search(project_dir, action)?,
         NpmCompatAction::Star { action } => print_npm_star(project_dir, action)?,
         NpmCompatAction::Ping {
@@ -5526,6 +5532,46 @@ fn absolutize_npm_pack_action_paths(base_dir: &Path, action: &mut NpmPackAction)
             *path = absolutize_path(base_dir, std::mem::take(path));
         }
     }
+}
+
+fn absolutize_npm_publish_action_paths(base_dir: &Path, action: &mut NpmPublishAction) {
+    action.package = action
+        .package
+        .take()
+        .map(|path| absolutize_path(base_dir, path));
+    action.userconfig = action
+        .userconfig
+        .take()
+        .map(|path| absolutize_path(base_dir, path));
+    if let NpmPublishProvenance::File(path) = &mut action.provenance {
+        *path = absolutize_path(base_dir, std::mem::take(path));
+    }
+}
+
+fn absolutize_npm_diff_action_paths(
+    base_dir: &Path,
+    action: &mut NpmDiffAction,
+) -> Result<(), OmcRegistryError> {
+    action.specs = std::mem::take(&mut action.specs)
+        .into_iter()
+        .map(|spec| absolutize_npm_diff_spec(base_dir, spec))
+        .collect::<Result<Vec<_>, _>>()?;
+    action.userconfig = action
+        .userconfig
+        .take()
+        .map(|path| absolutize_path(base_dir, path));
+    Ok(())
+}
+
+fn absolutize_npm_diff_spec(base_dir: &Path, spec: String) -> Result<String, OmcRegistryError> {
+    if is_npm_local_directory_arg(&spec) {
+        let path = absolutize_path(base_dir, npm_local_path_arg(&spec)?);
+        return Ok(path.display().to_string());
+    }
+    if is_npm_archive_arg(&spec) {
+        return Ok(absolutize_npm_archive_reference(base_dir, &spec));
+    }
+    Ok(spec)
 }
 
 fn absolutize_pip_lock_action_paths(base_dir: &Path, action: &mut PipLockAction) {
@@ -35385,6 +35431,49 @@ verdict = "accepted"
     }
 
     #[test]
+    fn direct_npm_diff_resolves_local_inputs_from_invocation_cwd() {
+        let project = test_dir("direct-npm-diff-local-project");
+        let invocation_cwd = project.join("work/release");
+        let left_dir = invocation_cwd.join("left");
+        let right_dir = invocation_cwd.join("right");
+        fs::create_dir_all(&left_dir).unwrap();
+        fs::create_dir_all(&right_dir).unwrap();
+        fs::write(
+            project.join("package.json"),
+            r#"{ "name": "root", "version": "1.0.0" }"#,
+        )
+        .unwrap();
+        fs::write(
+            left_dir.join("package.json"),
+            r#"{ "name": "diff-demo", "version": "1.0.0" }"#,
+        )
+        .unwrap();
+        fs::write(
+            right_dir.join("package.json"),
+            r#"{ "name": "diff-demo", "version": "1.0.1" }"#,
+        )
+        .unwrap();
+        fs::write(left_dir.join("index.js"), "module.exports = 1;\n").unwrap();
+        fs::write(right_dir.join("index.js"), "module.exports = 2;\n").unwrap();
+
+        let status = run_npm_compat_with_cwd(
+            &project,
+            &args(&[
+                "diff",
+                "--diff",
+                "./left",
+                "--diff",
+                "./right",
+                "--diff-name-only",
+            ]),
+            &invocation_cwd,
+        )
+        .unwrap();
+
+        assert_eq!(status, ExitCode::SUCCESS);
+    }
+
+    #[test]
     fn queries_npm_locked_packages_with_common_selectors() {
         fn query_names(items: &[NpmQueryItem], selector: &str) -> Vec<String> {
             let mut names = items
@@ -35586,6 +35675,69 @@ verdict = "accepted"
             },
         )
         .unwrap();
+    }
+
+    #[test]
+    fn direct_npm_publish_resolves_local_paths_from_invocation_cwd() {
+        let project = test_dir("direct-npm-publish-local-project");
+        let invocation_cwd = project.join("work/release");
+        let package = invocation_cwd.join("pkg");
+        fs::create_dir_all(&package).unwrap();
+        fs::write(
+            project.join("package.json"),
+            r#"{ "name": "root", "version": "1.0.0" }"#,
+        )
+        .unwrap();
+        fs::write(
+            package.join("package.json"),
+            r#"{ "name": "release-pkg", "version": "1.2.3" }"#,
+        )
+        .unwrap();
+        fs::write(package.join("index.js"), "module.exports = 1;\n").unwrap();
+        fs::write(
+            invocation_cwd.join("ci.npmrc"),
+            "registry=https://publish.example.invalid/npm\n",
+        )
+        .unwrap();
+
+        let (_, _, tarball) = npm_pack_package_for_publish(&package).unwrap();
+        let payload = serde_json::json!({
+            "subject": [{
+                "digest": {
+                    "sha512": sha512_hex(&tarball)
+                }
+            }]
+        })
+        .to_string();
+        fs::write(
+            invocation_cwd.join("build.sigstore"),
+            serde_json::json!({
+                "mediaType": "application/vnd.dev.sigstore.bundle+json;version=0.3",
+                "dsseEnvelope": {
+                    "payload": BASE64_STANDARD.encode(payload)
+                }
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let status = run_npm_compat_with_cwd(
+            &project,
+            &args(&[
+                "publish",
+                "./pkg",
+                "--dry-run",
+                "--json",
+                "--userconfig",
+                "ci.npmrc",
+                "--provenance-file",
+                "build.sigstore",
+            ]),
+            &invocation_cwd,
+        )
+        .unwrap();
+
+        assert_eq!(status, ExitCode::SUCCESS);
     }
 
     #[test]
