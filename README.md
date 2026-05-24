@@ -578,7 +578,8 @@ Supported now:
   `--trusted-host`, `--cert`, `--client-cert`, and `--cache-dir` are accepted
   before the subcommand; `pip uninstall` removes OMC manifest dependencies or,
   when a package only exists in the current locked environment, removes the
-  locked package and reinstalls the remaining environment; common
+  locked package and reinstalls the remaining environment; `pip check` validates
+  both locked PyPI packages and OMC-recorded editable local paths; common
   `pip install --report path` JSON reports and registry/archive
   `pip install --dry-run` resolution, including local editable paths and VCS
   requirements, without writing the current OMC manifest, lockfile, or

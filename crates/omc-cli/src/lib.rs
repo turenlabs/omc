@@ -13,10 +13,10 @@ use flate2::Compression;
 use omc_cap::Capability;
 use omc_registry::{
     add_manifest_npm_local_paths, add_manifest_policy_grants, add_npm_dist_tag, add_npm_team_user,
-    add_package_graph, apply_pypi_binary_option, check_pypi_distribution, check_pypi_lock,
-    compare_npm_versions, compare_pypi_versions, create_npm_team, create_npm_token,
-    deprecate_npm_package, destroy_npm_team, download_npm_package_tarball, grant_npm_access,
-    init_project, install_locked_packages, install_locked_project, install_project, lock_project,
+    add_package_graph, apply_pypi_binary_option, check_pypi_distribution, compare_npm_versions,
+    compare_pypi_versions, create_npm_team, create_npm_token, deprecate_npm_package,
+    destroy_npm_team, download_npm_package_tarball, grant_npm_access, init_project,
+    install_locked_packages, install_locked_project, install_project, lock_project,
     mutate_npm_package_owner, mutate_npm_package_star, parse_capability_grant,
     parse_npm_direct_archive_reference, parse_pypi_direct_archive_reference,
     parse_pypi_vcs_requirement, publish_npm_package, read_constraint_files, read_lockfile,
@@ -38,8 +38,8 @@ use omc_registry::{
     NpmPublishPackage, NpmPublishResult, NpmSearchPackage, NpmStarMutationResult, NpmStarsResult,
     NpmTeamListResult, NpmTeamMutationResult, NpmTokenCreateOptions, NpmTokenCreateResult,
     NpmTokenListResult, NpmTokenRevokeResult, NpmUnpublishResult, NpmWhoamiResult,
-    NpmWorkspacePackage, OmcRegistryError, PackageSpec, ProjectRequirements, PypiBinaryMode,
-    PypiCheckIssue, PypiUploadOptions, PypiUploadResult, PypiUploadSignature,
+    NpmWorkspacePackage, OmcLock, OmcRegistryError, PackageSpec, ProjectRequirements,
+    PypiBinaryMode, PypiCheckIssue, PypiUploadOptions, PypiUploadResult, PypiUploadSignature,
     PythonLocalRequirement, PythonVcsRequirement, Verdict,
 };
 use sha2::{Digest, Sha256, Sha384, Sha512};
@@ -12968,7 +12968,11 @@ fn pip_local_editable_package(
     Ok(Some(InstalledPythonPackage {
         name,
         version,
-        dependencies: metadata.requires,
+        dependencies: if metadata.requires_dist.is_empty() {
+            metadata.requires.clone()
+        } else {
+            metadata.requires_dist
+        },
         metadata_location: None,
         editable_project_location: Some(import_path.to_path_buf()),
     }))
@@ -13082,6 +13086,20 @@ fn read_pyproject_show_metadata(path: &Path) -> Result<PipShowMetadata, OmcRegis
     let Some(project) = value.get("project").and_then(|value| value.as_table()) else {
         return Ok(PipShowMetadata::default());
     };
+    let requires_dist = project
+        .get("dependencies")
+        .and_then(|value| value.as_array())
+        .into_iter()
+        .flatten()
+        .filter_map(|value| value.as_str())
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    let requires = requires_dist
+        .iter()
+        .filter_map(|requirement| pip_installed_dependency_name(requirement))
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
     Ok(PipShowMetadata {
         summary: project
             .get("description")
@@ -13114,16 +13132,8 @@ fn read_pyproject_show_metadata(path: &Path) -> Result<PipShowMetadata, OmcRegis
         license: project
             .get("license")
             .and_then(python_project_license_value),
-        requires: project
-            .get("dependencies")
-            .and_then(|value| value.as_array())
-            .into_iter()
-            .flatten()
-            .filter_map(|value| value.as_str())
-            .filter_map(pip_installed_dependency_name)
-            .collect::<BTreeSet<_>>()
-            .into_iter()
-            .collect(),
+        requires,
+        requires_dist,
     })
 }
 
@@ -13207,14 +13217,14 @@ fn read_setup_cfg_show_metadata(path: &Path) -> Result<PipShowMetadata, OmcRegis
             }
         } else if section == "options" {
             if install_requires && (line.starts_with(' ') || line.starts_with('\t')) {
-                push_pip_show_requirement_names(trimmed, &mut metadata.requires);
+                push_pip_show_requirement(trimmed, &mut metadata);
             } else if let Some((key, value)) = trimmed.split_once('=') {
                 install_requires = key.trim().eq_ignore_ascii_case("install_requires");
                 if install_requires {
-                    push_pip_show_requirement_names(value.trim(), &mut metadata.requires);
+                    push_pip_show_requirement(value.trim(), &mut metadata);
                 }
             } else if install_requires {
-                push_pip_show_requirement_names(trimmed, &mut metadata.requires);
+                push_pip_show_requirement(trimmed, &mut metadata);
             }
         }
     }
@@ -13240,7 +13250,13 @@ fn read_setup_py_show_metadata(path: &Path) -> Result<PipShowMetadata, OmcRegist
         author: setup_py_string_arg(&content, "author"),
         author_email: setup_py_string_arg(&content, "author_email"),
         license: setup_py_string_arg(&content, "license"),
-        requires: setup_py_install_requires(&content),
+        requires: setup_py_install_requires(&content)
+            .iter()
+            .filter_map(|requirement| pip_installed_dependency_name(requirement))
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect(),
+        requires_dist: setup_py_install_requires(&content),
     })
 }
 
@@ -13260,19 +13276,22 @@ fn setup_py_install_requires(content: &str) -> Vec<String> {
     let mut requires = Vec::new();
     for item in content[list_start..list_end].split(',') {
         let requirement = item.trim().trim_matches('"').trim_matches('\'');
-        push_pip_show_requirement_names(requirement, &mut requires);
+        if !requirement.is_empty() {
+            requires.push(requirement.to_owned());
+        }
     }
     requires.sort();
     requires.dedup();
     requires
 }
 
-fn push_pip_show_requirement_names(requirement: &str, requires: &mut Vec<String>) {
+fn push_pip_show_requirement(requirement: &str, metadata: &mut PipShowMetadata) {
     if requirement.is_empty() {
         return;
     }
+    metadata.requires_dist.push(requirement.to_owned());
     if let Some(name) = pip_installed_dependency_name(requirement) {
-        requires.push(name);
+        metadata.requires.push(name);
     }
 }
 
@@ -13882,7 +13901,7 @@ fn print_locked_pip_show(
 
 fn print_locked_pip_check(project_dir: &Path) -> Result<ExitCode, OmcRegistryError> {
     let lock = read_lockfile(project_dir.join("omc.lock"))?;
-    let issues = check_pypi_lock(&lock);
+    let issues = pip_check_installed_packages(project_dir, &lock)?;
     if issues.is_empty() {
         println!("No broken requirements found.");
         return Ok(ExitCode::SUCCESS);
@@ -13911,6 +13930,109 @@ fn print_locked_pip_check(project_dir: &Path) -> Result<ExitCode, OmcRegistryErr
         }
     }
     Ok(ExitCode::FAILURE)
+}
+
+fn pip_check_installed_packages(
+    project_dir: &Path,
+    lock: &OmcLock,
+) -> Result<Vec<PypiCheckIssue>, OmcRegistryError> {
+    let mut packages = lock
+        .packages
+        .iter()
+        .filter(|package| package.ecosystem == Ecosystem::Pypi)
+        .map(|package| InstalledPythonPackage {
+            name: package.name.clone(),
+            version: package.version.clone(),
+            dependencies: package.dependencies.clone(),
+            metadata_location: None,
+            editable_project_location: None,
+        })
+        .collect::<Vec<_>>();
+    packages.extend(pip_project_local_path_packages(project_dir, &[])?);
+    Ok(pip_check_installed_package_set(&packages))
+}
+
+fn pip_check_installed_package_set(packages: &[InstalledPythonPackage]) -> Vec<PypiCheckIssue> {
+    let mut issues = Vec::new();
+    for package in packages {
+        for dependency in &package.dependencies {
+            let Ok(spec) = parse_package_spec(dependency, Some(Ecosystem::Pypi)) else {
+                continue;
+            };
+            if spec.ecosystem != Ecosystem::Pypi {
+                continue;
+            }
+            let requirement = pip_check_requirement_label(&spec);
+            if let Some(installed) = packages.iter().find(|installed| {
+                normalize_pip_show_name(&installed.name) == normalize_pip_show_name(&spec.name)
+            }) {
+                if pip_check_version_satisfies(&installed.version, spec.version.as_deref()) {
+                    continue;
+                }
+                issues.push(PypiCheckIssue::Incompatible {
+                    package: package.name.clone(),
+                    version: package.version.clone(),
+                    requirement,
+                    installed_name: installed.name.clone(),
+                    installed_version: installed.version.clone(),
+                });
+            } else {
+                issues.push(PypiCheckIssue::Missing {
+                    package: package.name.clone(),
+                    version: package.version.clone(),
+                    requirement,
+                });
+            }
+        }
+    }
+    issues
+}
+
+fn pip_check_requirement_label(spec: &PackageSpec) -> String {
+    let mut name = spec.name.clone();
+    if !spec.extras.is_empty() {
+        name.push('[');
+        name.push_str(&spec.extras.iter().cloned().collect::<Vec<_>>().join(","));
+        name.push(']');
+    }
+    if let Some(version) = &spec.version {
+        name.push_str(version);
+    }
+    name
+}
+
+fn pip_check_version_satisfies(version: &str, requirement: Option<&str>) -> bool {
+    let Some(requirement) = requirement.map(str::trim).filter(|value| !value.is_empty()) else {
+        return true;
+    };
+    if requirement == "*" {
+        return true;
+    }
+    requirement
+        .trim_matches(|ch| ch == '(' || ch == ')')
+        .split(',')
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .all(|part| pip_check_comparator_satisfied(version, part))
+}
+
+fn pip_check_comparator_satisfied(version: &str, comparator: &str) -> bool {
+    for op in [">=", "<=", "==", "!=", "~=", ">", "<"] {
+        if let Some(required) = comparator.strip_prefix(op) {
+            let ordering = compare_pypi_versions(version, required.trim());
+            return match op {
+                ">=" => ordering.is_ge(),
+                "<=" => ordering.is_le(),
+                "==" => ordering.is_eq(),
+                "!=" => !ordering.is_eq(),
+                ">" => ordering.is_gt(),
+                "<" => ordering.is_lt(),
+                "~=" => ordering.is_ge(),
+                _ => false,
+            };
+        }
+    }
+    compare_pypi_versions(version, comparator).is_eq()
 }
 
 fn print_pip_show_package(
@@ -14006,6 +14128,7 @@ struct PipShowMetadata {
     author_email: Option<String>,
     license: Option<String>,
     requires: Vec<String>,
+    requires_dist: Vec<String>,
 }
 
 impl PipShowMetadata {
@@ -14016,6 +14139,7 @@ impl PipShowMetadata {
             && self.author_email.is_none()
             && self.license.is_none()
             && self.requires.is_empty()
+            && self.requires_dist.is_empty()
     }
 }
 
@@ -14049,6 +14173,7 @@ fn read_pip_show_metadata(
             }
         }
         if let Some(value) = line.strip_prefix("Requires-Dist:") {
+            output.requires_dist.push(value.trim().to_owned());
             if let Some(name) = pip_requires_dist_name(value.trim()) {
                 output.requires.push(name);
             }
@@ -27383,13 +27508,14 @@ version = "0.1.2"
         assert_eq!(metadata.author.as_deref(), Some("Alice"));
         assert_eq!(metadata.license.as_deref(), Some("MIT"));
         assert_eq!(metadata.requires, vec!["idna".to_owned()]);
+        assert_eq!(metadata.requires_dist, vec!["idna>=3".to_owned()]);
 
         assert_eq!(
             pip_project_local_path_packages(&project, &[]).unwrap(),
             vec![InstalledPythonPackage {
                 name: "demoedit".to_owned(),
                 version: "0.1.2".to_owned(),
-                dependencies: vec!["idna".to_owned()],
+                dependencies: vec!["idna>=3".to_owned()],
                 metadata_location: None,
                 editable_project_location: Some(src.clone()),
             }]
@@ -27398,8 +27524,62 @@ version = "0.1.2"
         assert_eq!(inspect.len(), 1);
         assert_eq!(inspect[0]["metadata"]["name"], "demoedit");
         assert_eq!(inspect[0]["metadata"]["version"], "0.1.2");
-        assert_eq!(inspect[0]["dependencies"][0], "idna");
+        assert_eq!(inspect[0]["dependencies"][0], "idna>=3");
         assert_eq!(inspect[0]["metadata_location"], src.display().to_string());
+
+        fs::remove_dir_all(project).unwrap();
+        fs::remove_dir_all(local).unwrap();
+    }
+
+    #[test]
+    fn pip_check_includes_editable_local_path_dependencies() {
+        let project = test_dir("pip-check-editable-project");
+        let local = test_dir("pip-check-editable-local");
+        let src = local.join("src");
+        fs::create_dir_all(src.join("editdep")).unwrap();
+        fs::write(src.join("editdep").join("__init__.py"), "").unwrap();
+        fs::write(
+            local.join("setup.cfg"),
+            "[metadata]\nname = editdep\nversion = 1.5.0\n[options]\ninstall_requires =\n    missing>=1\n",
+        )
+        .unwrap();
+        fs::create_dir_all(project.join(".omc").join("python")).unwrap();
+        fs::write(
+            project.join(".omc").join("python").join("local-paths"),
+            format!("{}\n", src.display()),
+        )
+        .unwrap();
+
+        let mut root = locked_pypi_package(
+            "root",
+            "1.0.0",
+            vec!["pypi:editdep>=1".to_owned(), "pypi:bad>=2".to_owned()],
+        );
+        root.source_url.clear();
+        let bad = locked_pypi_package("bad", "1.0.0", Vec::new());
+        let lock = OmcLock {
+            version: 1,
+            packages: vec![root, bad],
+            python_vcs: Vec::new(),
+        };
+
+        assert_eq!(
+            pip_check_installed_packages(&project, &lock).unwrap(),
+            vec![
+                PypiCheckIssue::Incompatible {
+                    package: "root".to_owned(),
+                    version: "1.0.0".to_owned(),
+                    requirement: "bad>=2".to_owned(),
+                    installed_name: "bad".to_owned(),
+                    installed_version: "1.0.0".to_owned(),
+                },
+                PypiCheckIssue::Missing {
+                    package: "editdep".to_owned(),
+                    version: "1.5.0".to_owned(),
+                    requirement: "missing>=1".to_owned(),
+                },
+            ]
+        );
 
         fs::remove_dir_all(project).unwrap();
         fs::remove_dir_all(local).unwrap();
@@ -28235,6 +28415,10 @@ resolved_commit = "0123456789abcdef0123456789abcdef01234567"
                 author_email: Some("dev@example.invalid".to_owned()),
                 license: Some("MIT".to_owned()),
                 requires: vec!["idna".to_owned(), "pysocks".to_owned()],
+                requires_dist: vec![
+                    "idna>=3".to_owned(),
+                    "PySocks>=1.5.6; extra == 'socks'".to_owned(),
+                ],
             }
         );
         fs::remove_dir_all(site_packages.parent().unwrap()).unwrap();
