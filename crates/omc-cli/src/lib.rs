@@ -4797,6 +4797,19 @@ fn run_pip_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
                 allow_flow,
                 allow_all_host,
             } = action;
+            let requested_count = specs.len()
+                + requirements.len()
+                + script_requirements.len()
+                + archive_references.len()
+                + local_paths.len()
+                + groups.len()
+                + vcs_requirements.len();
+            if requested_count == 0 {
+                return Err(OmcRegistryError::UnsupportedSpec(
+                    "pip install needs at least one package, archive, local path, VCS requirement, or requirement file"
+                        .to_owned(),
+                ));
+            }
             if specs.is_empty() && archive_references.is_empty() && script_requirements.is_empty() {
                 let mut options = LinkOptions::new(project_dir);
                 apply_cli_policy_options(&mut options, &allow, &allow_flow, allow_all_host)?;
@@ -33977,6 +33990,52 @@ version = "0.1.0"
         assert!(!project.join("omc.toml").exists());
         assert!(!project.join("omc.lock").exists());
         assert!(!project.join(".omc").exists());
+    }
+
+    #[test]
+    fn pip_install_requires_requested_input_like_pip() {
+        for (name, command, setup) in [
+            (
+                "pip-install-empty-request",
+                vec!["install"],
+                None::<(&str, &str)>,
+            ),
+            (
+                "pip-install-constraint-only",
+                vec!["install", "-c", "constraints.txt"],
+                Some(("constraints.txt", "")),
+            ),
+        ] {
+            let project = test_dir(name);
+            if let Some((path, content)) = setup {
+                fs::write(project.join(path), content).unwrap();
+            }
+
+            let error = run_pip_compat(&project, &args(&command))
+                .expect_err("pip install without requested input should fail");
+
+            assert!(error.to_string().contains("pip install needs at least one"));
+            assert!(!project.join("omc.toml").exists());
+            assert!(!project.join("omc.lock").exists());
+            assert!(!project.join(".omc").exists());
+
+            let _ = fs::remove_dir_all(project);
+        }
+    }
+
+    #[test]
+    fn pip_install_accepts_explicit_empty_requirement_file() {
+        let project = test_dir("pip-install-empty-requirement-file");
+        fs::write(project.join("requirements.txt"), "").unwrap();
+
+        let status = run_pip_compat(&project, &args(&["install", "-r", "requirements.txt"]))
+            .expect("explicit empty requirement files are valid pip input");
+
+        assert_eq!(status, ExitCode::SUCCESS);
+        assert!(project.join("omc.toml").exists());
+        assert!(project.join("omc.lock").exists());
+
+        let _ = fs::remove_dir_all(project);
     }
 
     #[test]
