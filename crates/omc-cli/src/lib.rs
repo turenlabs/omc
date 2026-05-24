@@ -3221,6 +3221,9 @@ fn run_pip_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
             if action.dry_run {
                 return run_pip_install_dry_run(project_dir, action);
             }
+            if action.target.is_some() {
+                return run_pip_install_target(project_dir, action);
+            }
             let PipInstallAction {
                 specs,
                 requirements,
@@ -4019,6 +4022,94 @@ fn run_pip_install_dry_run(
     );
     write_pip_install_report_from(
         dry_run_project.path(),
+        project_dir,
+        report.as_deref(),
+        &install,
+    )?;
+    Ok(ExitCode::SUCCESS)
+}
+
+fn run_pip_install_target(
+    project_dir: &Path,
+    action: PipInstallAction,
+) -> Result<ExitCode, OmcRegistryError> {
+    let PipInstallAction {
+        specs,
+        requirements,
+        constraints,
+        report,
+        dry_run: _,
+        archive_references,
+        local_paths,
+        index_url,
+        extra_index_urls,
+        find_links,
+        no_index,
+        binary_all,
+        binary_packages,
+        require_hashes,
+        no_deps,
+        allow_prereleases,
+        target,
+        vcs_requirements,
+        allow,
+        allow_all_host,
+    } = action;
+    let target = target.ok_or_else(|| {
+        OmcRegistryError::UnsupportedSpec("pip install --target needs a path".to_owned())
+    })?;
+
+    let target_project = TempOmcProject::empty("pip-target")?;
+    let mut options = LinkOptions::new(target_project.path());
+    options.discover_project_requirements = false;
+    options.allowed_capabilities = parse_grants(&allow, allow_all_host)?;
+    options.requirement_files = absolutize_paths(project_dir, requirements);
+    options.constraint_files = absolutize_paths(project_dir, constraints);
+    options.python_local_requirements =
+        absolutize_python_local_requirements(project_dir, local_paths);
+    apply_pip_compat_index_options(
+        &mut options,
+        index_url,
+        extra_index_urls,
+        find_links,
+        no_index,
+    );
+    options.pypi_require_hashes = require_hashes;
+    options.pypi_include_dependencies = !no_deps;
+    options.pypi_allow_prereleases = allow_prereleases;
+    options.pypi_binary_all = binary_all;
+    options.pypi_binary_packages = binary_packages;
+    options.python_target_dir = Some(absolutize_path(project_dir, target));
+    options.python_vcs_requirements = vcs_requirements;
+
+    let mut resolved_specs = parse_package_specs(&specs, Some(Ecosystem::Pypi))?;
+    resolved_specs.extend(parse_pip_archive_references(
+        project_dir,
+        &archive_references,
+        &mut options,
+    )?);
+    let requested_count = resolved_specs.len()
+        + options.requirement_files.len()
+        + options.python_local_requirements.len()
+        + options.python_vcs_requirements.len();
+    if requested_count == 0 {
+        return Err(OmcRegistryError::UnsupportedSpec(
+            "pip install --target needs at least one package, archive, local path, VCS requirement, or requirement file"
+                .to_owned(),
+        ));
+    }
+
+    let mut reports = Vec::new();
+    for spec in &resolved_specs {
+        reports.extend(add_package_graph(spec, &options)?);
+    }
+    print_link_reports(&reports);
+
+    let install = install_project(&options)?;
+    println!();
+    print_install_report(&install);
+    write_pip_install_report_from(
+        target_project.path(),
         project_dir,
         report.as_deref(),
         &install,
@@ -20777,6 +20868,27 @@ mod tests {
         dir
     }
 
+    fn pypi_sdist_for_test(root: &str, files: &[(&str, &str)]) -> Vec<u8> {
+        let encoder = GzEncoder::new(Vec::new(), Compression::default());
+        let mut archive = tar::Builder::new(encoder);
+        for (path, content) in files {
+            let archive_path = format!("{root}/{path}");
+            let mut header = tar::Header::new_gnu();
+            header.set_size(content.len() as u64);
+            header.set_mode(0o644);
+            header.set_cksum();
+            archive
+                .append_data(
+                    &mut header,
+                    archive_path,
+                    &mut std::io::Cursor::new(content.as_bytes()),
+                )
+                .unwrap();
+        }
+        let encoder = archive.into_inner().unwrap();
+        encoder.finish().unwrap()
+    }
+
     fn with_env_lock<T>(f: impl FnOnce() -> T) -> T {
         static ENV_MUTEX: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
         let _guard = ENV_MUTEX
@@ -25109,6 +25221,49 @@ version = "0.1.0"
         assert!(!project.join("omc.toml").exists());
         assert!(!project.join("omc.lock").exists());
         assert!(!project.join(".omc").exists());
+    }
+
+    #[test]
+    fn pip_install_target_does_not_write_project_state() {
+        let project = test_dir("pip-target-project");
+        let dist = project.join("dist");
+        fs::create_dir_all(&dist).unwrap();
+        fs::write(
+            dist.join("demo_pkg-1.0.0.tar.gz"),
+            pypi_sdist_for_test(
+                "demo_pkg-1.0.0",
+                &[
+                    (
+                        "PKG-INFO",
+                        "Metadata-Version: 2.1\nName: demo-pkg\nVersion: 1.0.0\n",
+                    ),
+                    ("demo_pkg/__init__.py", "VALUE = 'target'\n"),
+                ],
+            ),
+        )
+        .unwrap();
+
+        let status = run_pip_compat(
+            &project,
+            &args(&[
+                "install",
+                "--target",
+                "vendor",
+                "./dist/demo_pkg-1.0.0.tar.gz",
+            ]),
+        )
+        .unwrap();
+
+        assert_eq!(status, ExitCode::SUCCESS);
+        assert_eq!(
+            fs::read_to_string(project.join("vendor/demo_pkg/__init__.py")).unwrap(),
+            "VALUE = 'target'\n"
+        );
+        assert!(!project.join("omc.toml").exists());
+        assert!(!project.join("omc.lock").exists());
+        assert!(!project.join(".omc").exists());
+
+        fs::remove_dir_all(project).unwrap();
     }
 
     #[test]

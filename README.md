@@ -573,7 +573,9 @@ Supported now:
   `pip install --report path` JSON reports and registry/archive
   `pip install --dry-run` resolution, including local editable paths and VCS
   requirements, without writing the current OMC manifest, lockfile, or
-  site-packages; read-only `pip freeze` / `pip list` scope flags
+  site-packages; real `pip install --target DIR` installs into the requested
+  target through transient OMC state without writing the current manifest or
+  lockfile; read-only `pip freeze` / `pip list` scope flags
   such as `--all`, `--local`,
   `--user`, `--path`, `--exclude`, and `--exclude-editable` are accepted;
   direct `pip install -e PATH` and `pip install ./path` local directory
