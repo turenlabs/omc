@@ -4067,56 +4067,102 @@ fn run_npm_compat_with_cwd(
             absolutize_npm_publish_action_paths(invocation_cwd, &mut action);
             print_npm_publish(project_dir, action)?
         }
-        NpmCompatAction::Unpublish { action } => print_npm_unpublish(project_dir, action)?,
-        NpmCompatAction::Deprecate { action } => print_npm_deprecate(project_dir, action)?,
+        NpmCompatAction::Unpublish { mut action } => {
+            absolutize_npm_unpublish_action_paths(invocation_cwd, &mut action);
+            print_npm_unpublish(project_dir, action)?
+        }
+        NpmCompatAction::Deprecate { mut action } => {
+            absolutize_npm_deprecate_action_paths(invocation_cwd, &mut action);
+            print_npm_deprecate(project_dir, action)?
+        }
         NpmCompatAction::Diff { mut action } => {
             absolutize_npm_diff_action_paths(invocation_cwd, &mut action)?;
             print_npm_diff(project_dir, action)?
         }
         NpmCompatAction::Search { action } => print_npm_search(project_dir, action)?,
-        NpmCompatAction::Star { action } => print_npm_star(project_dir, action)?,
+        NpmCompatAction::Star { mut action } => {
+            absolutize_npm_star_action_paths(invocation_cwd, &mut action);
+            print_npm_star(project_dir, action)?
+        }
         NpmCompatAction::Ping {
             json,
             npm_registry,
-            userconfig,
-        } => print_npm_ping(
-            project_dir,
-            json,
-            npm_registry.as_deref(),
-            userconfig.as_deref(),
-        )?,
+            mut userconfig,
+        } => {
+            absolutize_optional_path(invocation_cwd, &mut userconfig);
+            print_npm_ping(
+                project_dir,
+                json,
+                npm_registry.as_deref(),
+                userconfig.as_deref(),
+            )?
+        }
         NpmCompatAction::Whoami {
             json,
             npm_registry,
-            userconfig,
-        } => print_npm_whoami(
-            project_dir,
-            json,
-            npm_registry.as_deref(),
-            userconfig.as_deref(),
-        )?,
-        NpmCompatAction::Login { action } => print_npm_login(project_dir, action)?,
-        NpmCompatAction::Logout { action } => print_npm_logout(project_dir, action)?,
-        NpmCompatAction::Token { action } => print_npm_token(project_dir, action)?,
-        NpmCompatAction::Profile { action } => print_npm_profile(project_dir, action)?,
-        NpmCompatAction::Owner { action } => print_npm_owner(project_dir, action)?,
-        NpmCompatAction::Access { action } => print_npm_access(project_dir, action)?,
-        NpmCompatAction::Org { action } => print_npm_org(project_dir, action)?,
-        NpmCompatAction::Team { action } => print_npm_team(project_dir, action)?,
-        NpmCompatAction::DistTag { action } => print_npm_dist_tag(project_dir, action)?,
+            mut userconfig,
+        } => {
+            absolutize_optional_path(invocation_cwd, &mut userconfig);
+            print_npm_whoami(
+                project_dir,
+                json,
+                npm_registry.as_deref(),
+                userconfig.as_deref(),
+            )?
+        }
+        NpmCompatAction::Login { mut action } => {
+            absolutize_npm_login_action_paths(invocation_cwd, &mut action);
+            print_npm_login(project_dir, action)?
+        }
+        NpmCompatAction::Logout { mut action } => {
+            absolutize_npm_logout_action_paths(invocation_cwd, &mut action);
+            print_npm_logout(project_dir, action)?
+        }
+        NpmCompatAction::Token { mut action } => {
+            absolutize_npm_token_action_paths(invocation_cwd, &mut action);
+            print_npm_token(project_dir, action)?
+        }
+        NpmCompatAction::Profile { mut action } => {
+            absolutize_npm_profile_action_paths(invocation_cwd, &mut action);
+            print_npm_profile(project_dir, action)?
+        }
+        NpmCompatAction::Owner { mut action } => {
+            absolutize_npm_owner_action_paths(invocation_cwd, &mut action);
+            print_npm_owner(project_dir, action)?
+        }
+        NpmCompatAction::Access { mut action } => {
+            absolutize_npm_access_action_paths(invocation_cwd, &mut action);
+            print_npm_access(project_dir, action)?
+        }
+        NpmCompatAction::Org { mut action } => {
+            absolutize_npm_org_action_paths(invocation_cwd, &mut action);
+            print_npm_org(project_dir, action)?
+        }
+        NpmCompatAction::Team { mut action } => {
+            absolutize_npm_team_action_paths(invocation_cwd, &mut action);
+            print_npm_team(project_dir, action)?
+        }
+        NpmCompatAction::DistTag { mut action } => {
+            absolutize_npm_dist_tag_action_paths(invocation_cwd, &mut action);
+            print_npm_dist_tag(project_dir, action)?
+        }
         NpmCompatAction::Sbom { action } => print_npm_sbom(project_dir, action)?,
         NpmCompatAction::Config {
             action,
             npm_registry,
-            userconfig,
-            globalconfig,
-        } => print_npm_config(
-            project_dir,
-            action,
-            npm_registry.as_deref(),
-            userconfig.as_deref(),
-            globalconfig.as_deref(),
-        )?,
+            mut userconfig,
+            mut globalconfig,
+        } => {
+            absolutize_optional_path(invocation_cwd, &mut userconfig);
+            absolutize_optional_path(invocation_cwd, &mut globalconfig);
+            print_npm_config(
+                project_dir,
+                action,
+                npm_registry.as_deref(),
+                userconfig.as_deref(),
+                globalconfig.as_deref(),
+            )?
+        }
         NpmCompatAction::View {
             spec,
             fields,
@@ -5572,6 +5618,108 @@ fn absolutize_npm_diff_spec(base_dir: &Path, spec: String) -> Result<String, Omc
         return Ok(absolutize_npm_archive_reference(base_dir, &spec));
     }
     Ok(spec)
+}
+
+fn absolutize_npm_unpublish_action_paths(base_dir: &Path, action: &mut NpmUnpublishAction) {
+    absolutize_optional_path(base_dir, &mut action.userconfig);
+}
+
+fn absolutize_npm_deprecate_action_paths(base_dir: &Path, action: &mut NpmDeprecateAction) {
+    absolutize_optional_path(base_dir, &mut action.userconfig);
+}
+
+fn absolutize_npm_star_action_paths(base_dir: &Path, action: &mut NpmStarAction) {
+    match action {
+        NpmStarAction::Mutate { userconfig, .. } | NpmStarAction::List { userconfig, .. } => {
+            absolutize_optional_path(base_dir, userconfig);
+        }
+    }
+}
+
+fn absolutize_npm_login_action_paths(base_dir: &Path, action: &mut NpmLoginAction) {
+    absolutize_optional_path(base_dir, &mut action.userconfig);
+}
+
+fn absolutize_npm_logout_action_paths(base_dir: &Path, action: &mut NpmLogoutAction) {
+    absolutize_optional_path(base_dir, &mut action.userconfig);
+}
+
+fn absolutize_npm_token_action_paths(base_dir: &Path, action: &mut NpmTokenAction) {
+    match action {
+        NpmTokenAction::List { userconfig, .. }
+        | NpmTokenAction::Create { userconfig, .. }
+        | NpmTokenAction::Revoke { userconfig, .. } => {
+            absolutize_optional_path(base_dir, userconfig);
+        }
+    }
+}
+
+fn absolutize_npm_profile_action_paths(base_dir: &Path, action: &mut NpmProfileAction) {
+    match action {
+        NpmProfileAction::Get { userconfig, .. } | NpmProfileAction::Set { userconfig, .. } => {
+            absolutize_optional_path(base_dir, userconfig);
+        }
+    }
+}
+
+fn absolutize_npm_owner_action_paths(base_dir: &Path, action: &mut NpmOwnerAction) {
+    match action {
+        NpmOwnerAction::List { userconfig, .. }
+        | NpmOwnerAction::Add { userconfig, .. }
+        | NpmOwnerAction::Remove { userconfig, .. } => {
+            absolutize_optional_path(base_dir, userconfig);
+        }
+    }
+}
+
+fn absolutize_npm_access_action_paths(base_dir: &Path, action: &mut NpmAccessAction) {
+    match action {
+        NpmAccessAction::ListPackages { userconfig, .. }
+        | NpmAccessAction::ListCollaborators { userconfig, .. }
+        | NpmAccessAction::GetStatus { userconfig, .. }
+        | NpmAccessAction::SetStatus { userconfig, .. }
+        | NpmAccessAction::SetMfa { userconfig, .. }
+        | NpmAccessAction::Grant { userconfig, .. }
+        | NpmAccessAction::Revoke { userconfig, .. } => {
+            absolutize_optional_path(base_dir, userconfig);
+        }
+    }
+}
+
+fn absolutize_npm_org_action_paths(base_dir: &Path, action: &mut NpmOrgAction) {
+    match action {
+        NpmOrgAction::Set { userconfig, .. }
+        | NpmOrgAction::Remove { userconfig, .. }
+        | NpmOrgAction::List { userconfig, .. } => {
+            absolutize_optional_path(base_dir, userconfig);
+        }
+    }
+}
+
+fn absolutize_npm_team_action_paths(base_dir: &Path, action: &mut NpmTeamAction) {
+    match action {
+        NpmTeamAction::Create { userconfig, .. }
+        | NpmTeamAction::Destroy { userconfig, .. }
+        | NpmTeamAction::Add { userconfig, .. }
+        | NpmTeamAction::Remove { userconfig, .. }
+        | NpmTeamAction::List { userconfig, .. } => {
+            absolutize_optional_path(base_dir, userconfig);
+        }
+    }
+}
+
+fn absolutize_npm_dist_tag_action_paths(base_dir: &Path, action: &mut NpmDistTagAction) {
+    match action {
+        NpmDistTagAction::List { userconfig, .. }
+        | NpmDistTagAction::Add { userconfig, .. }
+        | NpmDistTagAction::Remove { userconfig, .. } => {
+            absolutize_optional_path(base_dir, userconfig);
+        }
+    }
+}
+
+fn absolutize_optional_path(base_dir: &Path, path: &mut Option<PathBuf>) {
+    *path = path.take().map(|path| absolutize_path(base_dir, path));
 }
 
 fn absolutize_pip_lock_action_paths(base_dir: &Path, action: &mut PipLockAction) {
@@ -35738,6 +35886,100 @@ verdict = "accepted"
         .unwrap();
 
         assert_eq!(status, ExitCode::SUCCESS);
+    }
+
+    #[test]
+    fn direct_npm_config_resolves_config_paths_from_invocation_cwd() {
+        let project = test_dir("direct-npm-config-path-project");
+        let invocation_cwd = project.join("work/release");
+        fs::create_dir_all(&invocation_cwd).unwrap();
+        fs::write(
+            project.join("package.json"),
+            r#"{ "name": "root", "version": "1.0.0" }"#,
+        )
+        .unwrap();
+
+        let status = run_npm_compat_with_cwd(
+            &project,
+            &args(&[
+                "config",
+                "set",
+                "registry",
+                "https://nested-userconfig.example/npm",
+                "--userconfig",
+                "ci.npmrc",
+            ]),
+            &invocation_cwd,
+        )
+        .unwrap();
+
+        assert_eq!(status, ExitCode::SUCCESS);
+        let user_config = invocation_cwd.join("ci.npmrc");
+        assert!(fs::read_to_string(&user_config)
+            .unwrap()
+            .contains("registry=https://nested-userconfig.example/npm"));
+        assert!(!project.join("ci.npmrc").exists());
+
+        let status = run_npm_compat_with_cwd(
+            &project,
+            &args(&[
+                "config",
+                "set",
+                "registry",
+                "https://nested-globalconfig.example/npm",
+                "--location",
+                "global",
+                "--globalconfig",
+                "global.npmrc",
+            ]),
+            &invocation_cwd,
+        )
+        .unwrap();
+
+        assert_eq!(status, ExitCode::SUCCESS);
+        assert!(fs::read_to_string(invocation_cwd.join("global.npmrc"))
+            .unwrap()
+            .contains("registry=https://nested-globalconfig.example/npm"));
+        assert!(!project.join("global.npmrc").exists());
+    }
+
+    #[test]
+    fn direct_npm_login_resolves_userconfig_from_invocation_cwd() {
+        let project = test_dir("direct-npm-login-userconfig-project");
+        let invocation_cwd = project.join("work/release");
+        fs::create_dir_all(&invocation_cwd).unwrap();
+        fs::write(
+            project.join("package.json"),
+            r#"{ "name": "root", "version": "1.0.0" }"#,
+        )
+        .unwrap();
+        fs::write(
+            invocation_cwd.join("ci.npmrc"),
+            "registry=https://auth.example.invalid/npm\n",
+        )
+        .unwrap();
+
+        let status = run_npm_compat_with_cwd(
+            &project,
+            &args(&[
+                "login",
+                "--scope",
+                "@company",
+                "--userconfig",
+                "ci.npmrc",
+                "--auth-token",
+                "npm_secret",
+                "--json",
+            ]),
+            &invocation_cwd,
+        )
+        .unwrap();
+
+        assert_eq!(status, ExitCode::SUCCESS);
+        let user_config = fs::read_to_string(invocation_cwd.join("ci.npmrc")).unwrap();
+        assert!(user_config.contains("@company:registry=https://auth.example.invalid/npm/"));
+        assert!(user_config.contains("//auth.example.invalid/npm/:_authToken=npm_secret"));
+        assert!(!project.join("ci.npmrc").exists());
     }
 
     #[test]
