@@ -2791,9 +2791,11 @@ fn run_npm_install_compat(
             let reports = lock_project(&options)?;
             print_link_reports(&reports);
             print_lock_only_report(project_dir);
+            sync_npm_package_lock(project_dir)?;
         } else {
             let install = install_project(&options)?;
             print_install_report(&install);
+            sync_npm_package_lock(project_dir)?;
         }
     } else {
         let mut options = LinkOptions::new(project_dir);
@@ -2836,6 +2838,7 @@ fn run_npm_install_compat(
         }
         if lock_only {
             print_lock_only_report(project_dir);
+            sync_npm_package_lock(project_dir)?;
             return Ok(ExitCode::SUCCESS);
         }
         let install = if options.npm_local_paths.is_empty() {
@@ -2845,6 +2848,7 @@ fn run_npm_install_compat(
         };
         println!();
         print_install_report(&install);
+        sync_npm_package_lock(project_dir)?;
     }
     Ok(ExitCode::SUCCESS)
 }
@@ -3007,11 +3011,13 @@ fn run_npm_install_workspace_compat(
             let reports = lock_project(&options)?;
             print_link_reports(&reports);
             print_lock_only_report(project_dir);
+            sync_npm_package_lock(project_dir)?;
             return Ok(ExitCode::SUCCESS);
         } else {
             install_project(&options)?
         };
         print_install_report(&install);
+        sync_npm_package_lock(project_dir)?;
         return Ok(ExitCode::SUCCESS);
     }
 
@@ -3054,12 +3060,14 @@ fn run_npm_install_workspace_compat(
 
     if lock_only {
         print_lock_only_report(project_dir);
+        sync_npm_package_lock(project_dir)?;
         return Ok(ExitCode::SUCCESS);
     }
 
     let install = install_project(&options)?;
     println!();
     print_install_report(&install);
+    sync_npm_package_lock(project_dir)?;
     Ok(ExitCode::SUCCESS)
 }
 
@@ -12104,6 +12112,175 @@ fn update_npm_lockfile_root_version(
     }
     fs::write(path, format!("{}\n", serde_json::to_string_pretty(&value)?))?;
     Ok(())
+}
+
+fn sync_npm_package_lock(project_dir: &Path) -> Result<(), OmcRegistryError> {
+    let package_json = project_dir.join("package.json");
+    if !package_json.exists() {
+        return Ok(());
+    }
+    let lockfile = project_dir.join("omc.lock");
+    if !lockfile.exists() {
+        return Ok(());
+    }
+
+    let package = read_npm_pkg_json(&package_json)?;
+    let lock = read_lockfile(lockfile)?;
+    let package_lock = npm_package_lock_json(&package, &lock);
+    fs::write(
+        project_dir.join("package-lock.json"),
+        format!("{}\n", serde_json::to_string_pretty(&package_lock)?),
+    )?;
+    Ok(())
+}
+
+fn npm_package_lock_json(package: &serde_json::Value, lock: &OmcLock) -> serde_json::Value {
+    let mut packages = serde_json::Map::new();
+    packages.insert(String::new(), npm_package_lock_root_entry(package));
+
+    for package in lock.packages.iter().filter(|package| {
+        package.ecosystem == Ecosystem::Npm && package.verdict == Verdict::Accepted
+    }) {
+        packages.insert(
+            npm_package_lock_path(&package.name),
+            npm_package_lock_package_entry(package),
+        );
+    }
+
+    let mut root = serde_json::Map::new();
+    if let Some(name) = package.get("name").and_then(serde_json::Value::as_str) {
+        root.insert(
+            "name".to_owned(),
+            serde_json::Value::String(name.to_owned()),
+        );
+    }
+    if let Some(version) = package.get("version").and_then(serde_json::Value::as_str) {
+        root.insert(
+            "version".to_owned(),
+            serde_json::Value::String(version.to_owned()),
+        );
+    }
+    root.insert(
+        "lockfileVersion".to_owned(),
+        serde_json::Value::Number(3.into()),
+    );
+    root.insert("requires".to_owned(), serde_json::Value::Bool(true));
+    root.insert("packages".to_owned(), serde_json::Value::Object(packages));
+    serde_json::Value::Object(root)
+}
+
+fn npm_package_lock_root_entry(package: &serde_json::Value) -> serde_json::Value {
+    let mut root = serde_json::Map::new();
+    for field in ["name", "version", "license"] {
+        if let Some(value) = package.get(field).and_then(serde_json::Value::as_str) {
+            root.insert(
+                field.to_owned(),
+                serde_json::Value::String(value.to_owned()),
+            );
+        }
+    }
+    if let Some(private) = package.get("private").and_then(serde_json::Value::as_bool) {
+        root.insert("private".to_owned(), serde_json::Value::Bool(private));
+    }
+    for field in [
+        "dependencies",
+        "devDependencies",
+        "optionalDependencies",
+        "peerDependencies",
+    ] {
+        if let Some(dependencies) = package
+            .get(field)
+            .and_then(serde_json::Value::as_object)
+            .filter(|dependencies| !dependencies.is_empty())
+        {
+            root.insert(
+                field.to_owned(),
+                serde_json::Value::Object(dependencies.clone()),
+            );
+        }
+    }
+    serde_json::Value::Object(root)
+}
+
+fn npm_package_lock_package_entry(package: &LockedPackage) -> serde_json::Value {
+    let mut entry = serde_json::Map::new();
+    entry.insert(
+        "version".to_owned(),
+        serde_json::Value::String(package.version.clone()),
+    );
+    if !package.source_url.is_empty() {
+        entry.insert(
+            "resolved".to_owned(),
+            serde_json::Value::String(package.source_url.clone()),
+        );
+    }
+    if let Some(integrity) = npm_package_lock_integrity(&package.sha256) {
+        entry.insert("integrity".to_owned(), serde_json::Value::String(integrity));
+    }
+    append_npm_package_lock_dependencies(&mut entry, "dependencies", &package.dependencies);
+    append_npm_package_lock_dependencies(
+        &mut entry,
+        "optionalDependencies",
+        &package.optional_dependencies,
+    );
+    append_npm_package_lock_dependencies(
+        &mut entry,
+        "peerDependencies",
+        &package.peer_dependencies,
+    );
+    serde_json::Value::Object(entry)
+}
+
+fn append_npm_package_lock_dependencies(
+    entry: &mut serde_json::Map<String, serde_json::Value>,
+    field: &str,
+    dependencies: &[String],
+) {
+    let dependencies = npm_package_lock_dependency_map(dependencies);
+    if !dependencies.is_empty() {
+        entry.insert(field.to_owned(), serde_json::Value::Object(dependencies));
+    }
+}
+
+fn npm_package_lock_dependency_map(
+    dependencies: &[String],
+) -> serde_json::Map<String, serde_json::Value> {
+    let mut sorted = BTreeMap::new();
+    for dependency in dependencies {
+        let Ok(spec) = PackageSpec::parse(dependency) else {
+            continue;
+        };
+        if spec.ecosystem != Ecosystem::Npm {
+            continue;
+        }
+        let requirement = spec
+            .version
+            .or(spec.direct_url)
+            .unwrap_or_else(|| "*".to_owned());
+        sorted.insert(spec.name, serde_json::Value::String(requirement));
+    }
+    sorted.into_iter().collect()
+}
+
+fn npm_package_lock_path(name: &str) -> String {
+    format!("node_modules/{name}")
+}
+
+fn npm_package_lock_integrity(sha256_hex: &str) -> Option<String> {
+    let bytes = hex_bytes(sha256_hex)?;
+    Some(format!("sha256-{}", BASE64_STANDARD.encode(bytes)))
+}
+
+fn hex_bytes(hex: &str) -> Option<Vec<u8>> {
+    if !hex.len().is_multiple_of(2) {
+        return None;
+    }
+    let mut bytes = Vec::with_capacity(hex.len() / 2);
+    for index in (0..hex.len()).step_by(2) {
+        let byte = u8::from_str_radix(&hex[index..index + 2], 16).ok()?;
+        bytes.push(byte);
+    }
+    Some(bytes)
 }
 
 fn print_npm_cache(project_dir: &Path, action: NpmCacheAction) -> Result<(), OmcRegistryError> {
@@ -34793,6 +34970,66 @@ resolved_commit = "0123456789abcdef0123456789abcdef01234567"
             pylock.contains("sdist = { url = \"https://files.example/source-pkg-1.0.0.tar.gz\"")
         );
         assert!(!pylock.contains("left-pad"));
+    }
+
+    #[test]
+    fn syncs_npm_package_lock_from_omc_lock() {
+        let project = test_dir("npm-package-lock-sync");
+        fs::write(
+            project.join("package.json"),
+            r#"{
+                "name": "demo",
+                "version": "1.0.0",
+                "license": "MIT",
+                "dependencies": { "is-odd": "3.0.1" },
+                "devDependencies": { "@scope/tool": "^2.0.0" }
+            }"#,
+        )
+        .unwrap();
+
+        let mut is_odd =
+            locked_npm_package("is-odd", "3.0.1", vec!["npm:is-number@^6.0.0".to_owned()]);
+        is_odd.sha256 =
+            "13c23b3f1f3a5c146b8906e23c8e674f8e4a6ff44b77720e1d4bddb7b2caf312".to_owned();
+        let scoped = locked_npm_package("@scope/tool", "2.1.0", Vec::new());
+        let lock = OmcLock {
+            version: 1,
+            packages: vec![
+                locked_pypi_package("idna", "3.7", Vec::new()),
+                is_odd,
+                scoped,
+            ],
+            python_vcs: Vec::new(),
+        };
+        fs::write(project.join("omc.lock"), toml::to_string(&lock).unwrap()).unwrap();
+
+        sync_npm_package_lock(&project).unwrap();
+
+        let package_lock: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(project.join("package-lock.json")).unwrap())
+                .unwrap();
+        assert_eq!(package_lock["lockfileVersion"], 3);
+        assert_eq!(
+            package_lock["packages"][""]["dependencies"]["is-odd"],
+            "3.0.1"
+        );
+        assert_eq!(
+            package_lock["packages"][""]["devDependencies"]["@scope/tool"],
+            "^2.0.0"
+        );
+        assert_eq!(
+            package_lock["packages"]["node_modules/is-odd"]["dependencies"]["is-number"],
+            "^6.0.0"
+        );
+        assert_eq!(
+            package_lock["packages"]["node_modules/is-odd"]["integrity"],
+            "sha256-E8I7Px86XBRriQbiPI5nT45Kb/RLd3IOHUvdt7LK8xI="
+        );
+        assert_eq!(
+            package_lock["packages"]["node_modules/@scope/tool"]["version"],
+            "2.1.0"
+        );
+        assert!(package_lock["packages"]["node_modules/idna"].is_null());
     }
 
     fn locked_pypi_package(name: &str, version: &str, dependencies: Vec<String>) -> LockedPackage {
