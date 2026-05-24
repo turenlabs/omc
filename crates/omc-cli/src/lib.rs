@@ -23302,12 +23302,7 @@ fn npm_global_ignored_bool_flag(arg: &str) -> bool {
             | "--progress=false"
             | "--no-color"
             | "--color=false"
-            | "--foreground-scripts"
-            | "--prefer-dedupe"
-            | "--prefer-dedupe=true"
-            | "--prefer-dedupe=false"
-            | "--no-prefer-dedupe"
-    )
+    ) || ignored_npm_install_preference_flag(arg)
 }
 
 fn npm_global_ignored_value_flag(arg: &str) -> bool {
@@ -23315,9 +23310,10 @@ fn npm_global_ignored_value_flag(arg: &str) -> bool {
 }
 
 fn npm_global_ignored_equals_flag(arg: &str) -> bool {
-    ["--cache=", "--loglevel=", "--prefer-dedupe="]
+    ["--cache=", "--loglevel="]
         .iter()
         .any(|prefix| arg.starts_with(prefix))
+        || ignored_npm_install_preference_equals_flag(arg)
 }
 
 fn parse_npm_path_args(command: &str, args: &[String]) -> Result<bool, OmcRegistryError> {
@@ -31278,9 +31274,7 @@ fn ignored_compat_flag(npm_mode: bool, arg: &str) -> bool {
     if npm_mode {
         matches!(
             arg,
-            "--ignore-scripts"
-                | "--ignore-scripts=false"
-                | "--silent"
+            "--silent"
                 | "-s"
                 | "--quiet"
                 | "-q"
@@ -31289,30 +31283,70 @@ fn ignored_compat_flag(npm_mode: bool, arg: &str) -> bool {
                 | "--no-color"
                 | "--color=false"
                 | "--save-exact"
-                | "--no-fund"
-                | "--fund"
-                | "--fund=false"
-                | "--audit"
-                | "--no-audit"
-                | "--audit=false"
-                | "--foreground-scripts"
-                | "--legacy-peer-deps"
-                | "--legacy-peer-deps=true"
-                | "--strict-peer-deps"
-                | "--strict-peer-deps=false"
                 | "--engine-strict=false"
-                | "--prefer-offline"
-                | "--prefer-online"
-                | "--prefer-dedupe"
-                | "--prefer-dedupe=true"
-                | "--prefer-dedupe=false"
-                | "--no-prefer-dedupe"
-                | "--install-links"
-                | "--no-install-links"
-        ) || ignored_npm_equals_flag(arg)
+        ) || ignored_npm_install_preference_flag(arg)
+            || ignored_npm_equals_flag(arg)
     } else {
         arg == "-y"
     }
+}
+
+fn ignored_npm_install_preference_flag(arg: &str) -> bool {
+    matches!(
+        arg,
+        "--ignore-scripts"
+            | "--ignore-scripts=true"
+            | "--ignore-scripts=false"
+            | "--no-ignore-scripts"
+            | "--foreground-scripts"
+            | "--foreground-scripts=true"
+            | "--foreground-scripts=false"
+            | "--no-foreground-scripts"
+            | "--fund"
+            | "--fund=true"
+            | "--fund=false"
+            | "--no-fund"
+            | "--audit"
+            | "--audit=true"
+            | "--audit=false"
+            | "--no-audit"
+            | "--legacy-peer-deps"
+            | "--legacy-peer-deps=true"
+            | "--legacy-peer-deps=false"
+            | "--no-legacy-peer-deps"
+            | "--strict-peer-deps"
+            | "--strict-peer-deps=true"
+            | "--strict-peer-deps=false"
+            | "--no-strict-peer-deps"
+            | "--prefer-offline"
+            | "--prefer-offline=true"
+            | "--prefer-offline=false"
+            | "--no-prefer-offline"
+            | "--prefer-online"
+            | "--prefer-online=true"
+            | "--prefer-online=false"
+            | "--no-prefer-online"
+            | "--prefer-dedupe"
+            | "--prefer-dedupe=true"
+            | "--prefer-dedupe=false"
+            | "--no-prefer-dedupe"
+            | "--install-links"
+            | "--install-links=true"
+            | "--install-links=false"
+            | "--no-install-links"
+            | "--bin-links"
+            | "--bin-links=true"
+            | "--bin-links=false"
+            | "--no-bin-links"
+            | "--global-style"
+            | "--global-style=true"
+            | "--global-style=false"
+            | "--no-global-style"
+            | "--legacy-bundling"
+            | "--legacy-bundling=true"
+            | "--legacy-bundling=false"
+            | "--no-legacy-bundling"
+    )
 }
 
 fn ignored_npm_value_flag(arg: &str) -> bool {
@@ -31330,7 +31364,27 @@ fn ignored_npm_equals_flag(arg: &str) -> bool {
         "--progress=",
         "--color=",
         "--install-links=",
+    ]
+    .iter()
+    .any(|prefix| arg.starts_with(prefix))
+        || ignored_npm_install_preference_equals_flag(arg)
+}
+
+fn ignored_npm_install_preference_equals_flag(arg: &str) -> bool {
+    [
+        "--ignore-scripts=",
+        "--foreground-scripts=",
+        "--fund=",
+        "--audit=",
+        "--legacy-peer-deps=",
+        "--strict-peer-deps=",
+        "--prefer-offline=",
+        "--prefer-online=",
         "--prefer-dedupe=",
+        "--install-links=",
+        "--bin-links=",
+        "--global-style=",
+        "--legacy-bundling=",
     ]
     .iter()
     .any(|prefix| arg.starts_with(prefix))
@@ -35557,13 +35611,23 @@ verdict = "accepted"
             "--color",
             "false",
             "--legacy-peer-deps=true",
+            "--legacy-peer-deps=false",
             "--strict-peer-deps=false",
+            "--strict-peer-deps=true",
+            "--ignore-scripts=true",
             "--prefer-offline",
+            "--prefer-offline=true",
             "--prefer-online",
+            "--prefer-online=false",
             "--prefer-dedupe",
             "--prefer-dedupe=false",
             "--no-prefer-dedupe",
-            "--foreground-scripts",
+            "--foreground-scripts=true",
+            "--audit=true",
+            "--fund=true",
+            "--bin-links=false",
+            "--global-style",
+            "--legacy-bundling",
             "--dry-run",
             "--allow-all-host",
             "left-pad@1.3.0",
@@ -35609,8 +35673,14 @@ verdict = "accepted"
         assert!(global);
         assert_eq!(specs, vec!["left-pad".to_owned()]);
 
-        let action =
-            parse_npm_compat_action(&args(&["--prefer-dedupe", "install", "left-pad"])).unwrap();
+        let action = parse_npm_compat_action(&args(&[
+            "--prefer-dedupe",
+            "--ignore-scripts=true",
+            "--bin-links=false",
+            "install",
+            "left-pad",
+        ]))
+        .unwrap();
         let NpmCompatAction::Install { specs, .. } = action else {
             panic!("expected npm install action");
         };
