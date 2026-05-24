@@ -15220,19 +15220,19 @@ impl SourceProfiler {
             self.add(CapabilityKind::FsWrite, "*", path, "open write mode");
         }
 
-        let http_hosts = extract_http_hosts(content);
-        if http_hosts.is_empty() {
-            if let Some(evidence) = http_client_usage_evidence(&lower) {
+        if let Some(evidence) = http_client_usage_evidence(&lower) {
+            let http_hosts = extract_http_hosts(content);
+            if http_hosts.is_empty() {
                 self.add(CapabilityKind::HttpRequest, "*", path, evidence);
-            }
-        } else {
-            for host in http_hosts {
-                self.add(
-                    CapabilityKind::HttpRequest,
-                    host.clone(),
-                    path,
-                    format!("static URL host `{host}`"),
-                );
+            } else {
+                for host in http_hosts {
+                    self.add(
+                        CapabilityKind::HttpRequest,
+                        host.clone(),
+                        path,
+                        format!("static URL host `{host}`"),
+                    );
+                }
             }
         }
 
@@ -21799,6 +21799,32 @@ wheels = [
             .iter()
             .any(|finding| finding.kind == CapabilityKind::HttpRequest
                 && finding.target == "evil.example"));
+    }
+
+    #[test]
+    fn profiler_ignores_static_urls_without_network_calls() {
+        let mut profiler = SourceProfiler::default();
+        profiler.scan_file(
+            "pygments/lexers/python.py",
+            "__url__ = 'https://www.python.org/'\nDOC = 'https://docs.python.org/'\n",
+        );
+        profiler.scan_file(
+            "client.py",
+            "endpoint = 'https://api.example.com/v1'; fetch(endpoint)",
+        );
+        let profile = profiler.finish();
+
+        assert!(!profile
+            .capabilities
+            .iter()
+            .any(|finding| finding.source == "pygments/lexers/python.py"
+                && finding.kind == CapabilityKind::HttpRequest));
+        assert!(profile
+            .capabilities
+            .iter()
+            .any(|finding| finding.source == "client.py"
+                && finding.kind == CapabilityKind::HttpRequest
+                && finding.target == "api.example.com"));
     }
 
     #[test]
