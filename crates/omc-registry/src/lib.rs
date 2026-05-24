@@ -8,6 +8,7 @@ use std::sync::OnceLock;
 use std::{env, fmt};
 
 use base64::{engine::general_purpose::STANDARD, Engine as _};
+use chrono::{DateTime, Duration, Local, NaiveDate, NaiveDateTime, TimeZone, Utc};
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use flate2::read::GzDecoder;
 use omc_cap::{Capability, FlowRule, LabelMatcher, Policy, Sink};
@@ -16,6 +17,7 @@ use omc_verify::{verify_module, VerifyFinding};
 use rand_core::OsRng;
 use reqwest::blocking::multipart::{Form, Part};
 use reqwest::blocking::Client;
+use reqwest::header::{ACCEPT, CONTENT_TYPE};
 use reqwest::{Certificate, Identity};
 use semver::Version;
 use serde::{Deserialize, Serialize};
@@ -639,6 +641,7 @@ pub struct LinkOptions {
     pub pypi_require_hashes: bool,
     pub pypi_include_dependencies: bool,
     pub pypi_allow_prereleases: bool,
+    pub pypi_uploaded_prior_to: Option<String>,
     pub pypi_target_python: Option<String>,
     pub pypi_target_implementation: Option<String>,
     pub pypi_target_platforms: Vec<String>,
@@ -684,6 +687,7 @@ impl LinkOptions {
             pypi_require_hashes: false,
             pypi_include_dependencies: true,
             pypi_allow_prereleases: false,
+            pypi_uploaded_prior_to: None,
             pypi_target_python: None,
             pypi_target_implementation: None,
             pypi_target_platforms: Vec::new(),
@@ -778,6 +782,7 @@ pub struct ProjectRequirements {
     pub pypi_require_hashes: bool,
     pub pypi_no_deps: bool,
     pub pypi_allow_prereleases: bool,
+    pub pypi_uploaded_prior_to: Option<String>,
     pub python_local_paths: Vec<PathBuf>,
     pub python_local_requirements: Vec<PythonLocalRequirement>,
     pub python_vcs_requirements: Vec<PythonVcsRequirement>,
@@ -836,6 +841,9 @@ fn extend_project_requirements(
     target.pypi_require_hashes |= requirements.pypi_require_hashes;
     target.pypi_no_deps |= requirements.pypi_no_deps;
     target.pypi_allow_prereleases |= requirements.pypi_allow_prereleases;
+    if requirements.pypi_uploaded_prior_to.is_some() {
+        target.pypi_uploaded_prior_to = requirements.pypi_uploaded_prior_to;
+    }
     target
         .python_local_paths
         .extend(requirements.python_local_paths);
@@ -873,6 +881,9 @@ fn apply_project_requirements_to_options(
     options.pypi_no_index |= requirements.pypi_no_index;
     options.pypi_require_hashes |= requirements.pypi_require_hashes;
     options.pypi_allow_prereleases |= requirements.pypi_allow_prereleases;
+    if requirements.pypi_uploaded_prior_to.is_some() {
+        options.pypi_uploaded_prior_to = requirements.pypi_uploaded_prior_to;
+    }
     if requirements.pypi_no_deps {
         options.pypi_include_dependencies = false;
     }
@@ -2873,6 +2884,7 @@ fn apply_pypi_environment_config(options: &mut LinkOptions, override_index: bool
     let constraint_files = env::var("PIP_CONSTRAINT").ok();
     let no_binary = env::var("PIP_NO_BINARY").ok();
     let only_binary = env::var("PIP_ONLY_BINARY").ok();
+    let uploaded_prior_to = env::var("PIP_UPLOADED_PRIOR_TO").ok();
     let no_index = env_truthy("PIP_NO_INDEX");
     let allow_prereleases = env_truthy("PIP_PRE");
     let base_dir = options
@@ -2890,6 +2902,7 @@ fn apply_pypi_environment_config(options: &mut LinkOptions, override_index: bool
             constraint_files: constraint_files.as_deref(),
             no_binary: no_binary.as_deref(),
             only_binary: only_binary.as_deref(),
+            uploaded_prior_to: uploaded_prior_to.as_deref(),
             no_index,
             allow_prereleases,
             override_index,
@@ -2910,6 +2923,7 @@ struct PypiEnvironmentValues<'a> {
     constraint_files: Option<&'a str>,
     no_binary: Option<&'a str>,
     only_binary: Option<&'a str>,
+    uploaded_prior_to: Option<&'a str>,
     no_index: bool,
     allow_prereleases: bool,
     override_index: bool,
@@ -2965,6 +2979,13 @@ fn apply_pypi_environment_values(
             only_binary,
         );
     }
+    if let Some(uploaded_prior_to) = values
+        .uploaded_prior_to
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        options.pypi_uploaded_prior_to = Some(uploaded_prior_to.to_owned());
+    }
     options.pypi_no_index |= values.no_index;
     options.pypi_allow_prereleases |= values.allow_prereleases;
     dedupe_pypi_find_links(options);
@@ -2984,6 +3005,7 @@ struct PipConfig {
     binary_packages: BTreeMap<String, PypiBinaryMode>,
     no_index: bool,
     allow_prereleases: bool,
+    uploaded_prior_to: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2995,6 +3017,7 @@ pub struct PipConfigSnapshot {
     pub binary_packages: BTreeMap<String, PypiBinaryMode>,
     pub no_index: bool,
     pub allow_prereleases: bool,
+    pub uploaded_prior_to: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -3020,6 +3043,9 @@ fn apply_pip_config_files(project_dir: &Path, options: &mut LinkOptions) -> Resu
     options.pypi_binary_packages.extend(config.binary_packages);
     options.pypi_no_index |= config.no_index;
     options.pypi_allow_prereleases |= config.allow_prereleases;
+    if config.uploaded_prior_to.is_some() {
+        options.pypi_uploaded_prior_to = config.uploaded_prior_to;
+    }
     dedupe_pypi_find_links(options);
     dedupe_pypi_extra_index_urls(options);
     dedupe_paths(&mut options.requirement_files);
@@ -3093,6 +3119,7 @@ pub fn read_pip_config_snapshot(project_dir: &Path) -> Result<PipConfigSnapshot>
     options.pypi_binary_packages = config.binary_packages;
     options.pypi_no_index = config.no_index;
     options.pypi_allow_prereleases = config.allow_prereleases;
+    options.pypi_uploaded_prior_to = config.uploaded_prior_to;
     apply_pypi_environment_config(&mut options, true);
     Ok(PipConfigSnapshot {
         index_url: options
@@ -3104,6 +3131,7 @@ pub fn read_pip_config_snapshot(project_dir: &Path) -> Result<PipConfigSnapshot>
         binary_packages: options.pypi_binary_packages,
         no_index: options.pypi_no_index,
         allow_prereleases: options.pypi_allow_prereleases,
+        uploaded_prior_to: options.pypi_uploaded_prior_to,
     })
 }
 
@@ -3114,6 +3142,7 @@ pub struct PypiAvailableVersionsOptions {
     pub find_links: Vec<String>,
     pub no_index: bool,
     pub allow_prereleases: bool,
+    pub uploaded_prior_to: Option<String>,
     pub target_python: Option<String>,
     pub target_implementation: Option<String>,
     pub target_platforms: Vec<String>,
@@ -3141,6 +3170,7 @@ pub fn read_pypi_available_versions(
         .collect();
     options.pypi_no_index = query.no_index;
     options.pypi_allow_prereleases = query.allow_prereleases;
+    options.pypi_uploaded_prior_to = query.uploaded_prior_to;
     options.pypi_target_python = query.target_python;
     options.pypi_target_implementation = query.target_implementation;
     options.pypi_target_platforms = query.target_platforms;
@@ -3150,17 +3180,25 @@ pub fn read_pypi_available_versions(
     let client = Client::builder().user_agent("omc-prototype/0.1").build()?;
     let target_python = pypi_target_python(&options);
     let wheel_compatibility = pypi_wheel_compatibility(&options);
+    let uploaded_prior_to = options
+        .pypi_uploaded_prior_to
+        .as_deref()
+        .map(parse_pypi_uploaded_prior_to)
+        .transpose()?;
     let mut versions = BTreeSet::new();
 
-    for candidate in pypi_find_link_candidates(
-        &client,
-        &spec,
-        &options,
-        target_python.as_deref(),
-        wheel_compatibility.as_ref(),
-    )? {
-        versions.insert(candidate.version);
-    }
+    insert_pypi_available_candidate_versions(
+        &mut versions,
+        pypi_find_link_candidates(
+            &client,
+            &spec,
+            &options,
+            target_python.as_deref(),
+            wheel_compatibility.as_ref(),
+        )?,
+        uploaded_prior_to.as_ref(),
+        &spec.name,
+    )?;
 
     if !options.pypi_no_index {
         let simple_indexes = pypi_simple_index_urls(&options);
@@ -3169,15 +3207,19 @@ pub fn read_pypi_available_versions(
         } else {
             simple_indexes
         };
-        for candidate in pypi_simple_index_candidates_from_indexes(
-            &client,
-            &spec,
-            &indexes,
-            target_python.as_deref(),
-            wheel_compatibility.as_ref(),
-        )? {
-            versions.insert(candidate.version);
-        }
+        insert_pypi_available_candidate_versions(
+            &mut versions,
+            pypi_simple_index_candidates_from_indexes(
+                &client,
+                &spec,
+                &indexes,
+                target_python.as_deref(),
+                wheel_compatibility.as_ref(),
+                options.pypi_uploaded_prior_to.as_deref(),
+            )?,
+            uploaded_prior_to.as_ref(),
+            &spec.name,
+        )?;
     }
 
     if versions.is_empty() {
@@ -3197,6 +3239,23 @@ pub fn read_pypi_available_versions(
         name: spec.name,
         versions,
     })
+}
+
+fn insert_pypi_available_candidate_versions(
+    versions: &mut BTreeSet<String>,
+    candidates: Vec<PypiSimpleCandidate>,
+    uploaded_prior_to: Option<&DateTime<Utc>>,
+    package: &str,
+) -> Result<()> {
+    let candidates = if let Some(cutoff) = uploaded_prior_to {
+        filter_pypi_candidates_uploaded_prior_to(candidates, cutoff.to_owned(), package)?
+    } else {
+        candidates
+    };
+    for candidate in candidates {
+        versions.insert(candidate.version);
+    }
+    Ok(())
 }
 
 fn read_pip_config_into(path: &Path, config: &mut PipConfig) -> Result<()> {
@@ -3295,6 +3354,11 @@ fn apply_pip_config_value(
         }
         "pre" => {
             config.allow_prereleases |= pip_config_bool(value);
+        }
+        "uploaded-prior-to" => {
+            if !value.trim().is_empty() {
+                config.uploaded_prior_to = Some(value.trim().to_owned());
+            }
         }
         "no-binary" => {
             apply_pypi_binary_option(
@@ -4306,6 +4370,7 @@ fn npm_requirements_from_lock_maps(
         pypi_require_hashes: false,
         pypi_no_deps: false,
         pypi_allow_prereleases: false,
+        pypi_uploaded_prior_to: None,
         python_local_paths: Vec::new(),
         python_local_requirements: Vec::new(),
         python_vcs_requirements: Vec::new(),
@@ -6300,6 +6365,13 @@ fn read_requirements_file_inner(
         if parse_requirements_allow_prereleases(line) {
             if mode == RequirementsMode::Install {
                 discovered.pypi_allow_prereleases = true;
+            }
+            continue;
+        }
+
+        if let Some(uploaded_prior_to) = parse_requirements_uploaded_prior_to(line) {
+            if mode == RequirementsMode::Install {
+                discovered.pypi_uploaded_prior_to = Some(uploaded_prior_to);
             }
             continue;
         }
@@ -12723,7 +12795,7 @@ fn resolve_pypi(
         wheel_compatibility.as_ref(),
     )?;
     let simple_indexes = pypi_simple_index_urls(options);
-    if !candidates.is_empty() || options.pypi_no_index {
+    if !candidates.is_empty() || options.pypi_no_index || options.pypi_uploaded_prior_to.is_some() {
         if !options.pypi_no_index {
             let indexes = if simple_indexes.is_empty() {
                 vec!["https://pypi.org/simple/".to_owned()]
@@ -12736,6 +12808,7 @@ fn resolve_pypi(
                 &indexes,
                 target_python.as_deref(),
                 wheel_compatibility.as_ref(),
+                options.pypi_uploaded_prior_to.as_deref(),
             )?);
         }
         return pypi_candidate_to_resolved(spec, options, candidates);
@@ -12747,6 +12820,7 @@ fn resolve_pypi(
             &simple_indexes,
             target_python.as_deref(),
             wheel_compatibility.as_ref(),
+            options.pypi_uploaded_prior_to.as_deref(),
         )?;
         return pypi_candidate_to_resolved(spec, options, candidates);
     }
@@ -12861,23 +12935,48 @@ fn pypi_simple_index_candidates_from_indexes(
     indexes: &[String],
     target_python: Option<&str>,
     wheel_compatibility: Option<&PythonWheelCompatibility>,
+    uploaded_prior_to: Option<&str>,
 ) -> Result<Vec<PypiSimpleCandidate>> {
     let mut candidates = Vec::new();
     for index in indexes {
         let url = pypi_simple_package_url(index, &spec.name)?;
-        let response = client.get(url).send()?;
+        let mut request = client.get(url);
+        if uploaded_prior_to.is_some() {
+            request = request.header(
+                ACCEPT,
+                "application/vnd.pypi.simple.v1+json, text/html;q=0.2",
+            );
+        }
+        let response = request.send()?;
         if response.status().as_u16() == 404 {
             continue;
         }
         let base_url = response.url().clone();
-        let html = response.error_for_status()?.text()?;
-        candidates.extend(pypi_simple_index_candidates(
-            &base_url,
-            &html,
-            &spec.name,
-            target_python,
-            wheel_compatibility,
-        ));
+        let is_json = response
+            .headers()
+            .get(CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .map(|value| value.contains("json"))
+            .unwrap_or(false);
+        let body = response.error_for_status()?.text()?;
+        if is_json || body.trim_start().starts_with('{') {
+            candidates.extend(pypi_simple_json_candidates(
+                &base_url,
+                &body,
+                &spec.name,
+                target_python,
+                wheel_compatibility,
+            )?);
+        } else {
+            candidates.extend(pypi_simple_index_candidates(
+                &base_url,
+                &body,
+                &spec.name,
+                target_python,
+                wheel_compatibility,
+                uploaded_prior_to.is_some(),
+            ));
+        }
     }
     Ok(candidates)
 }
@@ -12890,11 +12989,19 @@ fn pypi_candidate_to_resolved(
     let requirement =
         constrained_pypi_requirement(spec, &options.constraints).unwrap_or_else(|| "*".to_owned());
     let binary_mode = pypi_binary_mode_for_spec(options, spec);
+    let uploaded_prior_to = options
+        .pypi_uploaded_prior_to
+        .as_deref()
+        .map(parse_pypi_uploaded_prior_to)
+        .transpose()?;
     let mut candidates = candidates
         .into_iter()
         .filter(|candidate| pypi_version_satisfies(&candidate.version, &requirement))
         .filter(|candidate| pypi_candidate_matches_binary_mode(candidate, binary_mode))
         .collect::<Vec<_>>();
+    if let Some(cutoff) = uploaded_prior_to {
+        candidates = filter_pypi_candidates_uploaded_prior_to(candidates, cutoff, &spec.name)?;
+    }
     if !pypi_prereleases_allowed(
         &requirement,
         options.pypi_allow_prereleases,
@@ -12970,6 +13077,89 @@ struct PypiSimpleCandidate {
     version: String,
     sha256: Option<String>,
     sdist: bool,
+    upload_time: Option<String>,
+    upload_time_required: bool,
+}
+
+fn filter_pypi_candidates_uploaded_prior_to(
+    candidates: Vec<PypiSimpleCandidate>,
+    cutoff: DateTime<Utc>,
+    package: &str,
+) -> Result<Vec<PypiSimpleCandidate>> {
+    let mut filtered = Vec::new();
+    for candidate in candidates {
+        if !candidate.upload_time_required {
+            filtered.push(candidate);
+            continue;
+        }
+        let Some(upload_time) = candidate.upload_time.as_deref() else {
+            return Err(pypi_missing_upload_time_error(package));
+        };
+        let Some(upload_time) = parse_pypi_upload_time(upload_time) else {
+            return Err(pypi_missing_upload_time_error(package));
+        };
+        if upload_time < cutoff {
+            filtered.push(candidate);
+        }
+    }
+    Ok(filtered)
+}
+
+fn pypi_missing_upload_time_error(package: &str) -> OmcRegistryError {
+    OmcRegistryError::UnsupportedSpec(format!(
+        "pip --uploaded-prior-to requires upload-time metadata for pypi:{package}"
+    ))
+}
+
+fn parse_pypi_uploaded_prior_to(value: &str) -> Result<DateTime<Utc>> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Err(OmcRegistryError::UnsupportedSpec(
+            "pip --uploaded-prior-to needs a datetime or PnD duration".to_owned(),
+        ));
+    }
+    if let Some(days) = parse_pypi_duration_days(value) {
+        return Ok(Utc::now() - Duration::days(days));
+    }
+    if let Some(timestamp) = parse_pypi_upload_time(value) {
+        return Ok(timestamp);
+    }
+    if let Ok(date) = NaiveDate::parse_from_str(value, "%Y-%m-%d") {
+        let Some(naive) = date.and_hms_opt(0, 0, 0) else {
+            return Err(OmcRegistryError::UnsupportedSpec(value.to_owned()));
+        };
+        return Ok(local_naive_to_utc(naive));
+    }
+    for format in ["%Y-%m-%dT%H:%M:%S%.f", "%Y-%m-%d %H:%M:%S%.f"] {
+        if let Ok(naive) = NaiveDateTime::parse_from_str(value, format) {
+            return Ok(local_naive_to_utc(naive));
+        }
+    }
+    Err(OmcRegistryError::UnsupportedSpec(format!(
+        "unsupported pip --uploaded-prior-to value `{value}`"
+    )))
+}
+
+fn parse_pypi_duration_days(value: &str) -> Option<i64> {
+    let value = value.strip_prefix('P')?.strip_suffix('D')?;
+    if value.is_empty() || !value.chars().all(|ch| ch.is_ascii_digit()) {
+        return None;
+    }
+    value.parse().ok()
+}
+
+fn parse_pypi_upload_time(value: &str) -> Option<DateTime<Utc>> {
+    DateTime::parse_from_rfc3339(value)
+        .ok()
+        .map(|timestamp| timestamp.with_timezone(&Utc))
+}
+
+fn local_naive_to_utc(naive: NaiveDateTime) -> DateTime<Utc> {
+    if let Some(local) = Local.from_local_datetime(&naive).earliest() {
+        local.with_timezone(&Utc)
+    } else {
+        DateTime::<Utc>::from_naive_utc_and_offset(naive, Utc)
+    }
 }
 
 fn pypi_find_link_candidates(
@@ -13045,6 +13235,9 @@ fn pypi_http_find_link_candidates(
             target_python,
             wheel_compatibility,
             None,
+            None,
+            None,
+            false,
         )
         .into_iter()
         .collect());
@@ -13062,6 +13255,7 @@ fn pypi_http_find_link_candidates(
         package,
         target_python,
         wheel_compatibility,
+        false,
     ))
 }
 
@@ -13125,6 +13319,7 @@ fn pypi_local_find_link_candidates(
         package,
         target_python,
         wheel_compatibility,
+        false,
     );
     for candidate in &mut candidates {
         if candidate.local_path.is_none() {
@@ -13152,6 +13347,9 @@ fn pypi_local_archive_candidate(
         target_python,
         wheel_compatibility,
         Some(path.to_path_buf()),
+        None,
+        None,
+        false,
     )
 }
 
@@ -13161,6 +13359,7 @@ fn pypi_simple_index_candidates(
     package: &str,
     target_python: Option<&str>,
     wheel_compatibility: Option<&PythonWheelCompatibility>,
+    upload_time_required: bool,
 ) -> Vec<PypiSimpleCandidate> {
     simple_index_links(base_url, html)
         .into_iter()
@@ -13172,9 +13371,63 @@ fn pypi_simple_index_candidates(
                 target_python,
                 wheel_compatibility,
                 None,
+                None,
+                link.upload_time,
+                upload_time_required,
             )
         })
         .collect()
+}
+
+fn pypi_simple_json_candidates(
+    base_url: &reqwest::Url,
+    body: &str,
+    package: &str,
+    target_python: Option<&str>,
+    wheel_compatibility: Option<&PythonWheelCompatibility>,
+) -> Result<Vec<PypiSimpleCandidate>> {
+    let page = serde_json::from_str::<PypiSimpleJsonPage>(body)?;
+    let mut candidates = Vec::new();
+    for file in page.files {
+        let Ok(mut url) = base_url.join(&file.url) else {
+            continue;
+        };
+        inherit_url_credentials(base_url, &mut url);
+        let sha256 = file
+            .hashes
+            .get("sha256")
+            .and_then(|hash| normalize_sha256_hash(&format!("sha256:{hash}")));
+        if let Some(candidate) = pypi_candidate_from_url(
+            url,
+            package,
+            file.requires_python.as_deref(),
+            target_python,
+            wheel_compatibility,
+            None,
+            sha256,
+            file.upload_time,
+            true,
+        ) {
+            candidates.push(candidate);
+        }
+    }
+    Ok(candidates)
+}
+
+#[derive(Debug, Deserialize)]
+struct PypiSimpleJsonPage {
+    files: Vec<PypiSimpleJsonFile>,
+}
+
+#[derive(Debug, Deserialize)]
+struct PypiSimpleJsonFile {
+    url: String,
+    #[serde(default)]
+    hashes: BTreeMap<String, String>,
+    #[serde(default, rename = "requires-python")]
+    requires_python: Option<String>,
+    #[serde(default, rename = "upload-time")]
+    upload_time: Option<String>,
 }
 
 fn pypi_candidate_from_url(
@@ -13184,6 +13437,9 @@ fn pypi_candidate_from_url(
     target_python: Option<&str>,
     wheel_compatibility: Option<&PythonWheelCompatibility>,
     local_path: Option<PathBuf>,
+    sha256_override: Option<String>,
+    upload_time: Option<String>,
+    upload_time_required: bool,
 ) -> Option<PypiSimpleCandidate> {
     let filename = url
         .path_segments()
@@ -13224,7 +13480,7 @@ fn pypi_candidate_from_url(
             return None;
         }
     }
-    let sha256 = url.fragment().and_then(simple_index_sha256_fragment);
+    let sha256 = sha256_override.or_else(|| url.fragment().and_then(simple_index_sha256_fragment));
     url.set_fragment(None);
     let mut source_url = url.clone();
     strip_url_credentials(&mut source_url);
@@ -13237,6 +13493,8 @@ fn pypi_candidate_from_url(
         version,
         sha256,
         sdist,
+        upload_time,
+        upload_time_required,
     })
 }
 
@@ -13244,6 +13502,7 @@ fn pypi_candidate_from_url(
 struct SimpleIndexLink {
     url: reqwest::Url,
     requires_python: Option<String>,
+    upload_time: Option<String>,
 }
 
 fn simple_index_links(base_url: &reqwest::Url, html: &str) -> Vec<SimpleIndexLink> {
@@ -13267,6 +13526,7 @@ fn simple_index_links(base_url: &reqwest::Url, html: &str) -> Vec<SimpleIndexLin
             url,
             requires_python: html_attr(tag, "data-requires-python")
                 .map(|value| html_unescape(&value)),
+            upload_time: html_attr(tag, "data-upload-time").map(|value| html_unescape(&value)),
         });
     }
     links
@@ -14875,6 +15135,10 @@ fn parse_requirements_no_deps(line: &str) -> bool {
 
 fn parse_requirements_allow_prereleases(line: &str) -> bool {
     line == "--pre"
+}
+
+fn parse_requirements_uploaded_prior_to(line: &str) -> Option<String> {
+    parse_requirements_option_value(line, &["--uploaded-prior-to=", "--uploaded-prior-to"])
 }
 
 fn parse_requirements_binary_option(line: &str, mode: PypiBinaryMode) -> Option<String> {
@@ -21012,7 +21276,7 @@ wheels = [
         let requirements = dir.path().join("requirements.txt");
         fs::write(
             &requirements,
-            "--trusted-host example.invalid\n--no-binary=:all:\n--only-binary idna\n--prefer-binary\n--require-hashes\n--no-deps\n--pre\nidna==3.7 --hash=sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n",
+            "--trusted-host example.invalid\n--no-binary=:all:\n--only-binary idna\n--prefer-binary\n--require-hashes\n--no-deps\n--pre\n--uploaded-prior-to=2026-01-01T00:00:00Z\nidna==3.7 --hash=sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n",
         )
         .unwrap();
 
@@ -21020,6 +21284,10 @@ wheels = [
         assert!(discovered.pypi_require_hashes);
         assert!(discovered.pypi_no_deps);
         assert!(discovered.pypi_allow_prereleases);
+        assert_eq!(
+            discovered.pypi_uploaded_prior_to.as_deref(),
+            Some("2026-01-01T00:00:00Z")
+        );
         assert_eq!(discovered.pypi_binary_all, Some(PypiBinaryMode::Source));
         assert_eq!(
             discovered.pypi_binary_packages.get("idna"),
@@ -21224,7 +21492,7 @@ wheels = [
         "#;
 
         let candidates =
-            pypi_simple_index_candidates(&base_url, html, "idna", Some("3.11.0"), None);
+            pypi_simple_index_candidates(&base_url, html, "idna", Some("3.11.0"), None, false);
         assert_eq!(
             candidates,
             vec![
@@ -21239,6 +21507,8 @@ wheels = [
                             .to_owned()
                     ),
                     sdist: false,
+                    upload_time: None,
+                    upload_time_required: false,
                 },
                 PypiSimpleCandidate {
                     url: "https://index.example/simple/idna/idna-3.6.tar.gz".to_owned(),
@@ -21251,11 +21521,13 @@ wheels = [
                             .to_owned()
                     ),
                     sdist: true,
+                    upload_time: None,
+                    upload_time_required: false,
                 }
             ]
         );
         let legacy_candidates =
-            pypi_simple_index_candidates(&base_url, html, "idna", Some("3.7.0"), None);
+            pypi_simple_index_candidates(&base_url, html, "idna", Some("3.7.0"), None, false);
         assert_eq!(legacy_candidates.len(), 1);
         assert!(legacy_candidates[0].sdist);
     }
@@ -21266,7 +21538,7 @@ wheels = [
         let html = r#"<a href="../../packages/idna-3.7-py3-none-any.whl">idna</a>"#;
 
         let candidates =
-            pypi_simple_index_candidates(&base_url, html, "idna", Some("3.11.0"), None);
+            pypi_simple_index_candidates(&base_url, html, "idna", Some("3.11.0"), None, false);
         assert_eq!(
             candidates,
             vec![PypiSimpleCandidate {
@@ -21279,8 +21551,57 @@ wheels = [
                 version: "3.7".to_owned(),
                 sha256: None,
                 sdist: false,
+                upload_time: None,
+                upload_time_required: false,
             }]
         );
+    }
+
+    #[test]
+    fn pypi_simple_json_candidates_carry_upload_times() {
+        let base_url = reqwest::Url::parse("https://index.example/simple/idna/").unwrap();
+        let json = r#"{
+            "files": [
+                {
+                    "filename": "idna-3.7-py3-none-any.whl",
+                    "url": "../../packages/idna-3.7-py3-none-any.whl",
+                    "hashes": {"sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+                    "requires-python": ">=3.8",
+                    "upload-time": "2024-01-01T00:00:00.000000Z"
+                },
+                {
+                    "filename": "idna-3.6.tar.gz",
+                    "url": "idna-3.6.tar.gz",
+                    "hashes": {"sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"},
+                    "upload-time": "2023-01-01T00:00:00.000000Z"
+                }
+            ]
+        }"#;
+
+        let candidates =
+            pypi_simple_json_candidates(&base_url, json, "idna", Some("3.11.0"), None).unwrap();
+        assert_eq!(candidates.len(), 2);
+        assert_eq!(
+            candidates[0].upload_time.as_deref(),
+            Some("2024-01-01T00:00:00.000000Z")
+        );
+        assert!(candidates[0].upload_time_required);
+
+        let cutoff = parse_pypi_uploaded_prior_to("2023-06-01T00:00:00Z").unwrap();
+        let filtered =
+            filter_pypi_candidates_uploaded_prior_to(candidates.clone(), cutoff, "idna").unwrap();
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].version, "3.6");
+
+        let mut versions = BTreeSet::new();
+        insert_pypi_available_candidate_versions(
+            &mut versions,
+            candidates,
+            Some(&parse_pypi_uploaded_prior_to("2023-06-01T00:00:00Z").unwrap()),
+            "idna",
+        )
+        .unwrap();
+        assert_eq!(versions, BTreeSet::from(["3.6".to_owned()]));
     }
 
     #[test]
@@ -24975,6 +25296,7 @@ wheels = [
                 constraint_files: None,
                 no_binary: Some(":all:"),
                 only_binary: Some("idna"),
+                uploaded_prior_to: Some("P7D"),
                 no_index: true,
                 allow_prereleases: true,
                 override_index: true,
@@ -25010,6 +25332,7 @@ wheels = [
         );
         assert!(options.pypi_no_index);
         assert!(options.pypi_allow_prereleases);
+        assert_eq!(options.pypi_uploaded_prior_to.as_deref(), Some("P7D"));
 
         apply_pypi_environment_values(
             &mut options,
@@ -25157,6 +25480,7 @@ wheels = [
             only-binary = idna
             no-index = true
             pre = true
+            uploaded-prior-to = P3D
 
             [download]
             index-url = https://ignored.example/simple
@@ -25209,6 +25533,7 @@ wheels = [
         );
         assert!(config.no_index);
         assert!(config.allow_prereleases);
+        assert_eq!(config.uploaded_prior_to.as_deref(), Some("P3D"));
     }
 
     #[test]

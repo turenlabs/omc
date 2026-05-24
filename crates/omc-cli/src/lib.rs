@@ -1216,6 +1216,7 @@ enum PipCompatAction {
         find_links: Vec<String>,
         no_index: bool,
         allow_prereleases: bool,
+        uploaded_prior_to: Option<String>,
         compatibility: PipCompatibilityTarget,
         json: bool,
     },
@@ -1301,6 +1302,7 @@ struct PipInstallAction {
     require_hashes: bool,
     no_deps: bool,
     allow_prereleases: bool,
+    uploaded_prior_to: Option<String>,
     upgrade: bool,
     force_reinstall: bool,
     compatibility: PipCompatibilityTarget,
@@ -1336,6 +1338,7 @@ struct PipDownloadAction {
     require_hashes: bool,
     no_deps: bool,
     allow_prereleases: bool,
+    uploaded_prior_to: Option<String>,
     compatibility: PipCompatibilityTarget,
     destination: PathBuf,
     allow: Vec<String>,
@@ -2000,6 +2003,7 @@ fn run_pip_lock(project_dir: &Path, action: PipLockAction) -> Result<ExitCode, O
         require_hashes,
         no_deps,
         allow_prereleases,
+        uploaded_prior_to,
         upgrade: _,
         force_reinstall: _,
         compatibility,
@@ -2062,6 +2066,7 @@ fn run_pip_lock(project_dir: &Path, action: PipLockAction) -> Result<ExitCode, O
     options.pypi_require_hashes = require_hashes;
     options.pypi_include_dependencies = !no_deps;
     options.pypi_allow_prereleases = allow_prereleases;
+    options.pypi_uploaded_prior_to = uploaded_prior_to;
     options.pypi_binary_all = binary_all;
     options.pypi_binary_packages = binary_packages;
     apply_pip_compatibility_target(&mut options, compatibility);
@@ -5116,6 +5121,7 @@ fn pip_cli_default_config_key(key: &str) -> bool {
             | "no-binary"
             | "only-binary"
             | "pre"
+            | "uploaded-prior-to"
             | "platform"
             | "python-version"
             | "implementation"
@@ -5163,6 +5169,7 @@ fn append_pip_default_args_from_config(
 
     if install_like || artifact_like || index_like {
         append_pip_bool_arg_from_config(values, args, "pre", "--pre", "--pre=false");
+        append_pip_value_arg_from_config(values, args, "uploaded-prior-to", "--uploaded-prior-to");
         append_pip_token_args_from_config(values, args, "platform", "--platform");
         append_pip_value_arg_from_config(values, args, "python-version", "--python-version");
         append_pip_value_arg_from_config(values, args, "implementation", "--implementation");
@@ -5304,6 +5311,9 @@ fn pip_environment_default_args(command: &str) -> Vec<String> {
 
     if install_like || artifact_like || index_like {
         append_pip_bool_arg_from_env(&mut args, "pre", "--pre", "--pre=false");
+        if let Some(uploaded_prior_to) = pip_config_env("uploaded-prior-to") {
+            args.push(format!("--uploaded-prior-to={uploaded_prior_to}"));
+        }
         for platform in pip_config_env_tokens("platform") {
             args.push(format!("--platform={platform}"));
         }
@@ -5478,6 +5488,7 @@ fn run_pip_compat_with_cwd(
                 require_hashes,
                 no_deps,
                 allow_prereleases,
+                uploaded_prior_to,
                 upgrade: _,
                 force_reinstall: _,
                 compatibility,
@@ -5522,6 +5533,7 @@ fn run_pip_compat_with_cwd(
                 options.pypi_require_hashes = require_hashes;
                 options.pypi_include_dependencies = !no_deps;
                 options.pypi_allow_prereleases = allow_prereleases;
+                options.pypi_uploaded_prior_to = uploaded_prior_to.clone();
                 options.pypi_binary_all = binary_all;
                 options.pypi_binary_packages = binary_packages;
                 apply_pip_compatibility_target(&mut options, compatibility);
@@ -5549,6 +5561,7 @@ fn run_pip_compat_with_cwd(
                 options.pypi_require_hashes = require_hashes;
                 options.pypi_include_dependencies = !no_deps;
                 options.pypi_allow_prereleases = allow_prereleases;
+                options.pypi_uploaded_prior_to = uploaded_prior_to;
                 options.pypi_binary_all = binary_all;
                 options.pypi_binary_packages = binary_packages;
                 apply_pip_compatibility_target(&mut options, compatibility);
@@ -5778,6 +5791,7 @@ fn run_pip_compat_with_cwd(
             find_links,
             no_index,
             allow_prereleases,
+            uploaded_prior_to,
             compatibility,
             json,
         } => print_pip_index_versions(
@@ -5789,6 +5803,7 @@ fn run_pip_compat_with_cwd(
                 find_links: absolutize_pip_find_links(invocation_cwd, find_links),
                 no_index,
                 allow_prereleases,
+                uploaded_prior_to,
                 compatibility,
             },
             json,
@@ -6614,6 +6629,7 @@ fn run_pip_install_dry_run(
         require_hashes,
         no_deps,
         allow_prereleases,
+        uploaded_prior_to,
         upgrade: _,
         force_reinstall: _,
         compatibility,
@@ -6679,6 +6695,7 @@ fn run_pip_install_dry_run(
     options.pypi_require_hashes = require_hashes;
     options.pypi_include_dependencies = !no_deps;
     options.pypi_allow_prereleases = allow_prereleases;
+    options.pypi_uploaded_prior_to = uploaded_prior_to;
     options.pypi_binary_all = binary_all;
     options.pypi_binary_packages = binary_packages;
     apply_pip_compatibility_target(&mut options, compatibility);
@@ -6851,6 +6868,7 @@ fn run_pip_install_target(
         require_hashes,
         no_deps,
         allow_prereleases,
+        uploaded_prior_to,
         upgrade,
         force_reinstall,
         compatibility,
@@ -6888,6 +6906,7 @@ fn run_pip_install_target(
     options.pypi_require_hashes = require_hashes;
     options.pypi_include_dependencies = !no_deps;
     options.pypi_allow_prereleases = allow_prereleases;
+    options.pypi_uploaded_prior_to = uploaded_prior_to;
     options.pypi_binary_all = binary_all;
     options.pypi_binary_packages = binary_packages;
     options.python_target_overwrite_existing = upgrade || force_reinstall;
@@ -6965,6 +6984,7 @@ fn run_pip_install_prefix(
         require_hashes,
         no_deps,
         allow_prereleases,
+        uploaded_prior_to,
         upgrade: _,
         force_reinstall: _,
         compatibility,
@@ -7005,6 +7025,7 @@ fn run_pip_install_prefix(
     options.pypi_require_hashes = require_hashes;
     options.pypi_include_dependencies = !no_deps;
     options.pypi_allow_prereleases = allow_prereleases;
+    options.pypi_uploaded_prior_to = uploaded_prior_to;
     options.pypi_binary_all = binary_all;
     options.pypi_binary_packages = binary_packages;
     apply_pip_compatibility_target(&mut options, compatibility);
@@ -7078,6 +7099,7 @@ fn run_pip_install_root(
         require_hashes,
         no_deps,
         allow_prereleases,
+        uploaded_prior_to,
         upgrade: _,
         force_reinstall: _,
         compatibility,
@@ -7116,6 +7138,7 @@ fn run_pip_install_root(
     options.pypi_require_hashes = require_hashes;
     options.pypi_include_dependencies = !no_deps;
     options.pypi_allow_prereleases = allow_prereleases;
+    options.pypi_uploaded_prior_to = uploaded_prior_to;
     options.pypi_binary_all = binary_all;
     options.pypi_binary_packages = binary_packages;
     apply_pip_compatibility_target(&mut options, compatibility);
@@ -7189,6 +7212,7 @@ fn run_pip_install_user(
         require_hashes,
         no_deps,
         allow_prereleases,
+        uploaded_prior_to,
         upgrade: _,
         force_reinstall: _,
         compatibility,
@@ -7243,6 +7267,7 @@ fn run_pip_install_user(
     options.pypi_require_hashes = require_hashes;
     options.pypi_include_dependencies = !no_deps;
     options.pypi_allow_prereleases = allow_prereleases;
+    options.pypi_uploaded_prior_to = uploaded_prior_to;
     options.pypi_binary_all = binary_all;
     options.pypi_binary_packages = binary_packages;
     apply_pip_compatibility_target(&mut options, compatibility);
@@ -12583,6 +12608,7 @@ fn print_pip_index_versions(
         find_links,
         no_index,
         allow_prereleases,
+        uploaded_prior_to,
         compatibility,
     } = options;
     let listing = read_pypi_available_versions(
@@ -12594,6 +12620,7 @@ fn print_pip_index_versions(
             find_links,
             no_index,
             allow_prereleases,
+            uploaded_prior_to,
             target_python: compatibility.python_version,
             target_implementation: compatibility.implementation,
             target_platforms: compatibility.platforms,
@@ -12654,6 +12681,7 @@ struct PipIndexSearchOptions {
     find_links: Vec<String>,
     no_index: bool,
     allow_prereleases: bool,
+    uploaded_prior_to: Option<String>,
     compatibility: PipCompatibilityTarget,
 }
 
@@ -12706,6 +12734,7 @@ fn download_pip_packages(
         require_hashes,
         no_deps,
         allow_prereleases,
+        uploaded_prior_to,
         compatibility,
         destination,
         allow,
@@ -12734,6 +12763,7 @@ fn download_pip_packages(
     options.pypi_require_hashes = require_hashes;
     options.pypi_include_dependencies = !no_deps;
     options.pypi_allow_prereleases = allow_prereleases;
+    options.pypi_uploaded_prior_to = uploaded_prior_to;
     options.pypi_binary_all = binary_all;
     options.pypi_binary_packages = binary_packages;
     apply_pip_compatibility_target(&mut options, compatibility);
@@ -12840,6 +12870,9 @@ fn apply_pypi_download_requirements(
     options.pypi_no_index |= requirements.pypi_no_index;
     options.pypi_require_hashes |= requirements.pypi_require_hashes;
     options.pypi_allow_prereleases |= requirements.pypi_allow_prereleases;
+    if requirements.pypi_uploaded_prior_to.is_some() {
+        options.pypi_uploaded_prior_to = requirements.pypi_uploaded_prior_to;
+    }
     if requirements.pypi_no_deps {
         options.pypi_include_dependencies = false;
     }
@@ -12870,6 +12903,9 @@ fn apply_pypi_install_requirements(
     options.pypi_no_index |= requirements.pypi_no_index;
     options.pypi_require_hashes |= requirements.pypi_require_hashes;
     options.pypi_allow_prereleases |= requirements.pypi_allow_prereleases;
+    if requirements.pypi_uploaded_prior_to.is_some() {
+        options.pypi_uploaded_prior_to = requirements.pypi_uploaded_prior_to;
+    }
     if requirements.pypi_no_deps {
         options.pypi_include_dependencies = false;
     }
@@ -17009,6 +17045,9 @@ fn pip_config_values(project_dir: &Path) -> Result<BTreeMap<String, String>, Omc
             "global.find-links".to_owned(),
             snapshot.find_links.join(" "),
         );
+    }
+    if let Some(uploaded_prior_to) = snapshot.uploaded_prior_to {
+        values.insert("global.uploaded-prior-to".to_owned(), uploaded_prior_to);
     }
     if let Some(value) = pip_binary_config_value(snapshot.binary_all, PypiBinaryMode::Source) {
         values.insert("global.no-binary".to_owned(), value);
@@ -28053,6 +28092,7 @@ fn parse_pip_index_args(args: &[String]) -> Result<PipCompatAction, OmcRegistryE
         find_links,
         no_index,
         allow_prereleases,
+        uploaded_prior_to,
         compatibility,
         json,
         mut positionals,
@@ -28077,6 +28117,7 @@ fn parse_pip_index_args(args: &[String]) -> Result<PipCompatAction, OmcRegistryE
                 find_links,
                 no_index,
                 allow_prereleases,
+                uploaded_prior_to,
                 compatibility,
                 json,
             })
@@ -28094,6 +28135,7 @@ struct PipIndexArgs {
     find_links: Vec<String>,
     no_index: bool,
     allow_prereleases: bool,
+    uploaded_prior_to: Option<String>,
     compatibility: PipCompatibilityTarget,
     json: bool,
     positionals: Vec<String>,
@@ -28106,6 +28148,7 @@ fn parse_pip_index_common_args(args: &[String]) -> Result<PipIndexArgs, OmcRegis
         find_links: Vec::new(),
         no_index: false,
         allow_prereleases: false,
+        uploaded_prior_to: None,
         compatibility: PipCompatibilityTarget::default(),
         json: false,
         positionals: Vec::new(),
@@ -28149,6 +28192,10 @@ fn parse_pip_index_common_args(args: &[String]) -> Result<PipIndexArgs, OmcRegis
             parsed.no_index = value;
         } else if let Some(value) = pip_bool_flag_value(arg, "--pre") {
             parsed.allow_prereleases = value;
+        } else if arg == "--uploaded-prior-to" {
+            parsed.uploaded_prior_to = Some(pip_target_flag_value(args, &mut index, arg)?);
+        } else if let Some(value) = arg.strip_prefix("--uploaded-prior-to=") {
+            parsed.uploaded_prior_to = Some(value.to_owned());
         } else if arg == "--platform" {
             parsed
                 .compatibility
@@ -28845,6 +28892,7 @@ fn parse_pip_install_args(args: &[String]) -> Result<PipCompatAction, OmcRegistr
     let mut require_hashes = false;
     let mut no_deps = false;
     let mut allow_prereleases = false;
+    let mut uploaded_prior_to = None;
     let mut upgrade = false;
     let mut force_reinstall = false;
     let mut compatibility = PipCompatibilityTarget::default();
@@ -28940,6 +28988,10 @@ fn parse_pip_install_args(args: &[String]) -> Result<PipCompatAction, OmcRegistr
             no_deps = value;
         } else if let Some(value) = pip_bool_flag_value(arg, "--pre") {
             allow_prereleases = value;
+        } else if arg == "--uploaded-prior-to" {
+            uploaded_prior_to = Some(pip_target_flag_value(args, &mut index, arg)?);
+        } else if let Some(value) = arg.strip_prefix("--uploaded-prior-to=") {
+            uploaded_prior_to = Some(value.to_owned());
         } else if arg == "--platform" {
             compatibility
                 .platforms
@@ -29142,6 +29194,7 @@ fn parse_pip_install_args(args: &[String]) -> Result<PipCompatAction, OmcRegistr
         require_hashes,
         no_deps,
         allow_prereleases,
+        uploaded_prior_to,
         upgrade,
         force_reinstall,
         compatibility,
@@ -29224,6 +29277,7 @@ fn parse_pip_artifact_args(
     let mut require_hashes = false;
     let mut no_deps = false;
     let mut allow_prereleases = false;
+    let mut uploaded_prior_to = None;
     let mut compatibility = PipCompatibilityTarget::default();
     let mut destination = PathBuf::from(".");
     let mut archive_references = Vec::new();
@@ -29324,6 +29378,10 @@ fn parse_pip_artifact_args(
             no_deps = value;
         } else if let Some(value) = pip_bool_flag_value(arg, "--pre") {
             allow_prereleases = value;
+        } else if arg == "--uploaded-prior-to" {
+            uploaded_prior_to = Some(pip_target_flag_value(args, &mut index, arg)?);
+        } else if let Some(value) = arg.strip_prefix("--uploaded-prior-to=") {
+            uploaded_prior_to = Some(value.to_owned());
         } else if arg == "--platform" {
             compatibility
                 .platforms
@@ -29454,6 +29512,7 @@ fn parse_pip_artifact_args(
         require_hashes,
         no_deps,
         allow_prereleases,
+        uploaded_prior_to,
         compatibility,
         destination,
         allow,
@@ -30800,6 +30859,7 @@ mod tests {
                 ("PIP_NO_BINARY", None),
                 ("PIP_ONLY_BINARY", None),
                 ("PIP_PRE", None),
+                ("PIP_UPLOADED_PRIOR_TO", None),
                 ("PIP_PLATFORM", None),
                 ("PIP_PYTHON_VERSION", None),
                 ("PIP_IMPLEMENTATION", None),
@@ -31740,6 +31800,7 @@ mod tests {
                 ("PIP_NO_BINARY", Some(":all:")),
                 ("PIP_ONLY_BINARY", Some("idna")),
                 ("PIP_PRE", Some("on")),
+                ("PIP_UPLOADED_PRIOR_TO", Some("P7D")),
                 (
                     "PIP_PLATFORM",
                     Some("macosx_14_0_arm64 manylinux_2_28_x86_64"),
@@ -31774,6 +31835,7 @@ mod tests {
                         "--no-binary=:all:",
                         "--only-binary=idna",
                         "--pre",
+                        "--uploaded-prior-to=P7D",
                         "--platform=macosx_14_0_arm64",
                         "--platform=manylinux_2_28_x86_64",
                         "--python-version=3.12",
@@ -31809,6 +31871,7 @@ mod tests {
                 assert!(action.no_deps);
                 assert!(action.require_hashes);
                 assert!(action.allow_prereleases);
+                assert_eq!(action.uploaded_prior_to.as_deref(), Some("P7D"));
                 assert_eq!(action.binary_all, Some(PypiBinaryMode::Source));
                 assert_eq!(
                     action.binary_packages.get("idna"),
@@ -31847,6 +31910,7 @@ mod tests {
                 ("PIP_NO_BINARY", None),
                 ("PIP_ONLY_BINARY", None),
                 ("PIP_PRE", None),
+                ("PIP_UPLOADED_PRIOR_TO", None),
                 ("PIP_PLATFORM", None),
                 ("PIP_PYTHON_VERSION", None),
                 ("PIP_IMPLEMENTATION", None),
@@ -31895,6 +31959,7 @@ mod tests {
                 ("PIP_NO_BINARY", None),
                 ("PIP_ONLY_BINARY", None),
                 ("PIP_PRE", None),
+                ("PIP_UPLOADED_PRIOR_TO", None),
                 ("PIP_PLATFORM", None),
                 ("PIP_PYTHON_VERSION", None),
                 ("PIP_IMPLEMENTATION", None),
@@ -31939,6 +32004,7 @@ mod tests {
                 ("PIP_NO_BINARY", None),
                 ("PIP_ONLY_BINARY", None),
                 ("PIP_PRE", None),
+                ("PIP_UPLOADED_PRIOR_TO", None),
                 ("PIP_PLATFORM", None),
                 ("PIP_PYTHON_VERSION", None),
                 ("PIP_IMPLEMENTATION", None),
@@ -31980,6 +32046,7 @@ mod tests {
                 ("PIP_NO_BINARY", None),
                 ("PIP_ONLY_BINARY", None),
                 ("PIP_PRE", Some("true")),
+                ("PIP_UPLOADED_PRIOR_TO", Some("2026-01-01T00:00:00Z")),
                 ("PIP_PLATFORM", Some("manylinux_2_28_aarch64")),
                 ("PIP_PYTHON_VERSION", None),
                 ("PIP_IMPLEMENTATION", None),
@@ -31998,6 +32065,10 @@ mod tests {
                 };
                 assert!(action.no_deps);
                 assert!(action.allow_prereleases);
+                assert_eq!(
+                    action.uploaded_prior_to.as_deref(),
+                    Some("2026-01-01T00:00:00Z")
+                );
                 assert_eq!(
                     action.compatibility.platforms,
                     vec!["manylinux_2_28_aarch64".to_owned()]
@@ -32024,6 +32095,7 @@ mod tests {
                 ("PIP_NO_BINARY", None),
                 ("PIP_ONLY_BINARY", None),
                 ("PIP_PRE", None),
+                ("PIP_UPLOADED_PRIOR_TO", None),
                 ("PIP_PLATFORM", None),
                 ("PIP_PYTHON_VERSION", None),
                 ("PIP_IMPLEMENTATION", None),
@@ -32062,6 +32134,7 @@ mod tests {
                 ("PIP_NO_BINARY", Some(":all:")),
                 ("PIP_ONLY_BINARY", Some("idna")),
                 ("PIP_PRE", Some("true")),
+                ("PIP_UPLOADED_PRIOR_TO", Some("P30D")),
                 ("PIP_PLATFORM", Some("macosx_14_0_arm64")),
                 ("PIP_PYTHON_VERSION", Some("3.12")),
                 ("PIP_IMPLEMENTATION", Some("cp")),
@@ -38730,7 +38803,7 @@ verdict = "accepted"
         .unwrap();
         fs::write(
             project.join("pip.conf"),
-            "[install]\ntarget = vendor\ndry-run = true\nupgrade = true\nreport = report.json\nrequirement = requirements/base.txt 'requirements/dev requirements.txt'\nconstraint = constraints/base.txt\nbuild-constraint = build-constraints/base.txt\nonly-binary = idna\n[download]\ndest = wheelhouse\n[wheel]\nwheel-dir = wheels\n[global]\nplatform = macosx_14_0_arm64 manylinux_2_28_x86_64\nabi = cp312 abi3\n",
+            "[install]\ntarget = vendor\ndry-run = true\nupgrade = true\nreport = report.json\nrequirement = requirements/base.txt 'requirements/dev requirements.txt'\nconstraint = constraints/base.txt\nbuild-constraint = build-constraints/base.txt\nonly-binary = idna\n[download]\ndest = wheelhouse\n[wheel]\nwheel-dir = wheels\n[global]\nuploaded-prior-to = P3D\nplatform = macosx_14_0_arm64 manylinux_2_28_x86_64\nabi = cp312 abi3\n",
         )
         .unwrap();
 
@@ -38759,6 +38832,7 @@ verdict = "accepted"
                 ("PIP_NO_BINARY", None),
                 ("PIP_ONLY_BINARY", None),
                 ("PIP_PRE", None),
+                ("PIP_UPLOADED_PRIOR_TO", None),
                 ("PIP_PLATFORM", None),
                 ("PIP_PYTHON_VERSION", None),
                 ("PIP_IMPLEMENTATION", None),
@@ -38787,6 +38861,7 @@ verdict = "accepted"
                         "--require-hashes",
                         "--only-binary=idna",
                         "--pre",
+                        "--uploaded-prior-to=P3D",
                         "--platform=macosx_14_0_arm64",
                         "--platform=manylinux_2_28_x86_64",
                         "--abi=cp312",
@@ -38816,6 +38891,7 @@ verdict = "accepted"
                 assert!(action.no_deps);
                 assert!(action.require_hashes);
                 assert!(action.allow_prereleases);
+                assert_eq!(action.uploaded_prior_to.as_deref(), Some("P3D"));
                 assert_eq!(
                     action.binary_packages.get("idna"),
                     Some(&PypiBinaryMode::Binary)
@@ -38842,6 +38918,7 @@ verdict = "accepted"
                         "--no-deps=false",
                         "--require-hashes=false",
                         "--pre=false",
+                        "--uploaded-prior-to=2026-01-01T00:00:00Z",
                         "requests",
                     ]),
                 )
@@ -38856,6 +38933,10 @@ verdict = "accepted"
                 assert!(!action.no_deps);
                 assert!(!action.require_hashes);
                 assert!(!action.allow_prereleases);
+                assert_eq!(
+                    action.uploaded_prior_to.as_deref(),
+                    Some("2026-01-01T00:00:00Z")
+                );
 
                 let download =
                     pip_args_with_config_defaults(&project, &args(&["download", "requests"]))
@@ -38865,6 +38946,7 @@ verdict = "accepted"
                     args(&[
                         "download",
                         "--pre",
+                        "--uploaded-prior-to=P3D",
                         "--platform=macosx_14_0_arm64",
                         "--platform=manylinux_2_28_x86_64",
                         "--abi=cp312",
@@ -38878,6 +38960,7 @@ verdict = "accepted"
                     panic!("expected pip download action");
                 };
                 assert_eq!(action.destination, PathBuf::from("wheelhouse"));
+                assert_eq!(action.uploaded_prior_to.as_deref(), Some("P3D"));
 
                 let wheel =
                     pip_args_with_config_defaults(&project, &args(&["wheel", "requests"])).unwrap();
@@ -38886,6 +38969,7 @@ verdict = "accepted"
                     args(&[
                         "wheel",
                         "--pre",
+                        "--uploaded-prior-to=P3D",
                         "--platform=macosx_14_0_arm64",
                         "--platform=manylinux_2_28_x86_64",
                         "--abi=cp312",
@@ -38899,6 +38983,7 @@ verdict = "accepted"
                     panic!("expected pip wheel action");
                 };
                 assert_eq!(action.destination, PathBuf::from("wheels"));
+                assert_eq!(action.uploaded_prior_to.as_deref(), Some("P3D"));
 
                 let overridden_download = pip_args_with_config_defaults(
                     &project,
@@ -38942,6 +39027,8 @@ verdict = "accepted"
             "wheelhouse",
             "--no-index",
             "--pre",
+            "--uploaded-prior-to",
+            "2026-01-01T00:00:00Z",
             "--require-hashes",
             "--no-deps",
             "--platform",
@@ -39032,6 +39119,7 @@ verdict = "accepted"
                 require_hashes: true,
                 no_deps: true,
                 allow_prereleases: true,
+                uploaded_prior_to: Some("2026-01-01T00:00:00Z".to_owned()),
                 upgrade: true,
                 force_reinstall: true,
                 compatibility: PipCompatibilityTarget {
@@ -39169,6 +39257,7 @@ verdict = "accepted"
             "--require-hashes",
             "--no-deps",
             "--only-binary=:all:",
+            "--uploaded-prior-to=P30D",
             "--platform",
             "manylinux_2_28_aarch64",
             "--python-version=3.11",
@@ -39209,6 +39298,7 @@ verdict = "accepted"
                 require_hashes: true,
                 no_deps: true,
                 allow_prereleases: false,
+                uploaded_prior_to: Some("P30D".to_owned()),
                 compatibility: PipCompatibilityTarget {
                     platforms: vec!["manylinux_2_28_aarch64".to_owned()],
                     python_version: Some("3.11".to_owned()),
@@ -39237,6 +39327,8 @@ verdict = "accepted"
             "--no-index",
             "--require-hashes",
             "--no-deps",
+            "--uploaded-prior-to",
+            "2025-12-31",
             "--check-build-dependencies",
             "--build-constraint=build-constraints.txt",
             "--no-clean",
@@ -39276,6 +39368,7 @@ verdict = "accepted"
                 require_hashes: true,
                 no_deps: true,
                 allow_prereleases: false,
+                uploaded_prior_to: Some("2025-12-31".to_owned()),
                 compatibility: PipCompatibilityTarget::default(),
                 destination: PathBuf::from("wheelhouse"),
                 allow: vec!["http:files.example".to_owned()],
@@ -39307,6 +39400,7 @@ verdict = "accepted"
                 require_hashes: false,
                 no_deps: false,
                 allow_prereleases: false,
+                uploaded_prior_to: None,
                 compatibility: PipCompatibilityTarget::default(),
                 destination: PathBuf::from("wheelhouse"),
                 allow: Vec::new(),
@@ -39335,6 +39429,7 @@ verdict = "accepted"
                 require_hashes: false,
                 no_deps: false,
                 allow_prereleases: false,
+                uploaded_prior_to: None,
                 compatibility: PipCompatibilityTarget::default(),
                 destination: PathBuf::from("wheelhouse"),
                 allow: Vec::new(),
@@ -39373,6 +39468,7 @@ verdict = "accepted"
                 require_hashes: false,
                 no_deps: false,
                 allow_prereleases: false,
+                uploaded_prior_to: None,
                 compatibility: PipCompatibilityTarget::default(),
                 destination: PathBuf::from("wheelhouse"),
                 allow: Vec::new(),
@@ -39400,6 +39496,7 @@ verdict = "accepted"
                 require_hashes: false,
                 no_deps: false,
                 allow_prereleases: false,
+                uploaded_prior_to: None,
                 compatibility: PipCompatibilityTarget::default(),
                 destination: PathBuf::from("."),
                 allow: Vec::new(),
@@ -39448,6 +39545,7 @@ verdict = "accepted"
                 require_hashes: false,
                 no_deps: false,
                 allow_prereleases: false,
+                uploaded_prior_to: None,
                 upgrade: false,
                 force_reinstall: false,
                 compatibility: PipCompatibilityTarget::default(),
@@ -39489,6 +39587,7 @@ verdict = "accepted"
                 require_hashes: false,
                 no_deps: false,
                 allow_prereleases: false,
+                uploaded_prior_to: None,
                 upgrade: false,
                 force_reinstall: false,
                 compatibility: PipCompatibilityTarget::default(),
@@ -39898,6 +39997,7 @@ version = "0.1.0"
                 require_hashes: false,
                 no_deps: false,
                 allow_prereleases: false,
+                uploaded_prior_to: None,
                 upgrade: false,
                 force_reinstall: false,
                 compatibility: PipCompatibilityTarget::default(),
@@ -40334,6 +40434,7 @@ print("ok")
                 ("PIP_NO_BINARY", None),
                 ("PIP_ONLY_BINARY", None),
                 ("PIP_PRE", None),
+                ("PIP_UPLOADED_PRIOR_TO", None),
                 ("PIP_PLATFORM", None),
                 ("PIP_PYTHON_VERSION", None),
                 ("PIP_IMPLEMENTATION", None),
@@ -40933,6 +41034,7 @@ verdict = "accepted"
                 require_hashes: false,
                 no_deps: false,
                 allow_prereleases: false,
+                uploaded_prior_to: None,
                 upgrade: false,
                 force_reinstall: false,
                 compatibility: PipCompatibilityTarget::default(),
@@ -42454,6 +42556,7 @@ resolved_commit = "0123456789abcdef0123456789abcdef01234567"
                 "--find-links",
                 "wheelhouse",
                 "--pre",
+                "--uploaded-prior-to=P14D",
                 "--platform",
                 "macosx_14_0_arm64",
                 "--python-version=3.12",
@@ -42470,6 +42573,7 @@ resolved_commit = "0123456789abcdef0123456789abcdef01234567"
                 find_links: vec!["wheelhouse".to_owned()],
                 no_index: true,
                 allow_prereleases: true,
+                uploaded_prior_to: Some("P14D".to_owned()),
                 compatibility: PipCompatibilityTarget {
                     platforms: vec!["macosx_14_0_arm64".to_owned()],
                     python_version: Some("3.12".to_owned()),

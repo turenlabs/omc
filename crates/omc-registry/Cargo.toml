@@ -7,6 +7,7 @@ version.workspace = true
 
 [dependencies]
 base64 = "0.22"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
 ed25519-dalek = { version = "2", features = ["rand_core"] }
 flate2 = "1"
 hex = "0.4"
