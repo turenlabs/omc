@@ -322,8 +322,11 @@ use `omc.toml` PyPI simple-index settings for OMC-managed PyPI adds
 use project/user `pip.conf` PyPI simple-index settings when no project index is set
 use `PIP_INDEX_URL` / `PIP_EXTRA_INDEX_URL` when no project PyPI index is set
 use pip-style `find-links`, `no-index`, and binary-format config/env values for wheelhouses
-use pip install-mode env defaults such as `PIP_TARGET`, `PIP_PREFIX`,
-`PIP_ROOT`, `PIP_USER`, `PIP_NO_DEPS`, `PIP_REQUIRE_HASHES`, `PIP_DRY_RUN`,
+use pip install-mode `pip.conf`/env defaults such as `target`, `prefix`,
+`root`, `user`, `dry-run`, `report`, `no-deps`, `require-hashes`,
+`no-binary`, `only-binary`, `pre`, `platform`, `python-version`,
+`implementation`, `abi`, `PIP_TARGET`, `PIP_PREFIX`, `PIP_ROOT`,
+`PIP_USER`, `PIP_NO_DEPS`, `PIP_REQUIRE_HASHES`, `PIP_DRY_RUN`,
 `PIP_REPORT`, `PIP_PRE`, `PIP_PLATFORM`, `PIP_PYTHON_VERSION`,
 `PIP_IMPLEMENTATION`, and `PIP_ABI`
 verify npm shasum/integrity and PyPI sha256 when the registry provides them
@@ -430,6 +433,10 @@ Supported now:
 - global/project/user `pip.conf` and `PIP_CONFIG_FILE` PyPI support for `index-url`,
   `extra-index-url`, `find-links`, `requirement`, `constraint`, `no-index`,
   `no-binary`, and `only-binary`
+- global/project/user `pip.conf` install/download/wheel/index defaults for
+  `target`, `prefix`, `root`, `user`, `dry-run`, `report`, `no-deps`,
+  `require-hashes`, `no-binary`, `only-binary`, `pre`, `platform`,
+  `python-version`, `implementation`, and `abi`
 - pip-style `PIP_REQUIREMENT` and `PIP_CONSTRAINT` requirement-file defaults
 - pip-style `PIP_INDEX_URL`, `PIP_EXTRA_INDEX_URL`, `PIP_FIND_LINKS`,
   `PIP_NO_INDEX`, `PIP_NO_BINARY`, and `PIP_ONLY_BINARY` support when no

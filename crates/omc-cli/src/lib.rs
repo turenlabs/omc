@@ -3888,6 +3888,33 @@ fn append_npm_bool_arg_from_config(
     }
 }
 
+fn pip_args_with_config_defaults(
+    project_dir: &Path,
+    args: &[String],
+) -> Result<Vec<String>, OmcRegistryError> {
+    if pip_isolated_requested(args) {
+        return Ok(args.to_vec());
+    }
+
+    let normalized = normalize_pip_global_args(args)?;
+    let Some(command) = normalized.first().map(String::as_str) else {
+        return Ok(args.to_vec());
+    };
+
+    let mut defaults = pip_config_file_default_args(project_dir, command)?;
+    defaults.extend(pip_environment_default_args(command));
+    if defaults.is_empty() {
+        return Ok(args.to_vec());
+    }
+
+    let mut merged = Vec::with_capacity(normalized.len() + defaults.len());
+    merged.push(command.to_owned());
+    merged.extend(defaults);
+    merged.extend(normalized.iter().skip(1).cloned());
+    Ok(merged)
+}
+
+#[cfg(test)]
 fn pip_args_with_environment_defaults(args: &[String]) -> Result<Vec<String>, OmcRegistryError> {
     if pip_isolated_requested(args) {
         return Ok(args.to_vec());
@@ -3914,6 +3941,281 @@ fn pip_isolated_requested(args: &[String]) -> bool {
     args.iter().any(|arg| arg == "--isolated") || pip_config_env_bool("isolated")
 }
 
+#[derive(Debug, Default)]
+struct PipCliConfigDefaults {
+    values: BTreeMap<String, Vec<String>>,
+}
+
+impl PipCliConfigDefaults {
+    fn push(&mut self, key: String, value: String) {
+        self.values.entry(key).or_default().push(value);
+    }
+
+    fn last(&self, key: &str) -> Option<&str> {
+        self.values
+            .get(key)
+            .and_then(|values| values.last())
+            .map(String::as_str)
+            .filter(|value| !value.trim().is_empty())
+    }
+
+    fn tokens(&self, key: &str) -> Vec<String> {
+        self.values
+            .get(key)
+            .into_iter()
+            .flat_map(|values| values.iter())
+            .flat_map(|value| shell_like_tokens(value))
+            .collect()
+    }
+}
+
+fn pip_config_file_default_args(
+    project_dir: &Path,
+    command: &str,
+) -> Result<Vec<String>, OmcRegistryError> {
+    let values = read_pip_cli_config_defaults(project_dir, command)?;
+    let mut args = Vec::new();
+    append_pip_default_args_from_config(&values, command, &mut args);
+    Ok(args)
+}
+
+fn read_pip_cli_config_defaults(
+    project_dir: &Path,
+    command: &str,
+) -> Result<PipCliConfigDefaults, OmcRegistryError> {
+    let project_dir = absolute_project_dir(project_dir);
+    let mut values = PipCliConfigDefaults::default();
+    for path in pip_cli_config_default_paths(&project_dir) {
+        read_pip_cli_config_defaults_file(&path, command, &mut values)?;
+    }
+    Ok(values)
+}
+
+fn pip_cli_config_default_paths(project_dir: &Path) -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    #[cfg(test)]
+    if let Some(path) = env::var_os("OMC_TEST_PIP_GLOBAL_CONFIG_FILE")
+        .map(PathBuf::from)
+        .filter(|path| !path.as_os_str().is_empty())
+    {
+        paths.push(absolutize_path(project_dir, path));
+    }
+    #[cfg(not(test))]
+    paths.push(pip_global_config_default_path(project_dir));
+
+    if let Some(home) = env::var_os("HOME")
+        .map(PathBuf::from)
+        .filter(|path| !path.as_os_str().is_empty())
+    {
+        paths.push(home.join(".pip").join("pip.conf"));
+        paths.push(home.join(".config").join("pip").join("pip.conf"));
+    }
+    if let Some(xdg) = env::var_os("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .filter(|path| !path.as_os_str().is_empty())
+    {
+        paths.push(xdg.join("pip").join("pip.conf"));
+    }
+    paths.push(project_dir.join("pip.conf"));
+    if let Some(path) = env::var_os("PIP_CONFIG_FILE")
+        .map(PathBuf::from)
+        .filter(|path| !path.as_os_str().is_empty())
+    {
+        paths.push(absolutize_path(project_dir, path));
+    }
+    paths
+}
+
+fn read_pip_cli_config_defaults_file(
+    path: &Path,
+    command: &str,
+    values: &mut PipCliConfigDefaults,
+) -> Result<(), OmcRegistryError> {
+    if !path.exists() {
+        return Ok(());
+    }
+    parse_pip_cli_config_defaults_content(&fs::read_to_string(path)?, command, values);
+    Ok(())
+}
+
+fn parse_pip_cli_config_defaults_content(
+    content: &str,
+    command: &str,
+    values: &mut PipCliConfigDefaults,
+) {
+    let mut section = String::new();
+    let mut multiline_key: Option<String> = None;
+    for raw_line in content.lines() {
+        let line = strip_pip_config_comment(raw_line);
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if trimmed.starts_with('[') && trimmed.ends_with(']') {
+            section = trimmed
+                .trim_start_matches('[')
+                .trim_end_matches(']')
+                .trim()
+                .to_ascii_lowercase();
+            multiline_key = None;
+            continue;
+        }
+        let indented = raw_line
+            .chars()
+            .next()
+            .map(char::is_whitespace)
+            .unwrap_or(false);
+        if indented && multiline_key.is_some() && !trimmed.contains('=') {
+            if let Some(key) = multiline_key.as_deref() {
+                push_pip_cli_config_default(&section, key, trimmed, command, values);
+            }
+            continue;
+        }
+        let Some((key, value)) = trimmed.split_once('=') else {
+            multiline_key = None;
+            continue;
+        };
+        let key = key.trim().to_ascii_lowercase().replace('_', "-");
+        let value = value.trim();
+        push_pip_cli_config_default(&section, &key, value, command, values);
+        multiline_key = value.is_empty().then_some(key);
+    }
+}
+
+fn push_pip_cli_config_default(
+    section: &str,
+    key: &str,
+    value: &str,
+    command: &str,
+    values: &mut PipCliConfigDefaults,
+) {
+    if !pip_cli_config_section_applies(section, command) || !pip_cli_default_config_key(key) {
+        return;
+    }
+    values.push(key.to_owned(), value.trim().to_owned());
+}
+
+fn pip_cli_config_section_applies(section: &str, command: &str) -> bool {
+    section == "global"
+        || section == command
+        || (command == "lock" && section == "install")
+        || (command == "index" && section == "index")
+}
+
+fn pip_cli_default_config_key(key: &str) -> bool {
+    matches!(
+        key,
+        "target"
+            | "prefix"
+            | "root"
+            | "user"
+            | "dry-run"
+            | "report"
+            | "no-deps"
+            | "require-hashes"
+            | "no-binary"
+            | "only-binary"
+            | "pre"
+            | "platform"
+            | "python-version"
+            | "implementation"
+            | "abi"
+    )
+}
+
+fn append_pip_default_args_from_config(
+    values: &PipCliConfigDefaults,
+    command: &str,
+    args: &mut Vec<String>,
+) {
+    let install_like = matches!(command, "install" | "lock");
+    let artifact_like = matches!(command, "download" | "wheel");
+    let index_like = command == "index";
+
+    if install_like {
+        append_pip_value_arg_from_config(values, args, "target", "--target");
+        append_pip_value_arg_from_config(values, args, "prefix", "--prefix");
+        append_pip_value_arg_from_config(values, args, "root", "--root");
+        append_pip_bool_arg_from_config(values, args, "user", "--user", "--user=false");
+        append_pip_bool_arg_from_config(values, args, "dry-run", "--dry-run", "--dry-run=false");
+        append_pip_value_arg_from_config(values, args, "report", "--report");
+    }
+
+    if install_like || artifact_like {
+        append_pip_bool_arg_from_config(values, args, "no-deps", "--no-deps", "--no-deps=false");
+        append_pip_bool_arg_from_config(
+            values,
+            args,
+            "require-hashes",
+            "--require-hashes",
+            "--require-hashes=false",
+        );
+        append_pip_repeated_value_args_from_config(values, args, "no-binary", "--no-binary");
+        append_pip_repeated_value_args_from_config(values, args, "only-binary", "--only-binary");
+    }
+
+    if install_like || artifact_like || index_like {
+        append_pip_bool_arg_from_config(values, args, "pre", "--pre", "--pre=false");
+        append_pip_token_args_from_config(values, args, "platform", "--platform");
+        append_pip_value_arg_from_config(values, args, "python-version", "--python-version");
+        append_pip_value_arg_from_config(values, args, "implementation", "--implementation");
+        append_pip_token_args_from_config(values, args, "abi", "--abi");
+    }
+}
+
+fn append_pip_value_arg_from_config(
+    values: &PipCliConfigDefaults,
+    args: &mut Vec<String>,
+    key: &str,
+    flag: &str,
+) {
+    if let Some(value) = values.last(key) {
+        args.push(format!("{flag}={value}"));
+    }
+}
+
+fn append_pip_repeated_value_args_from_config(
+    values: &PipCliConfigDefaults,
+    args: &mut Vec<String>,
+    key: &str,
+    flag: &str,
+) {
+    if let Some(repeated) = values.values.get(key) {
+        for value in repeated {
+            if !value.trim().is_empty() {
+                args.push(format!("{flag}={value}"));
+            }
+        }
+    }
+}
+
+fn append_pip_token_args_from_config(
+    values: &PipCliConfigDefaults,
+    args: &mut Vec<String>,
+    key: &str,
+    flag: &str,
+) {
+    for value in values.tokens(key) {
+        args.push(format!("{flag}={value}"));
+    }
+}
+
+fn append_pip_bool_arg_from_config(
+    values: &PipCliConfigDefaults,
+    args: &mut Vec<String>,
+    key: &str,
+    true_arg: &str,
+    false_arg: &str,
+) {
+    if let Some(value) = values.last(key) {
+        if config_bool(value) {
+            args.push(true_arg.to_owned());
+        } else if config_false(value) {
+            args.push(false_arg.to_owned());
+        }
+    }
+}
+
 fn pip_environment_default_args(command: &str) -> Vec<String> {
     let mut args = Vec::new();
     let install_like = matches!(command, "install" | "lock");
@@ -3937,21 +4239,20 @@ fn pip_environment_default_args(command: &str) -> Vec<String> {
                 args.push("--user=false".to_owned());
             }
         }
-        if pip_config_env_bool("dry-run") {
-            args.push("--dry-run".to_owned());
-        }
+        append_pip_bool_arg_from_env(&mut args, "dry-run", "--dry-run", "--dry-run=false");
         if let Some(report) = pip_config_env("report") {
             args.push(format!("--report={report}"));
         }
     }
 
     if install_like || artifact_like {
-        if pip_config_env_bool("no-deps") {
-            args.push("--no-deps".to_owned());
-        }
-        if pip_config_env_bool("require-hashes") {
-            args.push("--require-hashes".to_owned());
-        }
+        append_pip_bool_arg_from_env(&mut args, "no-deps", "--no-deps", "--no-deps=false");
+        append_pip_bool_arg_from_env(
+            &mut args,
+            "require-hashes",
+            "--require-hashes",
+            "--require-hashes=false",
+        );
         if let Some(no_binary) = pip_config_env("no-binary") {
             args.push(format!("--no-binary={no_binary}"));
         }
@@ -3961,9 +4262,7 @@ fn pip_environment_default_args(command: &str) -> Vec<String> {
     }
 
     if install_like || artifact_like || index_like {
-        if pip_config_env_bool("pre") {
-            args.push("--pre".to_owned());
-        }
+        append_pip_bool_arg_from_env(&mut args, "pre", "--pre", "--pre=false");
         for platform in pip_config_env_tokens("platform") {
             args.push(format!("--platform={platform}"));
         }
@@ -3979,6 +4278,21 @@ fn pip_environment_default_args(command: &str) -> Vec<String> {
     }
 
     args
+}
+
+fn append_pip_bool_arg_from_env(
+    args: &mut Vec<String>,
+    key: &str,
+    true_arg: &str,
+    false_arg: &str,
+) {
+    if let Some(value) = pip_config_env(key) {
+        if config_bool(&value) {
+            args.push(true_arg.to_owned());
+        } else if config_false(&value) {
+            args.push(false_arg.to_owned());
+        }
+    }
 }
 
 fn pip_config_env_bool(name: &str) -> bool {
@@ -4041,7 +4355,7 @@ fn run_pip_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
         return Ok(ExitCode::SUCCESS);
     }
 
-    let args = pip_args_with_environment_defaults(args)?;
+    let args = pip_args_with_config_defaults(project_dir, args)?;
     match parse_pip_compat_action(&args)? {
         PipCompatAction::Help { topic } => print_pip_help(topic.as_deref()),
         PipCompatAction::Version => println!("pip {} from OMC", env!("CARGO_PKG_VERSION")),
@@ -22993,10 +23307,10 @@ fn parse_pip_index_common_args(args: &[String]) -> Result<PipIndexArgs, OmcRegis
             parsed.find_links.push(value.clone());
         } else if let Some(value) = arg.strip_prefix("--find-links=") {
             parsed.find_links.push(value.to_owned());
-        } else if arg == "--no-index" {
-            parsed.no_index = true;
-        } else if arg == "--pre" {
-            parsed.allow_prereleases = true;
+        } else if let Some(value) = pip_bool_flag_value(arg, "--no-index") {
+            parsed.no_index = value;
+        } else if let Some(value) = pip_bool_flag_value(arg, "--pre") {
+            parsed.allow_prereleases = value;
         } else if arg == "--platform" {
             parsed
                 .compatibility
@@ -23678,8 +23992,8 @@ fn parse_pip_install_args(args: &[String]) -> Result<PipCompatAction, OmcRegistr
             report = Some(PathBuf::from(path));
         } else if let Some(path) = arg.strip_prefix("--report=") {
             report = Some(PathBuf::from(path));
-        } else if arg == "--dry-run" {
-            dry_run = true;
+        } else if let Some(value) = pip_bool_flag_value(arg, "--dry-run") {
+            dry_run = value;
         } else if arg == "-i" || arg == "--index-url" {
             index += 1;
             let Some(url) = args.get(index) else {
@@ -23710,14 +24024,14 @@ fn parse_pip_install_args(args: &[String]) -> Result<PipCompatAction, OmcRegistr
             find_links.push(value.clone());
         } else if let Some(value) = arg.strip_prefix("--find-links=") {
             find_links.push(value.to_owned());
-        } else if arg == "--no-index" {
-            no_index = true;
-        } else if arg == "--require-hashes" {
-            require_hashes = true;
-        } else if arg == "--no-deps" {
-            no_deps = true;
-        } else if arg == "--pre" {
-            allow_prereleases = true;
+        } else if let Some(value) = pip_bool_flag_value(arg, "--no-index") {
+            no_index = value;
+        } else if let Some(value) = pip_bool_flag_value(arg, "--require-hashes") {
+            require_hashes = value;
+        } else if let Some(value) = pip_bool_flag_value(arg, "--no-deps") {
+            no_deps = value;
+        } else if let Some(value) = pip_bool_flag_value(arg, "--pre") {
+            allow_prereleases = value;
         } else if arg == "--platform" {
             compatibility
                 .platforms
@@ -24080,14 +24394,14 @@ fn parse_pip_artifact_args(
             find_links.push(value.clone());
         } else if let Some(value) = arg.strip_prefix("--find-links=") {
             find_links.push(value.to_owned());
-        } else if arg == "--no-index" {
-            no_index = true;
-        } else if arg == "--require-hashes" {
-            require_hashes = true;
-        } else if arg == "--no-deps" {
-            no_deps = true;
-        } else if arg == "--pre" {
-            allow_prereleases = true;
+        } else if let Some(value) = pip_bool_flag_value(arg, "--no-index") {
+            no_index = value;
+        } else if let Some(value) = pip_bool_flag_value(arg, "--require-hashes") {
+            require_hashes = value;
+        } else if let Some(value) = pip_bool_flag_value(arg, "--no-deps") {
+            no_deps = value;
+        } else if let Some(value) = pip_bool_flag_value(arg, "--pre") {
+            allow_prereleases = value;
         } else if arg == "--platform" {
             compatibility
                 .platforms
@@ -24260,6 +24574,18 @@ fn pip_ignored_install_equals_flag(arg: &str) -> bool {
     ]
     .iter()
     .any(|prefix| arg.starts_with(prefix))
+}
+
+fn pip_bool_flag_value(arg: &str, flag: &str) -> Option<bool> {
+    if arg == flag {
+        return Some(true);
+    }
+    let value = arg.strip_prefix(flag)?.strip_prefix('=')?;
+    match value {
+        "true" => Some(true),
+        "false" => Some(false),
+        _ => None,
+    }
 }
 
 fn pip_target_flag_value(
@@ -30117,6 +30443,130 @@ verdict = "accepted"
                 "~",
             ),
             ("left-pad".to_owned(), "~1.3.0".to_owned())
+        );
+    }
+
+    #[test]
+    fn pip_config_file_defaults_behave_like_command_flags() {
+        let project = test_dir("pip-config-file-defaults");
+        let home = test_dir("pip-config-file-home");
+        let xdg = test_dir("pip-config-file-xdg");
+        let global_config = test_dir("pip-config-file-global").join("pip.conf");
+        let user_config = home.join(".config").join("pip").join("pip.conf");
+        fs::create_dir_all(user_config.parent().unwrap()).unwrap();
+        fs::write(
+            &global_config,
+            "[install]\ntarget = global-target\nno-deps = true\n[global]\npre = true\n",
+        )
+        .unwrap();
+        fs::write(
+            &user_config,
+            "[install]\ntarget = user-target\nrequire-hashes = true\n",
+        )
+        .unwrap();
+        fs::write(
+            project.join("pip.conf"),
+            "[install]\ntarget = vendor\ndry-run = true\nreport = report.json\nonly-binary = idna\n[global]\nplatform = macosx_14_0_arm64 manylinux_2_28_x86_64\nabi = cp312 abi3\n",
+        )
+        .unwrap();
+
+        with_env_values(
+            &[
+                ("HOME", Some(home.to_str().unwrap())),
+                ("XDG_CONFIG_HOME", Some(xdg.to_str().unwrap())),
+                (
+                    "OMC_TEST_PIP_GLOBAL_CONFIG_FILE",
+                    Some(global_config.to_str().unwrap()),
+                ),
+                ("PIP_CONFIG_FILE", None),
+                ("PIP_ISOLATED", None),
+                ("PIP_TARGET", None),
+                ("PIP_PREFIX", None),
+                ("PIP_ROOT", None),
+                ("PIP_USER", None),
+                ("PIP_DRY_RUN", None),
+                ("PIP_REPORT", None),
+                ("PIP_NO_DEPS", None),
+                ("PIP_REQUIRE_HASHES", None),
+                ("PIP_NO_BINARY", None),
+                ("PIP_ONLY_BINARY", None),
+                ("PIP_PRE", None),
+                ("PIP_PLATFORM", None),
+                ("PIP_PYTHON_VERSION", None),
+                ("PIP_IMPLEMENTATION", None),
+                ("PIP_ABI", None),
+            ],
+            || {
+                let merged =
+                    pip_args_with_config_defaults(&project, &args(&["install", "requests"]))
+                        .unwrap();
+                assert_eq!(
+                    merged,
+                    args(&[
+                        "install",
+                        "--target=vendor",
+                        "--dry-run",
+                        "--report=report.json",
+                        "--no-deps",
+                        "--require-hashes",
+                        "--only-binary=idna",
+                        "--pre",
+                        "--platform=macosx_14_0_arm64",
+                        "--platform=manylinux_2_28_x86_64",
+                        "--abi=cp312",
+                        "--abi=abi3",
+                        "requests",
+                    ])
+                );
+                let action = parse_pip_compat_action(&merged).unwrap();
+                let PipCompatAction::Install(action) = action else {
+                    panic!("expected pip install action");
+                };
+                assert_eq!(action.target, Some(PathBuf::from("vendor")));
+                assert!(action.dry_run);
+                assert_eq!(action.report, Some(PathBuf::from("report.json")));
+                assert!(action.no_deps);
+                assert!(action.require_hashes);
+                assert!(action.allow_prereleases);
+                assert_eq!(
+                    action.binary_packages.get("idna"),
+                    Some(&PypiBinaryMode::Binary)
+                );
+                assert_eq!(
+                    action.compatibility.platforms,
+                    vec![
+                        "macosx_14_0_arm64".to_owned(),
+                        "manylinux_2_28_x86_64".to_owned()
+                    ]
+                );
+                assert_eq!(
+                    action.compatibility.abis,
+                    vec!["cp312".to_owned(), "abi3".to_owned()]
+                );
+
+                let overridden = pip_args_with_config_defaults(
+                    &project,
+                    &args(&[
+                        "install",
+                        "--target=cli-target",
+                        "--dry-run=false",
+                        "--no-deps=false",
+                        "--require-hashes=false",
+                        "--pre=false",
+                        "requests",
+                    ]),
+                )
+                .unwrap();
+                let action = parse_pip_compat_action(&overridden).unwrap();
+                let PipCompatAction::Install(action) = action else {
+                    panic!("expected pip install action");
+                };
+                assert_eq!(action.target, Some(PathBuf::from("cli-target")));
+                assert!(!action.dry_run);
+                assert!(!action.no_deps);
+                assert!(!action.require_hashes);
+                assert!(!action.allow_prereleases);
+            },
         );
     }
 
