@@ -462,6 +462,9 @@ enum NpmCompatAction {
         parseable: bool,
         npm_registry: Option<String>,
     },
+    Doctor {
+        action: NpmDoctorAction,
+    },
     Audit {
         json: bool,
     },
@@ -912,6 +915,12 @@ enum NpmCacheAction {
     List { pattern: Option<String> },
     Remove { pattern: String },
     Clean,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct NpmDoctorAction {
+    checks: Vec<String>,
+    npm_registry: Option<String>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -4061,6 +4070,7 @@ fn run_npm_compat_with_cwd(
             parseable,
             npm_registry,
         } => return print_npm_outdated(project_dir, json, parseable, npm_registry.as_deref()),
+        NpmCompatAction::Doctor { action } => print_npm_doctor(project_dir, action)?,
         NpmCompatAction::Audit { json } => return print_audit_report(project_dir, json),
         NpmCompatAction::Fund { action } => print_npm_fund(project_dir, action)?,
         NpmCompatAction::Cache { action } => print_npm_cache(project_dir, action)?,
@@ -7711,6 +7721,14 @@ fn npm_help_text(topic: Option<&str>) -> String {
             "npm audit",
             &["Print OMC verifier and capability findings. Supports --json."],
         ),
+        Some("doctor") => npm_command_help(
+            "npm doctor [connection] [registry] [versions] [environment] [permissions] [cache]",
+            &[
+                "Print OMC npm compatibility health checks for the current project.",
+                "OMC doctor is offline by design and does not probe the registry network.",
+                "Supports --registry.",
+            ],
+        ),
         Some("outdated") => npm_command_help(
             "npm outdated",
             &["Compare locked npm packages to registry versions. Supports --json and --parseable."],
@@ -7943,7 +7961,7 @@ fn npm_general_help_text() -> String {
         "npm <command>",
         &[
             "OMC npm compatibility runs supported npm workflows through OMC's verifier, lockfile, cache, and project-local runtime paths.",
-            "Supported commands: install, link, install-test, ci, install-ci-test, remove, run, test, start, stop, restart, exec, explore, completion, help-search, list, query, explain, audit, outdated, fund, prune, dedupe, rebuild, cache, pkg, version, shrinkwrap, pack, publish, unpublish, deprecate, undeprecate, diff, search, star, unstar, stars, ping, whoami, login, adduser, logout, token, profile, owner, access, org, team, dist-tag, sbom, view, docs, repo, bugs, home, config, get, set, init, create, bin, root, prefix.",
+            "Supported commands: install, link, install-test, ci, install-ci-test, remove, run, test, start, stop, restart, exec, explore, completion, help-search, list, query, explain, audit, doctor, outdated, fund, prune, dedupe, rebuild, cache, pkg, version, shrinkwrap, pack, publish, unpublish, deprecate, undeprecate, diff, search, star, unstar, stars, ping, whoami, login, adduser, logout, token, profile, owner, access, org, team, dist-tag, sbom, view, docs, repo, bugs, home, config, get, set, init, create, bin, root, prefix.",
             "Use `npm help <command>` for focused OMC compatibility notes.",
         ],
     )
@@ -7980,6 +7998,7 @@ fn npm_help_topic(topic: &str) -> Option<&'static str> {
         "query" => Some("query"),
         "explain" | "why" => Some("explain"),
         "audit" => Some("audit"),
+        "doctor" => Some("doctor"),
         "outdated" => Some("outdated"),
         "fund" => Some("fund"),
         "prune" | "dedupe" | "ddp" | "find-dupes" => Some("maintenance"),
@@ -8035,6 +8054,7 @@ const NPM_COMPLETION_COMMANDS: &[&str] = &[
     "diff",
     "dist-tag",
     "docs",
+    "doctor",
     "exec",
     "explain",
     "explore",
@@ -13579,6 +13599,140 @@ fn print_npm_cache(project_dir: &Path, action: NpmCacheAction) -> Result<(), Omc
         }
     }
     Ok(())
+}
+
+fn print_npm_doctor(project_dir: &Path, action: NpmDoctorAction) -> Result<(), OmcRegistryError> {
+    print!("{}", npm_doctor_report(project_dir, &action)?);
+    Ok(())
+}
+
+fn npm_doctor_report(
+    project_dir: &Path,
+    action: &NpmDoctorAction,
+) -> Result<String, OmcRegistryError> {
+    let checks = npm_doctor_checks(&action.checks)?;
+    let values = npm_config_values(
+        project_dir,
+        action.npm_registry.as_deref(),
+        None,
+        None,
+        NpmConfigLocation::User,
+    )?;
+    let registry = npm_config_value_for_key(&values, "registry");
+    let cache_dir = npm_cache_dir(project_dir);
+    let mut output = String::from("OMC npm doctor\n");
+    for check in checks {
+        match check {
+            "connection" => {
+                output.push_str("\nconnection\n");
+                output.push_str("  network probe: skipped (OMC doctor is offline)\n");
+                output.push_str(&format!("  registry: {registry}\n"));
+            }
+            "registry" => {
+                output.push_str("\nregistry\n");
+                output.push_str(&format!("  registry: {registry}\n"));
+            }
+            "versions" => {
+                output.push_str("\nversions\n");
+                output.push_str(&format!("  omc: {}\n", env!("CARGO_PKG_VERSION")));
+                output.push_str(&format!(
+                    "  omc.lock: {}\n",
+                    npm_doctor_file_status(&project_dir.join("omc.lock"))
+                ));
+                output.push_str(&format!(
+                    "  npm lockfile: {}\n",
+                    if project_dir.join("npm-shrinkwrap.json").exists() {
+                        "npm-shrinkwrap.json"
+                    } else if project_dir.join("package-lock.json").exists() {
+                        "package-lock.json"
+                    } else {
+                        "missing"
+                    }
+                ));
+            }
+            "environment" => {
+                output.push_str("\nenvironment\n");
+                output.push_str(&format!("  project: {}\n", project_dir.display()));
+                output.push_str(&format!(
+                    "  package.json: {}\n",
+                    npm_doctor_file_status(&project_dir.join("package.json"))
+                ));
+                output.push_str(&format!(
+                    "  node_modules: {}\n",
+                    npm_doctor_file_status(&project_dir.join("node_modules"))
+                ));
+            }
+            "permissions" => {
+                output.push_str("\npermissions\n");
+                output.push_str(&format!(
+                    "  project directory: {}\n",
+                    npm_doctor_access_status(project_dir)
+                ));
+                output.push_str(&format!(
+                    "  cache directory: {}\n",
+                    npm_doctor_access_status(&cache_dir)
+                ));
+            }
+            "cache" => {
+                let files = compat_cache_files(&cache_dir)?;
+                let bytes = cache_files_size(&files)?;
+                output.push_str("\ncache\n");
+                output.push_str(&format!("  path: {}\n", cache_dir.display()));
+                output.push_str(&format!("  files: {}\n", files.len()));
+                output.push_str(&format!("  bytes: {bytes}\n"));
+            }
+            _ => unreachable!("npm_doctor_checks only returns known checks"),
+        }
+    }
+    Ok(output)
+}
+
+fn npm_doctor_checks(checks: &[String]) -> Result<Vec<&'static str>, OmcRegistryError> {
+    const DEFAULT_CHECKS: &[&str] = &[
+        "connection",
+        "registry",
+        "versions",
+        "environment",
+        "permissions",
+        "cache",
+    ];
+    if checks.is_empty() {
+        return Ok(DEFAULT_CHECKS.to_vec());
+    }
+    let mut selected = Vec::new();
+    for check in checks {
+        let canonical = match check.as_str() {
+            "connection" => "connection",
+            "registry" => "registry",
+            "versions" => "versions",
+            "environment" => "environment",
+            "permissions" => "permissions",
+            "cache" => "cache",
+            other => {
+                return Err(OmcRegistryError::UnsupportedSpec(format!(
+                    "unsupported npm doctor check `{other}`"
+                )));
+            }
+        };
+        selected.push(canonical);
+    }
+    Ok(selected)
+}
+
+fn npm_doctor_file_status(path: &Path) -> &'static str {
+    if path.exists() {
+        "found"
+    } else {
+        "missing"
+    }
+}
+
+fn npm_doctor_access_status(path: &Path) -> &'static str {
+    if path.exists() {
+        "accessible"
+    } else {
+        "missing"
+    }
 }
 
 fn print_npm_fund(project_dir: &Path, action: NpmFundAction) -> Result<(), OmcRegistryError> {
@@ -20472,6 +20626,7 @@ fn parse_npm_compat_action(args: &[String]) -> Result<NpmCompatAction, OmcRegist
         "query" => parse_npm_query_args(&args[1..]),
         "explain" | "why" => parse_npm_explain_args(&args[1..]),
         "outdated" => parse_npm_outdated_args(&args[1..]),
+        "doctor" => parse_npm_doctor_args(&args[1..]),
         "audit" => parse_npm_audit_args(&args[1..]),
         "fund" => parse_npm_fund_args(&args[1..]),
         "cache" => parse_npm_cache_args(&args[1..]),
@@ -20687,6 +20842,7 @@ fn npm_global_arg_supported_by_command(command: &str, arg: &str) -> bool {
                 | "create"
                 | "innit"
                 | "ci"
+                | "doctor"
                 | "outdated"
                 | "pack"
                 | "publish"
@@ -22187,6 +22343,52 @@ fn parse_npm_audit_args(args: &[String]) -> Result<NpmCompatAction, OmcRegistryE
     }
 
     Ok(NpmCompatAction::Audit { json })
+}
+
+fn parse_npm_doctor_args(args: &[String]) -> Result<NpmCompatAction, OmcRegistryError> {
+    let mut checks = Vec::new();
+    let mut npm_registry = None;
+    let mut index = 0;
+    while index < args.len() {
+        let arg = &args[index];
+        if arg == "--registry" {
+            index += 1;
+            let Some(registry) = args.get(index) else {
+                return Err(OmcRegistryError::UnsupportedSpec(
+                    "--registry needs a URL".to_owned(),
+                ));
+            };
+            npm_registry = Some(registry.clone());
+        } else if let Some(registry) = arg.strip_prefix("--registry=") {
+            npm_registry = Some(registry.to_owned());
+        } else if matches!(arg.as_str(), "--silent" | "-s") {
+        } else if matches!(arg.as_str(), "--loglevel" | "--cache") {
+            index += 1;
+            if args.get(index).is_none() {
+                return Err(OmcRegistryError::UnsupportedSpec(format!(
+                    "{arg} needs a value"
+                )));
+            }
+        } else if npm_doctor_ignored_equals_flag(arg) {
+        } else if arg.starts_with('-') {
+            return Err(unsupported_compat_arg("npm doctor", arg));
+        } else {
+            checks.push(arg.clone());
+        }
+        index += 1;
+    }
+    Ok(NpmCompatAction::Doctor {
+        action: NpmDoctorAction {
+            checks,
+            npm_registry,
+        },
+    })
+}
+
+fn npm_doctor_ignored_equals_flag(arg: &str) -> bool {
+    ["--loglevel=", "--cache="]
+        .iter()
+        .any(|prefix| arg.starts_with(prefix))
 }
 
 fn parse_npm_fund_args(args: &[String]) -> Result<NpmCompatAction, OmcRegistryError> {
@@ -32144,8 +32346,24 @@ verdict = "accepted"
                 long: true,
             }
         );
+        assert_eq!(
+            parse_npm_compat_action(&args(&[
+                "--registry=https://registry.example.invalid/npm",
+                "doctor",
+                "environment",
+                "cache",
+            ]))
+            .unwrap(),
+            NpmCompatAction::Doctor {
+                action: NpmDoctorAction {
+                    checks: vec!["environment".to_owned(), "cache".to_owned()],
+                    npm_registry: Some("https://registry.example.invalid/npm".to_owned()),
+                },
+            }
+        );
         assert!(npm_help_text(None).contains("Supported commands: install"));
         assert!(npm_help_text(Some("help-search")).contains("npm help-search"));
+        assert!(npm_help_text(Some("doctor")).contains("npm doctor"));
         let help_search = npm_help_search_text(&args(&["cache"]), false).unwrap();
         assert!(help_search.contains("Top hits for \"cache\""));
         assert!(help_search.contains("npm help cache"));
@@ -34959,6 +35177,37 @@ verdict = "accepted"
                 globalconfig: None,
             }
         );
+    }
+
+    #[test]
+    fn reports_npm_doctor_project_state() {
+        let project = test_dir("npm-doctor");
+        fs::create_dir_all(project.join(".omc/cache/npm")).unwrap();
+        fs::write(
+            project.join("package.json"),
+            r#"{ "name": "doctor-demo", "version": "1.0.0" }"#,
+        )
+        .unwrap();
+        fs::write(project.join(".omc/cache/npm/pkg.tgz"), b"cache").unwrap();
+
+        let report = npm_doctor_report(
+            &project,
+            &NpmDoctorAction {
+                checks: vec![
+                    "registry".to_owned(),
+                    "environment".to_owned(),
+                    "cache".to_owned(),
+                ],
+                npm_registry: Some("https://registry.example.invalid/npm".to_owned()),
+            },
+        )
+        .unwrap();
+
+        assert!(report.contains("OMC npm doctor"));
+        assert!(report.contains("registry: https://registry.example.invalid/npm"));
+        assert!(report.contains("package.json: found"));
+        assert!(report.contains(".omc/cache/npm"));
+        assert!(report.contains("files: 1"));
     }
 
     #[test]
