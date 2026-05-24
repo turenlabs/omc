@@ -6722,15 +6722,57 @@ fn requirement_logical_lines(content: &str) -> Vec<String> {
             current.push_str(line);
         }
         if !continued && !current.trim().is_empty() {
-            lines.push(std::mem::take(&mut current));
+            lines.push(expand_requirement_env_variables(&std::mem::take(
+                &mut current,
+            )));
         }
     }
 
     if !current.trim().is_empty() {
-        lines.push(current);
+        lines.push(expand_requirement_env_variables(&current));
     }
 
     lines
+}
+
+fn expand_requirement_env_variables(line: &str) -> String {
+    let mut expanded = String::new();
+    let mut rest = line;
+
+    while let Some(start) = rest.find("${") {
+        expanded.push_str(&rest[..start]);
+        let after_start = &rest[start + 2..];
+        let Some(end) = after_start.find('}') else {
+            expanded.push_str(&rest[start..]);
+            return expanded;
+        };
+        let name = &after_start[..end];
+        let token = &rest[start..start + 3 + name.len()];
+        if requirement_env_var_name_is_valid(name) {
+            if let Ok(value) = env::var(name) {
+                if !value.is_empty() {
+                    expanded.push_str(&value);
+                } else {
+                    expanded.push_str(token);
+                }
+            } else {
+                expanded.push_str(token);
+            }
+        } else {
+            expanded.push_str(token);
+        }
+        rest = &after_start[end + 1..];
+    }
+
+    expanded.push_str(rest);
+    expanded
+}
+
+fn requirement_env_var_name_is_valid(name: &str) -> bool {
+    !name.is_empty()
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit() || byte == b'_')
 }
 
 fn strip_requirement_comment(line: &str) -> &str {
@@ -19884,6 +19926,49 @@ packages:
                 .and_then(|hashes| hashes.iter().next())
                 .map(String::as_str),
             Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+        );
+    }
+
+    #[test]
+    fn expands_requirements_environment_variables() {
+        let dir = tempfile::tempdir().unwrap();
+        let requirements = dir.path().join("requirements.txt");
+        fs::write(
+            &requirements,
+            "--index-url ${OMC_TEST_INDEX_URL}\n--extra-index-url ${OMC_TEST_EXTRA_INDEX_URL}\n--find-links ${OMC_TEST_FIND_LINKS}\n${OMC_TEST_REQUIREMENT}\n",
+        )
+        .unwrap();
+
+        with_env_values(
+            &[
+                (
+                    "OMC_TEST_INDEX_URL",
+                    Some("https://index.example.invalid/simple"),
+                ),
+                (
+                    "OMC_TEST_EXTRA_INDEX_URL",
+                    Some("https://extra.example.invalid/simple"),
+                ),
+                ("OMC_TEST_FIND_LINKS", Some("wheelhouse")),
+                ("OMC_TEST_REQUIREMENT", Some("idna==3.7")),
+            ],
+            || {
+                let discovered = read_requirements_file(&requirements).unwrap();
+
+                assert_eq!(
+                    discovered.pypi_index_url.as_deref(),
+                    Some("https://index.example.invalid/simple/")
+                );
+                assert_eq!(
+                    discovered.pypi_extra_index_urls,
+                    vec!["https://extra.example.invalid/simple/".to_owned()]
+                );
+                assert_eq!(
+                    discovered.pypi_find_links,
+                    vec![dir.path().join("wheelhouse").to_string_lossy().into_owned()]
+                );
+                assert!(has_spec(&discovered.specs, "idna", "==3.7"));
+            },
         );
     }
 
