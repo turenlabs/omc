@@ -2523,6 +2523,11 @@ fn link_package_inner(
         .iter()
         .cloned()
         .fold(Policy::pure(), Policy::allow_capability);
+    let policy = if grants_all_host_capabilities(&options.allowed_capabilities) {
+        policy.allow_all_flows()
+    } else {
+        policy
+    };
     let verification = verify_module(&module, &policy);
     let verifier_findings = verification
         .err()
@@ -15043,6 +15048,30 @@ fn profile_archive(package: &ResolvedPackage, bytes: &[u8]) -> Result<ArchivePro
     Ok(profiler.finish())
 }
 
+fn grants_all_host_capabilities(capabilities: &[Capability]) -> bool {
+    capabilities
+        .iter()
+        .any(|capability| matches!(capability, Capability::EnvRead(target) if target == "*"))
+        && capabilities
+            .iter()
+            .any(|capability| matches!(capability, Capability::FsRead(target) if target == "*"))
+        && capabilities
+            .iter()
+            .any(|capability| matches!(capability, Capability::FsWrite(target) if target == "*"))
+        && capabilities
+            .iter()
+            .any(|capability| matches!(capability, Capability::HttpHost(target) if target == "*"))
+        && capabilities
+            .iter()
+            .any(|capability| matches!(capability, Capability::DnsHost(target) if target == "*"))
+        && capabilities
+            .iter()
+            .any(|capability| matches!(capability, Capability::ProcSpawn(target) if target == "*"))
+        && capabilities
+            .iter()
+            .any(|capability| matches!(capability, Capability::DynamicEval))
+}
+
 #[derive(Debug, Default)]
 struct SourceProfiler {
     files_scanned: usize,
@@ -21417,6 +21446,22 @@ wheels = [
             .iter()
             .any(|finding| finding.kind == CapabilityKind::HttpRequest
                 && finding.target == "evil.example"));
+    }
+
+    #[test]
+    fn detects_all_host_grants_for_flow_escape_hatch() {
+        let grants = vec![
+            Capability::EnvRead("*".to_owned()),
+            Capability::FsRead("*".to_owned()),
+            Capability::FsWrite("*".to_owned()),
+            Capability::HttpHost("*".to_owned()),
+            Capability::DnsHost("*".to_owned()),
+            Capability::ProcSpawn("*".to_owned()),
+            Capability::DynamicEval,
+        ];
+
+        assert!(grants_all_host_capabilities(&grants));
+        assert!(!grants_all_host_capabilities(&grants[..grants.len() - 1]));
     }
 
     #[test]

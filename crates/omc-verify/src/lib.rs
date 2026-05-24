@@ -425,4 +425,17 @@ mod tests {
 
         verify_module(&module, &policy).unwrap();
     }
+
+    #[test]
+    fn accepts_secret_flow_when_all_flows_are_explicitly_allowed() {
+        let module = malicious_date_helper_module();
+        let policy = Policy::pure()
+            .allow_capability(Capability::EnvRead("NPM_TOKEN".to_owned()))
+            .allow_capability(Capability::HttpHost(
+                "cdn-update-service.example".to_owned(),
+            ))
+            .allow_all_flows();
+
+        verify_module(&module, &policy).unwrap();
+    }
 }

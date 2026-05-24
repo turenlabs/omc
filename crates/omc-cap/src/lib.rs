@@ -142,6 +142,7 @@ impl FlowRule {
 pub struct Policy {
     pub allowed_capabilities: Vec<Capability>,
     pub allowed_flows: Vec<FlowRule>,
+    allow_all_flows: bool,
 }
 
 impl Policy {
@@ -149,6 +150,7 @@ impl Policy {
         Self {
             allowed_capabilities: Vec::new(),
             allowed_flows: Vec::new(),
+            allow_all_flows: false,
         }
     }
 
@@ -162,16 +164,23 @@ impl Policy {
         self
     }
 
+    pub fn allow_all_flows(mut self) -> Self {
+        self.allow_all_flows = true;
+        self
+    }
+
     pub fn require(&self, requested: Capability) -> Result<(), Trap> {
-        if self
-            .allowed_capabilities
-            .iter()
-            .any(|allowed| allowed.matches(&requested))
-        {
+        if self.allows_capability(&requested) {
             Ok(())
         } else {
             Err(Trap::denied(format!("capability {requested} not granted")))
         }
+    }
+
+    fn allows_capability(&self, requested: &Capability) -> bool {
+        self.allowed_capabilities
+            .iter()
+            .any(|allowed| allowed.matches(requested))
     }
 
     pub fn require_cap_op(&self, op: &CapOp) -> Result<(), Trap> {
@@ -180,6 +189,9 @@ impl Policy {
 
     pub fn check_flows(&self, label: &Label, sink: Sink) -> Result<(), Trap> {
         if label.is_public() {
+            return Ok(());
+        }
+        if self.allow_all_flows {
             return Ok(());
         }
 
@@ -364,5 +376,53 @@ impl CapabilityBroker for MemoryBroker {
         Err(Trap::denied(
             "process spawning is not implemented by MemoryBroker",
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn flow_requires_explicit_flow_grant() {
+        let env_to_api = (
+            Label::Env("API_TOKEN".to_owned()),
+            Sink::Network("api.example.com".to_owned()),
+        );
+
+        assert!(Policy::pure()
+            .allow_capability(Capability::EnvRead("API_TOKEN".to_owned()))
+            .check_flows(&env_to_api.0, env_to_api.1.clone())
+            .is_err());
+
+        assert!(Policy::pure()
+            .allow_capability(Capability::HttpHost("api.example.com".to_owned()))
+            .check_flows(&env_to_api.0, env_to_api.1.clone())
+            .is_err());
+
+        assert!(Policy::pure()
+            .allow_capability(Capability::EnvRead("API_TOKEN".to_owned()))
+            .allow_capability(Capability::HttpHost("api.example.com".to_owned()))
+            .check_flows(&env_to_api.0, env_to_api.1.clone())
+            .is_err());
+
+        Policy::pure()
+            .allow_flow(
+                LabelMatcher::Env("API_TOKEN".to_owned()),
+                Sink::Network("api.example.com".to_owned()),
+            )
+            .check_flows(&env_to_api.0, env_to_api.1)
+            .unwrap();
+    }
+
+    #[test]
+    fn allow_all_flows_allows_sensitive_flows() {
+        Policy::pure()
+            .allow_all_flows()
+            .check_flows(
+                &Label::Env("NODE_INSPECTOR_IPC".to_owned()),
+                Sink::Network("www.w3.org".to_owned()),
+            )
+            .unwrap();
     }
 }
