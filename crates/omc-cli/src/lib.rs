@@ -1454,9 +1454,11 @@ fn parse_direct_compat_invocation<I>(
 where
     I: IntoIterator<Item = OsString>,
 {
-    let mut project_dir = env::var_os("OMC_PROJECT_DIR")
-        .map(PathBuf::from)
+    let env_project_dir = env::var_os("OMC_PROJECT_DIR").map(PathBuf::from);
+    let mut project_dir = env_project_dir
+        .clone()
         .unwrap_or_else(|| PathBuf::from("."));
+    let mut explicit_project_dir = env_project_dir.is_some();
     let mut compat_args = Vec::new();
     let mut args = args.into_iter();
     while let Some(arg) = args.next() {
@@ -1471,15 +1473,19 @@ where
                 )));
             };
             project_dir = PathBuf::from(os_arg_to_string(path)?);
+            explicit_project_dir = true;
         } else if let Some(path) = arg.strip_prefix("--omc-project-dir=") {
             project_dir = PathBuf::from(path);
+            explicit_project_dir = true;
         } else if let Some(path) = arg.strip_prefix("--project-dir=") {
             project_dir = PathBuf::from(path);
+            explicit_project_dir = true;
         } else if let Some(path) = direct_compat_uses_npm_prefix(mode)
             .then(|| arg.strip_prefix("--prefix="))
             .flatten()
         {
             project_dir = PathBuf::from(path);
+            explicit_project_dir = true;
         } else {
             compat_args.push(arg);
             compat_args.extend(
@@ -1489,10 +1495,61 @@ where
             break;
         }
     }
+    if !explicit_project_dir {
+        project_dir = discover_direct_compat_project_dir(mode, &project_dir);
+    }
     Ok(DirectCompatInvocation {
         project_dir,
         args: compat_args,
     })
+}
+
+fn discover_direct_compat_project_dir(mode: DirectCompatMode, start: &Path) -> PathBuf {
+    let start = absolute_project_dir(start);
+    discover_direct_compat_project_dir_from(mode, &start).unwrap_or(start)
+}
+
+fn discover_direct_compat_project_dir_from(
+    mode: DirectCompatMode,
+    start: &Path,
+) -> Option<PathBuf> {
+    for dir in start.ancestors() {
+        if direct_compat_project_markers(mode)
+            .iter()
+            .any(|marker| dir.join(marker).exists())
+        {
+            return Some(dir.to_path_buf());
+        }
+    }
+    None
+}
+
+fn direct_compat_project_markers(mode: DirectCompatMode) -> &'static [&'static str] {
+    match mode {
+        DirectCompatMode::Node | DirectCompatMode::Npm | DirectCompatMode::Npx => &[
+            "omc.toml",
+            "omc.lock",
+            "package.json",
+            "package-lock.json",
+            "npm-shrinkwrap.json",
+            "pnpm-lock.yaml",
+            "yarn.lock",
+            "node_modules",
+        ],
+        DirectCompatMode::Pip | DirectCompatMode::Python | DirectCompatMode::Twine => &[
+            "omc.toml",
+            "omc.lock",
+            "pyproject.toml",
+            "setup.cfg",
+            "setup.py",
+            "requirements.txt",
+            "Pipfile",
+            "poetry.lock",
+            "uv.lock",
+            "pylock.toml",
+            ".pypirc",
+        ],
+    }
 }
 
 fn direct_compat_uses_npm_prefix(mode: DirectCompatMode) -> bool {
@@ -31066,6 +31123,41 @@ verdict = "accepted"
 
     #[test]
     fn parses_direct_compat_project_dir_prefix() {
+        let npm_root = test_dir("direct-compat-npm-root");
+        let npm_workspace = npm_root.join("packages").join("lib");
+        let npm_nested = npm_workspace.join("src");
+        fs::create_dir_all(&npm_nested).unwrap();
+        fs::write(npm_root.join("package.json"), r#"{"name":"root"}"#).unwrap();
+        fs::write(
+            npm_workspace.join("package.json"),
+            r#"{"name":"@demo/lib"}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            discover_direct_compat_project_dir_from(DirectCompatMode::Npm, &npm_nested),
+            Some(npm_workspace.clone())
+        );
+
+        let pip_root = test_dir("direct-compat-pip-root");
+        let pip_nested = pip_root.join("src").join("demo");
+        fs::create_dir_all(&pip_nested).unwrap();
+        fs::write(
+            pip_root.join("pyproject.toml"),
+            "[project]\nname = \"demo\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+        assert_eq!(
+            discover_direct_compat_project_dir_from(DirectCompatMode::Pip, &pip_nested),
+            Some(pip_root.clone())
+        );
+        assert_eq!(
+            discover_direct_compat_project_dir_from(
+                DirectCompatMode::Python,
+                &test_dir("direct-compat-no-root")
+            ),
+            None
+        );
+
         assert_eq!(
             parse_direct_compat_invocation(
                 DirectCompatMode::Npm,

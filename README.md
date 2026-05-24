@@ -276,7 +276,7 @@ such as `node`, `npm install`, `npm test`, `npx eslint`, `pip install`,
 `pip3 install`, `pip freeze`, `python -m pip`, `python3 -m pip`,
 `twine check`, `twine upload`, and `python -m twine` without spelling `omc node`, `omc npm`,
 `omc pip`, `omc python`, or `omc twine`. They default to the
-current directory; use
+nearest ancestor with an OMC, npm, or Python project marker; use
 `OMC_PROJECT_DIR=/path/to/project`, `--project-dir PATH`, or
 `--omc-project-dir PATH` for an explicit project root. The Python shims run a
 host interpreter with OMC's isolated import path; set `OMC_HOST_PYTHON` if the
