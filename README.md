@@ -635,7 +635,7 @@ Supported now:
   package directories and registry specs; `npm diff` supports registry package
   specs, local package directories, and npm tarballs; common `npm exec` / `npx`
   flags such as `--yes`, `--no-install`, `--package`, `--cache`,
-  `--registry`, `--allow`, and `--allow-all-host` are parsed; direct `npx`
+  `--call` / `-c`, `--registry`, `--allow`, and `--allow-all-host` are parsed; direct `npx`
   package specs and explicit `--package` specs are installed into a temporary
   verified OMC project before dispatching to the requested executable; `--no-save`,
   `--save-exact`, `--save-bundle`, `--save-prefix`, `--package-lock-only`,

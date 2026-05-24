@@ -7287,8 +7287,8 @@ fn npm_help_text(topic: Option<&str>) -> String {
             "npm exec <command> [-- <args>...]",
             &[
                 "Run a project-local executable with OMC runtime paths.",
-                "--package installs verified packages into a temporary OMC project before running the command.",
-                "Aliases: x, npx. Common flags: --yes, --no-install, --package, --cache, --registry, --allow, --allow-all-host.",
+                "--package installs verified packages into a temporary OMC project before running the command; --call/-c runs a shell command with the same OMC runtime paths.",
+                "Aliases: x, npx. Common flags: --yes, --no-install, --package, --call, --cache, --registry, --allow, --allow-all-host.",
             ],
         ),
         Some("completion") => npm_command_help(
@@ -25314,6 +25314,7 @@ fn parse_npm_exec_args(
     let mut allow = Vec::new();
     let mut allow_flow = Vec::new();
     let mut allow_all_host = false;
+    let mut call = None;
     let mut filtered = Vec::new();
     let mut index = 0;
     while index < args.len() {
@@ -25332,6 +25333,16 @@ fn parse_npm_exec_args(
         ) {
         } else if arg == "--no-install" {
             no_install = true;
+        } else if matches!(arg.as_str(), "-c" | "--call") {
+            index += 1;
+            let Some(value) = args.get(index) else {
+                return Err(OmcRegistryError::UnsupportedSpec(format!(
+                    "{arg} needs a command"
+                )));
+            };
+            call = Some(value.clone());
+        } else if let Some(value) = arg.strip_prefix("--call=") {
+            call = Some(value.to_owned());
         } else if matches!(arg.as_str(), "-p" | "--package") {
             index += 1;
             let Some(package) = args.get(index) else {
@@ -25391,16 +25402,25 @@ fn parse_npm_exec_args(
         }
         index += 1;
     }
-    let (mut command, args) = split_first_position("npm exec", &filtered)?;
-    let prefer_project_bin = command_name == "npx"
-        && packages.is_empty()
-        && !no_install
-        && npm_exec_should_infer_package(&command);
-    if prefer_project_bin {
-        let package = command.clone();
-        command = npm_exec_inferred_bin_name(&package)?;
-        packages.push(package);
-    }
+    let (command, args, prefer_project_bin) = if let Some(call) = call {
+        if let Some(extra) = filtered.first() {
+            return Err(unsupported_compat_arg("npm exec", extra));
+        }
+        let (command, args) = npm_exec_call_command(call);
+        (command, args, false)
+    } else {
+        let (mut command, args) = split_first_position("npm exec", &filtered)?;
+        let prefer_project_bin = command_name == "npx"
+            && packages.is_empty()
+            && !no_install
+            && npm_exec_should_infer_package(&command);
+        if prefer_project_bin {
+            let package = command.clone();
+            command = npm_exec_inferred_bin_name(&package)?;
+            packages.push(package);
+        }
+        (command, args, prefer_project_bin)
+    };
     Ok(NpmExecAction {
         packages,
         command,
@@ -25412,6 +25432,16 @@ fn parse_npm_exec_args(
         allow_flow,
         allow_all_host,
     })
+}
+
+#[cfg(windows)]
+fn npm_exec_call_command(call: String) -> (String, Vec<String>) {
+    ("cmd".to_owned(), vec!["/C".to_owned(), call])
+}
+
+#[cfg(not(windows))]
+fn npm_exec_call_command(call: String) -> (String, Vec<String>) {
+    ("sh".to_owned(), vec!["-c".to_owned(), call])
 }
 
 fn npm_exec_equals_value_flag(arg: &str) -> bool {
@@ -32651,6 +32681,31 @@ verdict = "accepted"
                     packages: vec!["eslint".to_owned()],
                     command: "eslint".to_owned(),
                     args: vec![".".to_owned()],
+                    no_install: false,
+                    prefer_project_bin: false,
+                    npm_registry: None,
+                    allow: Vec::new(),
+                    allow_flow: Vec::new(),
+                    allow_all_host: false,
+                },
+            }
+        );
+        let (call_command, call_args) =
+            npm_exec_call_command("node -e \"console.log(1)\"".to_owned());
+        assert_eq!(
+            parse_npm_compat_action(&args(&[
+                "exec",
+                "--package",
+                "typescript",
+                "--call",
+                "node -e \"console.log(1)\"",
+            ]))
+            .unwrap(),
+            NpmCompatAction::Exec {
+                action: NpmExecAction {
+                    packages: vec!["typescript".to_owned()],
+                    command: call_command,
+                    args: call_args,
                     no_install: false,
                     prefer_project_bin: false,
                     npm_registry: None,
