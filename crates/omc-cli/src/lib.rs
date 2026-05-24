@@ -3776,7 +3776,10 @@ fn run_npm_compat_with_cwd(
         NpmCompatAction::Init { action } => print_npm_init(project_dir, action)?,
         NpmCompatAction::Create { action } => return run_npm_create(invocation_cwd, action),
         NpmCompatAction::PackageVersion { action } => print_npm_version(project_dir, action)?,
-        NpmCompatAction::Link { action } => return run_npm_link_compat(project_dir, action),
+        NpmCompatAction::Link { mut action } => {
+            absolutize_npm_link_action_paths(invocation_cwd, &mut action);
+            return run_npm_link_compat(project_dir, action);
+        }
         NpmCompatAction::Install {
             specs,
             archive_references,
@@ -3800,32 +3803,31 @@ fn run_npm_compat_with_cwd(
             all_workspaces,
             include_workspace_root,
         } => {
-            return run_npm_install_compat(
-                project_dir,
-                NpmInstallCompatRequest {
-                    specs,
-                    archive_references,
-                    local_paths,
-                    global,
-                    save,
-                    save_prefix,
-                    save_bundle,
-                    dependency_kind,
-                    omit_dev,
-                    omit_optional,
-                    omit_peer,
-                    package_lock,
-                    lock_only,
-                    dry_run,
-                    npm_registry,
-                    allow,
-                    allow_flow,
-                    allow_all_host,
-                    workspaces,
-                    all_workspaces,
-                    include_workspace_root,
-                },
-            )
+            let mut request = NpmInstallCompatRequest {
+                specs,
+                archive_references,
+                local_paths,
+                global,
+                save,
+                save_prefix,
+                save_bundle,
+                dependency_kind,
+                omit_dev,
+                omit_optional,
+                omit_peer,
+                package_lock,
+                lock_only,
+                dry_run,
+                npm_registry,
+                allow,
+                allow_flow,
+                allow_all_host,
+                workspaces,
+                all_workspaces,
+                include_workspace_root,
+            };
+            absolutize_npm_install_request_paths(invocation_cwd, &mut request);
+            return run_npm_install_compat(project_dir, request);
         }
         NpmCompatAction::InstallTest {
             command,
@@ -3867,32 +3869,31 @@ fn run_npm_compat_with_cwd(
                     allow_all_host,
                 )?
             } else {
-                run_npm_install_compat(
-                    project_dir,
-                    NpmInstallCompatRequest {
-                        specs,
-                        archive_references,
-                        local_paths,
-                        global: false,
-                        save,
-                        save_prefix,
-                        save_bundle,
-                        dependency_kind,
-                        omit_dev,
-                        omit_optional,
-                        omit_peer,
-                        package_lock,
-                        lock_only,
-                        dry_run,
-                        npm_registry,
-                        allow,
-                        allow_flow,
-                        allow_all_host,
-                        workspaces,
-                        all_workspaces,
-                        include_workspace_root,
-                    },
-                )?
+                let mut request = NpmInstallCompatRequest {
+                    specs,
+                    archive_references,
+                    local_paths,
+                    global: false,
+                    save,
+                    save_prefix,
+                    save_bundle,
+                    dependency_kind,
+                    omit_dev,
+                    omit_optional,
+                    omit_peer,
+                    package_lock,
+                    lock_only,
+                    dry_run,
+                    npm_registry,
+                    allow,
+                    allow_flow,
+                    allow_all_host,
+                    workspaces,
+                    all_workspaces,
+                    include_workspace_root,
+                };
+                absolutize_npm_install_request_paths(invocation_cwd, &mut request);
+                run_npm_install_compat(project_dir, request)?
             };
             if status != ExitCode::SUCCESS {
                 return Ok(status);
@@ -5491,6 +5492,28 @@ fn run_pip_compat_with_cwd(
     }
 
     Ok(ExitCode::SUCCESS)
+}
+
+fn absolutize_npm_install_request_paths(base_dir: &Path, request: &mut NpmInstallCompatRequest) {
+    request.archive_references = absolutize_npm_archive_references(
+        base_dir,
+        std::mem::take(&mut request.archive_references),
+    );
+    request.local_paths = absolutize_paths(base_dir, std::mem::take(&mut request.local_paths));
+}
+
+fn absolutize_npm_link_action_paths(base_dir: &Path, action: &mut NpmLinkAction) {
+    let NpmLinkAction::Install {
+        archive_references,
+        local_paths,
+        ..
+    } = action
+    else {
+        return;
+    };
+    *archive_references =
+        absolutize_npm_archive_references(base_dir, std::mem::take(archive_references));
+    *local_paths = absolutize_paths(base_dir, std::mem::take(local_paths));
 }
 
 fn absolutize_pip_lock_action_paths(base_dir: &Path, action: &mut PipLockAction) {
@@ -30008,6 +30031,95 @@ mod tests {
     }
 
     #[test]
+    fn direct_npm_install_resolves_local_paths_from_invocation_cwd() {
+        let project = test_dir("direct-npm-install-local-path-project");
+        let invocation_cwd = project.join("packages/app/src");
+        let local_package = invocation_cwd.join("vendor/local-util");
+        fs::create_dir_all(&local_package).unwrap();
+        fs::write(
+            project.join("package.json"),
+            r#"{"name":"root","version":"1.0.0"}"#,
+        )
+        .unwrap();
+        fs::write(
+            local_package.join("package.json"),
+            r#"{"name":"local-util","version":"1.2.3"}"#,
+        )
+        .unwrap();
+        fs::write(local_package.join("index.js"), "module.exports = 42;\n").unwrap();
+
+        let status = run_npm_compat_with_cwd(
+            &project,
+            &args(&["install", "--package-lock=false", "./vendor/local-util"]),
+            &invocation_cwd,
+        )
+        .unwrap();
+
+        assert_eq!(status, ExitCode::SUCCESS);
+        assert_eq!(
+            fs::read_to_string(project.join("node_modules/local-util/index.js")).unwrap(),
+            "module.exports = 42;\n"
+        );
+        let package_json = read_npm_pkg_json(&project.join("package.json")).unwrap();
+        assert_eq!(
+            package_json["dependencies"]["local-util"],
+            format!(
+                "file:{}",
+                fs::canonicalize(&local_package).unwrap().display()
+            )
+        );
+        let manifest = read_manifest(project.join("omc.toml")).unwrap();
+        let saved_local_path = invocation_cwd
+            .join("./vendor/local-util")
+            .to_string_lossy()
+            .into_owned();
+        assert_eq!(manifest.npm_local_paths, vec![saved_local_path]);
+
+        let _ = fs::remove_dir_all(project);
+    }
+
+    #[test]
+    fn direct_npm_link_resolves_local_paths_from_invocation_cwd() {
+        let project = test_dir("direct-npm-link-local-path-project");
+        let invocation_cwd = project.join("packages/app/src");
+        let local_package = invocation_cwd.join("vendor/local-link");
+        fs::create_dir_all(&local_package).unwrap();
+        fs::write(
+            project.join("package.json"),
+            r#"{"name":"root","version":"1.0.0"}"#,
+        )
+        .unwrap();
+        fs::write(
+            local_package.join("package.json"),
+            r#"{"name":"local-link","version":"1.2.3"}"#,
+        )
+        .unwrap();
+        fs::write(local_package.join("index.js"), "module.exports = 7;\n").unwrap();
+
+        let link_home = project.join("links");
+        with_env_var("OMC_NPM_LINK_HOME", &link_home, || {
+            let status = run_npm_compat_with_cwd(
+                &project,
+                &args(&["link", "./vendor/local-link"]),
+                &invocation_cwd,
+            )
+            .unwrap();
+            assert_eq!(status, ExitCode::SUCCESS);
+        });
+
+        assert_eq!(
+            fs::read_to_string(project.join("node_modules/local-link/index.js")).unwrap(),
+            "module.exports = 7;\n"
+        );
+        assert_eq!(
+            fs::read_to_string(link_home.join("local-link")).unwrap(),
+            format!("{}\n", fs::canonicalize(&local_package).unwrap().display())
+        );
+
+        let _ = fs::remove_dir_all(project);
+    }
+
+    #[test]
     fn npm_global_install_uses_prefix_project_and_bins() {
         let project = test_dir("npm-global-install-project");
         let prefix = test_dir("npm-global-prefix");
@@ -30740,7 +30852,7 @@ mod tests {
             r#"{"name":"app","version":"1.0.0"}"#,
         )
         .unwrap();
-        write_npm_fixture_tarball(&workspace, "prod-pkg", "1.0.0");
+        write_npm_fixture_tarball(&project, "prod-pkg", "1.0.0");
 
         let status = run_npm_compat(
             &project,
