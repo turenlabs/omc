@@ -1131,6 +1131,14 @@ struct PipDebugAction {
     abis: Vec<String>,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct PipCompatibilityTarget {
+    platforms: Vec<String>,
+    python_version: Option<String>,
+    implementation: Option<String>,
+    abis: Vec<String>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PipHashAlgorithm {
     Sha256,
@@ -1168,6 +1176,7 @@ struct PipInstallAction {
     require_hashes: bool,
     no_deps: bool,
     allow_prereleases: bool,
+    compatibility: PipCompatibilityTarget,
     target: Option<PathBuf>,
     user: bool,
     vcs_requirements: Vec<PythonVcsRequirement>,
@@ -1196,6 +1205,7 @@ struct PipDownloadAction {
     require_hashes: bool,
     no_deps: bool,
     allow_prereleases: bool,
+    compatibility: PipCompatibilityTarget,
     destination: PathBuf,
     allow: Vec<String>,
     allow_all_host: bool,
@@ -1649,6 +1659,13 @@ fn apply_dependency_omit_flags(
     options.include_peer_dependencies = !omit_peer;
 }
 
+fn apply_pip_compatibility_target(options: &mut LinkOptions, target: PipCompatibilityTarget) {
+    options.pypi_target_platforms = target.platforms;
+    options.pypi_target_python = target.python_version;
+    options.pypi_target_implementation = target.implementation;
+    options.pypi_target_abis = target.abis;
+}
+
 fn print_install_report(install: &InstallReport) {
     println!(
         "installed npm={} pypi={} npm_bins={} python_scripts={} node_modules={} python_site_packages={}",
@@ -1712,6 +1729,7 @@ fn run_pip_lock(project_dir: &Path, action: PipLockAction) -> Result<ExitCode, O
         require_hashes,
         no_deps,
         allow_prereleases,
+        compatibility,
         target,
         user,
         vcs_requirements,
@@ -1758,6 +1776,7 @@ fn run_pip_lock(project_dir: &Path, action: PipLockAction) -> Result<ExitCode, O
     options.pypi_allow_prereleases = allow_prereleases;
     options.pypi_binary_all = binary_all;
     options.pypi_binary_packages = binary_packages;
+    apply_pip_compatibility_target(&mut options, compatibility);
     options.python_vcs_requirements = vcs_requirements;
 
     let mut resolved_specs = parse_package_specs(&specs, Some(Ecosystem::Pypi))?;
@@ -3629,6 +3648,7 @@ fn run_pip_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
                 require_hashes,
                 no_deps,
                 allow_prereleases,
+                compatibility,
                 target,
                 user: _,
                 vcs_requirements,
@@ -3656,6 +3676,7 @@ fn run_pip_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
                 options.pypi_allow_prereleases = allow_prereleases;
                 options.pypi_binary_all = binary_all;
                 options.pypi_binary_packages = binary_packages;
+                apply_pip_compatibility_target(&mut options, compatibility);
                 options.python_target_dir = target.map(|path| absolutize_path(project_dir, path));
                 options.python_vcs_requirements = vcs_requirements;
                 let install = install_project(&options)?;
@@ -3681,6 +3702,7 @@ fn run_pip_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
                 options.pypi_allow_prereleases = allow_prereleases;
                 options.pypi_binary_all = binary_all;
                 options.pypi_binary_packages = binary_packages;
+                apply_pip_compatibility_target(&mut options, compatibility);
                 options.python_target_dir = target.map(|path| absolutize_path(project_dir, path));
                 options.python_vcs_requirements = vcs_requirements;
                 let mut specs = parse_package_specs(&specs, Some(Ecosystem::Pypi))?;
@@ -4398,6 +4420,7 @@ fn run_pip_install_dry_run(
         require_hashes,
         no_deps,
         allow_prereleases,
+        compatibility,
         target,
         user,
         vcs_requirements,
@@ -4429,6 +4452,7 @@ fn run_pip_install_dry_run(
     options.pypi_allow_prereleases = allow_prereleases;
     options.pypi_binary_all = binary_all;
     options.pypi_binary_packages = binary_packages;
+    apply_pip_compatibility_target(&mut options, compatibility);
     options.python_local_requirements =
         absolutize_python_local_requirements(project_dir, local_paths);
     options.project_extras = groups.into_iter().collect();
@@ -4588,6 +4612,7 @@ fn run_pip_install_target(
         require_hashes,
         no_deps,
         allow_prereleases,
+        compatibility,
         target,
         user: _,
         vcs_requirements,
@@ -4619,6 +4644,7 @@ fn run_pip_install_target(
     options.pypi_allow_prereleases = allow_prereleases;
     options.pypi_binary_all = binary_all;
     options.pypi_binary_packages = binary_packages;
+    apply_pip_compatibility_target(&mut options, compatibility);
     options.python_target_dir = Some(absolutize_path(project_dir, target));
     options.python_vcs_requirements = vcs_requirements;
 
@@ -4687,6 +4713,7 @@ fn run_pip_install_user(
         require_hashes,
         no_deps,
         allow_prereleases,
+        compatibility,
         target: _,
         user: _,
         vcs_requirements,
@@ -4715,6 +4742,7 @@ fn run_pip_install_user(
     options.pypi_allow_prereleases = allow_prereleases;
     options.pypi_binary_all = binary_all;
     options.pypi_binary_packages = binary_packages;
+    apply_pip_compatibility_target(&mut options, compatibility);
     options.python_target_dir = Some(user_paths.site_packages.clone());
     options.python_vcs_requirements = vcs_requirements;
 
@@ -9487,6 +9515,7 @@ fn download_pip_packages(
         require_hashes,
         no_deps,
         allow_prereleases,
+        compatibility,
         destination,
         allow,
         allow_all_host,
@@ -9511,6 +9540,7 @@ fn download_pip_packages(
     options.pypi_allow_prereleases = allow_prereleases;
     options.pypi_binary_all = binary_all;
     options.pypi_binary_packages = binary_packages;
+    apply_pip_compatibility_target(&mut options, compatibility);
 
     let mut resolved_specs = parse_package_specs(&specs, Some(Ecosystem::Pypi))?;
     resolved_specs.extend(parse_pip_archive_references(
@@ -22695,6 +22725,7 @@ fn parse_pip_install_args(args: &[String]) -> Result<PipCompatAction, OmcRegistr
     let mut require_hashes = false;
     let mut no_deps = false;
     let mut allow_prereleases = false;
+    let mut compatibility = PipCompatibilityTarget::default();
     let mut target = None;
     let mut user = false;
     let mut groups = Vec::new();
@@ -22785,6 +22816,26 @@ fn parse_pip_install_args(args: &[String]) -> Result<PipCompatAction, OmcRegistr
             no_deps = true;
         } else if arg == "--pre" {
             allow_prereleases = true;
+        } else if arg == "--platform" {
+            compatibility
+                .platforms
+                .push(pip_target_flag_value(args, &mut index, arg)?);
+        } else if let Some(value) = arg.strip_prefix("--platform=") {
+            compatibility.platforms.push(value.to_owned());
+        } else if arg == "--python-version" {
+            compatibility.python_version = Some(pip_target_flag_value(args, &mut index, arg)?);
+        } else if let Some(value) = arg.strip_prefix("--python-version=") {
+            compatibility.python_version = Some(value.to_owned());
+        } else if arg == "--implementation" {
+            compatibility.implementation = Some(pip_target_flag_value(args, &mut index, arg)?);
+        } else if let Some(value) = arg.strip_prefix("--implementation=") {
+            compatibility.implementation = Some(value.to_owned());
+        } else if arg == "--abi" {
+            compatibility
+                .abis
+                .push(pip_target_flag_value(args, &mut index, arg)?);
+        } else if let Some(value) = arg.strip_prefix("--abi=") {
+            compatibility.abis.push(value.to_owned());
         } else if arg == "-t" || arg == "--target" {
             index += 1;
             let Some(path) = args.get(index) else {
@@ -22937,6 +22988,7 @@ fn parse_pip_install_args(args: &[String]) -> Result<PipCompatAction, OmcRegistr
         require_hashes,
         no_deps,
         allow_prereleases,
+        compatibility,
         target,
         user,
         vcs_requirements,
@@ -23013,6 +23065,7 @@ fn parse_pip_artifact_args(
     let mut require_hashes = false;
     let mut no_deps = false;
     let mut allow_prereleases = false;
+    let mut compatibility = PipCompatibilityTarget::default();
     let mut destination = PathBuf::from(".");
     let mut archive_references = Vec::new();
     let mut filtered = Vec::new();
@@ -23111,6 +23164,26 @@ fn parse_pip_artifact_args(
             no_deps = true;
         } else if arg == "--pre" {
             allow_prereleases = true;
+        } else if arg == "--platform" {
+            compatibility
+                .platforms
+                .push(pip_target_flag_value(args, &mut index, arg)?);
+        } else if let Some(value) = arg.strip_prefix("--platform=") {
+            compatibility.platforms.push(value.to_owned());
+        } else if arg == "--python-version" {
+            compatibility.python_version = Some(pip_target_flag_value(args, &mut index, arg)?);
+        } else if let Some(value) = arg.strip_prefix("--python-version=") {
+            compatibility.python_version = Some(value.to_owned());
+        } else if arg == "--implementation" {
+            compatibility.implementation = Some(pip_target_flag_value(args, &mut index, arg)?);
+        } else if let Some(value) = arg.strip_prefix("--implementation=") {
+            compatibility.implementation = Some(value.to_owned());
+        } else if arg == "--abi" {
+            compatibility
+                .abis
+                .push(pip_target_flag_value(args, &mut index, arg)?);
+        } else if let Some(value) = arg.strip_prefix("--abi=") {
+            compatibility.abis.push(value.to_owned());
         } else if arg == "--prefer-binary" {
         } else if arg == "--only-binary" || arg == "--no-binary" {
             index += 1;
@@ -23217,6 +23290,7 @@ fn parse_pip_artifact_args(
         require_hashes,
         no_deps,
         allow_prereleases,
+        compatibility,
         destination,
         allow,
         allow_all_host,
@@ -23262,6 +23336,17 @@ fn pip_ignored_install_equals_flag(arg: &str) -> bool {
     ]
     .iter()
     .any(|prefix| arg.starts_with(prefix))
+}
+
+fn pip_target_flag_value(
+    args: &[String],
+    index: &mut usize,
+    flag: &str,
+) -> Result<String, OmcRegistryError> {
+    *index += 1;
+    args.get(*index)
+        .cloned()
+        .ok_or_else(|| OmcRegistryError::UnsupportedSpec(format!("{flag} needs a value")))
 }
 
 enum PipProjectGroupArg {
@@ -23343,10 +23428,6 @@ fn pip_ignored_download_value_flag(arg: &str) -> bool {
             | "--proxy"
             | "--cache-dir"
             | "--log"
-            | "--platform"
-            | "--python-version"
-            | "--implementation"
-            | "--abi"
     )
 }
 
@@ -23362,10 +23443,6 @@ fn pip_ignored_download_equals_flag(arg: &str) -> bool {
         "--proxy=",
         "--cache-dir=",
         "--log=",
-        "--platform=",
-        "--python-version=",
-        "--implementation=",
-        "--abi=",
     ]
     .iter()
     .any(|prefix| arg.starts_with(prefix))
@@ -28585,6 +28662,12 @@ verdict = "accepted"
             "--pre",
             "--require-hashes",
             "--no-deps",
+            "--platform",
+            "macosx_14_0_arm64",
+            "--python-version=3.12",
+            "--implementation",
+            "cp",
+            "--abi=cp312",
             "--target",
             "vendor",
             "--no-binary=:all:",
@@ -28652,6 +28735,12 @@ verdict = "accepted"
                 require_hashes: true,
                 no_deps: true,
                 allow_prereleases: true,
+                compatibility: PipCompatibilityTarget {
+                    platforms: vec!["macosx_14_0_arm64".to_owned()],
+                    python_version: Some("3.12".to_owned()),
+                    implementation: Some("cp".to_owned()),
+                    abis: vec!["cp312".to_owned()],
+                },
                 target: Some(PathBuf::from("vendor")),
                 user: false,
                 vcs_requirements: Vec::new(),
@@ -28702,6 +28791,12 @@ verdict = "accepted"
             "--require-hashes",
             "--no-deps",
             "--only-binary=:all:",
+            "--platform",
+            "manylinux_2_28_aarch64",
+            "--python-version=3.11",
+            "--implementation",
+            "cp",
+            "--abi=cp311",
             "--trusted-host",
             "mirror.example",
             "--allow",
@@ -28726,6 +28821,12 @@ verdict = "accepted"
                 require_hashes: true,
                 no_deps: true,
                 allow_prereleases: false,
+                compatibility: PipCompatibilityTarget {
+                    platforms: vec!["manylinux_2_28_aarch64".to_owned()],
+                    python_version: Some("3.11".to_owned()),
+                    implementation: Some("cp".to_owned()),
+                    abis: vec!["cp311".to_owned()],
+                },
                 destination: PathBuf::from("wheelhouse"),
                 allow: vec!["http:files.example".to_owned()],
                 allow_all_host: false,
@@ -28776,6 +28877,7 @@ verdict = "accepted"
                 require_hashes: true,
                 no_deps: true,
                 allow_prereleases: false,
+                compatibility: PipCompatibilityTarget::default(),
                 destination: PathBuf::from("wheelhouse"),
                 allow: vec!["http:files.example".to_owned()],
                 allow_all_host: false,
@@ -28804,6 +28906,7 @@ verdict = "accepted"
                 require_hashes: false,
                 no_deps: false,
                 allow_prereleases: false,
+                compatibility: PipCompatibilityTarget::default(),
                 destination: PathBuf::from("wheelhouse"),
                 allow: Vec::new(),
                 allow_all_host: false,
@@ -28849,6 +28952,7 @@ verdict = "accepted"
                 require_hashes: false,
                 no_deps: false,
                 allow_prereleases: false,
+                compatibility: PipCompatibilityTarget::default(),
                 target: None,
                 user: false,
                 vcs_requirements: Vec::new(),
@@ -28884,6 +28988,7 @@ verdict = "accepted"
                 require_hashes: false,
                 no_deps: false,
                 allow_prereleases: false,
+                compatibility: PipCompatibilityTarget::default(),
                 target: None,
                 user: false,
                 vcs_requirements: vec![
@@ -28945,6 +29050,7 @@ version = "0.1.0"
                 require_hashes: false,
                 no_deps: false,
                 allow_prereleases: false,
+                compatibility: PipCompatibilityTarget::default(),
                 target: None,
                 user: false,
                 vcs_requirements: Vec::new(),
@@ -29478,6 +29584,7 @@ verdict = "accepted"
                 require_hashes: false,
                 no_deps: false,
                 allow_prereleases: false,
+                compatibility: PipCompatibilityTarget::default(),
                 target: None,
                 user: false,
                 vcs_requirements: Vec::new(),

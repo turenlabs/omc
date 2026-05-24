@@ -635,6 +635,10 @@ pub struct LinkOptions {
     pub pypi_require_hashes: bool,
     pub pypi_include_dependencies: bool,
     pub pypi_allow_prereleases: bool,
+    pub pypi_target_python: Option<String>,
+    pub pypi_target_implementation: Option<String>,
+    pub pypi_target_platforms: Vec<String>,
+    pub pypi_target_abis: Vec<String>,
     pub python_target_dir: Option<PathBuf>,
     pub npm_local_paths: Vec<PathBuf>,
     pub python_local_paths: Vec<PathBuf>,
@@ -672,6 +676,10 @@ impl LinkOptions {
             pypi_require_hashes: false,
             pypi_include_dependencies: true,
             pypi_allow_prereleases: false,
+            pypi_target_python: None,
+            pypi_target_implementation: None,
+            pypi_target_platforms: Vec::new(),
+            pypi_target_abis: Vec::new(),
             python_target_dir: None,
             npm_local_paths: Vec::new(),
             python_local_paths: Vec::new(),
@@ -2921,10 +2929,16 @@ pub fn read_pypi_available_versions(
     let spec = PackageSpec::parse(&format!("pypi:{package}"))?;
     let client = Client::builder().user_agent("omc-prototype/0.1").build()?;
     let target_python = current_python_version();
+    let wheel_compatibility = current_python_wheel_compatibility();
     let mut versions = BTreeSet::new();
 
-    for candidate in pypi_find_link_candidates(&client, &spec, &options, target_python.as_deref())?
-    {
+    for candidate in pypi_find_link_candidates(
+        &client,
+        &spec,
+        &options,
+        target_python.as_deref(),
+        wheel_compatibility.as_ref(),
+    )? {
         versions.insert(candidate.version);
     }
 
@@ -2940,6 +2954,7 @@ pub fn read_pypi_available_versions(
             &spec,
             &indexes,
             target_python.as_deref(),
+            wheel_compatibility.as_ref(),
         )? {
             versions.insert(candidate.version);
         }
@@ -12066,12 +12081,18 @@ fn resolve_pypi(
     options: &LinkOptions,
 ) -> Result<ResolvedPackage> {
     if spec.direct_url.is_some() {
-        return resolve_pypi_direct_wheel(spec);
+        return resolve_pypi_direct_wheel(spec, options);
     }
-    let target_python = current_python_version();
+    let target_python = pypi_target_python(options);
+    let wheel_compatibility = pypi_wheel_compatibility(options);
     let binary_mode = pypi_binary_mode_for_spec(options, spec);
-    let mut candidates =
-        pypi_find_link_candidates(client, spec, options, target_python.as_deref())?;
+    let mut candidates = pypi_find_link_candidates(
+        client,
+        spec,
+        options,
+        target_python.as_deref(),
+        wheel_compatibility.as_ref(),
+    )?;
     let simple_indexes = pypi_simple_index_urls(options);
     if !candidates.is_empty() || options.pypi_no_index {
         if !options.pypi_no_index {
@@ -12085,6 +12106,7 @@ fn resolve_pypi(
                 spec,
                 &indexes,
                 target_python.as_deref(),
+                wheel_compatibility.as_ref(),
             )?);
         }
         return pypi_candidate_to_resolved(spec, options, candidates);
@@ -12095,6 +12117,7 @@ fn resolve_pypi(
             spec,
             &simple_indexes,
             target_python.as_deref(),
+            wheel_compatibility.as_ref(),
         )?;
         return pypi_candidate_to_resolved(spec, options, candidates);
     }
@@ -12115,6 +12138,7 @@ fn resolve_pypi(
                 requirement,
                 &root,
                 target_python.as_deref(),
+                wheel_compatibility.as_ref(),
                 binary_mode,
                 options.pypi_allow_prereleases,
             )?
@@ -12131,6 +12155,7 @@ fn resolve_pypi(
                 "*",
                 &root,
                 target_python.as_deref(),
+                wheel_compatibility.as_ref(),
                 binary_mode,
                 options.pypi_allow_prereleases,
             )?
@@ -12142,8 +12167,13 @@ fn resolve_pypi(
         return Err(OmcRegistryError::PackageNotFound(spec.requested()));
     }
     let doc = response.error_for_status()?.json::<PypiResponse>()?;
-    let file = choose_pypi_file(&doc, target_python.as_deref(), binary_mode)
-        .ok_or_else(|| OmcRegistryError::MissingCompatibleWheel(spec.requested()))?;
+    let file = choose_pypi_file(
+        &doc,
+        target_python.as_deref(),
+        wheel_compatibility.as_ref(),
+        binary_mode,
+    )
+    .ok_or_else(|| OmcRegistryError::MissingCompatibleWheel(spec.requested()))?;
     let source_url = file.url.clone();
     let filename = file.filename.clone();
     let expected_sha256 = file.digests.sha256.clone();
@@ -12201,6 +12231,7 @@ fn pypi_simple_index_candidates_from_indexes(
     spec: &PackageSpec,
     indexes: &[String],
     target_python: Option<&str>,
+    wheel_compatibility: Option<&PythonWheelCompatibility>,
 ) -> Result<Vec<PypiSimpleCandidate>> {
     let mut candidates = Vec::new();
     for index in indexes {
@@ -12216,6 +12247,7 @@ fn pypi_simple_index_candidates_from_indexes(
             &html,
             &spec.name,
             target_python,
+            wheel_compatibility,
         ));
     }
     Ok(candidates)
@@ -12316,6 +12348,7 @@ fn pypi_find_link_candidates(
     spec: &PackageSpec,
     options: &LinkOptions,
     target_python: Option<&str>,
+    wheel_compatibility: Option<&PythonWheelCompatibility>,
 ) -> Result<Vec<PypiSimpleCandidate>> {
     let mut candidates = Vec::new();
     for source in &options.pypi_find_links {
@@ -12324,6 +12357,7 @@ fn pypi_find_link_candidates(
             source,
             &spec.name,
             target_python,
+            wheel_compatibility,
         )?);
     }
     Ok(candidates)
@@ -12334,20 +12368,32 @@ fn pypi_find_link_source_candidates(
     source: &str,
     package: &str,
     target_python: Option<&str>,
+    wheel_compatibility: Option<&PythonWheelCompatibility>,
 ) -> Result<Vec<PypiSimpleCandidate>> {
     if let Ok(url) = reqwest::Url::parse(source) {
         return match url.scheme() {
-            "http" | "https" => pypi_http_find_link_candidates(client, url, package, target_python),
+            "http" | "https" => pypi_http_find_link_candidates(
+                client,
+                url,
+                package,
+                target_python,
+                wheel_compatibility,
+            ),
             "file" => {
                 let Ok(path) = url.to_file_path() else {
                     return Ok(Vec::new());
                 };
-                pypi_local_find_link_candidates(&path, package, target_python)
+                pypi_local_find_link_candidates(&path, package, target_python, wheel_compatibility)
             }
             _ => Ok(Vec::new()),
         };
     }
-    pypi_local_find_link_candidates(Path::new(source), package, target_python)
+    pypi_local_find_link_candidates(
+        Path::new(source),
+        package,
+        target_python,
+        wheel_compatibility,
+    )
 }
 
 fn pypi_http_find_link_candidates(
@@ -12355,6 +12401,7 @@ fn pypi_http_find_link_candidates(
     url: reqwest::Url,
     package: &str,
     target_python: Option<&str>,
+    wheel_compatibility: Option<&PythonWheelCompatibility>,
 ) -> Result<Vec<PypiSimpleCandidate>> {
     if url
         .path_segments()
@@ -12362,11 +12409,16 @@ fn pypi_http_find_link_candidates(
         .map(|filename| filename.ends_with(".whl") || is_python_sdist_filename(filename))
         .unwrap_or(false)
     {
-        return Ok(
-            pypi_candidate_from_url(url, package, None, target_python, None)
-                .into_iter()
-                .collect(),
-        );
+        return Ok(pypi_candidate_from_url(
+            url,
+            package,
+            None,
+            target_python,
+            wheel_compatibility,
+            None,
+        )
+        .into_iter()
+        .collect());
     }
 
     let response = client.get(url).send()?;
@@ -12380,6 +12432,7 @@ fn pypi_http_find_link_candidates(
         &html,
         package,
         target_python,
+        wheel_compatibility,
     ))
 }
 
@@ -12387,6 +12440,7 @@ fn pypi_local_find_link_candidates(
     source: &Path,
     package: &str,
     target_python: Option<&str>,
+    wheel_compatibility: Option<&PythonWheelCompatibility>,
 ) -> Result<Vec<PypiSimpleCandidate>> {
     if source.is_dir() {
         let mut candidates = Vec::new();
@@ -12397,6 +12451,7 @@ fn pypi_local_find_link_candidates(
                     &path,
                     package,
                     target_python,
+                    wheel_compatibility,
                 )?);
             }
         }
@@ -12406,9 +12461,14 @@ fn pypi_local_find_link_candidates(
         return Ok(Vec::new());
     }
     if source.extension().and_then(|ext| ext.to_str()) == Some("whl") {
-        return Ok(pypi_local_archive_candidate(source, package, target_python)
-            .into_iter()
-            .collect());
+        return Ok(pypi_local_archive_candidate(
+            source,
+            package,
+            target_python,
+            wheel_compatibility,
+        )
+        .into_iter()
+        .collect());
     }
     if source
         .file_name()
@@ -12416,16 +12476,27 @@ fn pypi_local_find_link_candidates(
         .map(is_python_sdist_filename)
         .unwrap_or(false)
     {
-        return Ok(pypi_local_archive_candidate(source, package, target_python)
-            .into_iter()
-            .collect());
+        return Ok(pypi_local_archive_candidate(
+            source,
+            package,
+            target_python,
+            wheel_compatibility,
+        )
+        .into_iter()
+        .collect());
     }
 
     let html = fs::read_to_string(source)?;
     let Ok(base_url) = reqwest::Url::from_file_path(source) else {
         return Ok(Vec::new());
     };
-    let mut candidates = pypi_simple_index_candidates(&base_url, &html, package, target_python);
+    let mut candidates = pypi_simple_index_candidates(
+        &base_url,
+        &html,
+        package,
+        target_python,
+        wheel_compatibility,
+    );
     for candidate in &mut candidates {
         if candidate.local_path.is_none() {
             if let Ok(url) = reqwest::Url::parse(&candidate.url) {
@@ -12442,9 +12513,17 @@ fn pypi_local_archive_candidate(
     path: &Path,
     package: &str,
     target_python: Option<&str>,
+    wheel_compatibility: Option<&PythonWheelCompatibility>,
 ) -> Option<PypiSimpleCandidate> {
     let url = reqwest::Url::from_file_path(path).ok()?;
-    pypi_candidate_from_url(url, package, None, target_python, Some(path.to_path_buf()))
+    pypi_candidate_from_url(
+        url,
+        package,
+        None,
+        target_python,
+        wheel_compatibility,
+        Some(path.to_path_buf()),
+    )
 }
 
 fn pypi_simple_index_candidates(
@@ -12452,6 +12531,7 @@ fn pypi_simple_index_candidates(
     html: &str,
     package: &str,
     target_python: Option<&str>,
+    wheel_compatibility: Option<&PythonWheelCompatibility>,
 ) -> Vec<PypiSimpleCandidate> {
     simple_index_links(base_url, html)
         .into_iter()
@@ -12461,6 +12541,7 @@ fn pypi_simple_index_candidates(
                 package,
                 link.requires_python.as_deref(),
                 target_python,
+                wheel_compatibility,
                 None,
             )
         })
@@ -12472,6 +12553,7 @@ fn pypi_candidate_from_url(
     package: &str,
     requires_python: Option<&str>,
     target_python: Option<&str>,
+    wheel_compatibility: Option<&PythonWheelCompatibility>,
     local_path: Option<PathBuf>,
 ) -> Option<PypiSimpleCandidate> {
     let filename = url
@@ -12500,13 +12582,18 @@ fn pypi_candidate_from_url(
     {
         return None;
     }
-    if !sdist
-        && !current_python_wheel_compatibility()
-            .as_ref()
-            .map(|compatibility| wheel_tag_compatible(&filename, compatibility))
-            .unwrap_or(true)
-    {
-        return None;
+    if !sdist {
+        let compatible = if let Some(compatibility) = wheel_compatibility {
+            wheel_tag_compatible(&filename, compatibility)
+        } else {
+            current_python_wheel_compatibility()
+                .as_ref()
+                .map(|compatibility| wheel_tag_compatible(&filename, compatibility))
+                .unwrap_or(true)
+        };
+        if !compatible {
+            return None;
+        }
     }
     let sha256 = url.fragment().and_then(simple_index_sha256_fragment);
     url.set_fragment(None);
@@ -12614,7 +12701,7 @@ fn simple_index_sha256_fragment(fragment: &str) -> Option<String> {
         .next()
 }
 
-fn resolve_pypi_direct_wheel(spec: &PackageSpec) -> Result<ResolvedPackage> {
+fn resolve_pypi_direct_wheel(spec: &PackageSpec, options: &LinkOptions) -> Result<ResolvedPackage> {
     let source_url = spec
         .direct_url
         .clone()
@@ -12656,13 +12743,14 @@ fn resolve_pypi_direct_wheel(spec: &PackageSpec) -> Result<ResolvedPackage> {
             spec.name
         )));
     }
-    if !pypi_sdist
-        && !current_python_wheel_compatibility()
+    if !pypi_sdist {
+        let compatible = pypi_wheel_compatibility(options)
             .as_ref()
             .map(|compatibility| wheel_tag_compatible(&filename, compatibility))
-            .unwrap_or(true)
-    {
-        return Err(OmcRegistryError::MissingCompatibleWheel(spec.requested()));
+            .unwrap_or(true);
+        if !compatible {
+            return Err(OmcRegistryError::MissingCompatibleWheel(spec.requested()));
+        }
     }
 
     Ok(ResolvedPackage {
@@ -12745,25 +12833,45 @@ fn constrained_requirement(
 fn choose_pypi_file<'a>(
     doc: &'a PypiResponse,
     target_python: Option<&str>,
+    wheel_compatibility: Option<&PythonWheelCompatibility>,
     binary_mode: Option<PypiBinaryMode>,
 ) -> Option<&'a PypiFile> {
     if binary_mode == Some(PypiBinaryMode::Source) {
         return doc
             .urls
             .iter()
-            .filter(|file| pypi_file_compatible_for_binary_mode(file, target_python, binary_mode))
+            .filter(|file| {
+                pypi_file_compatible_for_binary_mode(
+                    file,
+                    target_python,
+                    wheel_compatibility,
+                    binary_mode,
+                )
+            })
             .find(|file| file.packagetype == "sdist" && is_python_sdist_filename(&file.filename));
     }
 
     doc.urls
         .iter()
-        .filter(|file| pypi_file_compatible_for_binary_mode(file, target_python, binary_mode))
+        .filter(|file| {
+            pypi_file_compatible_for_binary_mode(
+                file,
+                target_python,
+                wheel_compatibility,
+                binary_mode,
+            )
+        })
         .find(|file| file.packagetype == "bdist_wheel" && file.filename.contains("py3-none-any"))
         .or_else(|| {
             doc.urls
                 .iter()
                 .filter(|file| {
-                    pypi_file_compatible_for_binary_mode(file, target_python, binary_mode)
+                    pypi_file_compatible_for_binary_mode(
+                        file,
+                        target_python,
+                        wheel_compatibility,
+                        binary_mode,
+                    )
                 })
                 .find(|file| file.packagetype == "bdist_wheel")
         })
@@ -12774,7 +12882,12 @@ fn choose_pypi_file<'a>(
             doc.urls
                 .iter()
                 .filter(|file| {
-                    pypi_file_compatible_for_binary_mode(file, target_python, binary_mode)
+                    pypi_file_compatible_for_binary_mode(
+                        file,
+                        target_python,
+                        wheel_compatibility,
+                        binary_mode,
+                    )
                 })
                 .find(|file| {
                     file.packagetype == "sdist" && is_python_sdist_filename(&file.filename)
@@ -12785,9 +12898,10 @@ fn choose_pypi_file<'a>(
 fn pypi_file_compatible_for_binary_mode(
     file: &PypiFile,
     target_python: Option<&str>,
+    wheel_compatibility: Option<&PythonWheelCompatibility>,
     binary_mode: Option<PypiBinaryMode>,
 ) -> bool {
-    pypi_file_python_compatible(file, target_python)
+    pypi_file_python_compatible(file, target_python, wheel_compatibility)
         && pypi_file_matches_binary_mode(file, binary_mode)
 }
 
@@ -12925,6 +13039,7 @@ fn choose_pypi_version(
     requirement: &str,
     root: &PypiRoot,
     target_python: Option<&str>,
+    wheel_compatibility: Option<&PythonWheelCompatibility>,
     binary_mode: Option<PypiBinaryMode>,
     allow_prereleases: bool,
 ) -> Result<String> {
@@ -12932,9 +13047,14 @@ fn choose_pypi_version(
         .releases
         .iter()
         .filter(|(_, files)| {
-            files
-                .iter()
-                .any(|file| pypi_file_compatible_for_binary_mode(file, target_python, binary_mode))
+            files.iter().any(|file| {
+                pypi_file_compatible_for_binary_mode(
+                    file,
+                    target_python,
+                    wheel_compatibility,
+                    binary_mode,
+                )
+            })
         })
         .map(|(version, _)| version)
         .filter(|version| pypi_version_satisfies(version, requirement))
@@ -13008,7 +13128,11 @@ fn pypi_version_satisfies(version: &str, requirement: &str) -> bool {
         .all(|part| pypi_comparator_satisfied(version, part))
 }
 
-fn pypi_file_python_compatible(file: &PypiFile, target_python: Option<&str>) -> bool {
+fn pypi_file_python_compatible(
+    file: &PypiFile,
+    target_python: Option<&str>,
+    wheel_compatibility: Option<&PythonWheelCompatibility>,
+) -> bool {
     let python_compatible = target_python
         .and_then(|target_python| {
             file.requires_python
@@ -13024,10 +13148,34 @@ fn pypi_file_python_compatible(file: &PypiFile, target_python: Option<&str>) -> 
         return true;
     }
 
-    current_python_wheel_compatibility()
-        .as_ref()
-        .map(|compatibility| wheel_tag_compatible(&file.filename, compatibility))
-        .unwrap_or(true)
+    if let Some(compatibility) = wheel_compatibility {
+        wheel_tag_compatible(&file.filename, compatibility)
+    } else {
+        current_python_wheel_compatibility()
+            .as_ref()
+            .map(|compatibility| wheel_tag_compatible(&file.filename, compatibility))
+            .unwrap_or(true)
+    }
+}
+
+fn pypi_target_python(options: &LinkOptions) -> Option<String> {
+    options
+        .pypi_target_python
+        .as_deref()
+        .and_then(parse_target_python_version)
+        .map(|(major, minor)| format!("{major}.{minor}.0"))
+        .or_else(|| options.pypi_target_python.clone())
+        .or_else(current_python_version)
+}
+
+fn pypi_wheel_compatibility(options: &LinkOptions) -> Option<PythonWheelCompatibility> {
+    PythonWheelCompatibility::from_target_options(
+        options.pypi_target_python.as_deref(),
+        options.pypi_target_implementation.as_deref(),
+        &options.pypi_target_abis,
+        &options.pypi_target_platforms,
+    )
+    .or_else(current_python_wheel_compatibility)
 }
 
 fn current_python_version() -> Option<String> {
@@ -13108,6 +13256,70 @@ struct PythonWheelCompatibility {
 }
 
 impl PythonWheelCompatibility {
+    fn from_target_options(
+        python_version: Option<&str>,
+        implementation: Option<&str>,
+        abis: &[String],
+        platforms: &[String],
+    ) -> Option<Self> {
+        if python_version.is_none()
+            && implementation.is_none()
+            && abis.is_empty()
+            && platforms.is_empty()
+        {
+            return None;
+        }
+
+        let current = current_python_wheel_compatibility();
+        let current_python = current_python_version();
+        let (major, minor) = python_version
+            .and_then(parse_target_python_version)
+            .or_else(|| {
+                current_python
+                    .as_deref()
+                    .and_then(parse_target_python_version)
+            })
+            .unwrap_or((3, 0));
+        let implementation = implementation
+            .map(normalize_python_implementation_tag)
+            .unwrap_or_else(|| "cpython".to_owned());
+
+        let mut python_tags = BTreeSet::from([format!("py{major}"), format!("py{major}{minor}")]);
+        if implementation == "cpython" {
+            python_tags.insert(format!("cp{major}{minor}"));
+        }
+
+        let mut abi_tags = BTreeSet::from(["none".to_owned(), "abi3".to_owned()]);
+        if abis.is_empty() {
+            if implementation == "cpython" {
+                abi_tags.insert(format!("cp{major}{minor}"));
+            } else if let Some(current) = current.as_ref() {
+                abi_tags.extend(current.abi_tags.iter().cloned());
+            }
+        } else {
+            abi_tags.extend(abis.iter().map(|abi| normalize_wheel_platform(abi)));
+        }
+
+        let mut platform_tags = BTreeSet::from(["any".to_owned()]);
+        if platforms.is_empty() {
+            if let Some(current) = current.as_ref() {
+                platform_tags.extend(current.platform_tags.iter().cloned());
+            }
+        } else {
+            platform_tags.extend(
+                platforms
+                    .iter()
+                    .map(|platform| normalize_wheel_platform(platform)),
+            );
+        }
+
+        Some(Self {
+            python_tags,
+            abi_tags,
+            platform_tags,
+        })
+    }
+
     fn new(
         major: u64,
         minor: u64,
@@ -13143,6 +13355,28 @@ impl PythonWheelCompatibility {
             abi_tags,
             platform_tags,
         }
+    }
+}
+
+fn parse_target_python_version(value: &str) -> Option<(u64, u64)> {
+    let value = value.trim();
+    if value.is_empty() {
+        return None;
+    }
+    if let Some((major, rest)) = value.split_once('.') {
+        return Some((major.parse().ok()?, rest.split('.').next()?.parse().ok()?));
+    }
+    if value.len() >= 2 {
+        let (major, minor) = value.split_at(1);
+        return Some((major.parse().ok()?, minor.parse().ok()?));
+    }
+    Some((value.parse().ok()?, 0))
+}
+
+fn normalize_python_implementation_tag(value: &str) -> String {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "cp" | "cpython" => "cpython".to_owned(),
+        other => other.to_owned(),
     }
 }
 
@@ -19748,7 +19982,8 @@ wheels = [
             <a href="other-1.0-py3-none-any.whl">other</a>
         "#;
 
-        let candidates = pypi_simple_index_candidates(&base_url, html, "idna", Some("3.11.0"));
+        let candidates =
+            pypi_simple_index_candidates(&base_url, html, "idna", Some("3.11.0"), None);
         assert_eq!(
             candidates,
             vec![
@@ -19779,7 +20014,7 @@ wheels = [
             ]
         );
         let legacy_candidates =
-            pypi_simple_index_candidates(&base_url, html, "idna", Some("3.7.0"));
+            pypi_simple_index_candidates(&base_url, html, "idna", Some("3.7.0"), None);
         assert_eq!(legacy_candidates.len(), 1);
         assert!(legacy_candidates[0].sdist);
     }
@@ -19789,7 +20024,8 @@ wheels = [
         let base_url = reqwest::Url::parse("https://user:pass@index.example/simple/idna/").unwrap();
         let html = r#"<a href="../../packages/idna-3.7-py3-none-any.whl">idna</a>"#;
 
-        let candidates = pypi_simple_index_candidates(&base_url, html, "idna", Some("3.11.0"));
+        let candidates =
+            pypi_simple_index_candidates(&base_url, html, "idna", Some("3.11.0"), None);
         assert_eq!(
             candidates,
             vec![PypiSimpleCandidate {
@@ -19817,7 +20053,7 @@ wheels = [
         fs::write(&zip_sdist, b"not a real zip sdist").unwrap();
 
         let candidates =
-            pypi_local_find_link_candidates(dir.path(), "idna", Some("3.11.0")).unwrap();
+            pypi_local_find_link_candidates(dir.path(), "idna", Some("3.11.0"), None).unwrap();
         assert_eq!(candidates.len(), 3);
         let wheel_candidate = candidates
             .iter()
@@ -19880,22 +20116,23 @@ wheels = [
 
     #[test]
     fn reads_direct_pypi_sdist_specs() {
+        let options = LinkOptions::new(Path::new("."));
         let spec =
             PackageSpec::parse("pypi:pkg @ https://example.invalid/pkg-1.0.0.tar.gz").unwrap();
-        let resolved = resolve_pypi_direct_wheel(&spec).unwrap();
+        let resolved = resolve_pypi_direct_wheel(&spec, &options).unwrap();
         assert_eq!(resolved.name, "pkg");
         assert_eq!(resolved.version, "1.0.0");
         assert!(!resolved.pypi_direct_wheel);
         assert_eq!(resolved.filename, "pkg-1.0.0.tar.gz");
 
         let spec = PackageSpec::parse("pypi:pkg @ https://example.invalid/pkg-1.0.0.zip").unwrap();
-        let resolved = resolve_pypi_direct_wheel(&spec).unwrap();
+        let resolved = resolve_pypi_direct_wheel(&spec, &options).unwrap();
         assert_eq!(resolved.version, "1.0.0");
         assert!(!resolved.pypi_direct_wheel);
         assert_eq!(resolved.filename, "pkg-1.0.0.zip");
 
         let spec = PackageSpec::parse("pypi:pkg @ git+https://example.invalid/pkg.git").unwrap();
-        let error = resolve_pypi_direct_wheel(&spec).unwrap_err();
+        let error = resolve_pypi_direct_wheel(&spec, &options).unwrap_err();
         assert!(error.to_string().contains("must use https or file"));
     }
 
@@ -20617,8 +20854,8 @@ wheels = [
             },
             requires_python: Some(">=3.10".to_owned()),
         };
-        assert!(!pypi_file_python_compatible(&file, Some("3.9.6")));
-        assert!(pypi_file_python_compatible(&file, Some("3.11.0")));
+        assert!(!pypi_file_python_compatible(&file, Some("3.9.6"), None));
+        assert!(pypi_file_python_compatible(&file, Some("3.11.0"), None));
     }
 
     #[test]
@@ -20640,7 +20877,7 @@ wheels = [
             }],
         };
 
-        let file = choose_pypi_file(&doc, Some("3.11.0"), None).unwrap();
+        let file = choose_pypi_file(&doc, Some("3.11.0"), None, None).unwrap();
         assert_eq!(file.filename, "source-only-1.0.0.zip");
     }
 
@@ -20658,7 +20895,8 @@ wheels = [
             ],
         };
 
-        let file = choose_pypi_file(&doc, Some("3.11.0"), Some(PypiBinaryMode::Source)).unwrap();
+        let file =
+            choose_pypi_file(&doc, Some("3.11.0"), None, Some(PypiBinaryMode::Source)).unwrap();
         assert_eq!(file.filename, "dual-format-1.0.0.tar.gz");
     }
 
@@ -20673,7 +20911,49 @@ wheels = [
             urls: vec![test_pypi_file("source-only-1.0.0.tar.gz", "sdist")],
         };
 
-        assert!(choose_pypi_file(&doc, Some("3.11.0"), Some(PypiBinaryMode::Binary)).is_none());
+        assert!(
+            choose_pypi_file(&doc, Some("3.11.0"), None, Some(PypiBinaryMode::Binary)).is_none()
+        );
+    }
+
+    #[test]
+    fn chooses_pypi_target_compatible_wheel() {
+        let doc = PypiResponse {
+            info: PypiInfo {
+                name: "targeted".to_owned(),
+                version: "1.0.0".to_owned(),
+                requires_dist: None,
+            },
+            urls: vec![
+                test_pypi_file(
+                    "targeted-1.0.0-cp311-cp311-macosx_14_0_arm64.whl",
+                    "bdist_wheel",
+                ),
+                test_pypi_file(
+                    "targeted-1.0.0-cp312-cp312-macosx_14_0_arm64.whl",
+                    "bdist_wheel",
+                ),
+            ],
+        };
+        let compatibility = PythonWheelCompatibility::from_target_options(
+            Some("3.12"),
+            Some("cp"),
+            &[String::from("cp312")],
+            &[String::from("macosx_14_0_arm64")],
+        )
+        .unwrap();
+
+        let file = choose_pypi_file(
+            &doc,
+            Some("3.12.0"),
+            Some(&compatibility),
+            Some(PypiBinaryMode::Binary),
+        )
+        .unwrap();
+        assert_eq!(
+            file.filename,
+            "targeted-1.0.0-cp312-cp312-macosx_14_0_arm64.whl"
+        );
     }
 
     #[test]
@@ -20700,6 +20980,7 @@ wheels = [
                 "*",
                 &root,
                 Some("3.11.0"),
+                None,
                 Some(PypiBinaryMode::Source),
                 false,
             )
@@ -20712,6 +20993,7 @@ wheels = [
                 "*",
                 &root,
                 Some("3.11.0"),
+                None,
                 Some(PypiBinaryMode::Binary),
                 false,
             )
@@ -20742,11 +21024,12 @@ wheels = [
         };
 
         assert_eq!(
-            choose_pypi_version("previewed", "*", &root, Some("3.11.0"), None, false).unwrap(),
+            choose_pypi_version("previewed", "*", &root, Some("3.11.0"), None, None, false)
+                .unwrap(),
             "1.9.0"
         );
         assert_eq!(
-            choose_pypi_version("previewed", "*", &root, Some("3.11.0"), None, true).unwrap(),
+            choose_pypi_version("previewed", "*", &root, Some("3.11.0"), None, None, true).unwrap(),
             "2.0.0rc1"
         );
         assert_eq!(
@@ -20755,6 +21038,7 @@ wheels = [
                 ">=2.0.0rc1",
                 &root,
                 Some("3.11.0"),
+                None,
                 None,
                 false,
             )
@@ -20810,6 +21094,27 @@ wheels = [
         assert!(!wheel_tag_compatible(
             "orjson-3.10.18-cp39-cp39-win_amd64.whl",
             &compatibility
+        ));
+
+        let target = PythonWheelCompatibility::from_target_options(
+            Some("3.12"),
+            Some("cp"),
+            &[String::from("cp312")],
+            &[String::from("macosx_14_0_arm64")],
+        )
+        .unwrap();
+
+        assert!(wheel_tag_compatible(
+            "targeted-1.0.0-cp312-cp312-macosx_14_0_arm64.whl",
+            &target
+        ));
+        assert!(!wheel_tag_compatible(
+            "targeted-1.0.0-cp311-cp311-macosx_14_0_arm64.whl",
+            &target
+        ));
+        assert!(wheel_tag_compatible(
+            "targeted-1.0.0-py3-none-any.whl",
+            &target
         ));
     }
 
