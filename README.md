@@ -577,9 +577,10 @@ Supported now:
   `--disable-pip-version-check`, `--quiet`, `--timeout`, `--retries`,
   `--trusted-host`, `--cert`, `--client-cert`, and `--cache-dir` are accepted
   before the subcommand; `pip uninstall` removes OMC manifest dependencies,
-  OMC-recorded editable local paths, or, when a package only exists in the
-  current locked environment, removes the locked package and reinstalls the
-  remaining environment; `pip check` validates
+  OMC-recorded editable local paths, named editable paths from `-r`
+  requirement files, or, when a package only exists in the current locked
+  environment, removes the locked package and reinstalls the remaining
+  environment; `pip check` validates
   both locked PyPI packages and OMC-recorded editable local paths; common
   `pip install --report path` JSON reports and registry/archive
   `pip install --dry-run` resolution, including local editable paths and VCS

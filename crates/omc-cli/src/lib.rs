@@ -22483,13 +22483,6 @@ fn pip_uninstall_specs_from_requirements(
     }
 
     let requirements = read_requirements_files(&absolutize_paths(project_dir, requirements))?;
-    if !requirements.python_local_paths.is_empty()
-        || !requirements.python_local_requirements.is_empty()
-    {
-        return Err(OmcRegistryError::UnsupportedSpec(
-            "pip uninstall -r cannot remove unnamed local path requirements".to_owned(),
-        ));
-    }
 
     let mut specs = requirements
         .specs
@@ -22502,6 +22495,34 @@ fn pip_uninstall_specs_from_requirements(
             .into_iter()
             .map(|requirement| format!("pypi:{}", requirement.name)),
     );
+    specs.extend(pip_uninstall_local_path_specs(
+        requirements.python_local_paths,
+        requirements.python_local_requirements,
+    )?);
+    Ok(specs)
+}
+
+fn pip_uninstall_local_path_specs(
+    local_paths: Vec<PathBuf>,
+    local_requirements: Vec<PythonLocalRequirement>,
+) -> Result<Vec<String>, OmcRegistryError> {
+    let mut specs = Vec::new();
+    let mut seen = BTreeSet::new();
+    for path in local_paths.into_iter().chain(
+        local_requirements
+            .into_iter()
+            .map(|requirement| requirement.path),
+    ) {
+        let Some(package) = pip_local_editable_package(&path)? else {
+            return Err(OmcRegistryError::UnsupportedSpec(format!(
+                "pip uninstall -r cannot remove unnamed local path requirement `{}`",
+                path.display()
+            )));
+        };
+        if seen.insert(normalize_pip_show_name(&package.name)) {
+            specs.push(format!("pypi:{}", package.name));
+        }
+    }
     Ok(specs)
 }
 
@@ -27690,6 +27711,90 @@ version = "0.1.2"
         fs::remove_dir_all(project).unwrap();
         fs::remove_dir_all(local).unwrap();
         fs::remove_dir_all(keep).unwrap();
+    }
+
+    #[test]
+    fn pip_uninstall_requirement_file_removes_named_editable_paths() {
+        let project = test_dir("pip-uninstall-editable-requirements-project");
+        let local = test_dir("pip-uninstall-editable-requirements-local");
+        let keep = test_dir("pip-uninstall-editable-requirements-keep");
+        let src = local.join("src");
+        let keep_src = keep.join("src");
+        fs::create_dir_all(src.join("demoedit")).unwrap();
+        fs::create_dir_all(keep_src.join("keepedit")).unwrap();
+        fs::write(src.join("demoedit").join("__init__.py"), "").unwrap();
+        fs::write(keep_src.join("keepedit").join("__init__.py"), "").unwrap();
+        fs::write(
+            local.join("pyproject.toml"),
+            r#"[project]
+name = "demoedit"
+version = "0.1.0"
+"#,
+        )
+        .unwrap();
+        fs::write(
+            keep.join("pyproject.toml"),
+            r#"[project]
+name = "keepedit"
+version = "0.2.0"
+"#,
+        )
+        .unwrap();
+        fs::create_dir_all(project.join(".omc").join("python")).unwrap();
+        fs::write(project.join("omc.lock"), "version = 1\n").unwrap();
+        fs::write(
+            project.join("requirements.txt"),
+            format!("-e {}\n", local.display()),
+        )
+        .unwrap();
+        fs::write(
+            project.join(".omc").join("python").join("local-paths"),
+            format!("{}\n{}\n", src.display(), keep_src.display()),
+        )
+        .unwrap();
+
+        let status = run_pip_compat(
+            &project,
+            &args(&["uninstall", "-r", "requirements.txt", "-y"]),
+        )
+        .unwrap();
+
+        assert_eq!(status, ExitCode::SUCCESS);
+        assert_eq!(
+            fs::read_to_string(project.join(".omc").join("python").join("local-paths")).unwrap(),
+            format!("{}\n", fs::canonicalize(&keep_src).unwrap().display())
+        );
+        assert_eq!(
+            pip_project_local_path_packages(&project, &[])
+                .unwrap()
+                .into_iter()
+                .map(|package| package.name)
+                .collect::<Vec<_>>(),
+            vec!["keepedit"]
+        );
+
+        fs::remove_dir_all(project).unwrap();
+        fs::remove_dir_all(local).unwrap();
+        fs::remove_dir_all(keep).unwrap();
+    }
+
+    #[test]
+    fn pip_uninstall_requirement_file_rejects_unnamed_local_paths() {
+        let project = test_dir("pip-uninstall-unnamed-local-requirement");
+        fs::create_dir_all(project.join("unnamed")).unwrap();
+        fs::write(project.join("requirements.txt"), "-e ./unnamed\n").unwrap();
+
+        let error = pip_uninstall_specs_from_requirements(
+            &project,
+            vec![PathBuf::from("requirements.txt")],
+        )
+        .unwrap_err()
+        .to_string();
+
+        assert!(error.contains("cannot remove unnamed local path requirement"));
+        assert!(error.contains("unnamed"));
+
+        fs::remove_dir_all(project).unwrap();
     }
 
     #[test]
