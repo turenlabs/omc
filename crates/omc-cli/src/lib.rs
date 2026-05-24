@@ -1058,7 +1058,9 @@ enum PipCompatAction {
     Debug {
         action: PipDebugAction,
     },
-    Inspect,
+    Inspect {
+        paths: Vec<PathBuf>,
+    },
     Freeze {
         action: PipFreezeAction,
     },
@@ -3372,7 +3374,13 @@ fn run_pip_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
         PipCompatAction::Cache { action } => print_pip_cache(project_dir, action)?,
         PipCompatAction::Check => return print_locked_pip_check(project_dir),
         PipCompatAction::Debug { action } => print_pip_debug(project_dir, action)?,
-        PipCompatAction::Inspect => print_locked_pip_inspect(project_dir)?,
+        PipCompatAction::Inspect { paths } => {
+            if paths.is_empty() {
+                print_locked_pip_inspect(project_dir)?
+            } else {
+                print_pip_path_inspect(project_dir, &paths)?
+            }
+        }
         PipCompatAction::Freeze { action } => {
             if action.paths.is_empty() {
                 print_locked_freeze(project_dir, &action.exclude, action.exclude_editable)?
@@ -4860,7 +4868,7 @@ fn pip_help_text(topic: Option<&str>) -> String {
         ),
         Some("inspect") => pip_command_help(
             "pip inspect",
-            &["Print a JSON report for locked PyPI packages in pip inspect shape."],
+            &["Print a JSON report for locked PyPI packages or --path target directories in pip inspect shape."],
         ),
         Some("debug") => pip_command_help(
             "pip debug",
@@ -12382,6 +12390,7 @@ fn print_locked_pip_list_columns(
 struct InstalledPythonPackage {
     name: String,
     version: String,
+    metadata_location: Option<PathBuf>,
 }
 
 fn print_pip_path_list(
@@ -12493,7 +12502,11 @@ fn read_dist_info_metadata(
             }
         }
         if let (Some(name), Some(version)) = (name, version) {
-            return Ok(Some(InstalledPythonPackage { name, version }));
+            return Ok(Some(InstalledPythonPackage {
+                name,
+                version,
+                metadata_location: Some(dist_info.to_path_buf()),
+            }));
         }
     }
 
@@ -12506,6 +12519,7 @@ fn read_dist_info_metadata(
     Ok(Some(InstalledPythonPackage {
         name: name.replace('_', "-"),
         version: version.to_owned(),
+        metadata_location: Some(dist_info.to_path_buf()),
     }))
 }
 
@@ -12554,6 +12568,64 @@ fn print_locked_pip_inspect(project_dir: &Path) -> Result<(), OmcRegistryError> 
     });
     println!("{}", serde_json::to_string_pretty(&value)?);
     Ok(())
+}
+
+fn print_pip_path_inspect(project_dir: &Path, paths: &[PathBuf]) -> Result<(), OmcRegistryError> {
+    let installed = pip_path_inspect_entries(project_dir, paths)?;
+    let value = serde_json::json!({
+        "version": "1",
+        "pip_version": format!("omc-{}", env!("CARGO_PKG_VERSION")),
+        "installed": installed,
+        "environment": {},
+    });
+    println!("{}", serde_json::to_string_pretty(&value)?);
+    Ok(())
+}
+
+fn pip_path_inspect_entries(
+    project_dir: &Path,
+    paths: &[PathBuf],
+) -> Result<Vec<serde_json::Value>, OmcRegistryError> {
+    read_pip_path_packages(project_dir, paths, &[])?
+        .into_iter()
+        .map(|package| {
+            let metadata_location = package
+                .metadata_location
+                .as_ref()
+                .map(|path| path.display().to_string())
+                .unwrap_or_default();
+            let installer = package
+                .metadata_location
+                .as_deref()
+                .map(read_pip_installer)
+                .transpose()?
+                .unwrap_or_else(|| "omc".to_owned());
+            Ok(serde_json::json!({
+                "metadata": {
+                    "name": package.name,
+                    "version": package.version,
+                },
+                "metadata_location": metadata_location,
+                "installer": installer,
+                "requested": false,
+                "dependencies": [],
+            }))
+        })
+        .collect()
+}
+
+fn read_pip_installer(dist_info: &Path) -> Result<String, OmcRegistryError> {
+    let installer = dist_info.join("INSTALLER");
+    if !installer.exists() {
+        return Ok("omc".to_owned());
+    }
+    let installer = fs::read_to_string(installer)?;
+    let installer = installer.trim();
+    if installer.is_empty() {
+        Ok("omc".to_owned())
+    } else {
+        Ok(installer.to_owned())
+    }
 }
 
 #[derive(Debug)]
@@ -12710,6 +12782,7 @@ fn locked_pip_installed_packages(
         .map(|package| InstalledPythonPackage {
             name: package.name,
             version: package.version,
+            metadata_location: None,
         })
         .collect::<Vec<_>>();
     packages.sort_by(|left, right| {
@@ -18794,10 +18867,7 @@ fn parse_pip_compat_action(args: &[String]) -> Result<PipCompatAction, OmcRegist
             Ok(PipCompatAction::Check)
         }
         "debug" => parse_pip_debug_args(&args[1..]),
-        "inspect" => {
-            parse_pip_inspect_args(&args[1..])?;
-            Ok(PipCompatAction::Inspect)
-        }
+        "inspect" => parse_pip_inspect_args(&args[1..]),
         "freeze" => {
             let action = parse_pip_freeze_args(&args[1..])?;
             Ok(PipCompatAction::Freeze { action })
@@ -19750,7 +19820,8 @@ fn pip_debug_ignored_equals_flag(arg: &str) -> bool {
     .any(|prefix| arg.starts_with(prefix))
 }
 
-fn parse_pip_inspect_args(args: &[String]) -> Result<(), OmcRegistryError> {
+fn parse_pip_inspect_args(args: &[String]) -> Result<PipCompatAction, OmcRegistryError> {
+    let mut paths = Vec::new();
     let mut index = 0;
     while index < args.len() {
         let arg = &args[index];
@@ -19766,18 +19837,20 @@ fn parse_pip_inspect_args(args: &[String]) -> Result<(), OmcRegistryError> {
         ) {
         } else if arg == "--path" {
             index += 1;
-            if args.get(index).is_none() {
+            let Some(path) = args.get(index) else {
                 return Err(OmcRegistryError::UnsupportedSpec(format!(
                     "{arg} needs a value"
                 )));
-            }
-        } else if arg.starts_with("--path=") {
+            };
+            paths.push(PathBuf::from(path));
+        } else if let Some(path) = arg.strip_prefix("--path=") {
+            paths.push(PathBuf::from(path));
         } else {
             return Err(unsupported_compat_arg("pip inspect", arg));
         }
         index += 1;
     }
-    Ok(())
+    Ok(PipCompatAction::Inspect { paths })
 }
 
 fn parse_pip_freeze_args(args: &[String]) -> Result<PipFreezeAction, OmcRegistryError> {
@@ -25565,8 +25638,18 @@ version = "0.1.0"
             vec![InstalledPythonPackage {
                 name: "demo-pkg".to_owned(),
                 version: "1.0.0".to_owned(),
+                metadata_location: Some(project.join("vendor").join("demo_pkg-1.0.0.dist-info")),
             }]
         );
+        let inspect = pip_path_inspect_entries(&project, &[PathBuf::from("vendor")]).unwrap();
+        assert_eq!(inspect.len(), 1);
+        assert_eq!(inspect[0]["metadata"]["name"], "demo-pkg");
+        assert_eq!(inspect[0]["metadata"]["version"], "1.0.0");
+        assert_eq!(inspect[0]["installer"], "omc");
+        assert!(inspect[0]["metadata_location"]
+            .as_str()
+            .unwrap()
+            .ends_with("vendor/demo_pkg-1.0.0.dist-info"));
         assert!(!project.join("omc.toml").exists());
         assert!(!project.join("omc.lock").exists());
         assert!(!project.join(".omc").exists());
@@ -26027,7 +26110,9 @@ version = "0.1.0"
                 "--disable-pip-version-check",
             ]))
             .unwrap(),
-            PipCompatAction::Inspect
+            PipCompatAction::Inspect {
+                paths: vec![PathBuf::from(".omc/python/site-packages")],
+            }
         );
         assert_eq!(
             parse_pip_compat_action(&args(&["show", "-f", "requests"])).unwrap(),
