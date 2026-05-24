@@ -9618,6 +9618,7 @@ fn npm_config_values(
         globalconfig,
         location,
     )?;
+    extend_npm_config_values_from_env(&mut values);
     values.insert("registry".to_owned(), snapshot.registry);
     for (scope, registry) in snapshot.scoped_registries {
         values.insert(format!("{scope}:registry"), registry);
@@ -9683,11 +9684,39 @@ fn npm_config_line_assignment(line: &str) -> Option<(String, String)> {
     Some((key.to_owned(), value))
 }
 
+fn extend_npm_config_values_from_env(values: &mut BTreeMap<String, String>) {
+    for (name, value) in env::vars() {
+        let Some(key) = npm_config_key_from_env_name(&name) else {
+            continue;
+        };
+        if npm_config_key_is_secret(&key) {
+            continue;
+        }
+        let value = value.trim();
+        if value.is_empty() {
+            continue;
+        }
+        values.insert(key, value.to_owned());
+    }
+}
+
+fn npm_config_key_from_env_name(name: &str) -> Option<String> {
+    let name = name.to_ascii_lowercase();
+    let key = name.strip_prefix("npm_config_")?;
+    if key.is_empty() {
+        return None;
+    }
+    Some(key.replace('_', "-"))
+}
+
 fn npm_config_key_is_secret(key: &str) -> bool {
     let key = key.to_ascii_lowercase();
     key == "_auth"
+        || key == "auth"
         || key.ends_with(":_auth")
-        || key.contains("_authtoken")
+        || key.ends_with(":auth")
+        || key.ends_with("-auth")
+        || key.contains("authtoken")
         || key.contains("password")
 }
 
@@ -39196,6 +39225,52 @@ verdict = "accepted"
             Some("~")
         );
         assert!(!global_values.contains_key("save-exact"));
+
+        with_env_values(
+            &[
+                (
+                    "NPM_CONFIG_REGISTRY",
+                    Some("https://env.example.invalid/npm"),
+                ),
+                ("npm_config_registry", None),
+                ("NPM_CONFIG_SAVE_EXACT", Some("false")),
+                ("npm_config_save_exact", None),
+                ("NPM_CONFIG_MIN_RELEASE_AGE", None),
+                ("npm_config_min_release_age", Some("0")),
+                ("NPM_CONFIG_IGNORE_SCRIPTS", None),
+                ("npm_config_ignore_scripts", Some("true")),
+                ("NPM_CONFIG__AUTHTOKEN", None),
+                ("npm_config__authToken", Some("secret")),
+            ],
+            || {
+                let env_values = npm_config_values(
+                    &dir,
+                    None,
+                    Some(Path::new("user.npmrc")),
+                    Some(Path::new("global.npmrc")),
+                    NpmConfigLocation::User,
+                )
+                .unwrap();
+
+                assert_eq!(
+                    env_values.get("registry").map(String::as_str),
+                    Some("https://env.example.invalid/npm/")
+                );
+                assert_eq!(
+                    env_values.get("save-exact").map(String::as_str),
+                    Some("false")
+                );
+                assert_eq!(
+                    env_values.get("min-release-age").map(String::as_str),
+                    Some("0")
+                );
+                assert_eq!(
+                    env_values.get("ignore-scripts").map(String::as_str),
+                    Some("true")
+                );
+                assert!(!env_values.keys().any(|key| key.contains("authtoken")));
+            },
+        );
 
         let _ = fs::remove_dir_all(dir);
     }
