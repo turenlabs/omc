@@ -5162,6 +5162,7 @@ fn run_pip_compat_with_cwd(
     args: &[String],
     invocation_cwd: &Path,
 ) -> Result<ExitCode, OmcRegistryError> {
+    let _pip_config_file = scoped_relative_env_path("PIP_CONFIG_FILE", invocation_cwd);
     if pip_auto_complete_requested() {
         print_pip_auto_completion(project_dir)?;
         return Ok(ExitCode::SUCCESS);
@@ -5547,6 +5548,38 @@ fn run_pip_compat_with_cwd(
     }
 
     Ok(ExitCode::SUCCESS)
+}
+
+struct ScopedEnvPath {
+    key: &'static str,
+    previous: Option<OsString>,
+}
+
+impl Drop for ScopedEnvPath {
+    fn drop(&mut self) {
+        if let Some(previous) = &self.previous {
+            env::set_var(self.key, previous);
+        } else {
+            env::remove_var(self.key);
+        }
+    }
+}
+
+fn scoped_relative_env_path(key: &'static str, base_dir: &Path) -> Option<ScopedEnvPath> {
+    let value = env::var_os(key)?;
+    if value.is_empty() {
+        return None;
+    }
+    let path = PathBuf::from(&value);
+    if path.is_absolute() {
+        return None;
+    }
+    let scoped = ScopedEnvPath {
+        key,
+        previous: Some(value),
+    };
+    env::set_var(key, absolutize_path(base_dir, path));
+    Some(scoped)
 }
 
 fn absolutize_npm_install_request_paths(base_dir: &Path, request: &mut NpmInstallCompatRequest) {
@@ -40120,6 +40153,38 @@ resolved_commit = "0123456789abcdef0123456789abcdef01234567"
             let config = fs::read_to_string(dir.join("pip.conf")).unwrap();
             assert!(!config.contains("index-url = https://new.example.invalid/simple\n"));
             assert!(config.contains("extra-index-url = https://extra.example.invalid/simple\n"));
+        });
+    }
+
+    #[test]
+    fn direct_pip_config_file_env_resolves_from_invocation_cwd() {
+        let project = test_dir("direct-pip-config-file-env-project");
+        let invocation_cwd = project.join("work/release");
+        fs::create_dir_all(&invocation_cwd).unwrap();
+        fs::write(
+            project.join("pyproject.toml"),
+            "[project]\nname = \"root\"\nversion = \"1.0.0\"\n",
+        )
+        .unwrap();
+
+        with_env_values(&[("PIP_CONFIG_FILE", Some("ci/pip.conf"))], || {
+            let status = run_pip_compat_with_cwd(
+                &project,
+                &args(&[
+                    "config",
+                    "set",
+                    "global.index-url",
+                    "https://nested-pip-config.example/simple",
+                ]),
+                &invocation_cwd,
+            )
+            .unwrap();
+
+            assert_eq!(status, ExitCode::SUCCESS);
+            let config = fs::read_to_string(invocation_cwd.join("ci/pip.conf")).unwrap();
+            assert!(config.contains("index-url = https://nested-pip-config.example/simple\n"));
+            assert!(!project.join("ci/pip.conf").exists());
+            assert_eq!(env::var("PIP_CONFIG_FILE").unwrap(), "ci/pip.conf");
         });
     }
 
