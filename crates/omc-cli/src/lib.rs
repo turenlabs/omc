@@ -59,6 +59,7 @@ const NPM_PROFILE_KNOWN_KEYS: &[&str] = &[
 const NPM_PROFILE_WRITABLE_KEYS: &[&str] = &[
     "email", "password", "fullname", "homepage", "freenode", "twitter", "github",
 ];
+const DEFAULT_NPM_SAVE_PREFIX: &str = "^";
 
 #[derive(Debug, Parser)]
 #[command(name = "omc")]
@@ -310,6 +311,7 @@ enum NpmCompatAction {
         archive_references: Vec<String>,
         local_paths: Vec<PathBuf>,
         save: bool,
+        save_prefix: String,
         dependency_kind: ManifestDependencyKind,
         omit_dev: bool,
         omit_optional: bool,
@@ -330,6 +332,7 @@ enum NpmCompatAction {
         archive_references: Vec<String>,
         local_paths: Vec<PathBuf>,
         save: bool,
+        save_prefix: String,
         dependency_kind: ManifestDependencyKind,
         omit_dev: bool,
         omit_optional: bool,
@@ -2299,6 +2302,7 @@ struct NpmInstallCompatRequest {
     archive_references: Vec<String>,
     local_paths: Vec<PathBuf>,
     save: bool,
+    save_prefix: String,
     dependency_kind: ManifestDependencyKind,
     omit_dev: bool,
     omit_optional: bool,
@@ -2344,6 +2348,7 @@ fn run_npm_install_compat(
         archive_references,
         local_paths,
         save,
+        save_prefix,
         dependency_kind,
         omit_dev,
         omit_optional,
@@ -2365,6 +2370,7 @@ fn run_npm_install_compat(
                 archive_references,
                 local_paths,
                 save,
+                save_prefix,
                 dependency_kind,
                 omit_dev,
                 omit_optional,
@@ -2390,6 +2396,7 @@ fn run_npm_install_compat(
                 archive_references,
                 local_paths,
                 save,
+                save_prefix,
                 dependency_kind,
                 omit_dev,
                 omit_optional,
@@ -2453,6 +2460,7 @@ fn run_npm_install_compat(
                 root_dependencies.push(npm_package_json_requirement_for_link_root(
                     spec,
                     &root.locked,
+                    &save_prefix,
                 ));
             }
             all_reports.extend(reports);
@@ -2484,15 +2492,25 @@ fn run_npm_install_compat(
 fn npm_package_json_requirement_for_link_root(
     spec: &PackageSpec,
     locked: &LockedPackage,
+    save_prefix: &str,
 ) -> (String, String) {
     let requirement = spec.direct_url.clone().unwrap_or_else(|| {
         spec.version
             .as_deref()
             .and_then(npm_alias_requirement_name)
-            .map(|name| format!("npm:{name}@{}", locked.version))
-            .unwrap_or_else(|| locked.version.clone())
+            .map(|name| {
+                format!(
+                    "npm:{name}@{}",
+                    npm_package_json_version_requirement(&locked.version, save_prefix)
+                )
+            })
+            .unwrap_or_else(|| npm_package_json_version_requirement(&locked.version, save_prefix))
     });
     (locked.name.clone(), requirement)
+}
+
+fn npm_package_json_version_requirement(version: &str, save_prefix: &str) -> String {
+    format!("{save_prefix}{version}")
 }
 
 fn npm_alias_requirement_name(requirement: &str) -> Option<&str> {
@@ -2539,6 +2557,7 @@ fn run_npm_install_workspace_compat(
         archive_references,
         local_paths,
         save,
+        save_prefix,
         dependency_kind,
         omit_dev,
         omit_optional,
@@ -2596,11 +2615,11 @@ fn run_npm_install_workspace_compat(
     for spec in &specs {
         let reports = add_package_graph(spec, &options)?;
         if let Some(root) = reports.first() {
-            let requirement = spec
-                .direct_url
-                .clone()
-                .unwrap_or_else(|| root.locked.version.clone());
-            root_dependencies.push((root.locked.name.clone(), requirement));
+            root_dependencies.push(npm_package_json_requirement_for_link_root(
+                spec,
+                &root.locked,
+                &save_prefix,
+            ));
         }
         all_reports.extend(reports);
     }
@@ -2740,6 +2759,7 @@ fn run_npm_link_compat(
                     archive_references,
                     local_paths,
                     save,
+                    save_prefix: DEFAULT_NPM_SAVE_PREFIX.to_owned(),
                     dependency_kind,
                     omit_dev,
                     omit_optional,
@@ -2868,6 +2888,7 @@ fn run_npm_install_dry_run(
         archive_references,
         local_paths,
         save: _,
+        save_prefix: _,
         dependency_kind: _,
         omit_dev,
         omit_optional,
@@ -2974,6 +2995,7 @@ fn run_npm_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
             archive_references,
             local_paths,
             save,
+            save_prefix,
             dependency_kind,
             omit_dev,
             omit_optional,
@@ -2994,6 +3016,7 @@ fn run_npm_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
                     archive_references,
                     local_paths,
                     save,
+                    save_prefix,
                     dependency_kind,
                     omit_dev,
                     omit_optional,
@@ -3016,6 +3039,7 @@ fn run_npm_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
             archive_references,
             local_paths,
             save,
+            save_prefix,
             dependency_kind,
             omit_dev,
             omit_optional,
@@ -3050,6 +3074,7 @@ fn run_npm_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
                         archive_references,
                         local_paths,
                         save,
+                        save_prefix,
                         dependency_kind,
                         omit_dev,
                         omit_optional,
@@ -14987,6 +15012,7 @@ fn parse_npm_compat_action(args: &[String]) -> Result<NpmCompatAction, OmcRegist
             archive_references: Vec::new(),
             local_paths: Vec::new(),
             save: true,
+            save_prefix: DEFAULT_NPM_SAVE_PREFIX.to_owned(),
             dependency_kind: ManifestDependencyKind::Production,
             omit_dev: false,
             omit_optional: false,
@@ -15412,7 +15438,16 @@ fn npm_global_arg_supported_by_command(command: &str, arg: &str) -> bool {
             | "-O"
             | "--save-peer"
             | "--no-save"
-    ) {
+            | "--save-exact"
+            | "-E"
+    ) || arg.starts_with("--save-exact=")
+    {
+        return matches!(
+            command,
+            "install" | "i" | "add" | "update" | "up" | "upgrade" | "link" | "ln"
+        );
+    }
+    if matches!(arg, "--save-prefix") || arg.starts_with("--save-prefix=") {
         return matches!(
             command,
             "install" | "i" | "add" | "update" | "up" | "upgrade" | "link" | "ln"
@@ -15732,6 +15767,8 @@ fn npm_global_preserved_bool_flag(arg: &str) -> bool {
             | "-O"
             | "--save-peer"
             | "--no-save"
+            | "--save-exact"
+            | "-E"
             | "--packages-all"
             | "--no-packages-all"
             | "--bypass-2fa"
@@ -15758,6 +15795,7 @@ fn npm_global_preserved_value_flag(arg: &str) -> bool {
             | "--depth"
             | "--omit"
             | "--include"
+            | "--save-prefix"
             | "--searchlimit"
             | "--limit"
             | "--workspace"
@@ -15798,6 +15836,8 @@ fn npm_global_preserved_equals_flag(arg: &str) -> bool {
         "--depth=",
         "--omit=",
         "--include=",
+        "--save-exact=",
+        "--save-prefix=",
         "--searchlimit=",
         "--limit=",
         "--workspace=",
@@ -16288,6 +16328,7 @@ fn parse_npm_install_args(args: &[String]) -> Result<NpmCompatAction, OmcRegistr
         omit_optional,
         omit_peer,
         save,
+        save_prefix,
         lock_only,
         npm_registry,
         allow,
@@ -16303,6 +16344,7 @@ fn parse_npm_install_args(args: &[String]) -> Result<NpmCompatAction, OmcRegistr
         archive_references,
         local_paths,
         save,
+        save_prefix,
         dependency_kind,
         omit_dev,
         omit_optional,
@@ -16447,6 +16489,7 @@ fn parse_npm_install_test_args(
             archive_references: Vec::new(),
             local_paths: Vec::new(),
             save: true,
+            save_prefix: DEFAULT_NPM_SAVE_PREFIX.to_owned(),
             dependency_kind: ManifestDependencyKind::Production,
             omit_dev,
             omit_optional,
@@ -16469,6 +16512,7 @@ fn parse_npm_install_test_args(
         archive_references,
         local_paths,
         save,
+        save_prefix,
         dependency_kind,
         omit_dev,
         omit_optional,
@@ -16492,6 +16536,7 @@ fn parse_npm_install_test_args(
         archive_references,
         local_paths,
         save,
+        save_prefix,
         dependency_kind,
         omit_dev,
         omit_optional,
@@ -22106,6 +22151,7 @@ struct CommonCompatFlags {
     omit_optional: bool,
     omit_peer: bool,
     save: bool,
+    save_prefix: String,
     lock_only: bool,
     npm_registry: Option<String>,
     allow: Vec<String>,
@@ -22124,6 +22170,7 @@ impl Default for CommonCompatFlags {
             omit_optional: false,
             omit_peer: false,
             save: true,
+            save_prefix: DEFAULT_NPM_SAVE_PREFIX.to_owned(),
             lock_only: false,
             npm_registry: None,
             allow: Vec::new(),
@@ -22173,6 +22220,23 @@ fn parse_common_compat_flags(
         } else if npm_mode && matches!(arg.as_str(), "--save" | "-S" | "--save-prod" | "-P") {
             parsed.dependency_kind = ManifestDependencyKind::Production;
             parsed.save = true;
+        } else if npm_mode && matches!(arg.as_str(), "--save-exact" | "-E" | "--save-exact=true") {
+            parsed.save_prefix.clear();
+        } else if npm_mode && arg == "--save-exact=false" {
+            parsed.save_prefix = DEFAULT_NPM_SAVE_PREFIX.to_owned();
+        } else if npm_mode && arg == "--save-prefix" {
+            index += 1;
+            let Some(prefix) = args.get(index) else {
+                return Err(OmcRegistryError::UnsupportedSpec(
+                    "--save-prefix needs a value".to_owned(),
+                ));
+            };
+            parsed.save_prefix = prefix.clone();
+        } else if npm_mode && arg.starts_with("--save-prefix=") {
+            let prefix = arg
+                .strip_prefix("--save-prefix=")
+                .expect("checked save-prefix option");
+            parsed.save_prefix = prefix.to_owned();
         } else if npm_mode && arg == "--package-lock-only" {
             parsed.lock_only = true;
         } else if npm_mode && arg == "--registry" {
@@ -23309,6 +23373,7 @@ mod tests {
                 archive_references: Vec::new(),
                 local_paths: Vec::new(),
                 save: true,
+                save_prefix: DEFAULT_NPM_SAVE_PREFIX.to_owned(),
                 dependency_kind: ManifestDependencyKind::Production,
                 omit_dev: false,
                 omit_optional: false,
@@ -23504,6 +23569,7 @@ mod tests {
                 archive_references: Vec::new(),
                 local_paths: Vec::new(),
                 save: true,
+                save_prefix: DEFAULT_NPM_SAVE_PREFIX.to_owned(),
                 dependency_kind: ManifestDependencyKind::Dev,
                 omit_dev: true,
                 omit_optional: false,
@@ -23519,6 +23585,20 @@ mod tests {
             }
         );
 
+        let exact =
+            parse_npm_compat_action(&args(&["install", "--save-exact", "left-pad"])).unwrap();
+        let NpmCompatAction::Install { save_prefix, .. } = exact else {
+            panic!("expected npm install action");
+        };
+        assert_eq!(save_prefix, "");
+
+        let tilde =
+            parse_npm_compat_action(&args(&["--save-prefix=~", "install", "left-pad"])).unwrap();
+        let NpmCompatAction::Install { save_prefix, .. } = tilde else {
+            panic!("expected npm install action");
+        };
+        assert_eq!(save_prefix, "~");
+
         assert_eq!(
             parse_npm_compat_action(&args(&["install", "--save-optional", "fsevents"])).unwrap(),
             NpmCompatAction::Install {
@@ -23526,6 +23606,7 @@ mod tests {
                 archive_references: Vec::new(),
                 local_paths: Vec::new(),
                 save: true,
+                save_prefix: DEFAULT_NPM_SAVE_PREFIX.to_owned(),
                 dependency_kind: ManifestDependencyKind::Optional,
                 omit_dev: false,
                 omit_optional: false,
@@ -23548,6 +23629,7 @@ mod tests {
                 archive_references: Vec::new(),
                 local_paths: Vec::new(),
                 save: true,
+                save_prefix: DEFAULT_NPM_SAVE_PREFIX.to_owned(),
                 dependency_kind: ManifestDependencyKind::Peer,
                 omit_dev: false,
                 omit_optional: false,
@@ -23579,6 +23661,7 @@ mod tests {
                 archive_references: vec!["./pkg.tgz".to_owned(), "file:../other.tgz".to_owned()],
                 local_paths: vec![PathBuf::from("../local-pkg")],
                 save: true,
+                save_prefix: DEFAULT_NPM_SAVE_PREFIX.to_owned(),
                 dependency_kind: ManifestDependencyKind::Production,
                 omit_dev: false,
                 omit_optional: false,
@@ -23696,6 +23779,7 @@ mod tests {
                 archive_references: Vec::new(),
                 local_paths: Vec::new(),
                 save: false,
+                save_prefix: DEFAULT_NPM_SAVE_PREFIX.to_owned(),
                 dependency_kind: ManifestDependencyKind::Production,
                 omit_dev: false,
                 omit_optional: true,
@@ -23722,6 +23806,7 @@ mod tests {
                 archive_references: Vec::new(),
                 local_paths: Vec::new(),
                 save: true,
+                save_prefix: DEFAULT_NPM_SAVE_PREFIX.to_owned(),
                 dependency_kind: ManifestDependencyKind::Production,
                 omit_dev: false,
                 omit_optional: false,
@@ -23753,6 +23838,7 @@ mod tests {
                 archive_references: Vec::new(),
                 local_paths: Vec::new(),
                 save: true,
+                save_prefix: DEFAULT_NPM_SAVE_PREFIX.to_owned(),
                 dependency_kind: ManifestDependencyKind::Production,
                 omit_dev: false,
                 omit_optional: false,
@@ -23804,6 +23890,7 @@ mod tests {
                 archive_references: Vec::new(),
                 local_paths: Vec::new(),
                 save: true,
+                save_prefix: DEFAULT_NPM_SAVE_PREFIX.to_owned(),
                 dependency_kind: ManifestDependencyKind::Production,
                 omit_dev: true,
                 omit_optional: false,
@@ -23829,6 +23916,7 @@ mod tests {
                 archive_references: Vec::new(),
                 local_paths: Vec::new(),
                 save: true,
+                save_prefix: DEFAULT_NPM_SAVE_PREFIX.to_owned(),
                 dependency_kind: ManifestDependencyKind::Production,
                 omit_dev: true,
                 omit_optional: false,
@@ -23861,6 +23949,7 @@ mod tests {
                 archive_references: Vec::new(),
                 local_paths: Vec::new(),
                 save: true,
+                save_prefix: DEFAULT_NPM_SAVE_PREFIX.to_owned(),
                 dependency_kind: ManifestDependencyKind::Production,
                 omit_dev: true,
                 omit_optional: false,
@@ -26936,10 +27025,11 @@ verdict = "accepted"
             npm_package_json_requirement_for_link_root(
                 &alias,
                 &locked_npm_package("string-width-cjs", "4.2.3", Vec::new()),
+                DEFAULT_NPM_SAVE_PREFIX,
             ),
             (
                 "string-width-cjs".to_owned(),
-                "npm:string-width@4.2.3".to_owned()
+                "npm:string-width@^4.2.3".to_owned()
             )
         );
 
@@ -26948,11 +27038,31 @@ verdict = "accepted"
             npm_package_json_requirement_for_link_root(
                 &scoped,
                 &locked_npm_package("demo-runtime", "1.2.0", Vec::new()),
+                DEFAULT_NPM_SAVE_PREFIX,
             ),
             (
                 "demo-runtime".to_owned(),
-                "npm:@scope/runtime@1.2.0".to_owned()
+                "npm:@scope/runtime@^1.2.0".to_owned()
             )
+        );
+
+        let exact = PackageSpec::parse("npm:left-pad").unwrap();
+        assert_eq!(
+            npm_package_json_requirement_for_link_root(
+                &exact,
+                &locked_npm_package("left-pad", "1.3.0", Vec::new()),
+                "",
+            ),
+            ("left-pad".to_owned(), "1.3.0".to_owned())
+        );
+
+        assert_eq!(
+            npm_package_json_requirement_for_link_root(
+                &exact,
+                &locked_npm_package("left-pad", "1.3.0", Vec::new()),
+                "~",
+            ),
+            ("left-pad".to_owned(), "~1.3.0".to_owned())
         );
     }
 

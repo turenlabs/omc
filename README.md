@@ -545,8 +545,9 @@ Supported now:
   `--registry`, `--allow`, and `--allow-all-host` are parsed; direct `npx`
   package specs and explicit `--package` specs are installed into a temporary
   verified OMC project before dispatching to the requested executable; `--no-save`,
-  `--package-lock-only`, `--package-lock=false`, `--dry-run`, `--registry`,
-  `--omit=...`, `--include=...`, and common audit/fund/peer/install-strategy flags are
+  `--save-exact`, `--save-prefix`, `--package-lock-only`,
+  `--package-lock=false`, `--dry-run`, `--registry`, `--omit=...`,
+  `--include=...`, and common audit/fund/peer/install-strategy flags are
   understood for install/ci compatibility; `npm install <pkg>` saves into the
   root `package.json` when one exists, `npm remove <pkg>` removes root
   `package.json` entries when present, and workspace-scoped
