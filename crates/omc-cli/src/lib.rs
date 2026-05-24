@@ -3424,9 +3424,47 @@ fn run_npm_ci_compat(
     let mut options = LinkOptions::new(project_dir);
     apply_cli_policy_options(&mut options, &allow, &allow_flow, allow_all_host)?;
     apply_dependency_omit_flags(&mut options, omit_dev, omit_optional, omit_peer);
-    let install = install_locked_project(&options)?;
+    let install = match npm_ci_lock_source(project_dir)? {
+        NpmCiLockSource::OmcLock => install_locked_project(&options)?,
+        NpmCiLockSource::ProjectLock => install_project(&options)?,
+    };
     print_install_report(&install);
     Ok(ExitCode::SUCCESS)
+}
+
+enum NpmCiLockSource {
+    OmcLock,
+    ProjectLock,
+}
+
+fn npm_ci_lock_source(project_dir: &Path) -> Result<NpmCiLockSource, OmcRegistryError> {
+    let has_project_lock = npm_project_has_npm_lockfile(project_dir);
+    let omc_lockfile = project_dir.join("omc.lock");
+    if !omc_lockfile.exists() {
+        if has_project_lock {
+            return Ok(NpmCiLockSource::ProjectLock);
+        }
+        return Err(OmcRegistryError::UnsupportedSpec(
+            "npm ci needs package-lock.json, npm-shrinkwrap.json, or omc.lock".to_owned(),
+        ));
+    }
+
+    if has_project_lock && omc_lockfile_is_empty(&omc_lockfile)? {
+        return Ok(NpmCiLockSource::ProjectLock);
+    }
+
+    Ok(NpmCiLockSource::OmcLock)
+}
+
+fn npm_project_has_npm_lockfile(project_dir: &Path) -> bool {
+    ["package-lock.json", "npm-shrinkwrap.json"]
+        .iter()
+        .any(|name| project_dir.join(name).exists())
+}
+
+fn omc_lockfile_is_empty(lockfile: &Path) -> Result<bool, OmcRegistryError> {
+    let lock = read_lockfile(lockfile)?;
+    Ok(lock.packages.is_empty() && lock.python_vcs.is_empty())
 }
 
 fn run_npm_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRegistryError> {
@@ -27864,6 +27902,68 @@ mod tests {
         let _ = fs::remove_dir_all(project);
         let _ = fs::remove_dir_all(package);
         let _ = fs::remove_dir_all(transient);
+    }
+
+    #[test]
+    fn npm_ci_bootstraps_omc_lock_from_package_lock() {
+        let project = test_dir("npm-ci-bootstrap-package-lock-project");
+        let package = test_dir("npm-ci-bootstrap-package-lock-package");
+        fs::write(
+            package.join("package.json"),
+            r#"{"name":"local-tarball","version":"1.2.3"}"#,
+        )
+        .unwrap();
+        fs::write(package.join("index.js"), "module.exports = 42;\n").unwrap();
+        let tarball = project.join("local-tarball-1.2.3.tgz");
+        let files = collect_npm_pack_files(&package).unwrap();
+        write_npm_pack_tarball(&tarball, &files).unwrap();
+
+        fs::write(
+            project.join("package.json"),
+            r#"{"name":"root","version":"1.0.0","dependencies":{"local-tarball":"file:local-tarball-1.2.3.tgz"}}"#,
+        )
+        .unwrap();
+        fs::write(
+            project.join("package-lock.json"),
+            r#"{
+                "name": "root",
+                "version": "1.0.0",
+                "lockfileVersion": 3,
+                "requires": true,
+                "packages": {
+                    "": {
+                        "name": "root",
+                        "version": "1.0.0",
+                        "dependencies": {
+                            "local-tarball": "file:local-tarball-1.2.3.tgz"
+                        }
+                    },
+                    "node_modules/local-tarball": {
+                        "version": "1.2.3",
+                        "resolved": "file:local-tarball-1.2.3.tgz"
+                    }
+                }
+            }"#,
+        )
+        .unwrap();
+
+        let status = run_npm_compat(&project, &args(&["ci"])).unwrap();
+
+        assert_eq!(status, ExitCode::SUCCESS);
+        assert_eq!(
+            fs::read_to_string(project.join("node_modules/local-tarball/index.js")).unwrap(),
+            "module.exports = 42;\n"
+        );
+        let lock = read_lockfile(project.join("omc.lock")).unwrap();
+        assert!(lock
+            .packages
+            .iter()
+            .any(|package| package.name == "local-tarball"
+                && package.version == "1.2.3"
+                && package.source_url.starts_with("file://")));
+
+        let _ = fs::remove_dir_all(project);
+        let _ = fs::remove_dir_all(package);
     }
 
     #[test]
