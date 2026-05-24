@@ -40,8 +40,9 @@ use omc_registry::{
     NpmStarMutationResult, NpmStarsResult, NpmTeamListResult, NpmTeamMutationResult,
     NpmTokenCreateOptions, NpmTokenCreateResult, NpmTokenListResult, NpmTokenRevokeResult,
     NpmUnpublishResult, NpmWhoamiResult, NpmWorkspacePackage, OmcLock, OmcRegistryError,
-    PackageSpec, ProjectRequirements, PypiBinaryMode, PypiCheckIssue, PypiUploadOptions,
-    PypiUploadResult, PypiUploadSignature, PythonLocalRequirement, PythonVcsRequirement, Verdict,
+    PackageSpec, ProjectRequirements, PypiAvailableVersionsOptions, PypiBinaryMode, PypiCheckIssue,
+    PypiUploadOptions, PypiUploadResult, PypiUploadSignature, PythonLocalRequirement,
+    PythonVcsRequirement, Verdict,
 };
 use sha2::{Digest, Sha256, Sha384, Sha512};
 
@@ -1099,6 +1100,7 @@ enum PipCompatAction {
         find_links: Vec<String>,
         no_index: bool,
         allow_prereleases: bool,
+        compatibility: PipCompatibilityTarget,
         json: bool,
     },
     Config {
@@ -3909,6 +3911,7 @@ fn run_pip_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
             find_links,
             no_index,
             allow_prereleases,
+            compatibility,
             json,
         } => print_pip_index_versions(
             project_dir,
@@ -3919,6 +3922,7 @@ fn run_pip_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
                 find_links,
                 no_index,
                 allow_prereleases,
+                compatibility,
             },
             json,
         )?,
@@ -9431,15 +9435,22 @@ fn print_pip_index_versions(
         find_links,
         no_index,
         allow_prereleases,
+        compatibility,
     } = options;
     let listing = read_pypi_available_versions(
         project_dir,
         package,
-        index_url,
-        extra_index_urls,
-        find_links,
-        no_index,
-        allow_prereleases,
+        PypiAvailableVersionsOptions {
+            index_url,
+            extra_index_urls,
+            find_links,
+            no_index,
+            allow_prereleases,
+            target_python: compatibility.python_version,
+            target_implementation: compatibility.implementation,
+            target_platforms: compatibility.platforms,
+            target_abis: compatibility.abis,
+        },
     )?;
     let latest = listing.versions.first().cloned().unwrap_or_default();
     if json {
@@ -9458,6 +9469,23 @@ fn print_pip_index_versions(
     Ok(())
 }
 
+fn pypi_available_versions_options(
+    index_url: Option<String>,
+    extra_index_urls: Vec<String>,
+    find_links: Vec<String>,
+    no_index: bool,
+    allow_prereleases: bool,
+) -> PypiAvailableVersionsOptions {
+    PypiAvailableVersionsOptions {
+        index_url,
+        extra_index_urls,
+        find_links,
+        no_index,
+        allow_prereleases,
+        ..PypiAvailableVersionsOptions::default()
+    }
+}
+
 #[derive(Debug)]
 struct PipIndexSearchOptions {
     index_url: Option<String>,
@@ -9465,6 +9493,7 @@ struct PipIndexSearchOptions {
     find_links: Vec<String>,
     no_index: bool,
     allow_prereleases: bool,
+    compatibility: PipCompatibilityTarget,
 }
 
 fn print_pip_hash(
@@ -14829,11 +14858,13 @@ fn print_pip_outdated(
         let listing = match read_pypi_available_versions(
             project_dir,
             &package.name,
-            options.index_url.clone(),
-            options.extra_index_urls.clone(),
-            options.find_links.clone(),
-            options.no_index,
-            options.allow_prereleases,
+            pypi_available_versions_options(
+                options.index_url.clone(),
+                options.extra_index_urls.clone(),
+                options.find_links.clone(),
+                options.no_index,
+                options.allow_prereleases,
+            ),
         ) {
             Ok(listing) => listing,
             Err(OmcRegistryError::PackageNotFound(_)) => continue,
@@ -14884,11 +14915,13 @@ fn print_locked_pip_outdated(
             let listing = match read_pypi_available_versions(
                 project_dir,
                 &package.name,
-                options.index_url.clone(),
-                options.extra_index_urls.clone(),
-                options.find_links.clone(),
-                options.no_index,
-                options.allow_prereleases,
+                pypi_available_versions_options(
+                    options.index_url.clone(),
+                    options.extra_index_urls.clone(),
+                    options.find_links.clone(),
+                    options.no_index,
+                    options.allow_prereleases,
+                ),
             ) {
                 Ok(listing) => listing,
                 Err(OmcRegistryError::PackageNotFound(_)) => continue,
@@ -14915,11 +14948,13 @@ fn print_locked_pip_outdated(
             let listing = match read_pypi_available_versions(
                 project_dir,
                 &package.name,
-                options.index_url.clone(),
-                options.extra_index_urls.clone(),
-                options.find_links.clone(),
-                options.no_index,
-                options.allow_prereleases,
+                pypi_available_versions_options(
+                    options.index_url.clone(),
+                    options.extra_index_urls.clone(),
+                    options.find_links.clone(),
+                    options.no_index,
+                    options.allow_prereleases,
+                ),
             ) {
                 Ok(listing) => listing,
                 Err(OmcRegistryError::PackageNotFound(_)) => continue,
@@ -22021,6 +22056,7 @@ fn parse_pip_index_args(args: &[String]) -> Result<PipCompatAction, OmcRegistryE
         find_links,
         no_index,
         allow_prereleases,
+        compatibility,
         json,
         mut positionals,
     } = parse_pip_index_common_args(args)?;
@@ -22044,6 +22080,7 @@ fn parse_pip_index_args(args: &[String]) -> Result<PipCompatAction, OmcRegistryE
                 find_links,
                 no_index,
                 allow_prereleases,
+                compatibility,
                 json,
             })
         }
@@ -22060,6 +22097,7 @@ struct PipIndexArgs {
     find_links: Vec<String>,
     no_index: bool,
     allow_prereleases: bool,
+    compatibility: PipCompatibilityTarget,
     json: bool,
     positionals: Vec<String>,
 }
@@ -22071,6 +22109,7 @@ fn parse_pip_index_common_args(args: &[String]) -> Result<PipIndexArgs, OmcRegis
         find_links: Vec::new(),
         no_index: false,
         allow_prereleases: false,
+        compatibility: PipCompatibilityTarget::default(),
         json: false,
         positionals: Vec::new(),
     };
@@ -22113,6 +22152,30 @@ fn parse_pip_index_common_args(args: &[String]) -> Result<PipIndexArgs, OmcRegis
             parsed.no_index = true;
         } else if arg == "--pre" {
             parsed.allow_prereleases = true;
+        } else if arg == "--platform" {
+            parsed
+                .compatibility
+                .platforms
+                .push(pip_target_flag_value(args, &mut index, arg)?);
+        } else if let Some(value) = arg.strip_prefix("--platform=") {
+            parsed.compatibility.platforms.push(value.to_owned());
+        } else if arg == "--python-version" {
+            parsed.compatibility.python_version =
+                Some(pip_target_flag_value(args, &mut index, arg)?);
+        } else if let Some(value) = arg.strip_prefix("--python-version=") {
+            parsed.compatibility.python_version = Some(value.to_owned());
+        } else if arg == "--implementation" {
+            parsed.compatibility.implementation =
+                Some(pip_target_flag_value(args, &mut index, arg)?);
+        } else if let Some(value) = arg.strip_prefix("--implementation=") {
+            parsed.compatibility.implementation = Some(value.to_owned());
+        } else if arg == "--abi" {
+            parsed
+                .compatibility
+                .abis
+                .push(pip_target_flag_value(args, &mut index, arg)?);
+        } else if let Some(value) = arg.strip_prefix("--abi=") {
+            parsed.compatibility.abis.push(value.to_owned());
         } else if matches!(
             arg.as_str(),
             "--disable-pip-version-check"
@@ -22153,10 +22216,6 @@ fn pip_index_ignored_value_flag(arg: &str) -> bool {
             | "--proxy"
             | "--cache-dir"
             | "--log"
-            | "--platform"
-            | "--python-version"
-            | "--implementation"
-            | "--abi"
     )
 }
 
@@ -22170,10 +22229,6 @@ fn pip_index_ignored_equals_flag(arg: &str) -> bool {
         "--proxy=",
         "--cache-dir=",
         "--log=",
-        "--platform=",
-        "--python-version=",
-        "--implementation=",
-        "--abi=",
     ]
     .iter()
     .any(|prefix| arg.starts_with(prefix))
@@ -30946,6 +31001,12 @@ resolved_commit = "0123456789abcdef0123456789abcdef01234567"
                 "--find-links",
                 "wheelhouse",
                 "--pre",
+                "--platform",
+                "macosx_14_0_arm64",
+                "--python-version=3.12",
+                "--implementation",
+                "cp",
+                "--abi=cp312",
                 "--disable-pip-version-check",
             ]))
             .unwrap(),
@@ -30956,6 +31017,12 @@ resolved_commit = "0123456789abcdef0123456789abcdef01234567"
                 find_links: vec!["wheelhouse".to_owned()],
                 no_index: true,
                 allow_prereleases: true,
+                compatibility: PipCompatibilityTarget {
+                    platforms: vec!["macosx_14_0_arm64".to_owned()],
+                    python_version: Some("3.12".to_owned()),
+                    implementation: Some("cp".to_owned()),
+                    abis: vec!["cp312".to_owned()],
+                },
                 json: true,
             }
         );

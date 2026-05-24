@@ -214,11 +214,13 @@ cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip install -e ../
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip install -e 'git+https://example.com/acme/pkg.git@main#egg=acme-pkg'
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip install --no-deps ./dist/local_pkg-1.0.0-py3-none-any.whl
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip install --target vendor ./dist/local_pkg-1.0.0.tar.gz
+cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip install --target vendor --platform macosx_14_0_arm64 --python-version 3.12 --implementation cp --abi cp312 orjson
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip install --user -e ../local-package
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip install ./dist/local_pkg-1.0.0-py3-none-any.whl
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip lock -r requirements.txt -o pylock.toml
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip install -r pylock.toml
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip download -r requirements.txt -d wheelhouse
+cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip download --only-binary=:all: --platform manylinux_2_28_x86_64 --python-version 3.11 --implementation cp --abi cp311 requests -d wheelhouse
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip wheel -r requirements.txt -w wheelhouse
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip wheel --no-binary=:all: ./dist/local_pkg-1.0.0.tar.gz -w wheelhouse
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo python -m pip install -e ../local-package
@@ -238,6 +240,7 @@ cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip list --outdate
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip list --outdated --format=freeze
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip list --uptodate --format=json
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip index versions requests
+cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip index versions orjson --platform macosx_14_0_arm64 --python-version 3.12 --implementation cp --abi cp312
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip hash ./dist/local_pkg-1.0.0-py3-none-any.whl
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip cache list
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip config get global.index-url
@@ -455,8 +458,10 @@ Supported now:
   directory paths with selected extras, and common Python environment markers
 - `pip download` and `pip wheel` compatibility for registry requirements,
   requirement files, hashes, direct wheel archives, and direct source
-  distributions; `pip wheel` populates the wheelhouse with safe source
-  distributions when a build would otherwise be required
+  distributions, including pip-style target compatibility flags
+  `--platform`, `--python-version`, `--implementation`, and `--abi`;
+  `pip wheel` populates the wheelhouse with safe source distributions when a
+  build would otherwise be required
 - unsupported requirements entries and unsupported direct archive formats fail
   closed instead of being silently ignored
 - `Pipfile` ingestion for Pipenv packages/dev-packages, source indexes, extras,
@@ -605,7 +610,8 @@ Supported now:
   requirements, without writing the current OMC manifest, lockfile, or
   site-packages; real `pip install --target DIR` installs into the requested
   target through transient OMC state without writing the current manifest or
-  lockfile; real `pip install --user` installs into Python's user
+  lockfile, with the same target compatibility flags used by `pip download`
+  and `pip wheel`; real `pip install --user` installs into Python's user
   site-packages through OMC-managed user state and mirrors generated scripts
   into the user bin directory; `pip install --group GROUP` installs current-project
   `pyproject.toml` dependency groups, and path-qualified groups such as
@@ -615,7 +621,8 @@ Supported now:
   verifier and writes a pylock-style output file without installing packages;
   `pip install -r pylock.toml`, `pip download -r pylock.toml`, and
   `pip wheel -r pylock.toml` consume standardized lockfiles through the shared
-  requirements reader; `pip list --user`,
+  requirements reader; `pip index versions` applies target compatibility flags
+  to version listings; `pip list --user`,
   `pip freeze --user`, `pip inspect --user`, and `pip show --user` read
   OMC-managed Python user site-packages; `pip freeze -r requirements.txt`
   preserves requirement-file order

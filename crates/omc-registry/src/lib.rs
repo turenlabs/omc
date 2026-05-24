@@ -2904,32 +2904,49 @@ pub fn read_pip_config_snapshot(project_dir: &Path) -> Result<PipConfigSnapshot>
     })
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct PypiAvailableVersionsOptions {
+    pub index_url: Option<String>,
+    pub extra_index_urls: Vec<String>,
+    pub find_links: Vec<String>,
+    pub no_index: bool,
+    pub allow_prereleases: bool,
+    pub target_python: Option<String>,
+    pub target_implementation: Option<String>,
+    pub target_platforms: Vec<String>,
+    pub target_abis: Vec<String>,
+}
+
 pub fn read_pypi_available_versions(
     project_dir: &Path,
     package: &str,
-    index_url: Option<String>,
-    extra_index_urls: Vec<String>,
-    find_links: Vec<String>,
-    no_index: bool,
-    allow_prereleases: bool,
+    query: PypiAvailableVersionsOptions,
 ) -> Result<PypiVersionListing> {
     let mut options = LinkOptions::new(project_dir);
-    options.pypi_index_url = index_url.and_then(|url| normalize_pypi_simple_index_url(&url));
-    options.pypi_extra_index_urls = extra_index_urls
+    options.pypi_index_url = query
+        .index_url
+        .and_then(|url| normalize_pypi_simple_index_url(&url));
+    options.pypi_extra_index_urls = query
+        .extra_index_urls
         .into_iter()
         .filter_map(|url| normalize_pypi_simple_index_url(&url))
         .collect();
-    options.pypi_find_links = find_links
+    options.pypi_find_links = query
+        .find_links
         .into_iter()
         .filter_map(|source| normalize_pypi_find_links_source(&source, project_dir))
         .collect();
-    options.pypi_no_index = no_index;
-    options.pypi_allow_prereleases = allow_prereleases;
+    options.pypi_no_index = query.no_index;
+    options.pypi_allow_prereleases = query.allow_prereleases;
+    options.pypi_target_python = query.target_python;
+    options.pypi_target_implementation = query.target_implementation;
+    options.pypi_target_platforms = query.target_platforms;
+    options.pypi_target_abis = query.target_abis;
     let options = options_with_manifest_policy(&options)?;
     let spec = PackageSpec::parse(&format!("pypi:{package}"))?;
     let client = Client::builder().user_agent("omc-prototype/0.1").build()?;
-    let target_python = current_python_version();
-    let wheel_compatibility = current_python_wheel_compatibility();
+    let target_python = pypi_target_python(&options);
+    let wheel_compatibility = pypi_wheel_compatibility(&options);
     let mut versions = BTreeSet::new();
 
     for candidate in pypi_find_link_candidates(
