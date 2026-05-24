@@ -34035,6 +34035,7 @@ print("ok")
                         "Metadata-Version: 2.1\nName: target-replace-pkg\nVersion: 1.0.0\n",
                     ),
                     ("target_replace_pkg/__init__.py", "VALUE = 'old'\n"),
+                    ("target_replace_pkg/extra.py", "EXTRA = True\n"),
                 ],
             ),
         )
@@ -34049,7 +34050,6 @@ print("ok")
                         "Metadata-Version: 2.1\nName: target-replace-pkg\nVersion: 1.1.0\n",
                     ),
                     ("target_replace_pkg/__init__.py", "VALUE = 'new'\n"),
-                    ("target_replace_pkg/extra.py", "EXTRA = True\n"),
                 ],
             ),
         )
@@ -34089,10 +34089,7 @@ print("ok")
             fs::read_to_string(project.join("vendor/target_replace_pkg/__init__.py")).unwrap(),
             "VALUE = 'new'\n"
         );
-        assert_eq!(
-            fs::read_to_string(project.join("vendor/target_replace_pkg/extra.py")).unwrap(),
-            "EXTRA = True\n"
-        );
+        assert!(!project.join("vendor/target_replace_pkg/extra.py").exists());
         assert!(project
             .join("vendor")
             .join("target_replace_pkg-1.0.0.dist-info")

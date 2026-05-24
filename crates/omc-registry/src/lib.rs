@@ -7374,6 +7374,10 @@ fn install_pypi_wheel_package(
     let reader = Cursor::new(read_locked_archive(project_dir, package)?);
     let mut archive = zip::ZipArchive::new(reader)?;
     let mut entry_points = Vec::new();
+    if overwrite_existing {
+        let targets = wheel_install_top_level_targets(&mut archive)?;
+        remove_existing_python_targets(site_packages, &targets)?;
+    }
     let existing_top_level = if overwrite_existing {
         BTreeSet::new()
     } else {
@@ -7584,6 +7588,10 @@ fn copy_python_sdist_import_tree(
     overwrite_existing: bool,
 ) -> Result<Vec<String>> {
     let mut installed_files = Vec::new();
+    if overwrite_existing {
+        let targets = python_sdist_import_top_level_targets(source)?;
+        remove_existing_python_targets(site_packages, &targets)?;
+    }
     let existing_top_level = if overwrite_existing {
         BTreeSet::new()
     } else {
@@ -7612,6 +7620,51 @@ fn copy_python_sdist_import_tree(
     }
     installed_files.sort();
     Ok(installed_files)
+}
+
+fn wheel_install_top_level_targets<R: Read + std::io::Seek>(
+    archive: &mut zip::ZipArchive<R>,
+) -> Result<BTreeSet<String>> {
+    let mut targets = BTreeSet::new();
+    for index in 0..archive.len() {
+        let file = archive.by_index(index)?;
+        let path = Path::new(file.name());
+        let Some(top_level) = top_level_archive_component(path) else {
+            continue;
+        };
+        if !is_python_metadata_dir(top_level) {
+            targets.insert(top_level.to_owned());
+        }
+    }
+    Ok(targets)
+}
+
+fn python_sdist_import_top_level_targets(source: &Path) -> Result<BTreeSet<String>> {
+    let mut targets = BTreeSet::new();
+    for entry in WalkDir::new(source)
+        .into_iter()
+        .filter_map(|entry| entry.ok())
+    {
+        if !entry.file_type().is_file() {
+            continue;
+        }
+        let relative = entry.path().strip_prefix(source).unwrap_or(entry.path());
+        if !should_copy_python_sdist_path(relative) {
+            continue;
+        }
+        if let Some(top_level) = top_level_archive_component(relative) {
+            targets.insert(top_level.to_owned());
+        }
+    }
+    Ok(targets)
+}
+
+fn remove_existing_python_targets(site_packages: &Path, targets: &BTreeSet<String>) -> Result<()> {
+    for target in targets {
+        let output = checked_join(site_packages, Path::new(target))?;
+        remove_path_if_exists(&output)?;
+    }
+    Ok(())
 }
 
 fn existing_top_level_targets(site_packages: &Path) -> Result<BTreeSet<String>> {
@@ -14484,6 +14537,11 @@ fn local_pypi_archive_url_and_hashes(
     } else {
         base_dir.join(path)
     };
+    let path = if path.is_absolute() {
+        path
+    } else {
+        env::current_dir()?.join(path)
+    };
     let filename = path
         .file_name()
         .and_then(|filename| filename.to_str())
@@ -19084,6 +19142,91 @@ print("hi")
     }
 
     #[test]
+    fn target_upgrade_removes_stale_wheel_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let old_wheel = python_package_wheel_for_test(
+            "wheel-stale-pkg",
+            "1.0.0",
+            &[
+                ("wheel_stale_pkg/__init__.py", "VALUE = 'old'\n"),
+                ("wheel_stale_pkg/extra.py", "EXTRA = True\n"),
+            ],
+        );
+        let new_wheel = python_package_wheel_for_test(
+            "wheel-stale-pkg",
+            "1.1.0",
+            &[("wheel_stale_pkg/__init__.py", "VALUE = 'new'\n")],
+        );
+        let old_archive = dir
+            .path()
+            .join(".omc")
+            .join("cache")
+            .join("wheel_stale_pkg-1.0.0-py3-none-any.whl");
+        let new_archive = dir
+            .path()
+            .join(".omc")
+            .join("cache")
+            .join("wheel_stale_pkg-1.1.0-py3-none-any.whl");
+        fs::create_dir_all(old_archive.parent().unwrap()).unwrap();
+        fs::write(&old_archive, &old_wheel).unwrap();
+        fs::write(&new_archive, &new_wheel).unwrap();
+
+        let mut old_package = locked_package_for_test(Ecosystem::Pypi, "wheel-stale-pkg", "1.0.0");
+        old_package.source_url =
+            "https://example.invalid/wheel_stale_pkg-1.0.0-py3-none-any.whl".to_owned();
+        old_package.archive = relative_path(dir.path(), &old_archive);
+        old_package.sha256 = sha256_hex(&old_wheel);
+        write_signed_artifact_for_test(dir.path(), &old_package);
+
+        let mut new_package = locked_package_for_test(Ecosystem::Pypi, "wheel-stale-pkg", "1.1.0");
+        new_package.source_url =
+            "https://example.invalid/wheel_stale_pkg-1.1.0-py3-none-any.whl".to_owned();
+        new_package.archive = relative_path(dir.path(), &new_archive);
+        new_package.sha256 = sha256_hex(&new_wheel);
+        write_signed_artifact_for_test(dir.path(), &new_package);
+
+        let target = dir.path().join("vendor");
+        install_lock_with_python_target(
+            dir.path(),
+            &OmcLock {
+                version: 1,
+                packages: vec![old_package],
+                python_vcs: Vec::new(),
+            },
+            Some(&target),
+            None,
+            true,
+        )
+        .unwrap();
+        install_lock_with_python_target(
+            dir.path(),
+            &OmcLock {
+                version: 1,
+                packages: vec![new_package],
+                python_vcs: Vec::new(),
+            },
+            Some(&target),
+            None,
+            true,
+        )
+        .unwrap();
+
+        assert_eq!(
+            fs::read_to_string(target.join("wheel_stale_pkg").join("__init__.py")).unwrap(),
+            "VALUE = 'new'\n"
+        );
+        assert!(!target.join("wheel_stale_pkg").join("extra.py").exists());
+        assert!(target
+            .join("wheel_stale_pkg-1.0.0.dist-info")
+            .join("METADATA")
+            .exists());
+        assert!(target
+            .join("wheel_stale_pkg-1.1.0.dist-info")
+            .join("METADATA")
+            .exists());
+    }
+
+    #[test]
     fn installs_pure_python_zip_sdist_archives() {
         let dir = tempfile::tempdir().unwrap();
         let bytes = python_zip_sdist_for_test(&[
@@ -20959,6 +21102,37 @@ wheels = [
             hashes.into_iter().collect::<Vec<_>>(),
             vec!["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"]
         );
+    }
+
+    #[test]
+    fn parses_direct_archive_references_with_relative_base_dir() {
+        let cwd = env::current_dir().unwrap();
+        let relative_dir = PathBuf::from(format!(
+            "target/omc-registry-relative-archive-{}",
+            std::process::id()
+        ));
+        let dir = cwd.join(&relative_dir);
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join("dist")).unwrap();
+        fs::write(
+            dir.join("dist").join("relative_pkg-1.0.0.tar.gz"),
+            b"not a real sdist",
+        )
+        .unwrap();
+
+        let (spec, _) =
+            parse_pypi_direct_archive_reference("./dist/relative_pkg-1.0.0.tar.gz", &relative_dir)
+                .unwrap()
+                .unwrap();
+        assert_eq!(spec.name, "relative-pkg");
+        assert!(spec.direct_url.as_deref().unwrap().starts_with("file://"));
+        assert!(spec
+            .direct_url
+            .as_deref()
+            .unwrap()
+            .ends_with("/dist/relative_pkg-1.0.0.tar.gz"));
+
+        fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
@@ -25177,6 +25351,51 @@ wheels = [
             .start_file("demo_pkg-1.0.0.dist-info/METADATA", options)
             .unwrap();
         archive.write_all(metadata.as_bytes()).unwrap();
+        archive.finish().unwrap().into_inner()
+    }
+
+    fn python_package_wheel_for_test(name: &str, version: &str, files: &[(&str, &str)]) -> Vec<u8> {
+        use std::io::Write as _;
+
+        let cursor = Cursor::new(Vec::new());
+        let mut archive = zip::ZipWriter::new(cursor);
+        let options = zip::write::SimpleFileOptions::default();
+        let mut record_paths = Vec::new();
+        for (path, content) in files {
+            archive.start_file(path, options).unwrap();
+            archive.write_all(content.as_bytes()).unwrap();
+            record_paths.push((*path).to_owned());
+        }
+
+        let dist_info = format!("{}-{version}.dist-info", python_dist_info_component(name));
+        let metadata_path = format!("{dist_info}/METADATA");
+        archive.start_file(&metadata_path, options).unwrap();
+        archive
+            .write_all(
+                format!("Metadata-Version: 2.1\nName: {name}\nVersion: {version}\n").as_bytes(),
+            )
+            .unwrap();
+        record_paths.push(metadata_path);
+
+        let wheel_path = format!("{dist_info}/WHEEL");
+        archive.start_file(&wheel_path, options).unwrap();
+        archive
+            .write_all(
+                b"Wheel-Version: 1.0\nGenerator: omc-test\nRoot-Is-Purelib: true\nTag: py3-none-any\n",
+            )
+            .unwrap();
+        record_paths.push(wheel_path);
+
+        let record_path = format!("{dist_info}/RECORD");
+        record_paths.push(record_path.clone());
+        record_paths.sort();
+        let record = record_paths
+            .into_iter()
+            .map(|path| format!("{path},,\n"))
+            .collect::<String>();
+        archive.start_file(&record_path, options).unwrap();
+        archive.write_all(record.as_bytes()).unwrap();
+
         archive.finish().unwrap().into_inner()
     }
 
