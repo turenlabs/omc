@@ -134,6 +134,7 @@ cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm link ./dist/lo
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm update --package-lock-only
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm install-test -- --watch
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm ci --omit=dev
+cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm ci --dry-run
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm install-ci-test
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm run --json
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm run test -- --watch

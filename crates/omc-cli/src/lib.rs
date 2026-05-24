@@ -391,6 +391,7 @@ enum NpmCompatAction {
         omit_dev: bool,
         omit_optional: bool,
         omit_peer: bool,
+        dry_run: bool,
         allow: Vec<String>,
         allow_flow: Vec<String>,
         allow_all_host: bool,
@@ -3487,10 +3488,22 @@ fn run_npm_ci_compat(
     omit_dev: bool,
     omit_optional: bool,
     omit_peer: bool,
+    dry_run: bool,
     allow: Vec<String>,
     allow_flow: Vec<String>,
     allow_all_host: bool,
 ) -> Result<ExitCode, OmcRegistryError> {
+    if dry_run {
+        return run_npm_ci_dry_run(
+            project_dir,
+            omit_dev,
+            omit_optional,
+            omit_peer,
+            allow,
+            allow_flow,
+            allow_all_host,
+        );
+    }
     let mut options = LinkOptions::new(project_dir);
     apply_cli_policy_options(&mut options, &allow, &allow_flow, allow_all_host)?;
     apply_dependency_omit_flags(&mut options, omit_dev, omit_optional, omit_peer);
@@ -3499,6 +3512,43 @@ fn run_npm_ci_compat(
         NpmCiLockSource::ProjectLock => install_npm_project_with_complete_lock(&options)?,
     };
     print_install_report(&install);
+    Ok(ExitCode::SUCCESS)
+}
+
+fn run_npm_ci_dry_run(
+    project_dir: &Path,
+    omit_dev: bool,
+    omit_optional: bool,
+    omit_peer: bool,
+    allow: Vec<String>,
+    allow_flow: Vec<String>,
+    allow_all_host: bool,
+) -> Result<ExitCode, OmcRegistryError> {
+    let source = npm_ci_lock_source(project_dir)?;
+    let dry_run_project = TempOmcProject::new("npm-ci-dry-run", project_dir)?;
+    if matches!(source, NpmCiLockSource::OmcLock) {
+        fs::copy(
+            project_dir.join("omc.lock"),
+            dry_run_project.path().join("omc.lock"),
+        )?;
+    }
+
+    let mut options = LinkOptions::new(dry_run_project.path());
+    apply_cli_policy_options(&mut options, &allow, &allow_flow, allow_all_host)?;
+    apply_dependency_omit_flags(&mut options, omit_dev, omit_optional, omit_peer);
+    let install = match source {
+        NpmCiLockSource::OmcLock => install_locked_project(&options)?,
+        NpmCiLockSource::ProjectLock => install_npm_project_with_complete_lock(&options)?,
+    };
+    println!(
+        "dry-run: would install npm={} pypi={} npm_bins={} python_scripts={} node_modules={} python_site_packages={}",
+        install.npm_packages,
+        install.pypi_packages,
+        install.npm_bins,
+        install.python_scripts,
+        project_dir.join("node_modules").display(),
+        project_dir.join(".omc").join("python").join("site-packages").display()
+    );
     Ok(ExitCode::SUCCESS)
 }
 
@@ -3618,6 +3668,7 @@ fn run_npm_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
                     omit_dev,
                     omit_optional,
                     omit_peer,
+                    dry_run,
                     allow,
                     allow_flow,
                     allow_all_host,
@@ -3669,6 +3720,7 @@ fn run_npm_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
             omit_dev,
             omit_optional,
             omit_peer,
+            dry_run,
             allow,
             allow_flow,
             allow_all_host,
@@ -3678,6 +3730,7 @@ fn run_npm_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
                 omit_dev,
                 omit_optional,
                 omit_peer,
+                dry_run,
                 allow,
                 allow_flow,
                 allow_all_host,
@@ -6660,7 +6713,7 @@ fn npm_help_text(topic: Option<&str>) -> String {
             "npm ci",
             &[
                 "Install the exact OMC lockfile state.",
-                "Common flags: --omit=dev|optional|peer, --include=dev|optional|peer, --allow, --allow-all-host.",
+                "Common flags: --dry-run, --omit=dev|optional|peer, --include=dev|optional|peer, --allow, --allow-all-host.",
             ],
         ),
         Some("install-test") => npm_command_help(
@@ -6674,6 +6727,7 @@ fn npm_help_text(topic: Option<&str>) -> String {
             "npm install-ci-test [-- <test-args>...]",
             &[
                 "Run OMC npm ci, then run the root package's test script.",
+                "Supports --dry-run for the ci step.",
                 "Alias: cit.",
             ],
         ),
@@ -18908,6 +18962,7 @@ fn parse_npm_compat_action(args: &[String]) -> Result<NpmCompatAction, OmcRegist
                 omit_dev,
                 omit_optional,
                 omit_peer,
+                dry_run,
                 allow,
                 allow_flow,
                 allow_all_host,
@@ -18921,6 +18976,7 @@ fn parse_npm_compat_action(args: &[String]) -> Result<NpmCompatAction, OmcRegist
                 omit_dev,
                 omit_optional,
                 omit_peer,
+                dry_run,
                 allow,
                 allow_flow,
                 allow_all_host,
@@ -19422,6 +19478,9 @@ fn npm_global_arg_supported_by_command(command: &str, arg: &str) -> bool {
                 | "upgrade"
                 | "install-test"
                 | "it"
+                | "ci"
+                | "install-ci-test"
+                | "cit"
                 | "publish"
                 | "unpublish"
                 | "deprecate"
@@ -20300,6 +20359,7 @@ fn parse_npm_install_args(
         save_prefix,
         package_lock,
         lock_only,
+        dry_run: _,
         npm_registry,
         allow,
         allow_flow,
@@ -20509,6 +20569,7 @@ fn parse_npm_install_test_args(
             omit_dev,
             omit_optional,
             omit_peer,
+            dry_run,
             allow,
             allow_flow,
             allow_all_host,
@@ -20535,7 +20596,7 @@ fn parse_npm_install_test_args(
             omit_peer,
             lock_only: false,
             package_lock: true,
-            dry_run: false,
+            dry_run,
             npm_registry: None,
             allow,
             allow_flow,
@@ -26410,6 +26471,7 @@ struct CommonCompatFlags {
     save_prefix: String,
     package_lock: bool,
     lock_only: bool,
+    dry_run: bool,
     npm_registry: Option<String>,
     allow: Vec<String>,
     allow_flow: Vec<String>,
@@ -26432,6 +26494,7 @@ impl Default for CommonCompatFlags {
             save_prefix: DEFAULT_NPM_SAVE_PREFIX.to_owned(),
             package_lock: true,
             lock_only: false,
+            dry_run: false,
             npm_registry: None,
             allow: Vec::new(),
             allow_flow: Vec::new(),
@@ -26477,6 +26540,10 @@ fn parse_common_compat_flags(
             parsed.allow_flow.push(flow.to_owned());
         } else if arg == "--allow-all-host" {
             parsed.allow_all_host = true;
+        } else if npm_mode && npm_bool_flag_value(arg, "--dry-run").is_some() {
+            parsed.dry_run = npm_bool_flag_value(arg, "--dry-run").unwrap_or(false);
+        } else if npm_mode && arg == "--no-dry-run" {
+            parsed.dry_run = false;
         } else if npm_mode && matches!(arg.as_str(), "-D" | "--save-dev" | "--dev") {
             parsed.dependency_kind = ManifestDependencyKind::Dev;
             parsed.save = true;
@@ -29419,6 +29486,16 @@ mod tests {
         assert!(!dry_run);
         assert!(!lock_only);
 
+        let action = parse_npm_compat_action(&args(&["--dry-run", "ci", "--omit=dev"])).unwrap();
+        let NpmCompatAction::Ci {
+            dry_run, omit_dev, ..
+        } = action
+        else {
+            panic!("expected npm ci action");
+        };
+        assert!(dry_run);
+        assert!(omit_dev);
+
         let action = parse_npm_compat_action(&args(&[
             "install",
             "--save=false",
@@ -29564,7 +29641,14 @@ mod tests {
         );
 
         assert_eq!(
-            parse_npm_compat_action(&args(&["cit", "--omit=dev", "--", "--runInBand"])).unwrap(),
+            parse_npm_compat_action(&args(&[
+                "cit",
+                "--dry-run",
+                "--omit=dev",
+                "--",
+                "--runInBand",
+            ]))
+            .unwrap(),
             NpmCompatAction::InstallTest {
                 command: "cit".to_owned(),
                 use_ci: true,
@@ -29579,7 +29663,7 @@ mod tests {
                 omit_peer: false,
                 package_lock: true,
                 lock_only: false,
-                dry_run: false,
+                dry_run: true,
                 npm_registry: None,
                 allow: Vec::new(),
                 allow_flow: Vec::new(),
