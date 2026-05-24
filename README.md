@@ -318,6 +318,10 @@ use `omc.toml` PyPI simple-index settings for OMC-managed PyPI adds
 use project/user `pip.conf` PyPI simple-index settings when no project index is set
 use `PIP_INDEX_URL` / `PIP_EXTRA_INDEX_URL` when no project PyPI index is set
 use pip-style `find-links`, `no-index`, and binary-format config/env values for wheelhouses
+use pip install-mode env defaults such as `PIP_TARGET`, `PIP_USER`,
+`PIP_NO_DEPS`, `PIP_REQUIRE_HASHES`, `PIP_DRY_RUN`, `PIP_REPORT`,
+`PIP_PRE`, `PIP_PLATFORM`, `PIP_PYTHON_VERSION`, `PIP_IMPLEMENTATION`,
+and `PIP_ABI`
 verify npm shasum/integrity and PyPI sha256 when the registry provides them
 use package-lock.json/npm-shrinkwrap.json/yarn.lock/pnpm-lock.yaml npm resolved tarball URLs and integrity hashes when present
 cache the source artifact under .omc/cache
@@ -423,6 +427,10 @@ Supported now:
 - pip-style `PIP_INDEX_URL`, `PIP_EXTRA_INDEX_URL`, `PIP_FIND_LINKS`,
   `PIP_NO_INDEX`, `PIP_NO_BINARY`, and `PIP_ONLY_BINARY` support when no
   project PyPI index is configured
+- pip install/download/wheel env defaults for `PIP_NO_DEPS`,
+  `PIP_REQUIRE_HASHES`, `PIP_PRE`, `PIP_PLATFORM`, `PIP_PYTHON_VERSION`,
+  `PIP_IMPLEMENTATION`, and `PIP_ABI`, plus install-only defaults for
+  `PIP_TARGET`, `PIP_USER`, `PIP_DRY_RUN`, and `PIP_REPORT`
 - credential-bearing PyPI simple-index URLs are used for downloads without
   recording those credentials in `omc.lock`
 - PyPI dependency range resolution with local `python3` `Requires-Python`

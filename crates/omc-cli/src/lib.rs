@@ -3677,13 +3677,155 @@ fn config_false(value: &str) -> bool {
     )
 }
 
+fn pip_args_with_environment_defaults(args: &[String]) -> Result<Vec<String>, OmcRegistryError> {
+    if pip_isolated_requested(args) {
+        return Ok(args.to_vec());
+    }
+
+    let normalized = normalize_pip_global_args(args)?;
+    let Some(command) = normalized.first().map(String::as_str) else {
+        return Ok(args.to_vec());
+    };
+
+    let defaults = pip_environment_default_args(command);
+    if defaults.is_empty() {
+        return Ok(args.to_vec());
+    }
+
+    let mut merged = Vec::with_capacity(normalized.len() + defaults.len());
+    merged.push(command.to_owned());
+    merged.extend(defaults);
+    merged.extend(normalized.iter().skip(1).cloned());
+    Ok(merged)
+}
+
+fn pip_isolated_requested(args: &[String]) -> bool {
+    args.iter().any(|arg| arg == "--isolated") || pip_config_env_bool("isolated")
+}
+
+fn pip_environment_default_args(command: &str) -> Vec<String> {
+    let mut args = Vec::new();
+    let install_like = matches!(command, "install" | "lock");
+    let artifact_like = matches!(command, "download" | "wheel");
+    let index_like = command == "index";
+
+    if install_like {
+        if let Some(target) = pip_config_env("target") {
+            args.push(format!("--target={target}"));
+        }
+        if let Some(user) = pip_config_env("user") {
+            if config_bool(&user) {
+                args.push("--user".to_owned());
+            } else if config_false(&user) {
+                args.push("--user=false".to_owned());
+            }
+        }
+        if pip_config_env_bool("dry-run") {
+            args.push("--dry-run".to_owned());
+        }
+        if let Some(report) = pip_config_env("report") {
+            args.push(format!("--report={report}"));
+        }
+    }
+
+    if install_like || artifact_like {
+        if pip_config_env_bool("no-deps") {
+            args.push("--no-deps".to_owned());
+        }
+        if pip_config_env_bool("require-hashes") {
+            args.push("--require-hashes".to_owned());
+        }
+        if let Some(no_binary) = pip_config_env("no-binary") {
+            args.push(format!("--no-binary={no_binary}"));
+        }
+        if let Some(only_binary) = pip_config_env("only-binary") {
+            args.push(format!("--only-binary={only_binary}"));
+        }
+    }
+
+    if install_like || artifact_like || index_like {
+        if pip_config_env_bool("pre") {
+            args.push("--pre".to_owned());
+        }
+        for platform in pip_config_env_tokens("platform") {
+            args.push(format!("--platform={platform}"));
+        }
+        if let Some(version) = pip_config_env("python-version") {
+            args.push(format!("--python-version={version}"));
+        }
+        if let Some(implementation) = pip_config_env("implementation") {
+            args.push(format!("--implementation={implementation}"));
+        }
+        for abi in pip_config_env_tokens("abi") {
+            args.push(format!("--abi={abi}"));
+        }
+    }
+
+    args
+}
+
+fn pip_config_env_bool(name: &str) -> bool {
+    pip_config_env(name)
+        .map(|value| config_bool(&value))
+        .unwrap_or(false)
+}
+
+fn pip_config_env(name: &str) -> Option<String> {
+    let env_name = name.replace('-', "_");
+    let upper = format!("PIP_{}", env_name.to_ascii_uppercase());
+    env::var(upper)
+        .ok()
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+}
+
+fn pip_config_env_tokens(name: &str) -> Vec<String> {
+    pip_config_env(name)
+        .map(|value| shell_like_tokens(&value))
+        .unwrap_or_default()
+}
+
+fn shell_like_tokens(value: &str) -> Vec<String> {
+    let mut tokens = Vec::new();
+    let mut current = String::new();
+    let mut quote = None;
+
+    for ch in value.chars() {
+        if matches!(ch, '\'' | '"') {
+            if quote == Some(ch) {
+                quote = None;
+            } else if quote.is_none() {
+                quote = Some(ch);
+            } else {
+                current.push(ch);
+            }
+            continue;
+        }
+
+        if quote.is_none() && ch.is_whitespace() {
+            if !current.is_empty() {
+                tokens.push(std::mem::take(&mut current));
+            }
+        } else {
+            current.push(ch);
+        }
+    }
+
+    if !current.is_empty() {
+        tokens.push(current);
+    }
+
+    tokens
+}
+
 fn run_pip_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRegistryError> {
     if pip_auto_complete_requested() {
         print_pip_auto_completion(project_dir)?;
         return Ok(ExitCode::SUCCESS);
     }
 
-    match parse_pip_compat_action(args)? {
+    let args = pip_args_with_environment_defaults(args)?;
+    match parse_pip_compat_action(&args)? {
         PipCompatAction::Help { topic } => print_pip_help(topic.as_deref()),
         PipCompatAction::Version => println!("pip {} from OMC", env!("CARGO_PKG_VERSION")),
         PipCompatAction::Completion { shell } => print_pip_completion(shell),
@@ -24662,6 +24804,192 @@ mod tests {
                 assert!(omit_optional);
                 assert!(!omit_peer);
                 assert_eq!(save_prefix, DEFAULT_NPM_SAVE_PREFIX);
+            },
+        );
+    }
+
+    #[test]
+    fn pip_environment_defaults_behave_like_command_flags() {
+        with_env_values(
+            &[
+                ("PIP_ISOLATED", None),
+                ("PIP_TARGET", Some("vendor")),
+                ("PIP_USER", Some("true")),
+                ("PIP_DRY_RUN", Some("true")),
+                ("PIP_REPORT", Some("report.json")),
+                ("PIP_NO_DEPS", Some("1")),
+                ("PIP_REQUIRE_HASHES", Some("yes")),
+                ("PIP_NO_BINARY", Some(":all:")),
+                ("PIP_ONLY_BINARY", Some("idna")),
+                ("PIP_PRE", Some("on")),
+                (
+                    "PIP_PLATFORM",
+                    Some("macosx_14_0_arm64 manylinux_2_28_x86_64"),
+                ),
+                ("PIP_PYTHON_VERSION", Some("3.12")),
+                ("PIP_IMPLEMENTATION", Some("cp")),
+                ("PIP_ABI", Some("cp312 abi3")),
+            ],
+            || {
+                let merged =
+                    pip_args_with_environment_defaults(&args(&["install", "requests==2.32.3"]))
+                        .unwrap();
+                assert_eq!(
+                    merged,
+                    args(&[
+                        "install",
+                        "--target=vendor",
+                        "--user",
+                        "--dry-run",
+                        "--report=report.json",
+                        "--no-deps",
+                        "--require-hashes",
+                        "--no-binary=:all:",
+                        "--only-binary=idna",
+                        "--pre",
+                        "--platform=macosx_14_0_arm64",
+                        "--platform=manylinux_2_28_x86_64",
+                        "--python-version=3.12",
+                        "--implementation=cp",
+                        "--abi=cp312",
+                        "--abi=abi3",
+                        "requests==2.32.3",
+                    ])
+                );
+
+                let action = parse_pip_compat_action(&merged).unwrap();
+                let PipCompatAction::Install(action) = action else {
+                    panic!("expected pip install action");
+                };
+                assert_eq!(action.target, Some(PathBuf::from("vendor")));
+                assert!(action.user);
+                assert!(action.dry_run);
+                assert_eq!(action.report, Some(PathBuf::from("report.json")));
+                assert!(action.no_deps);
+                assert!(action.require_hashes);
+                assert!(action.allow_prereleases);
+                assert_eq!(action.binary_all, Some(PypiBinaryMode::Source));
+                assert_eq!(
+                    action.binary_packages.get("idna"),
+                    Some(&PypiBinaryMode::Binary)
+                );
+                assert_eq!(
+                    action.compatibility,
+                    PipCompatibilityTarget {
+                        platforms: vec![
+                            "macosx_14_0_arm64".to_owned(),
+                            "manylinux_2_28_x86_64".to_owned()
+                        ],
+                        python_version: Some("3.12".to_owned()),
+                        implementation: Some("cp".to_owned()),
+                        abis: vec!["cp312".to_owned(), "abi3".to_owned()],
+                    }
+                );
+            },
+        );
+
+        with_env_values(
+            &[
+                ("PIP_ISOLATED", None),
+                ("PIP_TARGET", Some("vendor")),
+                ("PIP_USER", Some("true")),
+                ("PIP_DRY_RUN", None),
+                ("PIP_REPORT", None),
+                ("PIP_NO_DEPS", None),
+                ("PIP_REQUIRE_HASHES", None),
+                ("PIP_NO_BINARY", None),
+                ("PIP_ONLY_BINARY", None),
+                ("PIP_PRE", None),
+                ("PIP_PLATFORM", None),
+                ("PIP_PYTHON_VERSION", None),
+                ("PIP_IMPLEMENTATION", None),
+                ("PIP_ABI", None),
+            ],
+            || {
+                let action = parse_pip_compat_action(
+                    &pip_args_with_environment_defaults(&args(&[
+                        "install",
+                        "--target",
+                        "override",
+                        "--user=false",
+                        "requests",
+                    ]))
+                    .unwrap(),
+                )
+                .unwrap();
+                let PipCompatAction::Install(action) = action else {
+                    panic!("expected pip install action");
+                };
+                assert_eq!(action.target, Some(PathBuf::from("override")));
+                assert!(!action.user);
+            },
+        );
+
+        with_env_values(
+            &[
+                ("PIP_ISOLATED", None),
+                ("PIP_TARGET", None),
+                ("PIP_USER", None),
+                ("PIP_DRY_RUN", None),
+                ("PIP_REPORT", None),
+                ("PIP_NO_DEPS", Some("true")),
+                ("PIP_REQUIRE_HASHES", None),
+                ("PIP_NO_BINARY", None),
+                ("PIP_ONLY_BINARY", None),
+                ("PIP_PRE", Some("true")),
+                ("PIP_PLATFORM", Some("manylinux_2_28_aarch64")),
+                ("PIP_PYTHON_VERSION", None),
+                ("PIP_IMPLEMENTATION", None),
+                ("PIP_ABI", None),
+            ],
+            || {
+                let action = parse_pip_compat_action(
+                    &pip_args_with_environment_defaults(&args(&["download", "idna"])).unwrap(),
+                )
+                .unwrap();
+                let PipCompatAction::Download(action) = action else {
+                    panic!("expected pip download action");
+                };
+                assert!(action.no_deps);
+                assert!(action.allow_prereleases);
+                assert_eq!(
+                    action.compatibility.platforms,
+                    vec!["manylinux_2_28_aarch64".to_owned()]
+                );
+            },
+        );
+
+        with_env_values(
+            &[
+                ("PIP_ISOLATED", Some("true")),
+                ("PIP_TARGET", Some("vendor")),
+                ("PIP_USER", Some("true")),
+                ("PIP_DRY_RUN", Some("true")),
+                ("PIP_REPORT", Some("report.json")),
+                ("PIP_NO_DEPS", Some("true")),
+                ("PIP_REQUIRE_HASHES", Some("true")),
+                ("PIP_NO_BINARY", Some(":all:")),
+                ("PIP_ONLY_BINARY", Some("idna")),
+                ("PIP_PRE", Some("true")),
+                ("PIP_PLATFORM", Some("macosx_14_0_arm64")),
+                ("PIP_PYTHON_VERSION", Some("3.12")),
+                ("PIP_IMPLEMENTATION", Some("cp")),
+                ("PIP_ABI", Some("cp312")),
+            ],
+            || {
+                assert_eq!(
+                    pip_args_with_environment_defaults(&args(&[
+                        "--isolated",
+                        "install",
+                        "requests",
+                    ]))
+                    .unwrap(),
+                    args(&["--isolated", "install", "requests"])
+                );
+                assert_eq!(
+                    pip_args_with_environment_defaults(&args(&["install", "requests"])).unwrap(),
+                    args(&["install", "requests"])
+                );
             },
         );
     }
