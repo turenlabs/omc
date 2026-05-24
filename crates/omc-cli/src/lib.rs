@@ -1226,6 +1226,7 @@ struct PipInstallAction {
     no_deps: bool,
     allow_prereleases: bool,
     upgrade: bool,
+    force_reinstall: bool,
     compatibility: PipCompatibilityTarget,
     target: Option<PathBuf>,
     prefix: Option<PathBuf>,
@@ -1849,6 +1850,7 @@ fn run_pip_lock(project_dir: &Path, action: PipLockAction) -> Result<ExitCode, O
         no_deps,
         allow_prereleases,
         upgrade: _,
+        force_reinstall: _,
         compatibility,
         target,
         prefix,
@@ -4862,6 +4864,7 @@ fn run_pip_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
                 no_deps,
                 allow_prereleases,
                 upgrade: _,
+                force_reinstall: _,
                 compatibility,
                 target,
                 prefix: _,
@@ -5668,6 +5671,7 @@ fn run_pip_install_dry_run(
         no_deps,
         allow_prereleases,
         upgrade: _,
+        force_reinstall: _,
         compatibility,
         target,
         prefix,
@@ -5904,6 +5908,7 @@ fn run_pip_install_target(
         no_deps,
         allow_prereleases,
         upgrade,
+        force_reinstall,
         compatibility,
         target,
         prefix: _,
@@ -5941,7 +5946,7 @@ fn run_pip_install_target(
     options.pypi_allow_prereleases = allow_prereleases;
     options.pypi_binary_all = binary_all;
     options.pypi_binary_packages = binary_packages;
-    options.python_target_overwrite_existing = upgrade;
+    options.python_target_overwrite_existing = upgrade || force_reinstall;
     apply_pip_compatibility_target(&mut options, compatibility);
     options.python_target_dir = Some(pip_rooted_project_path(
         project_dir,
@@ -6016,6 +6021,7 @@ fn run_pip_install_prefix(
         no_deps,
         allow_prereleases,
         upgrade: _,
+        force_reinstall: _,
         compatibility,
         target: _,
         prefix,
@@ -6127,6 +6133,7 @@ fn run_pip_install_root(
         no_deps,
         allow_prereleases,
         upgrade: _,
+        force_reinstall: _,
         compatibility,
         target: _,
         prefix: _,
@@ -6236,6 +6243,7 @@ fn run_pip_install_user(
         no_deps,
         allow_prereleases,
         upgrade: _,
+        force_reinstall: _,
         compatibility,
         target: _,
         prefix: _,
@@ -26024,6 +26032,7 @@ fn parse_pip_install_args(args: &[String]) -> Result<PipCompatAction, OmcRegistr
     let mut no_deps = false;
     let mut allow_prereleases = false;
     let mut upgrade = false;
+    let mut force_reinstall = false;
     let mut compatibility = PipCompatibilityTarget::default();
     let mut target = None;
     let mut prefix = None;
@@ -26247,11 +26256,14 @@ fn parse_pip_install_args(args: &[String]) -> Result<PipCompatAction, OmcRegistr
             upgrade = false;
         } else if matches!(
             arg.as_str(),
-            "-I" | "--break-system-packages"
+            "--force-reinstall" | "--ignore-installed" | "-I"
+        ) {
+            force_reinstall = true;
+        } else if matches!(
+            arg.as_str(),
+            "--break-system-packages"
                 | "--disable-pip-version-check"
                 | "--no-cache-dir"
-                | "--force-reinstall"
-                | "--ignore-installed"
                 | "--no-build-isolation"
                 | "--check-build-dependencies"
                 | "--use-pep517"
@@ -26313,6 +26325,7 @@ fn parse_pip_install_args(args: &[String]) -> Result<PipCompatAction, OmcRegistr
         no_deps,
         allow_prereleases,
         upgrade,
+        force_reinstall,
         compatibility,
         target,
         prefix,
@@ -34093,6 +34106,7 @@ verdict = "accepted"
                 no_deps: true,
                 allow_prereleases: true,
                 upgrade: true,
+                force_reinstall: true,
                 compatibility: PipCompatibilityTarget {
                     platforms: vec!["macosx_14_0_arm64".to_owned()],
                     python_version: Some("3.12".to_owned()),
@@ -34126,6 +34140,24 @@ verdict = "accepted"
                 );
             }
             other => panic!("expected pip install action, got {other:?}"),
+        }
+
+        for flag in ["--force-reinstall", "--ignore-installed", "-I"] {
+            match parse_pip_compat_action(&args(&[
+                "install",
+                "--target",
+                "vendor",
+                flag,
+                "requests==2.32.3",
+            ]))
+            .unwrap()
+            {
+                PipCompatAction::Install(action) => {
+                    assert!(action.force_reinstall);
+                    assert!(!action.upgrade);
+                }
+                other => panic!("expected pip install action, got {other:?}"),
+            }
         }
 
         match parse_pip_compat_action(&args(&["install", "--user", "requests==2.32.3"])).unwrap() {
@@ -34402,6 +34434,7 @@ verdict = "accepted"
                 no_deps: false,
                 allow_prereleases: false,
                 upgrade: false,
+                force_reinstall: false,
                 compatibility: PipCompatibilityTarget::default(),
                 target: None,
                 prefix: None,
@@ -34442,6 +34475,7 @@ verdict = "accepted"
                 no_deps: false,
                 allow_prereleases: false,
                 upgrade: false,
+                force_reinstall: false,
                 compatibility: PipCompatibilityTarget::default(),
                 target: None,
                 prefix: None,
@@ -34742,6 +34776,7 @@ version = "0.1.0"
                 no_deps: false,
                 allow_prereleases: false,
                 upgrade: false,
+                force_reinstall: false,
                 compatibility: PipCompatibilityTarget::default(),
                 target: None,
                 prefix: None,
@@ -35284,6 +35319,85 @@ print("ok")
     }
 
     #[test]
+    fn pip_install_target_force_reinstall_replaces_existing_package() {
+        let project = test_dir("pip-target-force-reinstall-project");
+        let dist = project.join("dist");
+        fs::create_dir_all(&dist).unwrap();
+        fs::write(
+            dist.join("target_force_pkg-1.0.0.tar.gz"),
+            pypi_sdist_for_test(
+                "target_force_pkg-1.0.0",
+                &[
+                    (
+                        "PKG-INFO",
+                        "Metadata-Version: 2.1\nName: target-force-pkg\nVersion: 1.0.0\n",
+                    ),
+                    ("target_force_pkg/__init__.py", "VALUE = 'old'\n"),
+                    ("target_force_pkg/extra.py", "EXTRA = True\n"),
+                ],
+            ),
+        )
+        .unwrap();
+        fs::write(
+            dist.join("target_force_pkg-1.1.0.tar.gz"),
+            pypi_sdist_for_test(
+                "target_force_pkg-1.1.0",
+                &[
+                    (
+                        "PKG-INFO",
+                        "Metadata-Version: 2.1\nName: target-force-pkg\nVersion: 1.1.0\n",
+                    ),
+                    ("target_force_pkg/__init__.py", "VALUE = 'forced'\n"),
+                ],
+            ),
+        )
+        .unwrap();
+
+        let status = with_clean_pip_env(|| {
+            run_pip_compat(
+                &project,
+                &args(&[
+                    "install",
+                    "--target",
+                    "vendor",
+                    "--no-deps",
+                    "./dist/target_force_pkg-1.0.0.tar.gz",
+                ]),
+            )
+        })
+        .unwrap();
+        assert_eq!(status, ExitCode::SUCCESS);
+        let status = with_clean_pip_env(|| {
+            run_pip_compat(
+                &project,
+                &args(&[
+                    "install",
+                    "--target",
+                    "vendor",
+                    "--force-reinstall",
+                    "--no-deps",
+                    "./dist/target_force_pkg-1.1.0.tar.gz",
+                ]),
+            )
+        })
+        .unwrap();
+
+        assert_eq!(status, ExitCode::SUCCESS);
+        assert_eq!(
+            fs::read_to_string(project.join("vendor/target_force_pkg/__init__.py")).unwrap(),
+            "VALUE = 'forced'\n"
+        );
+        assert!(!project.join("vendor/target_force_pkg/extra.py").exists());
+        assert!(project
+            .join("vendor")
+            .join("target_force_pkg-1.1.0.dist-info")
+            .join("METADATA")
+            .exists());
+
+        fs::remove_dir_all(project).unwrap();
+    }
+
+    #[test]
     fn pip_install_user_uses_python_user_base() {
         let project = test_dir("pip-user-project");
         let local = test_dir("pip-user-local");
@@ -35504,6 +35618,7 @@ verdict = "accepted"
                 no_deps: false,
                 allow_prereleases: false,
                 upgrade: false,
+                force_reinstall: false,
                 compatibility: PipCompatibilityTarget::default(),
                 target: None,
                 prefix: None,

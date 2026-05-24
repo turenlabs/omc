@@ -680,8 +680,9 @@ Supported now:
   requirements, without writing the current OMC manifest, lockfile, or
   site-packages; real `pip install --target DIR` installs into the requested
   target through transient OMC state without writing the current manifest or
-  lockfile, with the same target compatibility flags used by `pip download`
-  and `pip wheel`; real `pip install --prefix DIR` installs packages under the
+  lockfile, honors `--upgrade`, `--force-reinstall`, `--ignore-installed`, and
+  `-I` when replacing existing target package directories, and supports the same
+  target compatibility flags used by `pip download` and `pip wheel`; real `pip install --prefix DIR` installs packages under the
   prefix lib/python site-packages path and scripts under the prefix bin
   directory; real `pip install --root DIR` stages default, target, prefix, and
   user installs under an alternate root; real `pip install --user` installs into Python's user
