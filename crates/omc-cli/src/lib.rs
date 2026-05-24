@@ -5525,7 +5525,10 @@ fn print_npm_view(
     let metadata = read_npm_package_metadata(project_dir, &spec, npm_registry)?;
     if fields.is_empty() {
         if json {
-            println!("{}", serde_json::to_string_pretty(&metadata.manifest)?);
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&npm_view_metadata_value(&metadata))?
+            );
         } else {
             println!("{}@{}", metadata.name, metadata.version);
             if let Some(tarball) = npm_view_field_value(&metadata, "dist.tarball") {
@@ -24329,6 +24332,20 @@ mod tests {
             Some(serde_json::json!(
                 "git+ssh://git@github.com/stevemao/left-pad.git"
             ))
+        );
+
+        let view = npm_view_metadata_value(&metadata);
+        assert_eq!(view["name"], serde_json::json!("left-pad"));
+        assert_eq!(view["version"], serde_json::json!("1.3.0"));
+        assert_eq!(view["versions"], serde_json::json!(["0.0.0", "1.3.0"]));
+        assert_eq!(
+            view["time"]["modified"],
+            serde_json::json!("2024-04-16T05:01:57.431Z")
+        );
+        assert_eq!(view["dist-tags"]["latest"], serde_json::json!("1.3.0"));
+        assert_eq!(
+            view["dist"]["tarball"],
+            serde_json::json!("https://registry.npmjs.org/left-pad/-/left-pad-1.3.0.tgz")
         );
     }
 
