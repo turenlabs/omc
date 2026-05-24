@@ -1206,7 +1206,7 @@ pub fn install_project(options: &LinkOptions) -> Result<InstallReport> {
         &options.project_dir,
         &report.node_modules,
         &report.npm_bin_dir,
-        options.include_dev_dependencies,
+        DependencySelection::from_options(&options),
     )?;
     report.npm_bins += install_npm_direct_local_links(
         &options.npm_local_paths,
@@ -1272,7 +1272,7 @@ pub fn install_locked_project(options: &LinkOptions) -> Result<InstallReport> {
         &options.project_dir,
         &report.node_modules,
         &report.npm_bin_dir,
-        options.include_dev_dependencies,
+        DependencySelection::from_options(&options),
     )?;
     report.npm_bins += install_npm_direct_local_links(
         &options.npm_local_paths,
@@ -1328,6 +1328,9 @@ fn project_requested_specs(options: &mut LinkOptions, locked: bool) -> Result<Ve
         )?;
         apply_project_requirements_to_options(options, &mut specs, discovered);
     }
+    if !options.npm_local_paths.is_empty() {
+        specs.extend(resolve_npm_local_path_requirements(options)?);
+    }
 
     if !options.requirement_files.is_empty() {
         let requirements = read_requirements_files(&options.requirement_files)?;
@@ -1367,6 +1370,60 @@ fn project_requested_specs(options: &mut LinkOptions, locked: bool) -> Result<Ve
 
     let mut seen = BTreeSet::new();
     specs.retain(|spec| seen.insert(spec.requested()));
+    Ok(specs)
+}
+
+fn resolve_npm_local_path_requirements(options: &mut LinkOptions) -> Result<Vec<PackageSpec>> {
+    let selection = DependencySelection {
+        dev: false,
+        optional: options.include_optional_dependencies,
+        peer: options.include_peer_dependencies,
+    };
+    let mut specs = Vec::new();
+    let mut queue = options.npm_local_paths.clone();
+    let mut seen = BTreeSet::new();
+    let mut resolved_paths = Vec::new();
+
+    while let Some(path) = queue.pop() {
+        let path = fs::canonicalize(&path).map_err(|error| {
+            OmcRegistryError::UnsupportedRequirement(format!(
+                "local npm path `{}` could not be resolved: {error}",
+                path.display()
+            ))
+        })?;
+        if !path.is_dir() {
+            return Err(OmcRegistryError::UnsupportedSpec(format!(
+                "local npm path `{}` must point to an existing directory",
+                path.display()
+            )));
+        }
+        if !seen.insert(path.clone()) {
+            continue;
+        }
+        let package_json = path.join("package.json");
+        if !package_json.exists() {
+            return Err(OmcRegistryError::UnsupportedSpec(format!(
+                "local npm path `{}` must contain package.json",
+                path.display()
+            )));
+        }
+        let package =
+            serde_json::from_str::<ProjectPackageJson>(&fs::read_to_string(&package_json)?)?;
+        collect_package_json_constraints(&package, &mut options.constraints);
+        specs.extend(package_json_dependency_specs(
+            package.clone(),
+            selection,
+            &path,
+        )?);
+        let mut links = Vec::new();
+        collect_npm_local_dependency_links(&package, selection, &path, &mut links)?;
+        for link in links {
+            queue.push(link.path);
+        }
+        resolved_paths.push(path);
+    }
+
+    options.npm_local_paths = resolved_paths;
     Ok(specs)
 }
 
@@ -6546,8 +6603,12 @@ pub fn install_locked_packages(project_dir: impl AsRef<Path>) -> Result<InstallR
         extend_project_requirements(&mut project, vcs_requirements.requirements);
     }
     let mut report = install_lock(project_dir, &lock)?;
-    report.npm_bins +=
-        install_npm_project_links(project_dir, &report.node_modules, &report.npm_bin_dir, true)?;
+    report.npm_bins += install_npm_project_links(
+        project_dir,
+        &report.node_modules,
+        &report.npm_bin_dir,
+        DependencySelection::with_dev(true),
+    )?;
     report.python_scripts += install_python_local_paths(
         &project.python_local_paths,
         &report.python_site_packages,
@@ -6578,8 +6639,12 @@ pub fn install_locked_packages_with_python_target(
         Some(python_target_dir.as_ref()),
         None,
     )?;
-    report.npm_bins +=
-        install_npm_project_links(project_dir, &report.node_modules, &report.npm_bin_dir, true)?;
+    report.npm_bins += install_npm_project_links(
+        project_dir,
+        &report.node_modules,
+        &report.npm_bin_dir,
+        DependencySelection::with_dev(true),
+    )?;
     report.python_scripts += install_python_local_paths(
         &project.python_local_paths,
         &report.python_site_packages,
@@ -6886,16 +6951,11 @@ fn install_npm_project_links(
     project_dir: &Path,
     node_modules: &Path,
     bin_dir: &Path,
-    include_dev_dependencies: bool,
+    selection: DependencySelection,
 ) -> Result<usize> {
     Ok(install_npm_root_bins(project_dir, bin_dir)?
         + install_npm_workspace_links(project_dir, node_modules, bin_dir)?
-        + install_npm_local_dependency_links(
-            project_dir,
-            node_modules,
-            bin_dir,
-            include_dev_dependencies,
-        )?)
+        + install_npm_local_dependency_links(project_dir, node_modules, bin_dir, selection)?)
 }
 
 fn install_npm_direct_local_links(
@@ -6996,7 +7056,7 @@ fn install_npm_local_dependency_links(
     project_dir: &Path,
     node_modules: &Path,
     bin_dir: &Path,
-    include_dev_dependencies: bool,
+    selection: DependencySelection,
 ) -> Result<usize> {
     let mut count = 0;
     for package_json in npm_project_package_jsons(project_dir)? {
@@ -7004,12 +7064,7 @@ fn install_npm_local_dependency_links(
         let package =
             serde_json::from_str::<ProjectPackageJson>(&fs::read_to_string(&package_json)?)?;
         let mut links = Vec::new();
-        collect_npm_local_dependency_links(
-            &package,
-            include_dev_dependencies,
-            base_dir,
-            &mut links,
-        )?;
+        collect_npm_local_dependency_links(&package, selection, base_dir, &mut links)?;
         for link in links {
             let target = npm_install_target(node_modules, &link.name);
             remove_path_if_exists(&target)?;
@@ -7045,25 +7100,33 @@ struct NpmLocalLink {
 
 fn collect_npm_local_dependency_links(
     package: &ProjectPackageJson,
-    include_dev_dependencies: bool,
+    selection: DependencySelection,
     base_dir: &Path,
     links: &mut Vec<NpmLocalLink>,
 ) -> Result<()> {
     collect_npm_local_dependency_links_from_map(&package.dependencies, base_dir, links)?;
-    if include_dev_dependencies {
+    if selection.dev {
         collect_npm_local_dependency_links_from_map(&package.dev_dependencies, base_dir, links)?;
     }
-    collect_npm_local_dependency_links_from_map(&package.optional_dependencies, base_dir, links)?;
-    for (name, requirement) in &package.peer_dependencies {
-        if package
-            .peer_dependencies_meta
-            .get(name)
-            .map(|meta| meta.optional)
-            .unwrap_or(false)
-        {
-            continue;
+    if selection.optional {
+        collect_npm_local_dependency_links_from_map(
+            &package.optional_dependencies,
+            base_dir,
+            links,
+        )?;
+    }
+    if selection.peer {
+        for (name, requirement) in &package.peer_dependencies {
+            if package
+                .peer_dependencies_meta
+                .get(name)
+                .map(|meta| meta.optional)
+                .unwrap_or(false)
+            {
+                continue;
+            }
+            collect_npm_local_dependency_link(name, requirement, base_dir, links)?;
         }
-        collect_npm_local_dependency_link(name, requirement, base_dir, links)?;
     }
     Ok(())
 }
@@ -15444,7 +15507,7 @@ fn relative_path(base: &Path, path: &Path) -> String {
         .replace('\\', "/")
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 struct ProjectPackageJson {
     #[serde(default)]
     name: Option<String>,
@@ -16731,6 +16794,64 @@ mod tests {
         assert!(dir.path().join("node_modules/.bin/direct-tool").exists());
         let manifest = read_manifest(dir.path().join("omc.toml")).unwrap();
         assert_eq!(manifest.npm_local_paths, vec!["vendor/direct-pkg"]);
+    }
+
+    #[test]
+    fn installs_recursive_npm_local_path_dependencies() {
+        let dir = tempfile::tempdir().unwrap();
+        let parent = dir.path().join("vendor/parent-pkg");
+        let child = parent.join("child-pkg");
+        fs::create_dir_all(&child).unwrap();
+        fs::write(
+            parent.join("package.json"),
+            r#"{
+                "name": "parent-pkg",
+                "version": "1.0.0",
+                "dependencies": {
+                    "child-pkg": "file:./child-pkg",
+                    "tar-dep": "file:./tar-dep-1.0.0.tgz"
+                }
+            }"#,
+        )
+        .unwrap();
+        fs::write(
+            parent.join("index.js"),
+            "module.exports = require('child-pkg');\n",
+        )
+        .unwrap();
+        fs::write(
+            child.join("package.json"),
+            r#"{ "name": "child-pkg", "version": "1.0.0" }"#,
+        )
+        .unwrap();
+        fs::write(child.join("index.js"), "module.exports = 44;\n").unwrap();
+        fs::write(
+            parent.join("tar-dep-1.0.0.tgz"),
+            npm_tgz_for_test(r#"{ "name": "tar-dep", "version": "1.0.0" }"#),
+        )
+        .unwrap();
+
+        add_manifest_npm_local_paths(
+            dir.path(),
+            &[PathBuf::from("vendor/parent-pkg")],
+            ManifestDependencyKind::Production,
+        )
+        .unwrap();
+
+        let report = install_project(&LinkOptions::new(dir.path())).unwrap();
+
+        assert_eq!(report.npm_packages, 1);
+        assert!(dir.path().join("node_modules/parent-pkg").exists());
+        assert!(dir.path().join("node_modules/child-pkg").exists());
+        assert!(dir
+            .path()
+            .join("node_modules/tar-dep/package.json")
+            .exists());
+        let lock = read_lockfile(dir.path().join("omc.lock")).unwrap();
+        assert!(lock
+            .packages
+            .iter()
+            .any(|package| package.name == "tar-dep"));
     }
 
     #[test]

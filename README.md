@@ -465,8 +465,9 @@ Supported now:
   `node_modules/.bin`
 - direct `npm install ./package.tgz`, `npm install file:./package.tgz`, and
   `npm install ./local-package` compatibility paths through OMC-managed
-  artifacts or local links; local package directories installed with `-D`
-  are omitted by `--omit-dev`
+  artifacts or local links, including registry, tarball, and local directory
+  dependencies declared by those local packages; local package directories
+  installed with `-D` are omitted by `--omit-dev`
 - npm save-location flags for OMC manifests: `--save-prod`/`-P`,
   `--save-dev`/`-D`, `--save-optional`/`-O`, and `--save-peer`
 - npm omit/include flags for install selection:
