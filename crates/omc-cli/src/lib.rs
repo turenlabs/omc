@@ -1064,6 +1064,7 @@ enum PipCompatAction {
         extra_index_urls: Vec<String>,
         find_links: Vec<String>,
         no_index: bool,
+        allow_prereleases: bool,
     },
     IndexVersions {
         package: String,
@@ -1071,6 +1072,7 @@ enum PipCompatAction {
         extra_index_urls: Vec<String>,
         find_links: Vec<String>,
         no_index: bool,
+        allow_prereleases: bool,
         json: bool,
     },
     Config {
@@ -1137,6 +1139,7 @@ struct PipInstallAction {
     binary_packages: BTreeMap<String, PypiBinaryMode>,
     require_hashes: bool,
     no_deps: bool,
+    allow_prereleases: bool,
     target: Option<PathBuf>,
     vcs_requirements: Vec<PythonVcsRequirement>,
     allow: Vec<String>,
@@ -1157,6 +1160,7 @@ struct PipDownloadAction {
     binary_packages: BTreeMap<String, PypiBinaryMode>,
     require_hashes: bool,
     no_deps: bool,
+    allow_prereleases: bool,
     destination: PathBuf,
     allow: Vec<String>,
     allow_all_host: bool,
@@ -3121,6 +3125,7 @@ fn run_pip_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
                 binary_packages,
                 require_hashes,
                 no_deps,
+                allow_prereleases,
                 target,
                 vcs_requirements,
                 allow,
@@ -3143,6 +3148,7 @@ fn run_pip_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
                 );
                 options.pypi_require_hashes = require_hashes;
                 options.pypi_include_dependencies = !no_deps;
+                options.pypi_allow_prereleases = allow_prereleases;
                 options.pypi_binary_all = binary_all;
                 options.pypi_binary_packages = binary_packages;
                 options.python_target_dir = target.map(|path| absolutize_path(project_dir, path));
@@ -3166,6 +3172,7 @@ fn run_pip_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
                 );
                 options.pypi_require_hashes = require_hashes;
                 options.pypi_include_dependencies = !no_deps;
+                options.pypi_allow_prereleases = allow_prereleases;
                 options.pypi_binary_all = binary_all;
                 options.pypi_binary_packages = binary_packages;
                 options.python_target_dir = target.map(|path| absolutize_path(project_dir, path));
@@ -3245,6 +3252,7 @@ fn run_pip_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
             extra_index_urls,
             find_links,
             no_index,
+            allow_prereleases,
         } => {
             if outdated {
                 print_locked_pip_outdated(
@@ -3254,6 +3262,7 @@ fn run_pip_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
                     extra_index_urls,
                     find_links,
                     no_index,
+                    allow_prereleases,
                 )?;
             } else {
                 match format {
@@ -3271,14 +3280,18 @@ fn run_pip_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
             extra_index_urls,
             find_links,
             no_index,
+            allow_prereleases,
             json,
         } => print_pip_index_versions(
             project_dir,
             &package,
-            index_url,
-            extra_index_urls,
-            find_links,
-            no_index,
+            PipIndexSearchOptions {
+                index_url,
+                extra_index_urls,
+                find_links,
+                no_index,
+                allow_prereleases,
+            },
             json,
         )?,
         PipCompatAction::Config { action } => print_pip_config(project_dir, action)?,
@@ -3776,6 +3789,7 @@ fn run_pip_install_dry_run(
         binary_packages,
         require_hashes,
         no_deps,
+        allow_prereleases,
         target,
         vcs_requirements,
         allow,
@@ -3796,6 +3810,7 @@ fn run_pip_install_dry_run(
     );
     options.pypi_require_hashes = require_hashes;
     options.pypi_include_dependencies = !no_deps;
+    options.pypi_allow_prereleases = allow_prereleases;
     options.pypi_binary_all = binary_all;
     options.pypi_binary_packages = binary_packages;
     options.python_local_requirements =
@@ -7883,12 +7898,16 @@ fn npm_view_text_value(value: &serde_json::Value) -> String {
 fn print_pip_index_versions(
     project_dir: &Path,
     package: &str,
-    index_url: Option<String>,
-    extra_index_urls: Vec<String>,
-    find_links: Vec<String>,
-    no_index: bool,
+    options: PipIndexSearchOptions,
     json: bool,
 ) -> Result<(), OmcRegistryError> {
+    let PipIndexSearchOptions {
+        index_url,
+        extra_index_urls,
+        find_links,
+        no_index,
+        allow_prereleases,
+    } = options;
     let listing = read_pypi_available_versions(
         project_dir,
         package,
@@ -7896,6 +7915,7 @@ fn print_pip_index_versions(
         extra_index_urls,
         find_links,
         no_index,
+        allow_prereleases,
     )?;
     let latest = listing.versions.first().cloned().unwrap_or_default();
     if json {
@@ -7912,6 +7932,15 @@ fn print_pip_index_versions(
         println!("Available versions: {}", listing.versions.join(", "));
     }
     Ok(())
+}
+
+#[derive(Debug)]
+struct PipIndexSearchOptions {
+    index_url: Option<String>,
+    extra_index_urls: Vec<String>,
+    find_links: Vec<String>,
+    no_index: bool,
+    allow_prereleases: bool,
 }
 
 fn print_pip_hash(
@@ -7961,6 +7990,7 @@ fn download_pip_packages(
         binary_packages,
         require_hashes,
         no_deps,
+        allow_prereleases,
         destination,
         allow,
         allow_all_host,
@@ -7982,6 +8012,7 @@ fn download_pip_packages(
     );
     options.pypi_require_hashes = require_hashes;
     options.pypi_include_dependencies = !no_deps;
+    options.pypi_allow_prereleases = allow_prereleases;
     options.pypi_binary_all = binary_all;
     options.pypi_binary_packages = binary_packages;
 
@@ -8047,6 +8078,7 @@ fn apply_pypi_download_requirements(
     options.pypi_find_links.extend(requirements.pypi_find_links);
     options.pypi_no_index |= requirements.pypi_no_index;
     options.pypi_require_hashes |= requirements.pypi_require_hashes;
+    options.pypi_allow_prereleases |= requirements.pypi_allow_prereleases;
     if requirements.pypi_no_deps {
         options.pypi_include_dependencies = false;
     }
@@ -8076,6 +8108,7 @@ fn apply_pypi_install_requirements(
     options.pypi_find_links.extend(requirements.pypi_find_links);
     options.pypi_no_index |= requirements.pypi_no_index;
     options.pypi_require_hashes |= requirements.pypi_require_hashes;
+    options.pypi_allow_prereleases |= requirements.pypi_allow_prereleases;
     if requirements.pypi_no_deps {
         options.pypi_include_dependencies = false;
     }
@@ -10753,6 +10786,10 @@ fn pip_config_values(project_dir: &Path) -> Result<BTreeMap<String, String>, Omc
     let mut values = BTreeMap::from([
         ("global.index-url".to_owned(), snapshot.index_url),
         ("global.no-index".to_owned(), snapshot.no_index.to_string()),
+        (
+            "global.pre".to_owned(),
+            snapshot.allow_prereleases.to_string(),
+        ),
     ]);
     if !snapshot.extra_index_urls.is_empty() {
         values.insert(
@@ -12042,6 +12079,7 @@ fn print_locked_pip_outdated(
     extra_index_urls: Vec<String>,
     find_links: Vec<String>,
     no_index: bool,
+    allow_prereleases: bool,
 ) -> Result<(), OmcRegistryError> {
     let lock = read_lockfile(project_dir.join("omc.lock"))?;
     let mut rows = Vec::new();
@@ -12057,6 +12095,7 @@ fn print_locked_pip_outdated(
             extra_index_urls.clone(),
             find_links.clone(),
             no_index,
+            allow_prereleases,
         ) {
             Ok(listing) => listing,
             Err(OmcRegistryError::PackageNotFound(_)) => continue,
@@ -18553,6 +18592,7 @@ fn parse_pip_index_args(args: &[String]) -> Result<PipCompatAction, OmcRegistryE
         extra_index_urls,
         find_links,
         no_index,
+        allow_prereleases,
         json,
         mut positionals,
     } = parse_pip_index_common_args(args)?;
@@ -18575,6 +18615,7 @@ fn parse_pip_index_args(args: &[String]) -> Result<PipCompatAction, OmcRegistryE
                 extra_index_urls,
                 find_links,
                 no_index,
+                allow_prereleases,
                 json,
             })
         }
@@ -18590,6 +18631,7 @@ struct PipIndexArgs {
     extra_index_urls: Vec<String>,
     find_links: Vec<String>,
     no_index: bool,
+    allow_prereleases: bool,
     json: bool,
     positionals: Vec<String>,
 }
@@ -18600,6 +18642,7 @@ fn parse_pip_index_common_args(args: &[String]) -> Result<PipIndexArgs, OmcRegis
         extra_index_urls: Vec::new(),
         find_links: Vec::new(),
         no_index: false,
+        allow_prereleases: false,
         json: false,
         positionals: Vec::new(),
     };
@@ -18640,10 +18683,11 @@ fn parse_pip_index_common_args(args: &[String]) -> Result<PipIndexArgs, OmcRegis
             parsed.find_links.push(value.to_owned());
         } else if arg == "--no-index" {
             parsed.no_index = true;
+        } else if arg == "--pre" {
+            parsed.allow_prereleases = true;
         } else if matches!(
             arg.as_str(),
-            "--pre"
-                | "--disable-pip-version-check"
+            "--disable-pip-version-check"
                 | "--isolated"
                 | "--no-cache-dir"
                 | "--ignore-requires-python"
@@ -19210,6 +19254,7 @@ fn parse_pip_install_args(args: &[String]) -> Result<PipCompatAction, OmcRegistr
     let mut binary_packages = BTreeMap::new();
     let mut require_hashes = false;
     let mut no_deps = false;
+    let mut allow_prereleases = false;
     let mut target = None;
     let mut archive_references = Vec::new();
     let mut local_paths = Vec::new();
@@ -19286,6 +19331,8 @@ fn parse_pip_install_args(args: &[String]) -> Result<PipCompatAction, OmcRegistr
             require_hashes = true;
         } else if arg == "--no-deps" {
             no_deps = true;
+        } else if arg == "--pre" {
+            allow_prereleases = true;
         } else if arg == "-t" || arg == "--target" {
             index += 1;
             let Some(path) = args.get(index) else {
@@ -19411,6 +19458,7 @@ fn parse_pip_install_args(args: &[String]) -> Result<PipCompatAction, OmcRegistr
         binary_packages,
         require_hashes,
         no_deps,
+        allow_prereleases,
         target,
         vcs_requirements,
         allow,
@@ -19446,6 +19494,7 @@ fn parse_pip_artifact_args(
     let mut binary_packages = BTreeMap::new();
     let mut require_hashes = false;
     let mut no_deps = false;
+    let mut allow_prereleases = false;
     let mut destination = PathBuf::from(".");
     let mut archive_references = Vec::new();
     let mut filtered = Vec::new();
@@ -19542,6 +19591,8 @@ fn parse_pip_artifact_args(
             require_hashes = true;
         } else if arg == "--no-deps" {
             no_deps = true;
+        } else if arg == "--pre" {
+            allow_prereleases = true;
         } else if arg == "--prefer-binary" {
         } else if arg == "--only-binary" || arg == "--no-binary" {
             index += 1;
@@ -19635,6 +19686,7 @@ fn parse_pip_artifact_args(
         binary_packages,
         require_hashes,
         no_deps,
+        allow_prereleases,
         destination,
         allow,
         allow_all_host,
@@ -20237,6 +20289,7 @@ fn parse_pip_list_args(args: &[String]) -> Result<PipCompatAction, OmcRegistryEr
     let mut extra_index_urls = Vec::new();
     let mut find_links = Vec::new();
     let mut no_index = false;
+    let mut allow_prereleases = false;
     let mut index = 0;
     while index < args.len() {
         let arg = &args[index];
@@ -20284,6 +20337,8 @@ fn parse_pip_list_args(args: &[String]) -> Result<PipCompatAction, OmcRegistryEr
             find_links.push(value.to_owned());
         } else if arg == "--no-index" {
             no_index = true;
+        } else if arg == "--pre" {
+            allow_prereleases = true;
         } else if matches!(
             arg.as_str(),
             "--local"
@@ -20292,7 +20347,6 @@ fn parse_pip_list_args(args: &[String]) -> Result<PipCompatAction, OmcRegistryEr
                 | "--include-editable"
                 | "--exclude-editable"
                 | "--disable-pip-version-check"
-                | "--pre"
                 | "--not-required"
                 | "--ignore-requires-python"
                 | "-v"
@@ -20328,6 +20382,7 @@ fn parse_pip_list_args(args: &[String]) -> Result<PipCompatAction, OmcRegistryEr
         extra_index_urls,
         find_links,
         no_index,
+        allow_prereleases,
     })
 }
 
@@ -24357,6 +24412,7 @@ verdict = "accepted"
             "--find-links",
             "wheelhouse",
             "--no-index",
+            "--pre",
             "--require-hashes",
             "--no-deps",
             "--target",
@@ -24408,6 +24464,7 @@ verdict = "accepted"
                 binary_packages: BTreeMap::from([("idna".to_owned(), PypiBinaryMode::Binary)]),
                 require_hashes: true,
                 no_deps: true,
+                allow_prereleases: true,
                 target: Some(PathBuf::from("vendor")),
                 vcs_requirements: Vec::new(),
                 allow: Vec::new(),
@@ -24452,6 +24509,7 @@ verdict = "accepted"
                 binary_packages: BTreeMap::new(),
                 require_hashes: true,
                 no_deps: true,
+                allow_prereleases: false,
                 destination: PathBuf::from("wheelhouse"),
                 allow: vec!["http:files.example".to_owned()],
                 allow_all_host: false,
@@ -24492,6 +24550,7 @@ verdict = "accepted"
                 binary_packages: BTreeMap::new(),
                 require_hashes: true,
                 no_deps: true,
+                allow_prereleases: false,
                 destination: PathBuf::from("wheelhouse"),
                 allow: vec!["http:files.example".to_owned()],
                 allow_all_host: false,
@@ -24519,6 +24578,7 @@ verdict = "accepted"
                 binary_packages: BTreeMap::new(),
                 require_hashes: false,
                 no_deps: false,
+                allow_prereleases: false,
                 destination: PathBuf::from("wheelhouse"),
                 allow: Vec::new(),
                 allow_all_host: false,
@@ -24561,6 +24621,7 @@ verdict = "accepted"
                 binary_packages: BTreeMap::new(),
                 require_hashes: false,
                 no_deps: false,
+                allow_prereleases: false,
                 target: None,
                 vcs_requirements: Vec::new(),
                 allow: Vec::new(),
@@ -24592,6 +24653,7 @@ verdict = "accepted"
                 binary_packages: BTreeMap::new(),
                 require_hashes: false,
                 no_deps: false,
+                allow_prereleases: false,
                 target: None,
                 vcs_requirements: vec![
                     PythonVcsRequirement {
@@ -24649,6 +24711,7 @@ version = "0.1.0"
                 binary_packages: BTreeMap::new(),
                 require_hashes: false,
                 no_deps: false,
+                allow_prereleases: false,
                 target: None,
                 vcs_requirements: Vec::new(),
                 allow: Vec::new(),
@@ -24690,6 +24753,7 @@ version = "0.1.0"
                 binary_packages: BTreeMap::new(),
                 require_hashes: false,
                 no_deps: false,
+                allow_prereleases: false,
                 target: None,
                 vcs_requirements: Vec::new(),
                 allow: Vec::new(),
@@ -25219,6 +25283,7 @@ version = "0.1.0"
                 extra_index_urls: Vec::new(),
                 find_links: Vec::new(),
                 no_index: false,
+                allow_prereleases: false,
             }
         );
         assert_eq!(
@@ -25230,6 +25295,7 @@ version = "0.1.0"
                 extra_index_urls: Vec::new(),
                 find_links: Vec::new(),
                 no_index: false,
+                allow_prereleases: false,
             }
         );
         assert_eq!(
@@ -25250,6 +25316,7 @@ version = "0.1.0"
                 extra_index_urls: Vec::new(),
                 find_links: Vec::new(),
                 no_index: false,
+                allow_prereleases: false,
             }
         );
         assert_eq!(
@@ -25270,10 +25337,12 @@ version = "0.1.0"
                 extra_index_urls: Vec::new(),
                 find_links: vec!["wheelhouse".to_owned()],
                 no_index: true,
+                allow_prereleases: false,
             }
         );
         assert_eq!(
-            parse_pip_compat_action(&args(&["list", "--outdated", "--format=freeze"])).unwrap(),
+            parse_pip_compat_action(&args(&["list", "--outdated", "--pre", "--format=freeze"]))
+                .unwrap(),
             PipCompatAction::List {
                 format: PipListFormat::Freeze,
                 outdated: true,
@@ -25281,6 +25350,7 @@ version = "0.1.0"
                 extra_index_urls: Vec::new(),
                 find_links: Vec::new(),
                 no_index: false,
+                allow_prereleases: true,
             }
         );
         assert_eq!(
@@ -25292,6 +25362,7 @@ version = "0.1.0"
                 "--no-index",
                 "--find-links",
                 "wheelhouse",
+                "--pre",
                 "--disable-pip-version-check",
             ]))
             .unwrap(),
@@ -25301,6 +25372,7 @@ version = "0.1.0"
                 extra_index_urls: Vec::new(),
                 find_links: vec!["wheelhouse".to_owned()],
                 no_index: true,
+                allow_prereleases: true,
                 json: true,
             }
         );

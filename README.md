@@ -204,6 +204,7 @@ cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip completion --b
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip install --dry-run --report install-report.json requests==2.32.3
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip install --dry-run -e ../local-package
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip install requests==2.32.3 --report install-report.json --allow-all-host
+cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip install --pre some-package
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip install requests==2.32.3 --allow-all-host
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip install -e ../local-package
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip install -e 'git+https://example.com/acme/pkg.git@main#egg=acme-pkg'
@@ -359,7 +360,8 @@ pypi-extra-index-urls = ["https://packages.example/simple"]
 If the project does not set a PyPI index, OMC also honors pip-style
 global/project/user `pip.conf`, `PIP_CONFIG_FILE`, `PIP_INDEX_URL`, and
 `PIP_EXTRA_INDEX_URL` settings. Wheelhouse settings such as `find-links`,
-`no-index`, `PIP_FIND_LINKS`, and `PIP_NO_INDEX` feed the same offline resolver.
+`no-index`, prerelease opt-in, `PIP_FIND_LINKS`, `PIP_NO_INDEX`, and `PIP_PRE`
+feed the same offline resolver.
 
 This is still a prototype. It replaces install-time execution with registry
 resolution, source caching, OMC artifact generation, capability verification,
@@ -434,7 +436,7 @@ Supported now:
   subdirectories, recursive `-r` includes, `-c` constraints, `--index-url` /
   `--extra-index-url` simple indexes, `--find-links` / `-f` local wheel/sdist
   archives or HTML pages, `--no-index`, `--trusted-host`, `--only-binary`,
-  `--no-binary`, `--prefer-binary`, enforced `--require-hashes`, local editable/direct/bare
+  `--no-binary`, `--prefer-binary`, `--pre`, enforced `--require-hashes`, local editable/direct/bare
   directory paths with selected extras, and common Python environment markers
 - `pip download` and `pip wheel` compatibility for registry requirements,
   requirement files, hashes, direct wheel archives, and direct source
@@ -558,7 +560,7 @@ Supported now:
   with columns, JSON, and freeze output,
   `-r`, index URL,
   constraints, extra-index, find-links, no-index,
-  require-hashes, no-deps, target-directory, trusted-host, retry/timeout,
+  require-hashes, no-deps, prerelease opt-in, target-directory, trusted-host, retry/timeout,
   reinstall, warning, build-isolation, and binary-policy install flags without
   delegating to pip; common global pip flags such as
   `--disable-pip-version-check`, `--quiet`, `--timeout`, `--retries`,

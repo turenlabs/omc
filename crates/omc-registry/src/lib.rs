@@ -623,6 +623,7 @@ pub struct LinkOptions {
     pub pypi_no_index: bool,
     pub pypi_require_hashes: bool,
     pub pypi_include_dependencies: bool,
+    pub pypi_allow_prereleases: bool,
     pub python_target_dir: Option<PathBuf>,
     pub npm_local_paths: Vec<PathBuf>,
     pub python_local_paths: Vec<PathBuf>,
@@ -659,6 +660,7 @@ impl LinkOptions {
             pypi_no_index: false,
             pypi_require_hashes: false,
             pypi_include_dependencies: true,
+            pypi_allow_prereleases: false,
             python_target_dir: None,
             npm_local_paths: Vec::new(),
             python_local_paths: Vec::new(),
@@ -745,6 +747,7 @@ pub struct ProjectRequirements {
     pub pypi_no_index: bool,
     pub pypi_require_hashes: bool,
     pub pypi_no_deps: bool,
+    pub pypi_allow_prereleases: bool,
     pub python_local_paths: Vec<PathBuf>,
     pub python_local_requirements: Vec<PythonLocalRequirement>,
     pub python_vcs_requirements: Vec<PythonVcsRequirement>,
@@ -802,6 +805,7 @@ fn extend_project_requirements(
     target.pypi_no_index |= requirements.pypi_no_index;
     target.pypi_require_hashes |= requirements.pypi_require_hashes;
     target.pypi_no_deps |= requirements.pypi_no_deps;
+    target.pypi_allow_prereleases |= requirements.pypi_allow_prereleases;
     target
         .python_local_paths
         .extend(requirements.python_local_paths);
@@ -838,6 +842,7 @@ fn apply_project_requirements_to_options(
     options.pypi_find_links.extend(requirements.pypi_find_links);
     options.pypi_no_index |= requirements.pypi_no_index;
     options.pypi_require_hashes |= requirements.pypi_require_hashes;
+    options.pypi_allow_prereleases |= requirements.pypi_allow_prereleases;
     if requirements.pypi_no_deps {
         options.pypi_include_dependencies = false;
     }
@@ -2631,6 +2636,7 @@ fn apply_pypi_environment_config(options: &mut LinkOptions, override_index: bool
     let no_binary = env::var("PIP_NO_BINARY").ok();
     let only_binary = env::var("PIP_ONLY_BINARY").ok();
     let no_index = env_truthy("PIP_NO_INDEX");
+    let allow_prereleases = env_truthy("PIP_PRE");
     let project_dir = options.project_dir.clone();
     apply_pypi_environment_values(
         options,
@@ -2642,6 +2648,7 @@ fn apply_pypi_environment_config(options: &mut LinkOptions, override_index: bool
             no_binary: no_binary.as_deref(),
             only_binary: only_binary.as_deref(),
             no_index,
+            allow_prereleases,
             override_index,
         },
     );
@@ -2655,6 +2662,7 @@ struct PypiEnvironmentValues<'a> {
     no_binary: Option<&'a str>,
     only_binary: Option<&'a str>,
     no_index: bool,
+    allow_prereleases: bool,
     override_index: bool,
 }
 
@@ -2699,6 +2707,7 @@ fn apply_pypi_environment_values(
         );
     }
     options.pypi_no_index |= values.no_index;
+    options.pypi_allow_prereleases |= values.allow_prereleases;
     dedupe_pypi_find_links(options);
     dedupe_pypi_extra_index_urls(options);
 }
@@ -2711,6 +2720,7 @@ struct PipConfig {
     binary_all: Option<PypiBinaryMode>,
     binary_packages: BTreeMap<String, PypiBinaryMode>,
     no_index: bool,
+    allow_prereleases: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2721,6 +2731,7 @@ pub struct PipConfigSnapshot {
     pub binary_all: Option<PypiBinaryMode>,
     pub binary_packages: BTreeMap<String, PypiBinaryMode>,
     pub no_index: bool,
+    pub allow_prereleases: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2743,6 +2754,7 @@ fn apply_pip_config_files(project_dir: &Path, options: &mut LinkOptions) -> Resu
     }
     options.pypi_binary_packages.extend(config.binary_packages);
     options.pypi_no_index |= config.no_index;
+    options.pypi_allow_prereleases |= config.allow_prereleases;
     dedupe_pypi_find_links(options);
     dedupe_pypi_extra_index_urls(options);
     Ok(())
@@ -2796,6 +2808,7 @@ pub fn read_pip_config_snapshot(project_dir: &Path) -> Result<PipConfigSnapshot>
     options.pypi_binary_all = config.binary_all;
     options.pypi_binary_packages = config.binary_packages;
     options.pypi_no_index = config.no_index;
+    options.pypi_allow_prereleases = config.allow_prereleases;
     apply_pypi_environment_config(&mut options, true);
     Ok(PipConfigSnapshot {
         index_url: options
@@ -2806,6 +2819,7 @@ pub fn read_pip_config_snapshot(project_dir: &Path) -> Result<PipConfigSnapshot>
         binary_all: options.pypi_binary_all,
         binary_packages: options.pypi_binary_packages,
         no_index: options.pypi_no_index,
+        allow_prereleases: options.pypi_allow_prereleases,
     })
 }
 
@@ -2816,6 +2830,7 @@ pub fn read_pypi_available_versions(
     extra_index_urls: Vec<String>,
     find_links: Vec<String>,
     no_index: bool,
+    allow_prereleases: bool,
 ) -> Result<PypiVersionListing> {
     let mut options = LinkOptions::new(project_dir);
     options.pypi_index_url = index_url.and_then(|url| normalize_pypi_simple_index_url(&url));
@@ -2828,6 +2843,7 @@ pub fn read_pypi_available_versions(
         .filter_map(|source| normalize_pypi_find_links_source(&source, project_dir))
         .collect();
     options.pypi_no_index = no_index;
+    options.pypi_allow_prereleases = allow_prereleases;
     let options = options_with_manifest_policy(&options)?;
     let spec = PackageSpec::parse(&format!("pypi:{package}"))?;
     let client = Client::builder().user_agent("omc-prototype/0.1").build()?;
@@ -2861,6 +2877,13 @@ pub fn read_pypi_available_versions(
     }
 
     let mut versions = versions.into_iter().collect::<Vec<_>>();
+    if !options.pypi_allow_prereleases
+        && versions
+            .iter()
+            .any(|version| !pypi_version_is_prerelease(version))
+    {
+        versions.retain(|version| !pypi_version_is_prerelease(version));
+    }
     versions.sort_by(|left, right| compare_pypi_versions(right, left));
     Ok(PypiVersionListing {
         name: spec.name,
@@ -2951,6 +2974,9 @@ fn apply_pip_config_value(
         }
         "no-index" => {
             config.no_index |= pip_config_bool(value);
+        }
+        "pre" => {
+            config.allow_prereleases |= pip_config_bool(value);
         }
         "no-binary" => {
             apply_pypi_binary_option(
@@ -3940,6 +3966,7 @@ fn npm_requirements_from_lock_maps(
         pypi_no_index: false,
         pypi_require_hashes: false,
         pypi_no_deps: false,
+        pypi_allow_prereleases: false,
         python_local_paths: Vec::new(),
         python_local_requirements: Vec::new(),
         python_vcs_requirements: Vec::new(),
@@ -5835,6 +5862,13 @@ fn read_requirements_file_inner(
         if parse_requirements_no_deps(line) {
             if mode == RequirementsMode::Install {
                 discovered.pypi_no_deps = true;
+            }
+            continue;
+        }
+
+        if parse_requirements_allow_prereleases(line) {
+            if mode == RequirementsMode::Install {
+                discovered.pypi_allow_prereleases = true;
             }
             continue;
         }
@@ -11778,6 +11812,7 @@ fn resolve_pypi(
                 &root,
                 target_python.as_deref(),
                 binary_mode,
+                options.pypi_allow_prereleases,
             )?
         }
         None => {
@@ -11787,17 +11822,14 @@ fn resolve_pypi(
                 .send()?
                 .error_for_status()?
                 .json::<PypiRoot>()?;
-            if binary_mode.is_some() {
-                choose_pypi_version(
-                    &spec.name,
-                    "*",
-                    &root,
-                    target_python.as_deref(),
-                    binary_mode,
-                )?
-            } else {
-                root.info.version
-            }
+            choose_pypi_version(
+                &spec.name,
+                "*",
+                &root,
+                target_python.as_deref(),
+                binary_mode,
+                options.pypi_allow_prereleases,
+            )?
         }
     };
     let url = format!("https://pypi.org/pypi/{encoded}/{version}/json");
@@ -11893,11 +11925,23 @@ fn pypi_candidate_to_resolved(
     let requirement =
         constrained_pypi_requirement(spec, &options.constraints).unwrap_or_else(|| "*".to_owned());
     let binary_mode = pypi_binary_mode_for_spec(options, spec);
-
-    let candidate = candidates
+    let mut candidates = candidates
         .into_iter()
         .filter(|candidate| pypi_version_satisfies(&candidate.version, &requirement))
         .filter(|candidate| pypi_candidate_matches_binary_mode(candidate, binary_mode))
+        .collect::<Vec<_>>();
+    if !pypi_prereleases_allowed(
+        &requirement,
+        options.pypi_allow_prereleases,
+        candidates
+            .iter()
+            .map(|candidate| candidate.version.as_str()),
+    ) {
+        candidates.retain(|candidate| !pypi_version_is_prerelease(&candidate.version));
+    }
+
+    let candidate = candidates
+        .into_iter()
         .max_by(|left, right| {
             compare_pypi_versions(&left.version, &right.version)
                 .then_with(|| right.sdist.cmp(&left.sdist))
@@ -12578,8 +12622,10 @@ fn choose_pypi_version(
     root: &PypiRoot,
     target_python: Option<&str>,
     binary_mode: Option<PypiBinaryMode>,
+    allow_prereleases: bool,
 ) -> Result<String> {
-    root.releases
+    let mut versions = root
+        .releases
         .iter()
         .filter(|(_, files)| {
             files
@@ -12588,12 +12634,54 @@ fn choose_pypi_version(
         })
         .map(|(version, _)| version)
         .filter(|version| pypi_version_satisfies(version, requirement))
-        .max_by(|left, right| compare_pypi_versions(left, right))
         .cloned()
+        .collect::<Vec<_>>();
+    if !pypi_prereleases_allowed(
+        requirement,
+        allow_prereleases,
+        versions.iter().map(String::as_str),
+    ) {
+        versions.retain(|version| !pypi_version_is_prerelease(version));
+    }
+
+    versions
+        .into_iter()
+        .max_by(|left, right| compare_pypi_versions(left, right))
         .ok_or_else(|| OmcRegistryError::UnsatisfiedRequirement {
             name: name.to_owned(),
             requirement: requirement.to_owned(),
         })
+}
+
+fn pypi_prereleases_allowed<'a>(
+    requirement: &str,
+    allow_prereleases: bool,
+    versions: impl IntoIterator<Item = &'a str>,
+) -> bool {
+    allow_prereleases
+        || pypi_requirement_mentions_prerelease(requirement)
+        || !versions
+            .into_iter()
+            .any(|version| !pypi_version_is_prerelease(version))
+}
+
+fn pypi_requirement_mentions_prerelease(requirement: &str) -> bool {
+    requirement
+        .trim_matches(|ch| ch == '(' || ch == ')')
+        .split(',')
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .filter_map(pypi_comparator_version)
+        .any(pypi_version_is_prerelease)
+}
+
+fn pypi_comparator_version(comparator: &str) -> Option<&str> {
+    for op in [">=", "<=", "===", "==", "!=", "~=", ">", "<"] {
+        if let Some(required) = comparator.strip_prefix(op) {
+            return Some(required.trim());
+        }
+    }
+    Some(comparator.trim())
 }
 
 fn is_exact_pypi_version(requirement: &str) -> bool {
@@ -12856,15 +12944,130 @@ fn pypi_comparator_satisfied(version: &str, comparator: &str) -> bool {
 }
 
 pub fn compare_pypi_versions(left: &str, right: &str) -> std::cmp::Ordering {
-    comparable_version(left).cmp(&comparable_version(right))
+    comparable_pypi_version(left).cmp(&comparable_pypi_version(right))
 }
 
-fn comparable_version(version: &str) -> Vec<u64> {
-    version
-        .split(|ch: char| !ch.is_ascii_digit())
-        .filter(|part| !part.is_empty())
-        .map(|part| part.parse().unwrap_or(0))
-        .collect()
+fn pypi_version_is_prerelease(version: &str) -> bool {
+    comparable_pypi_version(version).phase != PypiReleasePhase::Final
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct PypiVersionKey {
+    epoch: u64,
+    release: Vec<u64>,
+    phase: PypiReleasePhase,
+    post: Option<u64>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum PypiReleasePhase {
+    Dev(u64),
+    Alpha(u64),
+    Beta(u64),
+    Rc(u64),
+    Final,
+}
+
+fn comparable_pypi_version(version: &str) -> PypiVersionKey {
+    let lower = version.trim().trim_start_matches('v').to_ascii_lowercase();
+    let public = lower
+        .split_once('+')
+        .map(|(public, _)| public)
+        .unwrap_or(&lower);
+    let (epoch, rest) = public
+        .split_once('!')
+        .map(|(epoch, rest)| (epoch.parse().unwrap_or(0), rest))
+        .unwrap_or((0, public));
+    let (release, rest) = pypi_release_segments(rest);
+    let suffix = rest.trim_matches(|ch: char| matches!(ch, '.' | '-' | '_'));
+    let phase = pypi_release_phase(suffix);
+    let post = pypi_post_release(suffix);
+    PypiVersionKey {
+        epoch,
+        release,
+        phase,
+        post,
+    }
+}
+
+fn pypi_release_segments(version: &str) -> (Vec<u64>, &str) {
+    let mut release = Vec::new();
+    let mut index = 0;
+    let bytes = version.as_bytes();
+    loop {
+        let start = index;
+        while index < bytes.len() && bytes[index].is_ascii_digit() {
+            index += 1;
+        }
+        if start == index {
+            break;
+        }
+        release.push(version[start..index].parse().unwrap_or(0));
+        if index >= bytes.len() || bytes[index] != b'.' {
+            break;
+        }
+        index += 1;
+    }
+    while release.last() == Some(&0) {
+        release.pop();
+    }
+    if release.is_empty() {
+        release.push(0);
+    }
+    (release, &version[index..])
+}
+
+fn pypi_release_phase(suffix: &str) -> PypiReleasePhase {
+    if let Some(number) = pypi_suffix_number(suffix, &["dev"]) {
+        return PypiReleasePhase::Dev(number);
+    }
+    if let Some(number) = pypi_suffix_number(suffix, &["alpha", "a"]) {
+        return PypiReleasePhase::Alpha(number);
+    }
+    if let Some(number) = pypi_suffix_number(suffix, &["beta", "b"]) {
+        return PypiReleasePhase::Beta(number);
+    }
+    if let Some(number) = pypi_suffix_number(suffix, &["preview", "pre", "rc", "c"]) {
+        return PypiReleasePhase::Rc(number);
+    }
+    PypiReleasePhase::Final
+}
+
+fn pypi_post_release(suffix: &str) -> Option<u64> {
+    pypi_suffix_number(suffix, &["post", "rev", "r"])
+}
+
+fn pypi_suffix_number(suffix: &str, labels: &[&str]) -> Option<u64> {
+    let normalized = suffix.replace(['-', '_'], ".");
+    let bytes = normalized.as_bytes();
+    let mut index = 0;
+    while index < normalized.len() {
+        if matches!(bytes[index], b'.') {
+            index += 1;
+            continue;
+        }
+        for label in labels {
+            if !normalized[index..].starts_with(label) {
+                continue;
+            }
+            let after = index + label.len();
+            if after < normalized.len() && normalized.as_bytes()[after].is_ascii_alphabetic() {
+                continue;
+            }
+            return Some(pypi_suffix_numeric_value(&normalized[after..]));
+        }
+        index += 1;
+    }
+    None
+}
+
+fn pypi_suffix_numeric_value(rest: &str) -> u64 {
+    let rest = rest.trim_start_matches('.');
+    let digits = rest
+        .chars()
+        .take_while(|ch| ch.is_ascii_digit())
+        .collect::<String>();
+    digits.parse().unwrap_or(0)
 }
 
 fn parse_pypi_requirement(requirement: &str) -> Option<PackageSpec> {
@@ -13496,6 +13699,10 @@ fn parse_requirements_require_hashes(line: &str) -> bool {
 
 fn parse_requirements_no_deps(line: &str) -> bool {
     line == "--no-deps"
+}
+
+fn parse_requirements_allow_prereleases(line: &str) -> bool {
+    line == "--pre"
 }
 
 fn parse_requirements_binary_option(line: &str, mode: PypiBinaryMode) -> Option<String> {
@@ -15176,7 +15383,6 @@ struct PypiInfo {
 
 #[derive(Debug, Deserialize)]
 struct PypiRoot {
-    info: PypiInfo,
     releases: BTreeMap<String, Vec<PypiFile>>,
 }
 
@@ -18842,13 +19048,14 @@ wheels = [
         let requirements = dir.path().join("requirements.txt");
         fs::write(
             &requirements,
-            "--trusted-host example.invalid\n--no-binary=:all:\n--only-binary idna\n--prefer-binary\n--require-hashes\n--no-deps\nidna==3.7 --hash=sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n",
+            "--trusted-host example.invalid\n--no-binary=:all:\n--only-binary idna\n--prefer-binary\n--require-hashes\n--no-deps\n--pre\nidna==3.7 --hash=sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n",
         )
         .unwrap();
 
         let discovered = read_requirements_file(&requirements).unwrap();
         assert!(discovered.pypi_require_hashes);
         assert!(discovered.pypi_no_deps);
+        assert!(discovered.pypi_allow_prereleases);
         assert_eq!(discovered.pypi_binary_all, Some(PypiBinaryMode::Source));
         assert_eq!(
             discovered.pypi_binary_packages.get("idna"),
@@ -19983,11 +20190,6 @@ wheels = [
     #[test]
     fn chooses_pypi_version_with_requested_binary_format() {
         let root = PypiRoot {
-            info: PypiInfo {
-                name: "dual-format".to_owned(),
-                version: "2.0.0".to_owned(),
-                requires_dist: None,
-            },
             releases: BTreeMap::from([
                 (
                     "1.0.0".to_owned(),
@@ -20010,6 +20212,7 @@ wheels = [
                 &root,
                 Some("3.11.0"),
                 Some(PypiBinaryMode::Source),
+                false,
             )
             .unwrap(),
             "1.0.0"
@@ -20021,9 +20224,73 @@ wheels = [
                 &root,
                 Some("3.11.0"),
                 Some(PypiBinaryMode::Binary),
+                false,
             )
             .unwrap(),
             "2.0.0"
+        );
+    }
+
+    #[test]
+    fn filters_pypi_prereleases_unless_requested() {
+        let root = PypiRoot {
+            releases: BTreeMap::from([
+                (
+                    "1.9.0".to_owned(),
+                    vec![test_pypi_file(
+                        "previewed-1.9.0-py3-none-any.whl",
+                        "bdist_wheel",
+                    )],
+                ),
+                (
+                    "2.0.0rc1".to_owned(),
+                    vec![test_pypi_file(
+                        "previewed-2.0.0rc1-py3-none-any.whl",
+                        "bdist_wheel",
+                    )],
+                ),
+            ]),
+        };
+
+        assert_eq!(
+            choose_pypi_version("previewed", "*", &root, Some("3.11.0"), None, false).unwrap(),
+            "1.9.0"
+        );
+        assert_eq!(
+            choose_pypi_version("previewed", "*", &root, Some("3.11.0"), None, true).unwrap(),
+            "2.0.0rc1"
+        );
+        assert_eq!(
+            choose_pypi_version(
+                "previewed",
+                ">=2.0.0rc1",
+                &root,
+                Some("3.11.0"),
+                None,
+                false,
+            )
+            .unwrap(),
+            "2.0.0rc1"
+        );
+    }
+
+    #[test]
+    fn compares_common_pypi_prerelease_versions() {
+        assert_eq!(
+            compare_pypi_versions("1.0.0rc1", "1.0.0"),
+            std::cmp::Ordering::Less
+        );
+        assert_eq!(
+            compare_pypi_versions("1.0.0.dev1", "1.0.0a1"),
+            std::cmp::Ordering::Less
+        );
+        assert_eq!(
+            compare_pypi_versions("1.0.0.post1", "1.0.0"),
+            std::cmp::Ordering::Greater
+        );
+        assert_eq!(
+            compare_pypi_versions("1.0", "1.0.0"),
+            std::cmp::Ordering::Equal
         );
     }
 
@@ -22416,6 +22683,7 @@ wheels = [
                 no_binary: Some(":all:"),
                 only_binary: Some("idna"),
                 no_index: true,
+                allow_prereleases: true,
                 override_index: true,
             },
         );
@@ -22448,6 +22716,7 @@ wheels = [
             Some(&PypiBinaryMode::Binary)
         );
         assert!(options.pypi_no_index);
+        assert!(options.pypi_allow_prereleases);
 
         apply_pypi_environment_values(
             &mut options,
@@ -22522,6 +22791,7 @@ wheels = [
             no-binary = :all:
             only-binary = idna
             no-index = true
+            pre = true
 
             [download]
             index-url = https://ignored.example/simple
@@ -22559,6 +22829,7 @@ wheels = [
             Some(&PypiBinaryMode::Binary)
         );
         assert!(config.no_index);
+        assert!(config.allow_prereleases);
     }
 
     #[test]
