@@ -2450,7 +2450,10 @@ fn run_npm_install_compat(
         for spec in &specs {
             let reports = add_package_graph(spec, &options)?;
             if let Some(root) = reports.first() {
-                root_dependencies.push(npm_package_json_requirement_for_link_root(spec, root));
+                root_dependencies.push(npm_package_json_requirement_for_link_root(
+                    spec,
+                    &root.locked,
+                ));
             }
             all_reports.extend(reports);
         }
@@ -2480,13 +2483,27 @@ fn run_npm_install_compat(
 
 fn npm_package_json_requirement_for_link_root(
     spec: &PackageSpec,
-    report: &omc_registry::LinkReport,
+    locked: &LockedPackage,
 ) -> (String, String) {
-    let requirement = spec
-        .direct_url
-        .clone()
-        .unwrap_or_else(|| report.locked.version.clone());
-    (report.locked.name.clone(), requirement)
+    let requirement = spec.direct_url.clone().unwrap_or_else(|| {
+        spec.version
+            .as_deref()
+            .and_then(npm_alias_requirement_name)
+            .map(|name| format!("npm:{name}@{}", locked.version))
+            .unwrap_or_else(|| locked.version.clone())
+    });
+    (locked.name.clone(), requirement)
+}
+
+fn npm_alias_requirement_name(requirement: &str) -> Option<&str> {
+    let alias = requirement.strip_prefix("npm:")?;
+    let version_at = if let Some(stripped) = alias.strip_prefix('@') {
+        stripped.rfind('@').map(|index| index + 1)
+    } else {
+        alias.rfind('@')
+    };
+    let name = version_at.map_or(alias, |index| &alias[..index]).trim();
+    (!name.is_empty()).then_some(name)
 }
 
 fn save_root_npm_package_json_dependencies(
@@ -26910,6 +26927,33 @@ verdict = "accepted"
         assert!(saved.starts_with("file:"));
         assert!(saved.ends_with("vendor/local-pkg"));
         let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn saves_npm_alias_requirements_as_aliases() {
+        let alias = PackageSpec::parse("npm:string-width-cjs@npm:string-width@^4.2.0").unwrap();
+        assert_eq!(
+            npm_package_json_requirement_for_link_root(
+                &alias,
+                &locked_npm_package("string-width-cjs", "4.2.3", Vec::new()),
+            ),
+            (
+                "string-width-cjs".to_owned(),
+                "npm:string-width@4.2.3".to_owned()
+            )
+        );
+
+        let scoped = PackageSpec::parse("npm:demo-runtime@npm:@scope/runtime@^1.0.0").unwrap();
+        assert_eq!(
+            npm_package_json_requirement_for_link_root(
+                &scoped,
+                &locked_npm_package("demo-runtime", "1.2.0", Vec::new()),
+            ),
+            (
+                "demo-runtime".to_owned(),
+                "npm:@scope/runtime@1.2.0".to_owned()
+            )
+        );
     }
 
     #[test]

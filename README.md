@@ -506,7 +506,8 @@ Supported now:
 - text and JSON audit output for locked package verdicts
 - `node_modules` installation for npm tarballs
 - nested `node_modules` installation for conflicting npm dependency versions
-- npm alias dependencies such as `name: npm:other-name@range`
+- npm alias dependencies such as `name: npm:other-name@range`, including
+  saved `package.json` alias requirements from `npm install`
 - `.omc/python/site-packages` installation for PyPI wheels and pure Python
   `.tar.gz`, `.tgz`, and `.zip` source distributions without executing build
   scripts

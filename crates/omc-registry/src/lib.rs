@@ -217,6 +217,17 @@ fn parse_npm_spec(raw: &str, rest: &str) -> Result<PackageSpec> {
         ));
     }
 
+    if let Some((alias, target)) = rest.split_once("@npm:") {
+        if alias.is_empty() || target.is_empty() {
+            return Err(OmcRegistryError::UnsupportedSpec(raw.to_owned()));
+        }
+        return Ok(PackageSpec::new(
+            Ecosystem::Npm,
+            alias,
+            Some(format!("npm:{target}")),
+        ));
+    }
+
     if rest.is_empty() {
         return Err(OmcRegistryError::UnsupportedSpec(raw.to_owned()));
     }
@@ -15754,16 +15765,19 @@ mod tests {
 
     #[test]
     fn parses_npm_alias_requirements() {
-        let spec = PackageSpec {
-            ecosystem: Ecosystem::Npm,
-            name: "string-width-cjs".to_owned(),
-            version: Some("npm:string-width@^4.2.0".to_owned()),
-            extras: BTreeSet::new(),
-            direct_url: None,
-        };
+        let spec = PackageSpec::parse("npm:string-width-cjs@npm:string-width@^4.2.0").unwrap();
+        assert_eq!(spec.name, "string-width-cjs");
+        assert_eq!(spec.version.as_deref(), Some("npm:string-width@^4.2.0"));
         let (registry_name, requirement) = npm_registry_name_and_requirement(&spec).unwrap();
         assert_eq!(registry_name, "string-width");
         assert_eq!(requirement.as_deref(), Some("^4.2.0"));
+
+        let scoped = PackageSpec::parse("npm:@demo/runtime@npm:@scope/runtime@^1.0.0").unwrap();
+        assert_eq!(scoped.name, "@demo/runtime");
+        assert_eq!(scoped.version.as_deref(), Some("npm:@scope/runtime@^1.0.0"));
+        let (registry_name, requirement) = npm_registry_name_and_requirement(&scoped).unwrap();
+        assert_eq!(registry_name, "@scope/runtime");
+        assert_eq!(requirement.as_deref(), Some("^1.0.0"));
     }
 
     #[test]
