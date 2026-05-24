@@ -15,36 +15,36 @@ use omc_registry::{
     add_manifest_npm_local_paths, add_manifest_policy_flows, add_manifest_policy_grants,
     add_npm_dist_tag, add_npm_team_user, add_package_graph, apply_pypi_binary_option,
     apply_pypi_environment_defaults, check_pypi_distribution, compare_npm_versions,
-    compare_pypi_versions, create_npm_team, create_npm_token, deprecate_npm_package,
-    destroy_npm_team, download_npm_package_tarball, grant_npm_access, init_project,
-    install_locked_packages, install_locked_packages_with_python_target, install_locked_project,
-    install_project, install_python_project_local_import_paths, lock_project,
-    mutate_npm_package_owner, mutate_npm_package_star, parse_capability_grant, parse_flow_rule,
-    parse_npm_direct_archive_reference, parse_pypi_direct_archive_reference,
+    compare_pypi_versions, create_npm_team, create_npm_token, create_npm_trust,
+    deprecate_npm_package, destroy_npm_team, download_npm_package_tarball, grant_npm_access,
+    init_project, install_locked_packages, install_locked_packages_with_python_target,
+    install_locked_project, install_project, install_python_project_local_import_paths,
+    lock_project, mutate_npm_package_owner, mutate_npm_package_star, parse_capability_grant,
+    parse_flow_rule, parse_npm_direct_archive_reference, parse_pypi_direct_archive_reference,
     parse_pypi_vcs_requirement, prune_locked_package_versions, publish_npm_package,
     pypi_marker_applies, read_constraint_files, read_lockfile, read_manifest,
     read_npm_access_collaborators, read_npm_access_packages, read_npm_access_status,
     read_npm_config_snapshot_with_globalconfig, read_npm_org_users, read_npm_package_metadata,
     read_npm_package_metadata_with_userconfig, read_npm_package_owners,
     read_npm_ping_with_userconfig, read_npm_profile, read_npm_search, read_npm_stars,
-    read_npm_team_users, read_npm_teams, read_npm_token_list, read_npm_whoami,
+    read_npm_team_users, read_npm_teams, read_npm_token_list, read_npm_trust, read_npm_whoami,
     read_npm_workspace_packages, read_package_scripts, read_pip_config_snapshot,
     read_pypi_available_versions, read_requirements_files, read_script_requirement_files,
     remove_locked_packages, remove_manifest_dependency, remove_npm_dist_tag, remove_npm_org_user,
-    remove_npm_team_user, revoke_npm_access, revoke_npm_token, set_npm_access_mfa,
-    set_npm_access_status, set_npm_org_user, set_npm_profile_property, unpublish_npm_package,
-    upload_pypi_distribution, Behavior, Ecosystem, InstallReport, LinkOptions, LinkReport,
-    LockedPackage, LockedPythonVcsDependency, ManifestDependencyKind, NpmAccessMapResult,
-    NpmAccessMutationResult, NpmAccessStatusResult, NpmAccessToken, NpmDeprecateResult,
-    NpmDistTagMutationResult, NpmOrgListResult, NpmOrgMutationResult, NpmOwnerListResult,
-    NpmOwnerMutationResult, NpmPackageTarball, NpmPingResult, NpmProfileMutationResult,
-    NpmProfileResult, NpmProvenanceBundle, NpmPublishPackage, NpmPublishResult, NpmSearchPackage,
-    NpmStarMutationResult, NpmStarsResult, NpmTeamListResult, NpmTeamMutationResult,
-    NpmTokenCreateOptions, NpmTokenCreateResult, NpmTokenListResult, NpmTokenRevokeResult,
-    NpmUnpublishResult, NpmWhoamiResult, NpmWorkspacePackage, OmcLock, OmcRegistryError,
-    PackageSpec, ProjectRequirements, PypiAvailableVersionsOptions, PypiBinaryMode, PypiCheckIssue,
-    PypiUploadOptions, PypiUploadResult, PypiUploadSignature, PythonLocalRequirement,
-    PythonVcsRequirement, Verdict,
+    remove_npm_team_user, revoke_npm_access, revoke_npm_token, revoke_npm_trust,
+    set_npm_access_mfa, set_npm_access_status, set_npm_org_user, set_npm_profile_property,
+    unpublish_npm_package, upload_pypi_distribution, Behavior, Ecosystem, InstallReport,
+    LinkOptions, LinkReport, LockedPackage, LockedPythonVcsDependency, ManifestDependencyKind,
+    NpmAccessMapResult, NpmAccessMutationResult, NpmAccessStatusResult, NpmAccessToken,
+    NpmDeprecateResult, NpmDistTagMutationResult, NpmOrgListResult, NpmOrgMutationResult,
+    NpmOwnerListResult, NpmOwnerMutationResult, NpmPackageTarball, NpmPingResult,
+    NpmProfileMutationResult, NpmProfileResult, NpmProvenanceBundle, NpmPublishPackage,
+    NpmPublishResult, NpmSearchPackage, NpmStarMutationResult, NpmStarsResult, NpmTeamListResult,
+    NpmTeamMutationResult, NpmTokenCreateOptions, NpmTokenCreateResult, NpmTokenListResult,
+    NpmTokenRevokeResult, NpmUnpublishResult, NpmWhoamiResult, NpmWorkspacePackage, OmcLock,
+    OmcRegistryError, PackageSpec, ProjectRequirements, PypiAvailableVersionsOptions,
+    PypiBinaryMode, PypiCheckIssue, PypiUploadOptions, PypiUploadResult, PypiUploadSignature,
+    PythonLocalRequirement, PythonVcsRequirement, Verdict,
 };
 use sha2::{Digest, Sha256, Sha384, Sha512};
 
@@ -521,6 +521,9 @@ enum NpmCompatAction {
     },
     Token {
         action: NpmTokenAction,
+    },
+    Trust {
+        action: NpmTrustAction,
     },
     Profile {
         action: NpmProfileAction,
@@ -1103,6 +1106,43 @@ enum NpmTokenAction {
         userconfig: Option<PathBuf>,
         otp: Option<String>,
     },
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum NpmTrustAction {
+    List {
+        package: Option<String>,
+        json: bool,
+        npm_registry: Option<String>,
+        userconfig: Option<PathBuf>,
+    },
+    Revoke {
+        package: Option<String>,
+        id: String,
+        dry_run: bool,
+        json: bool,
+        npm_registry: Option<String>,
+        userconfig: Option<PathBuf>,
+        otp: Option<String>,
+    },
+    Create {
+        provider: NpmTrustProvider,
+        package: Option<String>,
+        config: serde_json::Value,
+        dry_run: bool,
+        json: bool,
+        yes: bool,
+        npm_registry: Option<String>,
+        userconfig: Option<PathBuf>,
+        otp: Option<String>,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NpmTrustProvider {
+    GitHub,
+    GitLab,
+    CircleCi,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -4233,6 +4273,10 @@ fn run_npm_compat_with_cwd(
             absolutize_npm_token_action_paths(invocation_cwd, &mut action);
             print_npm_token(project_dir, action)?
         }
+        NpmCompatAction::Trust { mut action } => {
+            absolutize_npm_trust_action_paths(invocation_cwd, &mut action);
+            print_npm_trust(project_dir, action)?
+        }
         NpmCompatAction::Profile { mut action } => {
             absolutize_npm_profile_action_paths(invocation_cwd, &mut action);
             print_npm_profile(project_dir, action)?
@@ -5814,6 +5858,16 @@ fn absolutize_npm_token_action_paths(base_dir: &Path, action: &mut NpmTokenActio
         NpmTokenAction::List { userconfig, .. }
         | NpmTokenAction::Create { userconfig, .. }
         | NpmTokenAction::Revoke { userconfig, .. } => {
+            absolutize_optional_path(base_dir, userconfig);
+        }
+    }
+}
+
+fn absolutize_npm_trust_action_paths(base_dir: &Path, action: &mut NpmTrustAction) {
+    match action {
+        NpmTrustAction::List { userconfig, .. }
+        | NpmTrustAction::Revoke { userconfig, .. }
+        | NpmTrustAction::Create { userconfig, .. } => {
             absolutize_optional_path(base_dir, userconfig);
         }
     }
@@ -7965,6 +8019,14 @@ fn npm_help_text(topic: Option<&str>) -> String {
                 "OMC does not prompt interactively; pass --password or set NPM_CONFIG_PASSWORD.",
             ],
         ),
+        Some("trust") => npm_command_help(
+            "npm trust <github|gitlab|circleci|list|revoke> ...",
+            &[
+                "Manage npm trusted publishing relationships through the configured registry.",
+                "Supports list [package], revoke [package] --id, github/gitlab create flows, and circleci create flows.",
+                "Create/revoke support --dry-run, --json, --registry, --userconfig, --otp, and noninteractive --yes for real mutations.",
+            ],
+        ),
         Some("profile") => npm_command_help(
             "npm profile <get|set> ...",
             &[
@@ -8083,7 +8145,7 @@ fn npm_general_help_text() -> String {
         "npm <command>",
         &[
             "OMC npm compatibility runs supported npm workflows through OMC's verifier, lockfile, cache, and project-local runtime paths.",
-            "Supported commands: install, link, install-test, ci, install-ci-test, remove, run, test, start, stop, restart, exec, explore, edit, completion, help-search, list, query, explain, audit, doctor, outdated, fund, prune, dedupe, rebuild, cache, pkg, version, shrinkwrap, pack, publish, unpublish, deprecate, undeprecate, diff, search, star, unstar, stars, ping, whoami, login, adduser, logout, token, profile, owner, access, org, team, dist-tag, sbom, view, docs, repo, bugs, home, config, get, set, init, create, bin, root, prefix.",
+            "Supported commands: install, link, install-test, ci, install-ci-test, remove, run, test, start, stop, restart, exec, explore, edit, completion, help-search, list, query, explain, audit, doctor, outdated, fund, prune, dedupe, rebuild, cache, pkg, version, shrinkwrap, pack, publish, unpublish, deprecate, undeprecate, diff, search, star, unstar, stars, ping, whoami, login, adduser, logout, token, trust, profile, owner, access, org, team, dist-tag, sbom, view, docs, repo, bugs, home, config, get, set, init, create, bin, root, prefix.",
             "Use `npm help <command>` for focused OMC compatibility notes.",
         ],
     )
@@ -8138,6 +8200,7 @@ fn npm_help_topic(topic: &str) -> Option<&'static str> {
         "login" | "adduser" | "add-user" => Some("login"),
         "logout" => Some("logout"),
         "token" => Some("token"),
+        "trust" => Some("trust"),
         "profile" => Some("profile"),
         "owner" => Some("owner"),
         "access" => Some("access"),
@@ -8220,6 +8283,7 @@ const NPM_COMPLETION_COMMANDS: &[&str] = &[
     "team",
     "test",
     "token",
+    "trust",
     "uninstall",
     "unpublish",
     "unstar",
@@ -9945,6 +10009,354 @@ fn print_npm_token(project_dir: &Path, action: NpmTokenAction) -> Result<(), Omc
         }
     }
     Ok(())
+}
+
+fn print_npm_trust(project_dir: &Path, action: NpmTrustAction) -> Result<(), OmcRegistryError> {
+    match action {
+        NpmTrustAction::List {
+            package,
+            json,
+            npm_registry,
+            userconfig,
+        } => {
+            let package = npm_trust_package_arg(project_dir, package)?;
+            let result = read_npm_trust(
+                project_dir,
+                &package,
+                npm_registry.as_deref(),
+                userconfig.as_deref(),
+            )?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&result.response)?);
+            } else {
+                print_npm_trust_configs(&result.package, &result.configs)?;
+            }
+        }
+        NpmTrustAction::Revoke {
+            package,
+            id,
+            dry_run,
+            json,
+            npm_registry,
+            userconfig,
+            otp,
+        } => {
+            let package = npm_trust_package_arg(project_dir, package)?;
+            if dry_run {
+                let output = serde_json::json!({
+                    "dry_run": true,
+                    "package": package,
+                    "id": id,
+                    "action": "revoke",
+                });
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&output)?);
+                } else {
+                    println!(
+                        "dry-run: would revoke trusted publishing configuration {id} for {package}"
+                    );
+                }
+                return Ok(());
+            }
+            let result = revoke_npm_trust(
+                project_dir,
+                &package,
+                &id,
+                npm_registry.as_deref(),
+                userconfig.as_deref(),
+                otp.as_deref(),
+            )?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&result.response)?);
+            } else {
+                println!(
+                    "Revoked trusted configuration for {} with id {}",
+                    result.package, id
+                );
+            }
+        }
+        NpmTrustAction::Create {
+            provider,
+            package,
+            config,
+            dry_run,
+            json,
+            yes,
+            npm_registry,
+            userconfig,
+            otp,
+        } => {
+            let package = npm_trust_package_arg(project_dir, package)?;
+            let config = resolve_npm_trust_create_config(project_dir, provider, &package, config)?;
+            if dry_run {
+                let output = serde_json::json!({
+                    "dry_run": true,
+                    "package": package,
+                    "provider": npm_trust_provider_name(provider),
+                    "config": config,
+                });
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&output)?);
+                } else {
+                    println!(
+                        "dry-run: would create trusted publishing configuration for {package}"
+                    );
+                    print_npm_trust_config(&config)?;
+                }
+                return Ok(());
+            }
+            if !yes {
+                return Err(OmcRegistryError::UnsupportedSpec(
+                    "npm trust create is non-interactive in OMC; pass --yes or --dry-run"
+                        .to_owned(),
+                ));
+            }
+            let result = create_npm_trust(
+                project_dir,
+                &package,
+                config,
+                npm_registry.as_deref(),
+                userconfig.as_deref(),
+                otp.as_deref(),
+            )?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&result.response)?);
+            } else {
+                println!(
+                    "Trust configuration created successfully for {}",
+                    result.package
+                );
+                print_npm_trust_configs(
+                    &result.package,
+                    &npm_trust_response_configs(&result.response),
+                )?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn npm_trust_package_arg(
+    project_dir: &Path,
+    package: Option<String>,
+) -> Result<String, OmcRegistryError> {
+    if let Some(package) = package
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+    {
+        return Ok(package);
+    }
+    let package_json = read_npm_pkg_json(&project_dir.join("package.json"))?;
+    package_json
+        .get("name")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+        .ok_or_else(|| {
+            OmcRegistryError::UnsupportedSpec(
+                "Package name must be specified either as an argument or in package.json"
+                    .to_owned(),
+            )
+        })
+}
+
+fn print_npm_trust_configs(
+    package: &str,
+    configs: &[serde_json::Value],
+) -> Result<(), OmcRegistryError> {
+    if configs.is_empty() {
+        println!("No trust configurations found for package ({package})");
+        return Ok(());
+    }
+    for config in configs {
+        print_npm_trust_config(config)?;
+    }
+    Ok(())
+}
+
+fn resolve_npm_trust_create_config(
+    project_dir: &Path,
+    provider: NpmTrustProvider,
+    package: &str,
+    mut config: serde_json::Value,
+) -> Result<serde_json::Value, OmcRegistryError> {
+    let Some(claim_key) = npm_trust_provider_entity_claim(provider) else {
+        return Ok(config);
+    };
+    if npm_trust_claim_string(&config, claim_key).is_some() {
+        return Ok(config);
+    }
+    let entity = infer_npm_trust_provider_entity(project_dir, provider, package)?;
+    npm_trust_insert_claim(&mut config, claim_key, entity)?;
+    Ok(config)
+}
+
+fn npm_trust_provider_entity_claim(provider: NpmTrustProvider) -> Option<&'static str> {
+    match provider {
+        NpmTrustProvider::GitHub => Some("repository"),
+        NpmTrustProvider::GitLab => Some("project_path"),
+        NpmTrustProvider::CircleCi => None,
+    }
+}
+
+fn npm_trust_claim_string<'a>(config: &'a serde_json::Value, claim_key: &str) -> Option<&'a str> {
+    config
+        .get("claims")
+        .and_then(serde_json::Value::as_object)
+        .and_then(|claims| claims.get(claim_key))
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+}
+
+fn npm_trust_insert_claim(
+    config: &mut serde_json::Value,
+    claim_key: &str,
+    value: String,
+) -> Result<(), OmcRegistryError> {
+    let claims = config
+        .get_mut("claims")
+        .and_then(serde_json::Value::as_object_mut)
+        .ok_or_else(|| {
+            OmcRegistryError::UnsupportedSpec(
+                "npm trust provider config is missing claims".to_owned(),
+            )
+        })?;
+    claims.insert(claim_key.to_owned(), serde_json::json!(value));
+    Ok(())
+}
+
+fn infer_npm_trust_provider_entity(
+    project_dir: &Path,
+    provider: NpmTrustProvider,
+    package: &str,
+) -> Result<String, OmcRegistryError> {
+    let package_json = read_npm_pkg_json(&project_dir.join("package.json")).map_err(|_| {
+        OmcRegistryError::UnsupportedSpec(npm_trust_missing_entity_message(provider).to_owned())
+    })?;
+    let manifest_name = npm_manifest_string_field(&package_json, "name");
+    if manifest_name.as_deref() != Some(package) {
+        return Err(OmcRegistryError::UnsupportedSpec(
+            npm_trust_missing_entity_message(provider).to_owned(),
+        ));
+    }
+    let Some(repository) = npm_trust_repository_from_manifest(&package_json, provider) else {
+        return Err(OmcRegistryError::UnsupportedSpec(
+            npm_trust_missing_entity_message(provider).to_owned(),
+        ));
+    };
+    Ok(repository)
+}
+
+fn npm_trust_missing_entity_message(provider: NpmTrustProvider) -> &'static str {
+    match provider {
+        NpmTrustProvider::GitHub => {
+            "GitHub repository must be specified with --repo or --repository or inferred from package.json repository"
+        }
+        NpmTrustProvider::GitLab => {
+            "GitLab project must be specified with --project, --repo, or --repository or inferred from package.json repository"
+        }
+        NpmTrustProvider::CircleCi => "CircleCI repository origin must be specified with --vcs-origin",
+    }
+}
+
+fn npm_trust_repository_from_manifest(
+    manifest: &serde_json::Value,
+    provider: NpmTrustProvider,
+) -> Option<String> {
+    let repository = manifest.get("repository")?;
+    let raw = repository
+        .as_str()
+        .or_else(|| repository.get("url").and_then(serde_json::Value::as_str))?;
+    npm_trust_repository_slug(raw, provider)
+}
+
+fn npm_trust_repository_slug(raw: &str, provider: NpmTrustProvider) -> Option<String> {
+    let mut repository = raw.trim();
+    if repository.is_empty() {
+        return None;
+    }
+    if let Some(rest) = repository.strip_prefix("git+") {
+        repository = rest;
+    }
+    let path = match provider {
+        NpmTrustProvider::GitHub => npm_trust_repository_path(
+            repository,
+            "github.com",
+            &["github:", "git@github.com:", "ssh://git@github.com/"],
+        )?,
+        NpmTrustProvider::GitLab => npm_trust_repository_path(
+            repository,
+            "gitlab.com",
+            &["gitlab:", "git@gitlab.com:", "ssh://git@gitlab.com/"],
+        )?,
+        NpmTrustProvider::CircleCi => return None,
+    };
+    let mut segments = path
+        .trim_matches('/')
+        .trim_end_matches(".git")
+        .split('/')
+        .filter(|segment| !segment.is_empty())
+        .collect::<Vec<_>>();
+    if segments.len() < 2 {
+        return None;
+    }
+    if provider == NpmTrustProvider::GitHub {
+        segments.truncate(2);
+    }
+    Some(segments.join("/"))
+}
+
+fn npm_trust_repository_path(repository: &str, host: &str, prefixes: &[&str]) -> Option<String> {
+    for prefix in prefixes {
+        if let Some(path) = repository.strip_prefix(prefix) {
+            return Some(path.to_owned());
+        }
+    }
+    if let Ok(url) = reqwest::Url::parse(repository) {
+        if url.host_str() == Some(host) {
+            return Some(url.path().to_owned());
+        }
+    }
+    None
+}
+
+fn print_npm_trust_config(config: &serde_json::Value) -> Result<(), OmcRegistryError> {
+    if let Some(id) = config.get("id").and_then(serde_json::Value::as_str) {
+        println!("id: {id}");
+    }
+    if let Some(kind) = config.get("type").and_then(serde_json::Value::as_str) {
+        println!("type: {kind}");
+    }
+    if let Some(claims) = config.get("claims").and_then(serde_json::Value::as_object) {
+        for (key, value) in claims {
+            if let Some(value) = value.as_str() {
+                println!("{key}: {value}");
+            } else {
+                println!("{key}: {}", serde_json::to_string(value)?);
+            }
+        }
+    } else {
+        println!("{}", serde_json::to_string_pretty(config)?);
+    }
+    Ok(())
+}
+
+fn npm_trust_response_configs(response: &serde_json::Value) -> Vec<serde_json::Value> {
+    match response {
+        serde_json::Value::Array(items) => items.clone(),
+        serde_json::Value::Null => Vec::new(),
+        item => vec![item.clone()],
+    }
+}
+
+fn npm_trust_provider_name(provider: NpmTrustProvider) -> &'static str {
+    match provider {
+        NpmTrustProvider::GitHub => "github",
+        NpmTrustProvider::GitLab => "gitlab",
+        NpmTrustProvider::CircleCi => "circleci",
+    }
 }
 
 fn print_npm_profile(project_dir: &Path, action: NpmProfileAction) -> Result<(), OmcRegistryError> {
@@ -20925,6 +21337,7 @@ fn parse_npm_compat_action(args: &[String]) -> Result<NpmCompatAction, OmcRegist
         "login" | "adduser" | "add-user" => parse_npm_login_args(&args[1..]),
         "logout" => parse_npm_logout_args(&args[1..]),
         "token" => parse_npm_token_args(&args[1..]),
+        "trust" => parse_npm_trust_args(&args[1..]),
         "profile" => parse_npm_profile_args(&args[1..]),
         "owner" => parse_npm_owner_args(&args[1..]),
         "access" => parse_npm_access_args(&args[1..]),
@@ -21143,6 +21556,7 @@ fn npm_global_arg_supported_by_command(command: &str, arg: &str) -> bool {
                 | "add-user"
                 | "logout"
                 | "token"
+                | "trust"
                 | "profile"
                 | "owner"
                 | "access"
@@ -21179,6 +21593,7 @@ fn npm_global_arg_supported_by_command(command: &str, arg: &str) -> bool {
                 | "diff"
                 | "star"
                 | "unstar"
+                | "trust"
                 | "token"
                 | "profile"
                 | "owner"
@@ -21350,7 +21765,41 @@ fn npm_global_arg_supported_by_command(command: &str, arg: &str) -> bool {
                 | "link"
                 | "ln"
                 | "shrinkwrap"
+                | "trust"
         );
+    }
+    if matches!(
+        arg,
+        "--yes"
+            | "-y"
+            | "--no-yes"
+            | "--file"
+            | "--repo"
+            | "--repository"
+            | "--project"
+            | "--env"
+            | "--environment"
+            | "--org-id"
+            | "--project-id"
+            | "--pipeline-definition-id"
+            | "--vcs-origin"
+            | "--context-id"
+            | "--id"
+    ) || arg.starts_with("--yes=")
+        || arg.starts_with("--file=")
+        || arg.starts_with("--repo=")
+        || arg.starts_with("--repository=")
+        || arg.starts_with("--project=")
+        || arg.starts_with("--env=")
+        || arg.starts_with("--environment=")
+        || arg.starts_with("--org-id=")
+        || arg.starts_with("--project-id=")
+        || arg.starts_with("--pipeline-definition-id=")
+        || arg.starts_with("--vcs-origin=")
+        || arg.starts_with("--context-id=")
+        || arg.starts_with("--id=")
+    {
+        return matches!(command, "trust");
     }
     if matches!(arg, "--force" | "-f") || arg.starts_with("--force=") {
         return matches!(command, "cache" | "unpublish");
@@ -21430,6 +21879,7 @@ fn npm_global_arg_supported_by_command(command: &str, arg: &str) -> bool {
                 | "unstar"
                 | "stars"
                 | "logout"
+                | "trust"
                 | "token"
                 | "profile"
                 | "owner"
@@ -21507,7 +21957,7 @@ fn npm_global_arg_supported_by_command(command: &str, arg: &str) -> bool {
                 | "shrinkwrap"
         );
     }
-    if arg == "--json" {
+    if arg == "--json" || arg.starts_with("--json=") {
         return matches!(
             command,
             "version"
@@ -21543,6 +21993,7 @@ fn npm_global_arg_supported_by_command(command: &str, arg: &str) -> bool {
                 | "adduser"
                 | "add-user"
                 | "logout"
+                | "trust"
                 | "token"
                 | "profile"
                 | "owner"
@@ -21706,12 +22157,25 @@ fn npm_global_preserved_value_flag(arg: &str) -> bool {
             | "--diff-unified"
             | "--diff-src-prefix"
             | "--diff-dst-prefix"
+            | "--id"
+            | "--file"
+            | "--repo"
+            | "--repository"
+            | "--project"
+            | "--env"
+            | "--environment"
+            | "--org-id"
+            | "--project-id"
+            | "--pipeline-definition-id"
+            | "--vcs-origin"
+            | "--context-id"
     )
 }
 
 fn npm_global_preserved_equals_flag(arg: &str) -> bool {
     [
         "--registry=",
+        "--json=",
         "--userconfig=",
         "--depth=",
         "--omit=",
@@ -21773,6 +22237,19 @@ fn npm_global_preserved_equals_flag(arg: &str) -> bool {
         "--diff-src-prefix=",
         "--diff-dst-prefix=",
         "--diff-text=",
+        "--yes=",
+        "--id=",
+        "--file=",
+        "--repo=",
+        "--repository=",
+        "--project=",
+        "--env=",
+        "--environment=",
+        "--org-id=",
+        "--project-id=",
+        "--pipeline-definition-id=",
+        "--vcs-origin=",
+        "--context-id=",
     ]
     .iter()
     .any(|prefix| arg.starts_with(prefix))
@@ -24059,6 +24536,423 @@ fn parse_npm_token_args(args: &[String]) -> Result<NpmCompatAction, OmcRegistryE
             "unsupported npm token command `{other}`"
         ))),
     }
+}
+
+fn parse_npm_trust_args(args: &[String]) -> Result<NpmCompatAction, OmcRegistryError> {
+    let mut command = None;
+    let mut command_args = Vec::new();
+    let mut index = 0;
+    while index < args.len() {
+        let arg = &args[index];
+        if command.is_none() && !arg.starts_with('-') {
+            command = Some(arg.as_str());
+        } else {
+            command_args.push(arg.clone());
+            if npm_trust_presubcommand_value_flag(arg) {
+                index += 1;
+                let value = args.get(index).ok_or_else(|| {
+                    OmcRegistryError::UnsupportedSpec(format!("{arg} needs a value"))
+                })?;
+                command_args.push(value.clone());
+            }
+        }
+        index += 1;
+    }
+
+    match command.unwrap_or("list") {
+        "list" | "ls" => parse_npm_trust_list_args(&command_args),
+        "revoke" | "rm" => parse_npm_trust_revoke_args(&command_args),
+        "github" => parse_npm_trust_create_args(NpmTrustProvider::GitHub, &command_args),
+        "gitlab" => parse_npm_trust_create_args(NpmTrustProvider::GitLab, &command_args),
+        "circleci" => parse_npm_trust_create_args(NpmTrustProvider::CircleCi, &command_args),
+        other => Err(OmcRegistryError::UnsupportedSpec(format!(
+            "unsupported npm trust command `{other}`"
+        ))),
+    }
+}
+
+fn npm_trust_presubcommand_value_flag(arg: &str) -> bool {
+    matches!(
+        arg,
+        "--registry"
+            | "--userconfig"
+            | "--loglevel"
+            | "--cache"
+            | "--otp"
+            | "--id"
+            | "--file"
+            | "--repo"
+            | "--repository"
+            | "--project"
+            | "--env"
+            | "--environment"
+            | "--org-id"
+            | "--project-id"
+            | "--pipeline-definition-id"
+            | "--vcs-origin"
+            | "--context-id"
+    )
+}
+
+#[derive(Debug, Default)]
+struct NpmTrustArgs {
+    json: bool,
+    dry_run: bool,
+    yes: bool,
+    npm_registry: Option<String>,
+    userconfig: Option<PathBuf>,
+    otp: Option<String>,
+    id: Option<String>,
+    file: Option<String>,
+    repository: Option<String>,
+    project: Option<String>,
+    environment: Option<String>,
+    org_id: Option<String>,
+    project_id: Option<String>,
+    pipeline_definition_id: Option<String>,
+    vcs_origin: Option<String>,
+    context_ids: Vec<String>,
+    positionals: Vec<String>,
+}
+
+fn parse_npm_trust_common_args(
+    command: &str,
+    args: &[String],
+) -> Result<NpmTrustArgs, OmcRegistryError> {
+    let mut parsed = NpmTrustArgs::default();
+    let mut index = 0;
+    while index < args.len() {
+        let arg = &args[index];
+        if arg == "--json" || arg == "--json=true" {
+            parsed.json = true;
+        } else if matches!(arg.as_str(), "--json=false" | "--no-json") {
+            parsed.json = false;
+        } else if matches!(arg.as_str(), "--dry-run" | "--dry-run=true") {
+            parsed.dry_run = true;
+        } else if matches!(arg.as_str(), "--no-dry-run" | "--dry-run=false") {
+            parsed.dry_run = false;
+        } else if matches!(arg.as_str(), "--yes" | "-y" | "--yes=true") {
+            parsed.yes = true;
+        } else if matches!(arg.as_str(), "--no-yes" | "--yes=false") {
+            parsed.yes = false;
+        } else if arg == "--registry" {
+            index += 1;
+            parsed.npm_registry = Some(npm_trust_flag_value(args, index, arg)?);
+        } else if let Some(value) = arg.strip_prefix("--registry=") {
+            parsed.npm_registry = Some(value.to_owned());
+        } else if arg == "--userconfig" {
+            index += 1;
+            parsed.userconfig = Some(PathBuf::from(npm_trust_flag_value(args, index, arg)?));
+        } else if let Some(value) = arg.strip_prefix("--userconfig=") {
+            parsed.userconfig = Some(PathBuf::from(value));
+        } else if arg == "--otp" {
+            index += 1;
+            parsed.otp = Some(npm_trust_flag_value(args, index, arg)?);
+        } else if let Some(value) = arg.strip_prefix("--otp=") {
+            parsed.otp = Some(value.to_owned());
+        } else if arg == "--id" {
+            index += 1;
+            parsed.id = Some(npm_trust_flag_value(args, index, arg)?);
+        } else if let Some(value) = arg.strip_prefix("--id=") {
+            parsed.id = Some(value.to_owned());
+        } else if arg == "--file" {
+            index += 1;
+            parsed.file = Some(npm_trust_flag_value(args, index, arg)?);
+        } else if let Some(value) = arg.strip_prefix("--file=") {
+            parsed.file = Some(value.to_owned());
+        } else if arg == "--repo" || arg == "--repository" {
+            index += 1;
+            parsed.repository = Some(npm_trust_flag_value(args, index, arg)?);
+        } else if let Some(value) = arg
+            .strip_prefix("--repo=")
+            .or_else(|| arg.strip_prefix("--repository="))
+        {
+            parsed.repository = Some(value.to_owned());
+        } else if arg == "--project" {
+            index += 1;
+            parsed.project = Some(npm_trust_flag_value(args, index, arg)?);
+        } else if let Some(value) = arg.strip_prefix("--project=") {
+            parsed.project = Some(value.to_owned());
+        } else if arg == "--env" || arg == "--environment" {
+            index += 1;
+            parsed.environment = Some(npm_trust_flag_value(args, index, arg)?);
+        } else if let Some(value) = arg
+            .strip_prefix("--env=")
+            .or_else(|| arg.strip_prefix("--environment="))
+        {
+            parsed.environment = Some(value.to_owned());
+        } else if arg == "--org-id" {
+            index += 1;
+            parsed.org_id = Some(npm_trust_flag_value(args, index, arg)?);
+        } else if let Some(value) = arg.strip_prefix("--org-id=") {
+            parsed.org_id = Some(value.to_owned());
+        } else if arg == "--project-id" {
+            index += 1;
+            parsed.project_id = Some(npm_trust_flag_value(args, index, arg)?);
+        } else if let Some(value) = arg.strip_prefix("--project-id=") {
+            parsed.project_id = Some(value.to_owned());
+        } else if arg == "--pipeline-definition-id" {
+            index += 1;
+            parsed.pipeline_definition_id = Some(npm_trust_flag_value(args, index, arg)?);
+        } else if let Some(value) = arg.strip_prefix("--pipeline-definition-id=") {
+            parsed.pipeline_definition_id = Some(value.to_owned());
+        } else if arg == "--vcs-origin" {
+            index += 1;
+            parsed.vcs_origin = Some(npm_trust_flag_value(args, index, arg)?);
+        } else if let Some(value) = arg.strip_prefix("--vcs-origin=") {
+            parsed.vcs_origin = Some(value.to_owned());
+        } else if arg == "--context-id" {
+            index += 1;
+            parsed
+                .context_ids
+                .push(npm_trust_flag_value(args, index, arg)?);
+        } else if let Some(value) = arg.strip_prefix("--context-id=") {
+            parsed.context_ids.push(value.to_owned());
+        } else if arg == "--loglevel" || arg == "--cache" {
+            index += 1;
+            let _ = npm_trust_flag_value(args, index, arg)?;
+        } else if npm_trust_ignored_equals_flag(arg)
+            || matches!(
+                arg.as_str(),
+                "--silent" | "-s" | "--no-color" | "--color=false"
+            )
+        {
+        } else if arg.starts_with('-') {
+            return Err(unsupported_compat_arg(command, arg));
+        } else {
+            parsed.positionals.push(arg.clone());
+        }
+        index += 1;
+    }
+    Ok(parsed)
+}
+
+fn parse_npm_trust_list_args(args: &[String]) -> Result<NpmCompatAction, OmcRegistryError> {
+    let parsed = parse_npm_trust_common_args("npm trust list", args)?;
+    if parsed.positionals.len() > 1 {
+        return Err(unsupported_compat_arg(
+            "npm trust list",
+            &parsed.positionals[1],
+        ));
+    }
+    Ok(NpmCompatAction::Trust {
+        action: NpmTrustAction::List {
+            package: parsed.positionals.into_iter().next(),
+            json: parsed.json,
+            npm_registry: parsed.npm_registry,
+            userconfig: parsed.userconfig,
+        },
+    })
+}
+
+fn parse_npm_trust_revoke_args(args: &[String]) -> Result<NpmCompatAction, OmcRegistryError> {
+    let parsed = parse_npm_trust_common_args("npm trust revoke", args)?;
+    if parsed.positionals.len() > 1 {
+        return Err(unsupported_compat_arg(
+            "npm trust revoke",
+            &parsed.positionals[1],
+        ));
+    }
+    let id = parsed.id.ok_or_else(|| {
+        OmcRegistryError::UnsupportedSpec(
+            "ID of the trusted relationship to revoke must be specified with the --id option"
+                .to_owned(),
+        )
+    })?;
+    Ok(NpmCompatAction::Trust {
+        action: NpmTrustAction::Revoke {
+            package: parsed.positionals.into_iter().next(),
+            id,
+            dry_run: parsed.dry_run,
+            json: parsed.json,
+            npm_registry: parsed.npm_registry,
+            userconfig: parsed.userconfig,
+            otp: parsed.otp,
+        },
+    })
+}
+
+fn parse_npm_trust_create_args(
+    provider: NpmTrustProvider,
+    args: &[String],
+) -> Result<NpmCompatAction, OmcRegistryError> {
+    let command = format!("npm trust {}", npm_trust_provider_name(provider));
+    let parsed = parse_npm_trust_common_args(&command, args)?;
+    if parsed.positionals.len() > 1 {
+        return Err(unsupported_compat_arg(&command, &parsed.positionals[1]));
+    }
+    let config = match provider {
+        NpmTrustProvider::GitHub => npm_trust_github_config(&parsed)?,
+        NpmTrustProvider::GitLab => npm_trust_gitlab_config(&parsed)?,
+        NpmTrustProvider::CircleCi => npm_trust_circleci_config(&parsed)?,
+    };
+    Ok(NpmCompatAction::Trust {
+        action: NpmTrustAction::Create {
+            provider,
+            package: parsed.positionals.into_iter().next(),
+            config,
+            dry_run: parsed.dry_run,
+            json: parsed.json,
+            yes: parsed.yes,
+            npm_registry: parsed.npm_registry,
+            userconfig: parsed.userconfig,
+            otp: parsed.otp,
+        },
+    })
+}
+
+fn npm_trust_github_config(args: &NpmTrustArgs) -> Result<serde_json::Value, OmcRegistryError> {
+    let file = npm_trust_workflow_file(args.file.as_deref(), "GitHub Actions workflow")?;
+    if let Some(repository) = args.repository.as_deref() {
+        let parts = repository.split('/').collect::<Vec<_>>();
+        if parts.len() != 2 || parts.iter().any(|part| part.is_empty()) {
+            return Err(OmcRegistryError::UnsupportedSpec(
+                "GitHub repository must be specified in the format owner/repository".to_owned(),
+            ));
+        }
+    }
+    let mut claims = serde_json::Map::new();
+    if let Some(repository) = args.repository.as_deref() {
+        claims.insert("repository".to_owned(), serde_json::json!(repository));
+    }
+    claims.insert(
+        "workflow_ref".to_owned(),
+        serde_json::json!({
+            "file": file,
+        }),
+    );
+    if let Some(environment) = &args.environment {
+        claims.insert("environment".to_owned(), serde_json::json!(environment));
+    }
+    Ok(serde_json::json!({
+        "type": "github",
+        "claims": claims,
+    }))
+}
+
+fn npm_trust_gitlab_config(args: &NpmTrustArgs) -> Result<serde_json::Value, OmcRegistryError> {
+    let file = npm_trust_workflow_file(args.file.as_deref(), "GitLab CI/CD pipeline file")?;
+    let project = args.project.as_deref().or(args.repository.as_deref());
+    if let Some(project) = project {
+        let parts = project.split('/').collect::<Vec<_>>();
+        if parts.len() < 2 || parts.iter().any(|part| part.is_empty()) {
+            return Err(OmcRegistryError::UnsupportedSpec(
+                "GitLab project must be specified in the format group/project or group/subgroup/project"
+                    .to_owned(),
+            ));
+        }
+    }
+    let mut claims = serde_json::Map::new();
+    if let Some(project) = project {
+        claims.insert("project_path".to_owned(), serde_json::json!(project));
+    }
+    claims.insert(
+        "ci_config_ref_uri".to_owned(),
+        serde_json::json!({
+            "file": file,
+        }),
+    );
+    if let Some(environment) = &args.environment {
+        claims.insert("environment".to_owned(), serde_json::json!(environment));
+    }
+    Ok(serde_json::json!({
+        "type": "gitlab",
+        "claims": claims,
+    }))
+}
+
+fn npm_trust_circleci_config(args: &NpmTrustArgs) -> Result<serde_json::Value, OmcRegistryError> {
+    let org_id = npm_trust_required_uuid(args.org_id.as_deref(), "org-id")?;
+    let project_id = npm_trust_required_uuid(args.project_id.as_deref(), "project-id")?;
+    let pipeline_definition_id = npm_trust_required_uuid(
+        args.pipeline_definition_id.as_deref(),
+        "pipeline-definition-id",
+    )?;
+    let vcs_origin = args
+        .vcs_origin
+        .as_deref()
+        .ok_or_else(|| OmcRegistryError::UnsupportedSpec("vcs-origin is required".to_owned()))?;
+    if vcs_origin.contains("://") || vcs_origin.split('/').count() < 3 {
+        return Err(OmcRegistryError::UnsupportedSpec(
+            "vcs-origin must be in format 'provider/owner/repo' without a scheme".to_owned(),
+        ));
+    }
+    for context_id in &args.context_ids {
+        npm_trust_validate_uuid(context_id, "context-id")?;
+    }
+    let mut claims = serde_json::json!({
+        "oidc.circleci.com/org-id": org_id,
+        "oidc.circleci.com/project-id": project_id,
+        "oidc.circleci.com/pipeline-definition-id": pipeline_definition_id,
+        "oidc.circleci.com/vcs-origin": vcs_origin,
+    });
+    if !args.context_ids.is_empty() {
+        claims["oidc.circleci.com/context-ids"] = serde_json::json!(args.context_ids);
+    }
+    Ok(serde_json::json!({
+        "type": "circleci",
+        "claims": claims,
+    }))
+}
+
+fn npm_trust_workflow_file(value: Option<&str>, label: &str) -> Result<String, OmcRegistryError> {
+    let file = value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            OmcRegistryError::UnsupportedSpec(format!("{label} must be specified with --file"))
+        })?;
+    if !(file.ends_with(".yml") || file.ends_with(".yaml")) {
+        return Err(OmcRegistryError::UnsupportedSpec(format!(
+            "{label} must end in .yml or .yaml"
+        )));
+    }
+    let path = Path::new(file);
+    if path.file_name().and_then(|name| name.to_str()) != Some(file) {
+        return Err(OmcRegistryError::UnsupportedSpec(format!(
+            "{label} must be just a file not a path"
+        )));
+    }
+    Ok(file.to_owned())
+}
+
+fn npm_trust_required_uuid(value: Option<&str>, field: &str) -> Result<String, OmcRegistryError> {
+    let value =
+        value.ok_or_else(|| OmcRegistryError::UnsupportedSpec(format!("{field} is required")))?;
+    npm_trust_validate_uuid(value, field)?;
+    Ok(value.to_owned())
+}
+
+fn npm_trust_validate_uuid(value: &str, field: &str) -> Result<(), OmcRegistryError> {
+    let parts = value.split('-').collect::<Vec<_>>();
+    let valid = parts.len() == 5
+        && [8, 4, 4, 4, 12]
+            .iter()
+            .zip(parts.iter())
+            .all(|(len, part)| part.len() == *len && part.chars().all(|ch| ch.is_ascii_hexdigit()));
+    if valid {
+        Ok(())
+    } else {
+        Err(OmcRegistryError::UnsupportedSpec(format!(
+            "{field} must be a valid UUID"
+        )))
+    }
+}
+
+fn npm_trust_flag_value(
+    args: &[String],
+    index: usize,
+    flag: &str,
+) -> Result<String, OmcRegistryError> {
+    args.get(index)
+        .cloned()
+        .ok_or_else(|| OmcRegistryError::UnsupportedSpec(format!("{flag} needs a value")))
+}
+
+fn npm_trust_ignored_equals_flag(arg: &str) -> bool {
+    ["--loglevel=", "--cache=", "--color="]
+        .iter()
+        .any(|prefix| arg.starts_with(prefix))
 }
 
 fn npm_token_presubcommand_value_flag(arg: &str) -> bool {
@@ -34195,7 +35089,7 @@ verdict = "accepted"
         );
         assert_eq!(
             parse_npm_compat_action(&args(&[
-                "--json",
+                "--json=true",
                 "--registry",
                 "https://registry.example.invalid/npm",
                 "--userconfig=ci.npmrc",
@@ -34919,6 +35813,63 @@ verdict = "accepted"
         );
         assert!(
             parse_npm_compat_action(&args(&["token", "create", "--cidr=2001:db8::/32"])).is_err()
+        );
+        assert_eq!(
+            parse_npm_compat_action(&args(&[
+                "--json",
+                "--registry",
+                "https://registry.example.invalid/npm",
+                "--userconfig=ci.npmrc",
+                "trust",
+                "list",
+                "@demo/pkg",
+            ]))
+            .unwrap(),
+            NpmCompatAction::Trust {
+                action: NpmTrustAction::List {
+                    package: Some("@demo/pkg".to_owned()),
+                    json: true,
+                    npm_registry: Some("https://registry.example.invalid/npm".to_owned()),
+                    userconfig: Some(PathBuf::from("ci.npmrc")),
+                },
+            }
+        );
+        assert_eq!(
+            parse_npm_compat_action(&args(&[
+                "--json",
+                "--dry-run",
+                "trust",
+                "github",
+                "@demo/pkg",
+                "--file",
+                "release.yml",
+                "--repo",
+                "turenio/omc",
+                "--env=prod",
+            ]))
+            .unwrap(),
+            NpmCompatAction::Trust {
+                action: NpmTrustAction::Create {
+                    provider: NpmTrustProvider::GitHub,
+                    package: Some("@demo/pkg".to_owned()),
+                    config: serde_json::json!({
+                        "type": "github",
+                        "claims": {
+                            "repository": "turenio/omc",
+                            "workflow_ref": {
+                                "file": "release.yml",
+                            },
+                            "environment": "prod",
+                        },
+                    }),
+                    dry_run: true,
+                    json: true,
+                    yes: false,
+                    npm_registry: None,
+                    userconfig: None,
+                    otp: None,
+                },
+            }
         );
         assert_eq!(
             parse_npm_compat_action(&args(&[
@@ -37069,6 +38020,50 @@ verdict = "accepted"
             "edited=true\n"
         );
         assert!(npm_edit_target_parts("left-pad/..").is_err());
+    }
+
+    #[test]
+    fn npm_trust_create_dry_run_does_not_call_registry() {
+        let project = test_dir("npm-trust-dry-run");
+        let status = run_npm_compat(
+            &project,
+            &args(&[
+                "trust",
+                "github",
+                "@demo/pkg",
+                "--file",
+                "release.yml",
+                "--repo",
+                "turenio/omc",
+                "--dry-run",
+            ]),
+        )
+        .unwrap();
+
+        assert_eq!(status, ExitCode::SUCCESS);
+    }
+
+    #[test]
+    fn npm_trust_create_dry_run_infers_github_repository_from_package_json() {
+        let project = test_dir("npm-trust-dry-run-infer-repo");
+        fs::write(
+            project.join("package.json"),
+            r#"{
+  "name": "@demo/pkg",
+  "version": "1.0.0",
+  "repository": {
+    "url": "git+ssh://git@github.com/turenio/omc.git"
+  }
+}"#,
+        )
+        .unwrap();
+        let status = run_npm_compat(
+            &project,
+            &args(&["trust", "github", "--file", "release.yml", "--dry-run"]),
+        )
+        .unwrap();
+
+        assert_eq!(status, ExitCode::SUCCESS);
     }
 
     #[test]

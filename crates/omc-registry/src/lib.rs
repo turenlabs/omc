@@ -8490,6 +8490,22 @@ pub struct NpmTokenRevokeResult {
     pub status: u16,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct NpmTrustResult {
+    pub registry: String,
+    pub package: String,
+    pub configs: Vec<serde_json::Value>,
+    pub response: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct NpmTrustMutationResult {
+    pub registry: String,
+    pub package: String,
+    pub status: u16,
+    pub response: serde_json::Value,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct NpmDistTagMutationResult {
     pub registry: String,
@@ -9395,6 +9411,143 @@ pub fn read_npm_whoami(
         username,
         response,
     })
+}
+
+pub fn read_npm_trust(
+    project_dir: &Path,
+    package: &str,
+    registry_override: Option<&str>,
+    userconfig_override: Option<&Path>,
+) -> Result<NpmTrustResult> {
+    let package = npm_trust_package_name(package)?;
+    let client = Client::new();
+    let npm_config =
+        read_npm_config_with_overrides(project_dir, registry_override, userconfig_override)?;
+    let registry = ensure_trailing_slash(npm_config.registry_for(&package));
+    let url = npm_trust_url(&registry, &package);
+    let response = npm_get(&client, &url, &npm_config)
+        .send()?
+        .error_for_status()?
+        .json::<serde_json::Value>()?;
+    Ok(NpmTrustResult {
+        registry,
+        package,
+        configs: npm_trust_configs(&response),
+        response,
+    })
+}
+
+pub fn create_npm_trust(
+    project_dir: &Path,
+    package: &str,
+    config: serde_json::Value,
+    registry_override: Option<&str>,
+    userconfig_override: Option<&Path>,
+    otp: Option<&str>,
+) -> Result<NpmTrustMutationResult> {
+    let package = npm_trust_package_name(package)?;
+    let client = Client::new();
+    let npm_config =
+        read_npm_config_with_overrides(project_dir, registry_override, userconfig_override)?;
+    let registry = ensure_trailing_slash(npm_config.registry_for(&package));
+    let url = npm_trust_url(&registry, &package);
+    if npm_config.auth_token_for_url(&url).is_none() {
+        return Err(OmcRegistryError::UnsupportedSpec(
+            "npm trust create needs authentication; run npm login or configure a registry _authToken"
+                .to_owned(),
+        ));
+    }
+
+    let mut request = npm_post(&client, &url, &npm_config).json(&vec![config]);
+    if let Some(otp) = otp.map(str::trim).filter(|otp| !otp.is_empty()) {
+        request = request.header("npm-otp", otp);
+    }
+    let response = request.send()?;
+    response.error_for_status_ref()?;
+    let status = response.status().as_u16();
+    let response = response.json::<serde_json::Value>()?;
+    Ok(NpmTrustMutationResult {
+        registry,
+        package,
+        status,
+        response,
+    })
+}
+
+pub fn revoke_npm_trust(
+    project_dir: &Path,
+    package: &str,
+    id: &str,
+    registry_override: Option<&str>,
+    userconfig_override: Option<&Path>,
+    otp: Option<&str>,
+) -> Result<NpmTrustMutationResult> {
+    let package = npm_trust_package_name(package)?;
+    let id = id.trim();
+    if id.is_empty() {
+        return Err(OmcRegistryError::UnsupportedSpec(
+            "npm trust revoke needs --id".to_owned(),
+        ));
+    }
+
+    let client = Client::new();
+    let npm_config =
+        read_npm_config_with_overrides(project_dir, registry_override, userconfig_override)?;
+    let registry = ensure_trailing_slash(npm_config.registry_for(&package));
+    let url = format!(
+        "{}/{}",
+        npm_trust_url(&registry, &package),
+        urlencoding::encode(id)
+    );
+    if npm_config.auth_token_for_url(&url).is_none() {
+        return Err(OmcRegistryError::UnsupportedSpec(
+            "npm trust revoke needs authentication; run npm login or configure a registry _authToken"
+                .to_owned(),
+        ));
+    }
+
+    let mut request = npm_delete(&client, &url, &npm_config);
+    if let Some(otp) = otp.map(str::trim).filter(|otp| !otp.is_empty()) {
+        request = request.header("npm-otp", otp);
+    }
+    let response = request.send()?;
+    response.error_for_status_ref()?;
+    let status = response.status().as_u16();
+    let response = response
+        .json::<serde_json::Value>()
+        .unwrap_or_else(|_| serde_json::json!({ "ok": true }));
+    Ok(NpmTrustMutationResult {
+        registry,
+        package,
+        status,
+        response,
+    })
+}
+
+fn npm_trust_url(registry: &str, package: &str) -> String {
+    format!(
+        "{}-/package/{}/trust",
+        ensure_trailing_slash(registry),
+        urlencoding::encode(package)
+    )
+}
+
+fn npm_trust_package_name(package: &str) -> Result<String> {
+    let package = package.trim();
+    if package.is_empty() {
+        return Err(OmcRegistryError::UnsupportedSpec(
+            "npm trust needs a package".to_owned(),
+        ));
+    }
+    Ok(package.to_owned())
+}
+
+fn npm_trust_configs(response: &serde_json::Value) -> Vec<serde_json::Value> {
+    match response {
+        serde_json::Value::Array(items) => items.clone(),
+        serde_json::Value::Null => Vec::new(),
+        item => vec![item.clone()],
+    }
 }
 
 pub fn read_npm_profile(
