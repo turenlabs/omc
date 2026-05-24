@@ -1047,6 +1047,38 @@ pub fn remove_locked_packages(
     Ok(removed)
 }
 
+pub fn prune_locked_package_versions(
+    project_dir: impl AsRef<Path>,
+    keep_packages: &[LockedPackage],
+) -> Result<Vec<String>> {
+    let project_dir = project_dir.as_ref();
+    let lockfile = project_dir.join(LOCKFILE);
+    let mut lock = read_lockfile(&lockfile)?;
+    let keep_keys = keep_packages
+        .iter()
+        .map(locked_package_key)
+        .collect::<BTreeSet<_>>();
+    let affected_names = keep_packages
+        .iter()
+        .map(locked_package_name_key)
+        .collect::<BTreeSet<_>>();
+    let mut removed = Vec::new();
+    lock.packages.retain(|package| {
+        let affected = affected_names.contains(&locked_package_name_key(package));
+        let keep = keep_keys.contains(&locked_package_key(package));
+        if affected && !keep {
+            removed.push(locked_package_key(package));
+            false
+        } else {
+            true
+        }
+    });
+    if !removed.is_empty() {
+        fs::write(lockfile, toml::to_string_pretty(&lock)?)?;
+    }
+    Ok(removed)
+}
+
 fn locked_package_matches_spec(package: &LockedPackage, spec: &PackageSpec) -> bool {
     if package.ecosystem != spec.ecosystem {
         return false;
@@ -3360,6 +3392,13 @@ fn sync_python_vcs_lockfile(
 
 fn locked_package_key(package: &LockedPackage) -> String {
     format!("{}:{}@{}", package.ecosystem, package.name, package.version)
+}
+
+fn locked_package_name_key(package: &LockedPackage) -> (Ecosystem, String) {
+    match package.ecosystem {
+        Ecosystem::Npm => (package.ecosystem, package.name.clone()),
+        Ecosystem::Pypi => (package.ecosystem, normalize_pypi_name(&package.name)),
+    }
 }
 
 #[cfg(test)]
@@ -18189,6 +18228,53 @@ packages:
         assert_eq!(removed, 1);
         assert_eq!(lock.packages.len(), 1);
         assert_eq!(lock.packages[0].name, "left-pad");
+    }
+
+    #[test]
+    fn prunes_replaced_locked_versions_by_package_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let keep_npm = locked_package_for_test(Ecosystem::Npm, "left-pad", "1.1.3");
+        let stale_npm = locked_package_for_test(Ecosystem::Npm, "left-pad", "1.3.0");
+        let keep_pypi = locked_package_for_test(Ecosystem::Pypi, "idna", "3.16");
+        let stale_pypi = locked_package_for_test(Ecosystem::Pypi, "IDNA", "3.7");
+        let unrelated = locked_package_for_test(Ecosystem::Npm, "is-odd", "3.0.1");
+        fs::write(
+            dir.path().join("omc.lock"),
+            toml::to_string_pretty(&OmcLock {
+                version: 1,
+                packages: vec![
+                    keep_npm.clone(),
+                    stale_npm,
+                    keep_pypi.clone(),
+                    stale_pypi,
+                    unrelated.clone(),
+                ],
+                python_vcs: Vec::new(),
+            })
+            .unwrap(),
+        )
+        .unwrap();
+
+        let removed =
+            prune_locked_package_versions(dir.path(), &[keep_npm.clone(), keep_pypi.clone()])
+                .unwrap();
+
+        let lock = read_lockfile(dir.path().join("omc.lock")).unwrap();
+        assert_eq!(
+            removed,
+            vec!["npm:left-pad@1.3.0".to_owned(), "pypi:IDNA@3.7".to_owned()]
+        );
+        assert_eq!(
+            lock.packages
+                .iter()
+                .map(locked_package_key)
+                .collect::<Vec<_>>(),
+            vec![
+                locked_package_key(&keep_npm),
+                locked_package_key(&keep_pypi),
+                locked_package_key(&unrelated),
+            ]
+        );
     }
 
     #[test]

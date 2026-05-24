@@ -21,10 +21,11 @@ use omc_registry::{
     install_project, install_python_project_local_import_paths, lock_project,
     mutate_npm_package_owner, mutate_npm_package_star, parse_capability_grant, parse_flow_rule,
     parse_npm_direct_archive_reference, parse_pypi_direct_archive_reference,
-    parse_pypi_vcs_requirement, publish_npm_package, pypi_marker_applies, read_constraint_files,
-    read_lockfile, read_manifest, read_npm_access_collaborators, read_npm_access_packages,
-    read_npm_access_status, read_npm_config_snapshot_with_globalconfig, read_npm_org_users,
-    read_npm_package_metadata, read_npm_package_metadata_with_userconfig, read_npm_package_owners,
+    parse_pypi_vcs_requirement, prune_locked_package_versions, publish_npm_package,
+    pypi_marker_applies, read_constraint_files, read_lockfile, read_manifest,
+    read_npm_access_collaborators, read_npm_access_packages, read_npm_access_status,
+    read_npm_config_snapshot_with_globalconfig, read_npm_org_users, read_npm_package_metadata,
+    read_npm_package_metadata_with_userconfig, read_npm_package_owners,
     read_npm_ping_with_userconfig, read_npm_profile, read_npm_search, read_npm_stars,
     read_npm_team_users, read_npm_teams, read_npm_token_list, read_npm_whoami,
     read_npm_workspace_packages, read_package_scripts, read_pip_config_snapshot,
@@ -32,12 +33,12 @@ use omc_registry::{
     remove_locked_packages, remove_manifest_dependency, remove_npm_dist_tag, remove_npm_org_user,
     remove_npm_team_user, revoke_npm_access, revoke_npm_token, set_npm_access_mfa,
     set_npm_access_status, set_npm_org_user, set_npm_profile_property, unpublish_npm_package,
-    upload_pypi_distribution, Behavior, Ecosystem, InstallReport, LinkOptions, LockedPackage,
-    LockedPythonVcsDependency, ManifestDependencyKind, NpmAccessMapResult, NpmAccessMutationResult,
-    NpmAccessStatusResult, NpmAccessToken, NpmDeprecateResult, NpmDistTagMutationResult,
-    NpmOrgListResult, NpmOrgMutationResult, NpmOwnerListResult, NpmOwnerMutationResult,
-    NpmPackageTarball, NpmPingResult, NpmProfileMutationResult, NpmProfileResult,
-    NpmProvenanceBundle, NpmPublishPackage, NpmPublishResult, NpmSearchPackage,
+    upload_pypi_distribution, Behavior, Ecosystem, InstallReport, LinkOptions, LinkReport,
+    LockedPackage, LockedPythonVcsDependency, ManifestDependencyKind, NpmAccessMapResult,
+    NpmAccessMutationResult, NpmAccessStatusResult, NpmAccessToken, NpmDeprecateResult,
+    NpmDistTagMutationResult, NpmOrgListResult, NpmOrgMutationResult, NpmOwnerListResult,
+    NpmOwnerMutationResult, NpmPackageTarball, NpmPingResult, NpmProfileMutationResult,
+    NpmProfileResult, NpmProvenanceBundle, NpmPublishPackage, NpmPublishResult, NpmSearchPackage,
     NpmStarMutationResult, NpmStarsResult, NpmTeamListResult, NpmTeamMutationResult,
     NpmTokenCreateOptions, NpmTokenCreateResult, NpmTokenListResult, NpmTokenRevokeResult,
     NpmUnpublishResult, NpmWhoamiResult, NpmWorkspacePackage, OmcLock, OmcRegistryError,
@@ -1782,6 +1783,10 @@ fn write_pip_install_report_from(
     Ok(())
 }
 
+fn locked_packages_from_reports(reports: &[LinkReport]) -> Vec<LockedPackage> {
+    reports.iter().map(|report| report.locked.clone()).collect()
+}
+
 fn run_pip_lock(project_dir: &Path, action: PipLockAction) -> Result<ExitCode, OmcRegistryError> {
     let PipInstallAction {
         specs,
@@ -2809,6 +2814,12 @@ fn run_npm_install_compat(
         if save && !local_paths.is_empty() {
             add_manifest_npm_local_paths(project_dir, &local_paths, dependency_kind)?;
         }
+        let manifest_dirs = vec![project_dir.to_path_buf()];
+        let specs = if save {
+            specs
+        } else {
+            npm_specs_with_existing_manifest_requirements(&manifest_dirs, specs)?
+        };
         let mut specs = parse_package_specs(&specs, Some(Ecosystem::Npm))?;
         specs.extend(parse_npm_archive_references(
             project_dir,
@@ -2827,6 +2838,7 @@ fn run_npm_install_compat(
             }
             all_reports.extend(reports);
         }
+        prune_locked_package_versions(project_dir, &locked_packages_from_reports(&all_reports))?;
         print_link_reports(&all_reports);
         if save {
             save_root_npm_package_json_dependencies(
@@ -3021,6 +3033,11 @@ fn run_npm_install_workspace_compat(
         return Ok(ExitCode::SUCCESS);
     }
 
+    let specs = if save {
+        specs
+    } else {
+        npm_specs_with_existing_manifest_requirements(&targets, specs)?
+    };
     let mut specs = parse_package_specs(&specs, Some(Ecosystem::Npm))?;
     specs.extend(parse_npm_archive_references(
         project_dir,
@@ -3040,6 +3057,7 @@ fn run_npm_install_workspace_compat(
         }
         all_reports.extend(reports);
     }
+    prune_locked_package_versions(project_dir, &locked_packages_from_reports(&all_reports))?;
     print_link_reports(&all_reports);
 
     if save {
@@ -4661,6 +4679,10 @@ fn run_pip_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
                 for spec in &specs {
                     all_reports.extend(add_package_graph(spec, &options)?);
                 }
+                prune_locked_package_versions(
+                    project_dir,
+                    &locked_packages_from_reports(&all_reports),
+                )?;
                 print_link_reports(&all_reports);
                 let install = if options.requirement_files.is_empty()
                     && options.constraint_files.is_empty()
@@ -14190,6 +14212,99 @@ fn npm_package_json_dependency_field(kind: ManifestDependencyKind) -> &'static s
 
 fn remove_npm_package_json_dependency(package: &mut serde_json::Value, name: &str) {
     let _ = remove_npm_package_json_dependency_entry(package, name);
+}
+
+fn npm_specs_with_existing_manifest_requirements(
+    package_dirs: &[PathBuf],
+    specs: Vec<String>,
+) -> Result<Vec<String>, OmcRegistryError> {
+    specs
+        .into_iter()
+        .map(|spec| npm_spec_with_existing_manifest_requirement(package_dirs, spec))
+        .collect()
+}
+
+fn npm_spec_with_existing_manifest_requirement(
+    package_dirs: &[PathBuf],
+    raw: String,
+) -> Result<String, OmcRegistryError> {
+    let spec = parse_package_spec(&raw, Some(Ecosystem::Npm))?;
+    if spec.ecosystem != Ecosystem::Npm || spec.version.is_some() || spec.direct_url.is_some() {
+        return Ok(raw);
+    }
+
+    let Some(requirement) = npm_existing_package_json_requirement(package_dirs, &spec.name)? else {
+        return Ok(raw);
+    };
+    let requirement = requirement.trim();
+    if requirement.is_empty() {
+        return Ok(raw);
+    }
+
+    Ok(npm_spec_with_manifest_requirement(&spec.name, requirement))
+}
+
+fn npm_existing_package_json_requirement(
+    package_dirs: &[PathBuf],
+    name: &str,
+) -> Result<Option<String>, OmcRegistryError> {
+    if package_dirs.is_empty() {
+        return Ok(None);
+    }
+
+    let mut selected = None;
+    for package_dir in package_dirs {
+        let Some(requirement) = npm_package_json_dependency_requirement(package_dir, name)? else {
+            return Ok(None);
+        };
+        match selected.as_ref() {
+            Some(existing) if existing != &requirement => return Ok(None),
+            Some(_) => {}
+            None => selected = Some(requirement),
+        }
+    }
+    Ok(selected)
+}
+
+fn npm_package_json_dependency_requirement(
+    package_dir: &Path,
+    name: &str,
+) -> Result<Option<String>, OmcRegistryError> {
+    let package_json = package_dir.join("package.json");
+    if !package_json.exists() {
+        return Ok(None);
+    }
+    let package = read_npm_pkg_json(&package_json)?;
+    for field in [
+        "dependencies",
+        "devDependencies",
+        "optionalDependencies",
+        "peerDependencies",
+    ] {
+        if let Some(requirement) = package
+            .get(field)
+            .and_then(serde_json::Value::as_object)
+            .and_then(|dependencies| dependencies.get(name))
+            .and_then(serde_json::Value::as_str)
+        {
+            return Ok(Some(requirement.to_owned()));
+        }
+    }
+    Ok(None)
+}
+
+fn npm_spec_with_manifest_requirement(name: &str, requirement: &str) -> String {
+    if npm_manifest_requirement_is_direct_url(requirement) {
+        format!("{name} @ {requirement}")
+    } else {
+        format!("{name}@{requirement}")
+    }
+}
+
+fn npm_manifest_requirement_is_direct_url(requirement: &str) -> bool {
+    requirement.contains("://")
+        || requirement.starts_with("file:")
+        || requirement.starts_with("git+")
 }
 
 fn remove_npm_package_json_dependency_entry(package: &mut serde_json::Value, name: &str) -> bool {
@@ -27749,6 +27864,45 @@ mod tests {
         let _ = fs::remove_dir_all(project);
         let _ = fs::remove_dir_all(package);
         let _ = fs::remove_dir_all(transient);
+    }
+
+    #[test]
+    fn npm_no_save_specs_reuse_existing_manifest_requirements() {
+        let project = test_dir("npm-no-save-existing-manifest-requirements");
+        fs::write(
+            project.join("package.json"),
+            r#"{
+                "name": "root",
+                "version": "1.0.0",
+                "dependencies": { "left-pad": "1.1.3" },
+                "devDependencies": { "@scope/tool": "^2.0.0" }
+            }"#,
+        )
+        .unwrap();
+
+        let package_dirs = vec![project.clone()];
+        let specs = npm_specs_with_existing_manifest_requirements(
+            &package_dirs,
+            vec![
+                "left-pad".to_owned(),
+                "@scope/tool".to_owned(),
+                "new-pkg".to_owned(),
+                "left-pad@1.3.0".to_owned(),
+            ],
+        )
+        .unwrap();
+
+        assert_eq!(
+            specs,
+            vec![
+                "left-pad@1.1.3",
+                "@scope/tool@^2.0.0",
+                "new-pkg",
+                "left-pad@1.3.0",
+            ]
+        );
+
+        let _ = fs::remove_dir_all(project);
     }
 
     #[test]
