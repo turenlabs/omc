@@ -630,8 +630,9 @@ Supported now:
   `omc python -m pip ...` dispatches to the same compatibility path;
   direct `pip` / `pip3` compatibility binaries; and direct `python` / `python3`
   compatibility binaries for isolated interpreter use and `python -m pip` flows
-- isolated `omc python` execution that uses OMC site-packages without ambient
-  user/global Python site-packages or startup/hook environment variables
+- isolated `omc python` execution that uses OMC project site-packages and
+  OMC-managed Python user site-packages without ambient user/global Python
+  site-packages or startup/hook environment variables
 - isolated Node execution wrappers that remove ambient `NODE_PATH` module
   resolution and `NODE_OPTIONS` preloads outside the project install tree,
   including a direct `node` compatibility binary

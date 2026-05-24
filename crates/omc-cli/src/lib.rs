@@ -4699,7 +4699,7 @@ fn pip_user_paths() -> Result<PipUserPaths, OmcRegistryError> {
 }
 
 fn pip_user_paths_from_python() -> Option<(PathBuf, PathBuf)> {
-    let output = ProcessCommand::new("python3")
+    let output = ProcessCommand::new(host_python_program().ok()?)
         .arg("-c")
         .arg(
             "import json, site; print(json.dumps({'base': site.USER_BASE, 'site': site.USER_SITE}))",
@@ -15763,6 +15763,12 @@ fn project_path_for_cwd(project_dir: &Path, cwd: &Path) -> Result<OsString, OmcR
         project_dir.join("node_modules").join(".bin"),
         project_dir.join(".omc").join("python").join("bin"),
     ];
+    if let Ok(user_paths) = pip_user_paths() {
+        let user_source_bin = user_paths.site_packages.join("bin");
+        if user_source_bin.exists() {
+            paths.push(user_source_bin);
+        }
+    }
     paths.dedup();
     if let Some(existing) = env::var_os("PATH") {
         paths.extend(env::split_paths(&existing));
@@ -15775,17 +15781,47 @@ fn project_python_path(project_dir: &Path) -> Result<OsString, OmcRegistryError>
         .join(".omc")
         .join("python")
         .join("site-packages")];
-    let local_paths_file = project_dir.join(".omc").join("python").join("local-paths");
-    if let Ok(content) = fs::read_to_string(local_paths_file) {
-        paths.extend(
-            content
-                .lines()
-                .map(str::trim)
-                .filter(|line| !line.is_empty())
-                .map(PathBuf::from),
-        );
+    extend_python_path_file(
+        &mut paths,
+        &project_dir.join(".omc").join("python").join("local-paths"),
+    )?;
+    if let Ok(user_paths) = pip_user_paths() {
+        if user_paths.site_packages.exists() || user_paths.state_project.exists() {
+            paths.push(user_paths.site_packages.clone());
+            extend_python_path_file(&mut paths, &pip_user_install_local_paths_file(&user_paths)?)?;
+            extend_python_path_file(
+                &mut paths,
+                &user_paths.site_packages.join(".omc-local-paths"),
+            )?;
+        }
     }
+    dedup_paths(&mut paths);
     env::join_paths(paths).map_err(|error| OmcRegistryError::UnsupportedSpec(error.to_string()))
+}
+
+fn extend_python_path_file(
+    paths: &mut Vec<PathBuf>,
+    local_paths_file: &Path,
+) -> Result<(), OmcRegistryError> {
+    match fs::read_to_string(local_paths_file) {
+        Ok(content) => {
+            paths.extend(
+                content
+                    .lines()
+                    .map(str::trim)
+                    .filter(|line| !line.is_empty())
+                    .map(PathBuf::from),
+            );
+            Ok(())
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn dedup_paths(paths: &mut Vec<PathBuf>) {
+    let mut seen = BTreeSet::new();
+    paths.retain(|path| seen.insert(path.clone()));
 }
 
 #[cfg(unix)]
@@ -28757,6 +28793,19 @@ print("ok")
                 run_pip_compat(&project, &args(&["show", "--user", "demoedit"])).unwrap(),
                 ExitCode::SUCCESS
             );
+            let runtime_python_paths =
+                env::split_paths(&project_python_path(&project).unwrap()).collect::<Vec<_>>();
+            assert!(runtime_python_paths.contains(&paths.site_packages));
+            assert!(runtime_python_paths.contains(&canonical_src));
+            assert_eq!(
+                run_python(&project, &args(&["-c", "import demoedit"])).unwrap(),
+                ExitCode::SUCCESS
+            );
+            let mut command = ProcessCommand::new("demo-cli");
+            apply_project_runtime_env(&mut command, &project).unwrap();
+            let output = command.output().unwrap();
+            assert!(output.status.success());
+            assert_eq!(String::from_utf8_lossy(&output.stdout), "user-cli-ok\n");
 
             #[cfg(unix)]
             {
