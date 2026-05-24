@@ -284,13 +284,19 @@ enum Command {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
-    #[command(about = "Run a package.json or Pipfile script with OMC npm/Python bins and imports")]
+    #[command(
+        about = "Run a package.json or Pipfile script with OMC npm/Python bins and imports",
+        disable_help_flag = true
+    )]
     Script {
         name: String,
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
-    #[command(about = "Run a command with OMC npm/Python bins and imports on PATH")]
+    #[command(
+        about = "Run a command with OMC npm/Python bins and imports on PATH",
+        disable_help_flag = true
+    )]
     Run {
         command: String,
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
@@ -27327,6 +27333,33 @@ mod tests {
             direct_compat_mode(Some(Path::new("/tmp/omc").as_os_str())),
             None
         );
+    }
+
+    #[test]
+    fn run_and_script_forward_help_flags_to_targets() {
+        let cli = Cli::try_parse_from(args(&["omc", "run", "rich", "--help"])).unwrap();
+        match cli.command {
+            Command::Run {
+                command,
+                args: command_args,
+            } => {
+                assert_eq!(command, "rich");
+                assert_eq!(command_args, args(&["--help"]));
+            }
+            other => panic!("expected run command, got {other:?}"),
+        }
+
+        let cli = Cli::try_parse_from(args(&["omc", "script", "build", "--help"])).unwrap();
+        match cli.command {
+            Command::Script {
+                name,
+                args: script_args,
+            } => {
+                assert_eq!(name, "build");
+                assert_eq!(script_args, args(&["--help"]));
+            }
+            other => panic!("expected script command, got {other:?}"),
+        }
     }
 
     #[test]
