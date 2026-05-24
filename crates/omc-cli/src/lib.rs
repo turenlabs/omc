@@ -7788,7 +7788,7 @@ fn npm_help_text(topic: Option<&str>) -> String {
             "npm install [<package-spec>...]",
             &[
                 "Resolve, verify, lock, and install npm packages with OMC.",
-                "Aliases: i, add, update, up, upgrade.",
+                "Aliases: i, add, update, up, upgrade, udpate.",
                 "Common flags: --save, --no-save, --save-dev, --save-optional, --save-peer, --only=prod|dev, --also=dev, --no-optional, --omit=dev|optional|peer, --include=dev|optional|peer, --workspace, --workspaces, --include-workspace-root, --package-lock-only, --prefer-offline, --prefer-online, --dry-run, --registry, --allow, --allow-all-host.",
                 "Direct local inputs are supported for .tgz archives and local package directories.",
                 "Workspace installs save dependencies into selected workspace package.json files and install the root OMC graph.",
@@ -7868,7 +7868,7 @@ fn npm_help_text(topic: Option<&str>) -> String {
             "npm remove <package-spec>...",
             &[
                 "Remove OMC-managed npm dependencies and reinstall the remaining graph.",
-                "Aliases: uninstall, rm, un.",
+                "Aliases: uninstall, unlink, rm, r, un.",
             ],
         ),
         Some("list") => npm_command_help(
@@ -8145,7 +8145,7 @@ fn npm_general_help_text() -> String {
         "npm <command>",
         &[
             "OMC npm compatibility runs supported npm workflows through OMC's verifier, lockfile, cache, and project-local runtime paths.",
-            "Supported commands: install, link, install-test, ci, install-ci-test, remove, run, test, start, stop, restart, exec, explore, edit, completion, help-search, list, query, explain, audit, doctor, outdated, fund, prune, dedupe, rebuild, cache, pkg, version, shrinkwrap, pack, publish, unpublish, deprecate, undeprecate, diff, search, star, unstar, stars, ping, whoami, login, adduser, logout, token, trust, profile, owner, access, org, team, dist-tag, sbom, view, docs, repo, bugs, home, config, get, set, init, create, bin, root, prefix.",
+            "Supported commands: install, link, install-test, ci, install-ci-test, remove, uninstall, unlink, run, test, start, stop, restart, exec, explore, edit, completion, help-search, list, query, explain, audit, doctor, outdated, fund, prune, dedupe, rebuild, cache, pkg, version, shrinkwrap, pack, publish, unpublish, deprecate, undeprecate, diff, search, star, unstar, stars, ping, whoami, login, adduser, logout, token, trust, profile, owner, access, org, team, dist-tag, sbom, view, docs, repo, bugs, home, config, get, set, init, create, bin, root, prefix.",
             "Use `npm help <command>` for focused OMC compatibility notes.",
         ],
     )
@@ -8167,7 +8167,7 @@ fn npm_help_topic(topic: &str) -> Option<&'static str> {
     match topic {
         "help" | "--help" | "-h" => None,
         "install" | "i" | "in" | "ins" | "inst" | "insta" | "instal" | "isnt" | "isnta"
-        | "isntal" | "isntall" | "add" | "update" | "up" | "upgrade" => Some("install"),
+        | "isntal" | "isntall" | "add" | "update" | "up" | "upgrade" | "udpate" => Some("install"),
         "link" | "ln" => Some("link"),
         "install-test" | "it" => Some("install-test"),
         "ci" => Some("ci"),
@@ -8178,7 +8178,7 @@ fn npm_help_topic(topic: &str) -> Option<&'static str> {
         "help-search" => Some("help-search"),
         "explore" => Some("explore"),
         "edit" => Some("edit"),
-        "remove" | "uninstall" | "rm" | "un" => Some("remove"),
+        "remove" | "uninstall" | "unlink" | "rm" | "r" | "un" => Some("remove"),
         "list" | "ls" | "ll" | "la" => Some("list"),
         "query" => Some("query"),
         "explain" | "why" => Some("explain"),
@@ -8267,9 +8267,11 @@ const NPM_COMPLETION_COMMANDS: &[&str] = &[
     "profile",
     "publish",
     "query",
+    "r",
     "rebuild",
     "remove",
     "repo",
+    "rm",
     "root",
     "run",
     "sbom",
@@ -8284,10 +8286,15 @@ const NPM_COMPLETION_COMMANDS: &[&str] = &[
     "test",
     "token",
     "trust",
+    "un",
+    "unlink",
     "uninstall",
     "unpublish",
     "unstar",
     "update",
+    "up",
+    "upgrade",
+    "udpate",
     "version",
     "view",
     "whoami",
@@ -21155,7 +21162,7 @@ fn parse_npm_compat_action(args: &[String]) -> Result<NpmCompatAction, OmcRegist
         "install-test" | "it" => parse_npm_install_test_args(command, false, &args[1..]),
         "install-ci-test" | "cit" => parse_npm_install_test_args(command, true, &args[1..]),
         "install" | "i" | "in" | "ins" | "inst" | "insta" | "instal" | "isnt" | "isnta"
-        | "isntal" | "isntall" | "add" | "update" | "up" | "upgrade" => {
+        | "isntal" | "isntall" | "add" | "update" | "up" | "upgrade" | "udpate" => {
             parse_npm_install_args(command, &args[1..])
         }
         "ci" => {
@@ -21183,7 +21190,7 @@ fn parse_npm_compat_action(args: &[String]) -> Result<NpmCompatAction, OmcRegist
                 allow_all_host,
             })
         }
-        "remove" | "uninstall" | "rm" | "un" => {
+        "remove" | "uninstall" | "unlink" | "rm" | "r" | "un" => {
             let mut global = false;
             let mut filtered = Vec::new();
             let mut index = 1;
@@ -21501,11 +21508,14 @@ fn npm_global_arg_supported_by_command(command: &str, arg: &str) -> bool {
                 | "update"
                 | "up"
                 | "upgrade"
+                | "udpate"
                 | "link"
                 | "ln"
                 | "remove"
                 | "uninstall"
+                | "unlink"
                 | "rm"
+                | "r"
                 | "un"
                 | "bin"
                 | "root"
@@ -21524,6 +21534,7 @@ fn npm_global_arg_supported_by_command(command: &str, arg: &str) -> bool {
                 | "update"
                 | "up"
                 | "upgrade"
+                | "udpate"
                 | "link"
                 | "ln"
                 | "install-test"
@@ -21669,6 +21680,7 @@ fn npm_global_arg_supported_by_command(command: &str, arg: &str) -> bool {
                 | "update"
                 | "up"
                 | "upgrade"
+                | "udpate"
                 | "link"
                 | "ln"
         );
@@ -21691,6 +21703,7 @@ fn npm_global_arg_supported_by_command(command: &str, arg: &str) -> bool {
                 | "update"
                 | "up"
                 | "upgrade"
+                | "udpate"
                 | "link"
                 | "ln"
         );
@@ -21753,6 +21766,7 @@ fn npm_global_arg_supported_by_command(command: &str, arg: &str) -> bool {
                 | "update"
                 | "up"
                 | "upgrade"
+                | "udpate"
                 | "install-test"
                 | "it"
                 | "ci"
@@ -21843,6 +21857,7 @@ fn npm_global_arg_supported_by_command(command: &str, arg: &str) -> bool {
                 | "update"
                 | "up"
                 | "upgrade"
+                | "udpate"
                 | "install-test"
                 | "it"
                 | "link"
@@ -21902,6 +21917,7 @@ fn npm_global_arg_supported_by_command(command: &str, arg: &str) -> bool {
                 | "update"
                 | "up"
                 | "upgrade"
+                | "udpate"
                 | "install-test"
                 | "it"
                 | "install-ci-test"
@@ -21919,6 +21935,12 @@ fn npm_global_arg_supported_by_command(command: &str, arg: &str) -> bool {
                 | "publish"
                 | "dist-tag"
                 | "dist-tags"
+                | "remove"
+                | "uninstall"
+                | "unlink"
+                | "rm"
+                | "r"
+                | "un"
                 | "sbom"
                 | "query"
                 | "shrinkwrap"
@@ -21935,6 +21957,7 @@ fn npm_global_arg_supported_by_command(command: &str, arg: &str) -> bool {
                 | "update"
                 | "up"
                 | "upgrade"
+                | "udpate"
                 | "install-test"
                 | "it"
                 | "install-ci-test"
@@ -21952,6 +21975,12 @@ fn npm_global_arg_supported_by_command(command: &str, arg: &str) -> bool {
                 | "publish"
                 | "dist-tag"
                 | "dist-tags"
+                | "remove"
+                | "uninstall"
+                | "unlink"
+                | "rm"
+                | "r"
+                | "un"
                 | "sbom"
                 | "query"
                 | "shrinkwrap"
@@ -22036,6 +22065,7 @@ fn npm_global_arg_supported_by_command(command: &str, arg: &str) -> bool {
                 | "update"
                 | "up"
                 | "upgrade"
+                | "udpate"
                 | "link"
                 | "ln"
                 | "install-test"
@@ -22804,7 +22834,7 @@ fn parse_npm_install_args(
 }
 
 fn npm_update_defaults_to_no_save(command: &str) -> bool {
-    matches!(command, "update" | "up" | "upgrade")
+    matches!(command, "update" | "up" | "upgrade" | "udpate")
 }
 
 fn npm_bool_flag_value(arg: &str, flag: &str) -> Option<bool> {
@@ -33680,6 +33710,12 @@ verdict = "accepted"
             }
         );
         assert_eq!(
+            parse_npm_compat_action(&args(&["unlink", "--help"])).unwrap(),
+            NpmCompatAction::Help {
+                topic: Some("unlink".to_owned()),
+            }
+        );
+        assert_eq!(
             parse_npm_compat_action(&args(&["completion"])).unwrap(),
             NpmCompatAction::Completion { words: None }
         );
@@ -34531,6 +34567,44 @@ verdict = "accepted"
                 include_workspace_root: false,
             }
         );
+        assert_eq!(
+            parse_npm_compat_action(&args(&[
+                "--workspace=@demo/lib",
+                "unlink",
+                "left-pad",
+                "--no-save",
+            ]))
+            .unwrap(),
+            NpmCompatAction::Remove {
+                specs: vec!["left-pad".to_owned()],
+                global: false,
+                save: false,
+                package_lock: true,
+                lock_only: false,
+                allow: Vec::new(),
+                allow_flow: Vec::new(),
+                allow_all_host: false,
+                workspaces: vec!["@demo/lib".to_owned()],
+                all_workspaces: false,
+                include_workspace_root: false,
+            }
+        );
+        assert_eq!(
+            parse_npm_compat_action(&args(&["--location=global", "r", "left-pad"])).unwrap(),
+            NpmCompatAction::Remove {
+                specs: vec!["left-pad".to_owned()],
+                global: true,
+                save: true,
+                package_lock: true,
+                lock_only: false,
+                allow: Vec::new(),
+                allow_flow: Vec::new(),
+                allow_all_host: false,
+                workspaces: Vec::new(),
+                all_workspaces: false,
+                include_workspace_root: false,
+            }
+        );
 
         assert_eq!(
             parse_npm_compat_action(&args(&[
@@ -34658,6 +34732,32 @@ verdict = "accepted"
                 package_lock: true,
                 lock_only: false,
                 dry_run: false,
+                npm_registry: None,
+                allow: Vec::new(),
+                allow_flow: Vec::new(),
+                allow_all_host: false,
+                workspaces: Vec::new(),
+                all_workspaces: false,
+                include_workspace_root: false,
+            }
+        );
+        assert_eq!(
+            parse_npm_compat_action(&args(&["udpate", "--dry-run", "left-pad"])).unwrap(),
+            NpmCompatAction::Install {
+                specs: vec!["left-pad".to_owned()],
+                archive_references: Vec::new(),
+                local_paths: Vec::new(),
+                global: false,
+                save: false,
+                save_prefix: DEFAULT_NPM_SAVE_PREFIX.to_owned(),
+                save_bundle: false,
+                dependency_kind: ManifestDependencyKind::Production,
+                omit_dev: false,
+                omit_optional: false,
+                omit_peer: false,
+                package_lock: true,
+                lock_only: false,
+                dry_run: true,
                 npm_registry: None,
                 allow: Vec::new(),
                 allow_flow: Vec::new(),
