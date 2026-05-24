@@ -399,6 +399,7 @@ enum NpmCompatAction {
     Remove {
         specs: Vec<String>,
         global: bool,
+        save: bool,
         package_lock: bool,
         lock_only: bool,
         allow: Vec<String>,
@@ -3767,6 +3768,7 @@ fn run_npm_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
         NpmCompatAction::Remove {
             specs,
             global,
+            save,
             package_lock,
             lock_only,
             allow,
@@ -3788,6 +3790,17 @@ fn run_npm_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
                     ));
                 }
                 run_npm_global_remove_compat(&specs, &allow, &allow_flow, allow_all_host)?;
+                return Ok(ExitCode::SUCCESS);
+            }
+            if !save {
+                if lock_only {
+                    return Ok(ExitCode::SUCCESS);
+                }
+                let specs = parse_package_specs(&specs, Some(Ecosystem::Npm))?;
+                let removed = remove_npm_installed_specs(project_dir, &specs)?;
+                if !removed.is_empty() {
+                    println!("removed {}", removed.join(", "));
+                }
                 return Ok(ExitCode::SUCCESS);
             }
             if !workspaces.is_empty() || all_workspaces || include_workspace_root {
@@ -15449,6 +15462,198 @@ fn print_npm_maintenance_report(
     print_install_report(install);
 }
 
+fn remove_npm_installed_specs(
+    project_dir: &Path,
+    specs: &[PackageSpec],
+) -> Result<Vec<String>, OmcRegistryError> {
+    let mut package_names = specs
+        .iter()
+        .filter(|spec| spec.ecosystem == Ecosystem::Npm)
+        .map(|spec| spec.name.clone())
+        .collect::<BTreeSet<_>>();
+    extend_npm_installed_removal_with_lock_dependencies(project_dir, &mut package_names);
+
+    let mut removed = Vec::new();
+    for name in package_names {
+        if remove_npm_installed_package(project_dir, &name)? {
+            removed.push(format!("npm:{name}"));
+        }
+    }
+    Ok(removed)
+}
+
+fn extend_npm_installed_removal_with_lock_dependencies(
+    project_dir: &Path,
+    package_names: &mut BTreeSet<String>,
+) {
+    let Ok(lock) = read_lockfile(project_dir.join("omc.lock")) else {
+        return;
+    };
+    let mut npm_packages = BTreeMap::new();
+    for package in lock
+        .packages
+        .into_iter()
+        .filter(|package| package.ecosystem == Ecosystem::Npm)
+    {
+        npm_packages.insert(package.name.clone(), package);
+    }
+
+    let direct_names = package_names.clone();
+    let mut queue = package_names.iter().cloned().collect::<VecDeque<_>>();
+    while let Some(name) = queue.pop_front() {
+        let Some(package) = npm_packages.get(&name) else {
+            continue;
+        };
+        for dependency in package
+            .dependencies
+            .iter()
+            .chain(&package.optional_dependencies)
+        {
+            if let Some(dependency_name) = npm_dependency_name_from_key(dependency) {
+                if package_names.insert(dependency_name.clone()) {
+                    queue.push_back(dependency_name);
+                }
+            }
+        }
+    }
+
+    let mut protected = BTreeSet::new();
+    for name in npm_packages.keys() {
+        if package_names.contains(name) {
+            continue;
+        }
+        collect_npm_dependency_closure(name, &npm_packages, &mut protected);
+    }
+    for name in protected {
+        if !direct_names.contains(&name) {
+            package_names.remove(&name);
+        }
+    }
+}
+
+fn collect_npm_dependency_closure(
+    name: &str,
+    packages: &BTreeMap<String, LockedPackage>,
+    protected: &mut BTreeSet<String>,
+) {
+    let Some(package) = packages.get(name) else {
+        return;
+    };
+    for dependency in package
+        .dependencies
+        .iter()
+        .chain(&package.optional_dependencies)
+    {
+        if let Some(dependency_name) = npm_dependency_name_from_key(dependency) {
+            if protected.insert(dependency_name.clone()) {
+                collect_npm_dependency_closure(&dependency_name, packages, protected);
+            }
+        }
+    }
+}
+
+fn npm_dependency_name_from_key(dependency: &str) -> Option<String> {
+    parse_package_specs(&[dependency.to_owned()], Some(Ecosystem::Npm))
+        .ok()
+        .and_then(|specs| specs.into_iter().next())
+        .filter(|spec| spec.ecosystem == Ecosystem::Npm)
+        .map(|spec| spec.name)
+}
+
+fn remove_npm_installed_package(project_dir: &Path, name: &str) -> Result<bool, OmcRegistryError> {
+    let node_modules = project_dir.join("node_modules");
+    let package_dir = npm_installed_package_dir(project_dir, name)?;
+    if !package_dir.exists() {
+        return Ok(false);
+    }
+
+    remove_npm_bin_links_for_package(&node_modules, &package_dir, name)?;
+    remove_cli_path_if_exists(&package_dir)?;
+    if let Some(scope_dir) = package_dir.parent().filter(|path| {
+        path.parent() == Some(node_modules.as_path())
+            && path
+                .file_name()
+                .and_then(|part| part.to_str())
+                .is_some_and(|part| part.starts_with('@'))
+    }) {
+        if fs::read_dir(scope_dir)
+            .map(|mut entries| entries.next().is_none())
+            .unwrap_or(false)
+        {
+            fs::remove_dir(scope_dir)?;
+        }
+    }
+    Ok(true)
+}
+
+fn remove_npm_bin_links_for_package(
+    node_modules: &Path,
+    package_dir: &Path,
+    package_name: &str,
+) -> Result<(), OmcRegistryError> {
+    let package_json = package_dir.join("package.json");
+    let Ok(package) = read_npm_pkg_json(&package_json) else {
+        return Ok(());
+    };
+    for bin_name in npm_package_bin_names(&package, package_name) {
+        if !cli_bin_name_is_safe(&bin_name) {
+            continue;
+        }
+        let bin_path = node_modules.join(".bin").join(bin_name);
+        if npm_bin_link_owned_by_package(&bin_path, package_dir)? {
+            remove_cli_path_if_exists(&bin_path)?;
+        }
+    }
+    Ok(())
+}
+
+fn npm_package_bin_names(package: &serde_json::Value, package_name: &str) -> Vec<String> {
+    let Some(bin) = package.get("bin") else {
+        return Vec::new();
+    };
+    if bin.is_string() {
+        return vec![npm_default_bin_name(package_name).to_owned()];
+    }
+    bin.as_object()
+        .map(|bins| bins.keys().cloned().collect())
+        .unwrap_or_default()
+}
+
+fn npm_default_bin_name(package_name: &str) -> &str {
+    package_name
+        .rsplit_once('/')
+        .map(|(_, name)| name)
+        .unwrap_or(package_name)
+}
+
+fn npm_bin_link_owned_by_package(
+    bin_path: &Path,
+    package_dir: &Path,
+) -> Result<bool, OmcRegistryError> {
+    let metadata = match fs::symlink_metadata(bin_path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(OmcRegistryError::Io(error)),
+    };
+    if metadata.file_type().is_symlink() {
+        let target = fs::read_link(bin_path)?;
+        let target = if target.is_absolute() {
+            target
+        } else {
+            bin_path
+                .parent()
+                .unwrap_or_else(|| Path::new("."))
+                .join(target)
+        };
+        return Ok(target.starts_with(package_dir));
+    }
+    if metadata.is_file() {
+        let content = fs::read_to_string(bin_path).unwrap_or_default();
+        return Ok(content.contains(&package_dir.display().to_string()));
+    }
+    Ok(false)
+}
+
 fn remove_specs(
     project_dir: &Path,
     specs: &[String],
@@ -19099,6 +19304,7 @@ fn parse_npm_compat_action(args: &[String]) -> Result<NpmCompatAction, OmcRegist
                 allow,
                 allow_flow,
                 allow_all_host,
+                save,
                 package_lock,
                 lock_only,
                 workspaces,
@@ -19115,6 +19321,7 @@ fn parse_npm_compat_action(args: &[String]) -> Result<NpmCompatAction, OmcRegist
             Ok(NpmCompatAction::Remove {
                 specs: positionals,
                 global,
+                save,
                 package_lock,
                 lock_only,
                 allow,
@@ -28904,6 +29111,118 @@ mod tests {
     }
 
     #[test]
+    fn npm_remove_no_save_only_updates_install_state() {
+        let project = test_dir("npm-remove-no-save-project");
+        for package in ["is-odd", "is-number"] {
+            fs::create_dir_all(project.join("node_modules").join(package)).unwrap();
+            fs::write(
+                project.join("node_modules").join(package).join("index.js"),
+                "module.exports = 42;\n",
+            )
+            .unwrap();
+        }
+        fs::write(
+            project.join("package.json"),
+            r#"{"name":"root","version":"1.0.0","dependencies":{"is-odd":"3.0.1"}}"#,
+        )
+        .unwrap();
+        fs::write(
+            project.join("package-lock.json"),
+            r#"{"name":"root","version":"1.0.0","lockfileVersion":3,"requires":true,"packages":{"":{"name":"root","version":"1.0.0","dependencies":{"is-odd":"3.0.1"}},"node_modules/is-odd":{"version":"3.0.1","dependencies":{"is-number":"^6.0.0"}},"node_modules/is-number":{"version":"6.0.0"}}}"#,
+        )
+        .unwrap();
+        fs::write(
+            project.join("omc.lock"),
+            r#"version = 1
+
+[[packages]]
+ecosystem = "npm"
+name = "is-odd"
+version = "3.0.1"
+source_url = ""
+archive = ""
+artifact = ""
+sha256 = ""
+behavior = "pure"
+verdict = "accepted"
+dependencies = ["npm:is-number@^6.0.0"]
+
+[[packages]]
+ecosystem = "npm"
+name = "is-number"
+version = "6.0.0"
+source_url = ""
+archive = ""
+artifact = ""
+sha256 = ""
+behavior = "pure"
+verdict = "accepted"
+"#,
+        )
+        .unwrap();
+
+        let status =
+            run_npm_compat(&project, &args(&["uninstall", "--no-save", "is-odd"])).unwrap();
+
+        assert_eq!(status, ExitCode::SUCCESS);
+        assert!(!project.join("node_modules").join("is-odd").exists());
+        assert!(!project.join("node_modules").join("is-number").exists());
+        let package_json = read_npm_pkg_json(&project.join("package.json")).unwrap();
+        assert_eq!(package_json["dependencies"]["is-odd"], "3.0.1");
+        let package_lock = fs::read_to_string(project.join("package-lock.json")).unwrap();
+        assert!(package_lock.contains("node_modules/is-odd"));
+        assert!(package_lock.contains("node_modules/is-number"));
+        let lock = read_lockfile(project.join("omc.lock")).unwrap();
+        assert!(lock.packages.iter().any(|package| package.name == "is-odd"));
+        assert!(lock
+            .packages
+            .iter()
+            .any(|package| package.name == "is-number"));
+
+        let _ = fs::remove_dir_all(project);
+    }
+
+    #[test]
+    fn npm_remove_no_save_package_lock_only_is_noop_like_npm() {
+        let project = test_dir("npm-remove-no-save-package-lock-only-project");
+        fs::create_dir_all(project.join("node_modules").join("left-pad")).unwrap();
+        fs::write(
+            project
+                .join("node_modules")
+                .join("left-pad")
+                .join("index.js"),
+            "module.exports = 42;\n",
+        )
+        .unwrap();
+        let package_json =
+            r#"{"name":"root","version":"1.0.0","dependencies":{"left-pad":"1.3.0"}}"#;
+        let package_lock = r#"{"name":"root","version":"1.0.0","lockfileVersion":3,"requires":true,"packages":{"":{"name":"root","version":"1.0.0","dependencies":{"left-pad":"1.3.0"}},"node_modules/left-pad":{"version":"1.3.0"}}}"#;
+        fs::write(project.join("package.json"), package_json).unwrap();
+        fs::write(project.join("package-lock.json"), package_lock).unwrap();
+
+        let status = run_npm_compat(
+            &project,
+            &args(&["uninstall", "--no-save", "--package-lock-only", "left-pad"]),
+        )
+        .unwrap();
+
+        assert_eq!(status, ExitCode::SUCCESS);
+        assert!(project.join("node_modules").join("left-pad").exists());
+        assert_eq!(
+            fs::read_to_string(project.join("package.json")).unwrap(),
+            package_json
+        );
+        assert_eq!(
+            fs::read_to_string(project.join("package-lock.json")).unwrap(),
+            package_lock
+        );
+        assert!(!project.join("omc.toml").exists());
+        assert!(!project.join("omc.lock").exists());
+
+        let _ = fs::remove_dir_all(project);
+    }
+
+    #[test]
     fn npm_remove_package_lock_only_does_not_touch_install_state() {
         let project = test_dir("npm-remove-package-lock-only-project");
         fs::create_dir_all(project.join("node_modules").join("left-pad")).unwrap();
@@ -29925,6 +30244,7 @@ mod tests {
             NpmCompatAction::Remove {
                 specs: vec!["left-pad".to_owned()],
                 global: false,
+                save: true,
                 package_lock: true,
                 lock_only: true,
                 allow: Vec::new(),
@@ -29947,6 +30267,7 @@ mod tests {
             NpmCompatAction::Remove {
                 specs: vec!["left-pad".to_owned()],
                 global: false,
+                save: true,
                 package_lock: true,
                 lock_only: false,
                 allow: Vec::new(),
