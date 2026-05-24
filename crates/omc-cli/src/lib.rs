@@ -6991,7 +6991,7 @@ fn npm_help_text(topic: Option<&str>) -> String {
             &[
                 "Resolve, verify, lock, and install npm packages with OMC.",
                 "Aliases: i, add, update, up, upgrade.",
-                "Common flags: --save, --no-save, --save-dev, --save-optional, --save-peer, --only=prod|dev, --also=dev, --no-optional, --omit=dev|optional|peer, --include=dev|optional|peer, --workspace, --workspaces, --include-workspace-root, --package-lock-only, --dry-run, --registry, --allow, --allow-all-host.",
+                "Common flags: --save, --no-save, --save-dev, --save-optional, --save-peer, --only=prod|dev, --also=dev, --no-optional, --omit=dev|optional|peer, --include=dev|optional|peer, --workspace, --workspaces, --include-workspace-root, --package-lock-only, --prefer-offline, --prefer-online, --dry-run, --registry, --allow, --allow-all-host.",
                 "Direct local inputs are supported for .tgz archives and local package directories.",
                 "Workspace installs save dependencies into selected workspace package.json files and install the root OMC graph.",
             ],
@@ -7009,7 +7009,7 @@ fn npm_help_text(topic: Option<&str>) -> String {
             "npm ci",
             &[
                 "Install the exact OMC lockfile state.",
-                "Common flags: --dry-run, --only=prod|dev, --also=dev, --no-optional, --omit=dev|optional|peer, --include=dev|optional|peer, --allow, --allow-all-host.",
+                "Common flags: --dry-run, --only=prod|dev, --also=dev, --no-optional, --prefer-offline, --prefer-online, --omit=dev|optional|peer, --include=dev|optional|peer, --allow, --allow-all-host.",
             ],
         ),
         Some("install-test") => npm_command_help(
@@ -27646,6 +27646,8 @@ fn ignored_compat_flag(npm_mode: bool, arg: &str) -> bool {
                 | "--strict-peer-deps"
                 | "--strict-peer-deps=false"
                 | "--engine-strict=false"
+                | "--prefer-offline"
+                | "--prefer-online"
         ) || ignored_npm_equals_flag(arg)
     } else {
         arg == "-y"
@@ -31388,6 +31390,8 @@ verdict = "accepted"
             "--no-fund",
             "--legacy-peer-deps=true",
             "--strict-peer-deps=false",
+            "--prefer-offline",
+            "--prefer-online",
             "--foreground-scripts",
             "--dry-run",
             "--allow-all-host",

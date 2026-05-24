@@ -635,8 +635,8 @@ Supported now:
   package specs and explicit `--package` specs are installed into a temporary
   verified OMC project before dispatching to the requested executable; `--no-save`,
   `--save-exact`, `--save-bundle`, `--save-prefix`, `--package-lock-only`,
-  `--package-lock=false`, `--dry-run`, `--registry`, `--only=...`,
-  `--also=...`, `--no-optional`, `--optional=false`, `--omit=...`, `--include=...`, and common audit/fund/peer/install-strategy flags are
+  `--package-lock=false`, `--dry-run`, `--registry`, `--prefer-offline`,
+  `--prefer-online`, `--only=...`, `--also=...`, `--no-optional`, `--optional=false`, `--omit=...`, `--include=...`, and common audit/fund/peer/install-strategy flags are
   understood for install/ci compatibility; `npm install <pkg>` saves into the
   root `package.json` when one exists, `npm update`/`npm up`/`npm upgrade`
   default to no `package.json` save unless an explicit save flag is passed,
