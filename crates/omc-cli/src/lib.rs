@@ -26614,6 +26614,8 @@ fn parse_pip_install_args(args: &[String]) -> Result<PipCompatAction, OmcRegistr
             "--break-system-packages"
                 | "--disable-pip-version-check"
                 | "--no-cache-dir"
+                | "--isolated"
+                | "--require-virtualenv"
                 | "--no-build-isolation"
                 | "--check-build-dependencies"
                 | "--use-pep517"
@@ -26622,6 +26624,7 @@ fn parse_pip_install_args(args: &[String]) -> Result<PipCompatAction, OmcRegistr
                 | "--no-compile"
                 | "--no-color"
                 | "--no-input"
+                | "--no-python-version-warning"
                 | "--no-warn-script-location"
                 | "--no-warn-conflicts"
                 | "--no-clean"
@@ -27005,10 +27008,17 @@ fn pip_ignored_install_value_flag(arg: &str) -> bool {
             | "--global-option"
             | "--install-option"
             | "--root-user-action"
+            | "--log"
+            | "--proxy"
             | "--retries"
             | "--timeout"
             | "--exists-action"
             | "--keyring-provider"
+            | "--cert"
+            | "--client-cert"
+            | "--cache-dir"
+            | "--use-feature"
+            | "--use-deprecated"
     )
 }
 
@@ -27022,10 +27032,17 @@ fn pip_ignored_install_equals_flag(arg: &str) -> bool {
         "--global-option=",
         "--install-option=",
         "--root-user-action=",
+        "--log=",
+        "--proxy=",
         "--retries=",
         "--timeout=",
         "--exists-action=",
         "--keyring-provider=",
+        "--cert=",
+        "--client-cert=",
+        "--cache-dir=",
+        "--use-feature=",
+        "--use-deprecated=",
     ]
     .iter()
     .any(|prefix| arg.starts_with(prefix))
@@ -35510,6 +35527,9 @@ verdict = "accepted"
             "--timeout",
             "5",
             "install",
+            "--isolated",
+            "--require-virtualenv",
+            "--no-python-version-warning",
             "-q",
             "-vv",
             "--no-color",
@@ -35551,6 +35571,9 @@ verdict = "accepted"
             "--src",
             "src",
             "--root-user-action=ignore",
+            "--log",
+            "pip.log",
+            "--proxy=https://proxy.example",
             "--progress-bar",
             "off",
             "--retries",
@@ -35558,6 +35581,14 @@ verdict = "accepted"
             "--timeout=5",
             "--exists-action",
             "i",
+            "--cert",
+            "certs/ca.pem",
+            "--client-cert=certs/client.pem",
+            "--cache-dir",
+            ".pip-cache",
+            "--use-feature",
+            "truststore",
+            "--use-deprecated=legacy-resolver",
             "--no-build-isolation",
             "--check-build-dependencies",
             "-C",

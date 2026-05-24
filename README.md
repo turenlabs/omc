@@ -678,8 +678,9 @@ Supported now:
   build-isolation, and binary-policy install flags without
   delegating to pip; common global pip flags such as
   `--disable-pip-version-check`, `--quiet`, `--timeout`, `--retries`,
-  `--trusted-host`, `--cert`, `--client-cert`, and `--cache-dir` are accepted
-  before the subcommand; `pip uninstall` accepts those common global flags
+  `--trusted-host`, `--cert`, `--client-cert`, `--cache-dir`, `--proxy`,
+  `--log`, `--use-feature`, and `--use-deprecated` are accepted before
+  `install` or after it; `pip uninstall` accepts those common global flags
   after the subcommand too, skips missing packages with a pip-style warning,
   and removes OMC manifest dependencies, OMC-recorded editable local paths,
   named editable paths from `-r` requirement files, or, when a package only
