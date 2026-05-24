@@ -1063,7 +1063,9 @@ enum PipCompatAction {
     Cache {
         action: PipCacheAction,
     },
-    Check,
+    Check {
+        user: bool,
+    },
     Debug {
         action: PipDebugAction,
     },
@@ -3568,7 +3570,13 @@ fn run_pip_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
             print_pip_hash(project_dir, algorithm, paths)?
         }
         PipCompatAction::Cache { action } => print_pip_cache(project_dir, action)?,
-        PipCompatAction::Check => return print_locked_pip_check(project_dir),
+        PipCompatAction::Check { user } => {
+            if user {
+                let paths = pip_effective_scope_paths(&[], true)?;
+                return print_pip_path_check(project_dir, &paths);
+            }
+            return print_locked_pip_check(project_dir);
+        }
         PipCompatAction::Debug { action } => print_pip_debug(project_dir, action)?,
         PipCompatAction::Inspect { paths, user } => {
             let paths = pip_effective_scope_paths(&paths, user)?;
@@ -5594,7 +5602,7 @@ fn pip_help_text(topic: Option<&str>) -> String {
         ),
         Some("check") => pip_command_help(
             "pip check",
-            &["Validate locked PyPI dependency requirements."],
+            &["Validate locked PyPI dependency requirements. Supports --user for OMC-managed Python user state."],
         ),
         Some("inspect") => pip_command_help(
             "pip inspect",
@@ -14895,6 +14903,19 @@ fn print_pip_path_show(
 fn print_locked_pip_check(project_dir: &Path) -> Result<ExitCode, OmcRegistryError> {
     let lock = read_lockfile(project_dir.join("omc.lock"))?;
     let issues = pip_check_installed_packages(project_dir, &lock)?;
+    print_pip_check_issues(issues)
+}
+
+fn print_pip_path_check(
+    project_dir: &Path,
+    paths: &[PathBuf],
+) -> Result<ExitCode, OmcRegistryError> {
+    let packages = read_pip_path_packages(project_dir, paths, &[], PipEditableMode::Include)?;
+    let issues = pip_check_installed_package_set(&packages);
+    print_pip_check_issues(issues)
+}
+
+fn print_pip_check_issues(issues: Vec<PypiCheckIssue>) -> Result<ExitCode, OmcRegistryError> {
     if issues.is_empty() {
         println!("No broken requirements found.");
         return Ok(ExitCode::SUCCESS);
@@ -21345,10 +21366,7 @@ fn parse_pip_compat_action(args: &[String]) -> Result<PipCompatAction, OmcRegist
         "show" => parse_pip_show_args(&args[1..]),
         "hash" => parse_pip_hash_args(&args[1..]),
         "cache" => parse_pip_cache_args(&args[1..]),
-        "check" => {
-            parse_pip_check_args(&args[1..])?;
-            Ok(PipCompatAction::Check)
-        }
+        "check" => parse_pip_check_args(&args[1..]),
         "debug" => parse_pip_debug_args(&args[1..]),
         "inspect" => parse_pip_inspect_args(&args[1..]),
         "freeze" => {
@@ -22227,8 +22245,17 @@ fn parse_pip_cache_args(args: &[String]) -> Result<PipCompatAction, OmcRegistryE
     Ok(PipCompatAction::Cache { action })
 }
 
-fn parse_pip_check_args(args: &[String]) -> Result<(), OmcRegistryError> {
+fn parse_pip_check_args(args: &[String]) -> Result<PipCompatAction, OmcRegistryError> {
+    let mut user = false;
     for arg in args {
+        if matches!(arg.as_str(), "--user" | "--user=true") {
+            user = true;
+            continue;
+        }
+        if arg == "--user=false" {
+            user = false;
+            continue;
+        }
         if matches!(
             arg.as_str(),
             "--disable-pip-version-check" | "-v" | "--verbose"
@@ -22237,7 +22264,7 @@ fn parse_pip_check_args(args: &[String]) -> Result<(), OmcRegistryError> {
         }
         return Err(unsupported_compat_arg("pip check", arg));
     }
-    Ok(())
+    Ok(PipCompatAction::Check { user })
 }
 
 fn parse_pip_debug_args(args: &[String]) -> Result<PipCompatAction, OmcRegistryError> {
@@ -28793,6 +28820,10 @@ print("ok")
                 run_pip_compat(&project, &args(&["show", "--user", "demoedit"])).unwrap(),
                 ExitCode::SUCCESS
             );
+            assert_eq!(
+                run_pip_compat(&project, &args(&["check", "--user"])).unwrap(),
+                ExitCode::SUCCESS
+            );
             let runtime_python_paths =
                 env::split_paths(&project_python_path(&project).unwrap()).collect::<Vec<_>>();
             assert!(runtime_python_paths.contains(&paths.site_packages));
@@ -28869,9 +28900,18 @@ verdict = "accepted"
                 "requests/__init__.py,,\nrequests-2.32.3.dist-info/RECORD,,\n",
             )
             .unwrap();
+            fs::write(
+                dist_info.join("METADATA"),
+                "Metadata-Version: 2.1\nName: requests\nVersion: 2.32.3\nRequires-Dist: idna>=3\n",
+            )
+            .unwrap();
             assert_eq!(
                 run_pip_compat(&project, &args(&["show", "--user", "-f", "requests"])).unwrap(),
                 ExitCode::SUCCESS
+            );
+            assert_eq!(
+                run_pip_compat(&project, &args(&["check", "--user"])).unwrap(),
+                ExitCode::FAILURE
             );
 
             let status =
@@ -29849,7 +29889,11 @@ version = "0.2.0"
         );
         assert_eq!(
             parse_pip_compat_action(&args(&["check", "--disable-pip-version-check"])).unwrap(),
-            PipCompatAction::Check
+            PipCompatAction::Check { user: false }
+        );
+        assert_eq!(
+            parse_pip_compat_action(&args(&["check", "--user"])).unwrap(),
+            PipCompatAction::Check { user: true }
         );
         assert_eq!(
             parse_pip_compat_action(&args(&[

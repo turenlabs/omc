@@ -229,6 +229,7 @@ cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip list --format=
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip list --editable --format=columns
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip list --not-required --format=json
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip inspect
+cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip check --user
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip debug --verbose
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip list --outdated --format=json
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip list --outdated --format=freeze
@@ -594,7 +595,8 @@ Supported now:
   environment; `pip uninstall --user` removes packages from OMC-managed
   Python user state and cleans mirrored user scripts without writing the
   current project; `pip check` validates
-  both locked PyPI packages and OMC-recorded editable local paths; common
+  both locked PyPI packages and OMC-recorded editable local paths, and
+  `pip check --user` validates OMC-managed Python user site-packages; common
   `pip install --report path` JSON reports and registry/archive
   `pip install --dry-run` resolution, including local editable paths and VCS
   requirements, without writing the current OMC manifest, lockfile, or
