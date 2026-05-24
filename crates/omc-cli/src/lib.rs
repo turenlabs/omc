@@ -7826,7 +7826,7 @@ fn npm_general_help_text() -> String {
         "npm <command>",
         &[
             "OMC npm compatibility runs supported npm workflows through OMC's verifier, lockfile, cache, and project-local runtime paths.",
-            "Supported commands: install, link, install-test, ci, install-ci-test, remove, run, test, start, stop, restart, exec, explore, completion, list, query, explain, audit, outdated, fund, prune, dedupe, rebuild, cache, pkg, version, pack, publish, unpublish, deprecate, undeprecate, diff, search, star, unstar, stars, ping, whoami, login, adduser, logout, token, profile, owner, access, org, team, dist-tag, sbom, view, docs, repo, bugs, home, config, init, create, bin, root, prefix.",
+            "Supported commands: install, link, install-test, ci, install-ci-test, remove, run, test, start, stop, restart, exec, explore, completion, list, query, explain, audit, outdated, fund, prune, dedupe, rebuild, cache, pkg, version, pack, publish, unpublish, deprecate, undeprecate, diff, search, star, unstar, stars, ping, whoami, login, adduser, logout, token, profile, owner, access, org, team, dist-tag, sbom, view, docs, repo, bugs, home, config, get, set, init, create, bin, root, prefix.",
             "Use `npm help <command>` for focused OMC compatibility notes.",
         ],
     )
@@ -7889,7 +7889,7 @@ fn npm_help_topic(topic: &str) -> Option<&'static str> {
         "docs" | "doc" | "repo" | "repository" | "bugs" | "home" | "homepage" => {
             Some("metadata-url")
         }
-        "config" | "c" | "get" => Some("config"),
+        "config" | "c" | "get" | "set" => Some("config"),
         "cache" => Some("cache"),
         "pkg" => Some("pkg"),
         "version" => Some("version"),
@@ -7946,6 +7946,7 @@ const NPM_COMPLETION_COMMANDS: &[&str] = &[
     "run",
     "sbom",
     "search",
+    "set",
     "star",
     "stars",
     "start",
@@ -20348,6 +20349,7 @@ fn parse_npm_compat_action(args: &[String]) -> Result<NpmCompatAction, OmcRegist
         }
         "config" | "c" => parse_npm_config_args(&args[1..]),
         "get" => parse_npm_config_get_args(&args[1..]),
+        "set" => parse_npm_config_set_args(&args[1..]),
         other => Err(OmcRegistryError::UnsupportedSpec(format!(
             "unsupported npm compatibility command `{other}`"
         ))),
@@ -34641,6 +34643,27 @@ verdict = "accepted"
         );
         assert_eq!(
             parse_npm_compat_action(&args(&[
+                "set",
+                "registry",
+                "https://registry.example.invalid/npm",
+                "--userconfig=ci.npmrc",
+            ]))
+            .unwrap(),
+            NpmCompatAction::Config {
+                action: NpmConfigAction::Set {
+                    assignments: vec![(
+                        "registry".to_owned(),
+                        "https://registry.example.invalid/npm".to_owned(),
+                    )],
+                    location: NpmConfigLocation::User,
+                },
+                npm_registry: None,
+                userconfig: Some(PathBuf::from("ci.npmrc")),
+                globalconfig: None,
+            }
+        );
+        assert_eq!(
+            parse_npm_compat_action(&args(&[
                 "config",
                 "set",
                 "@scope:registry=https://registry.example.invalid/npm",
@@ -35974,6 +35997,38 @@ verdict = "accepted"
             .unwrap()
             .contains("registry=https://nested-globalconfig.example/npm"));
         assert!(!project.join("global.npmrc").exists());
+    }
+
+    #[test]
+    fn direct_npm_set_resolves_userconfig_from_invocation_cwd() {
+        let project = test_dir("direct-npm-set-userconfig-project");
+        let invocation_cwd = project.join("work/release");
+        fs::create_dir_all(&invocation_cwd).unwrap();
+        fs::write(
+            project.join("package.json"),
+            r#"{ "name": "root", "version": "1.0.0" }"#,
+        )
+        .unwrap();
+
+        let status = run_npm_compat_with_cwd(
+            &project,
+            &args(&[
+                "set",
+                "registry",
+                "https://top-level-set.example/npm",
+                "--userconfig",
+                "ci.npmrc",
+            ]),
+            &invocation_cwd,
+        )
+        .unwrap();
+
+        assert_eq!(status, ExitCode::SUCCESS);
+        let user_config = invocation_cwd.join("ci.npmrc");
+        assert!(fs::read_to_string(&user_config)
+            .unwrap()
+            .contains("registry=https://top-level-set.example/npm"));
+        assert!(!project.join("ci.npmrc").exists());
     }
 
     #[test]
