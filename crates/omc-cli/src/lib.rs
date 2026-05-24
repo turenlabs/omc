@@ -15486,43 +15486,43 @@ fn extend_npm_installed_removal_with_lock_dependencies(
     project_dir: &Path,
     package_names: &mut BTreeSet<String>,
 ) {
-    let Ok(lock) = read_lockfile(project_dir.join("omc.lock")) else {
+    let omc_lock = project_dir.join("omc.lock");
+    let dependency_graph = if omc_lock.exists() {
+        read_lockfile(omc_lock)
+            .ok()
+            .map(npm_dependency_graph_from_omc_lock)
+    } else {
+        None
+    }
+    .or_else(|| npm_dependency_graph_from_package_lock(project_dir));
+    let Some(dependency_graph) = dependency_graph else {
         return;
     };
-    let mut npm_packages = BTreeMap::new();
-    for package in lock
-        .packages
-        .into_iter()
-        .filter(|package| package.ecosystem == Ecosystem::Npm)
-    {
-        npm_packages.insert(package.name.clone(), package);
-    }
 
     let direct_names = package_names.clone();
     let mut queue = package_names.iter().cloned().collect::<VecDeque<_>>();
     while let Some(name) = queue.pop_front() {
-        let Some(package) = npm_packages.get(&name) else {
+        let Some(dependencies) = dependency_graph.get(&name) else {
             continue;
         };
-        for dependency in package
-            .dependencies
-            .iter()
-            .chain(&package.optional_dependencies)
-        {
-            if let Some(dependency_name) = npm_dependency_name_from_key(dependency) {
-                if package_names.insert(dependency_name.clone()) {
-                    queue.push_back(dependency_name);
-                }
+        for dependency_name in dependencies {
+            if package_names.insert(dependency_name.clone()) {
+                queue.push_back(dependency_name.clone());
             }
         }
     }
 
     let mut protected = BTreeSet::new();
-    for name in npm_packages.keys() {
+    for name in npm_project_declared_dependency_names(project_dir) {
+        if !direct_names.contains(&name) && protected.insert(name.clone()) {
+            collect_npm_dependency_closure(&name, &dependency_graph, &mut protected);
+        }
+    }
+    for name in dependency_graph.keys() {
         if package_names.contains(name) {
             continue;
         }
-        collect_npm_dependency_closure(name, &npm_packages, &mut protected);
+        collect_npm_dependency_closure(name, &dependency_graph, &mut protected);
     }
     for name in protected {
         if !direct_names.contains(&name) {
@@ -15531,23 +15531,105 @@ fn extend_npm_installed_removal_with_lock_dependencies(
     }
 }
 
-fn collect_npm_dependency_closure(
-    name: &str,
-    packages: &BTreeMap<String, LockedPackage>,
-    protected: &mut BTreeSet<String>,
-) {
-    let Some(package) = packages.get(name) else {
+fn npm_dependency_graph_from_omc_lock(lock: OmcLock) -> BTreeMap<String, BTreeSet<String>> {
+    lock.packages
+        .into_iter()
+        .filter(|package| package.ecosystem == Ecosystem::Npm)
+        .map(|package| {
+            let dependencies = package
+                .dependencies
+                .iter()
+                .chain(&package.optional_dependencies)
+                .filter_map(|dependency| npm_dependency_name_from_key(dependency))
+                .collect();
+            (package.name, dependencies)
+        })
+        .collect()
+}
+
+fn npm_dependency_graph_from_package_lock(
+    project_dir: &Path,
+) -> Option<BTreeMap<String, BTreeSet<String>>> {
+    let package_lock = read_npm_pkg_json(&project_dir.join("package-lock.json")).ok()?;
+    let packages = package_lock.get("packages")?.as_object()?;
+    let mut graph = BTreeMap::new();
+    for (path, entry) in packages {
+        let Some(name) = npm_package_name_from_package_lock_path(path) else {
+            continue;
+        };
+        let dependencies = ["dependencies", "optionalDependencies"]
+            .into_iter()
+            .filter_map(|field| entry.get(field).and_then(serde_json::Value::as_object))
+            .flat_map(|dependencies| dependencies.keys().cloned())
+            .collect();
+        graph.insert(name, dependencies);
+    }
+    Some(graph)
+}
+
+fn npm_package_name_from_package_lock_path(path: &str) -> Option<String> {
+    if !path.contains("node_modules/") {
+        return None;
+    }
+    let mut parts = path.rsplit("node_modules/");
+    let name = parts.next()?;
+    if name.is_empty() || name.contains("/node_modules/") {
+        return None;
+    }
+    if let Some(scoped) = name.strip_prefix('@') {
+        let (scope, package) = scoped.split_once('/')?;
+        if package.contains('/') {
+            return None;
+        }
+        return Some(format!("@{scope}/{package}"));
+    }
+    if name.contains('/') {
+        return None;
+    }
+    Some(name.to_owned())
+}
+
+fn npm_project_declared_dependency_names(project_dir: &Path) -> BTreeSet<String> {
+    let mut names = BTreeSet::new();
+    extend_npm_package_json_dependency_names(&project_dir.join("package.json"), &mut names);
+    if let Ok(workspaces) = read_npm_workspace_packages(project_dir) {
+        for workspace in workspaces {
+            extend_npm_package_json_dependency_names(
+                &workspace.path.join("package.json"),
+                &mut names,
+            );
+        }
+    }
+    names
+}
+
+fn extend_npm_package_json_dependency_names(path: &Path, names: &mut BTreeSet<String>) {
+    let Ok(package) = read_npm_pkg_json(path) else {
         return;
     };
-    for dependency in package
-        .dependencies
-        .iter()
-        .chain(&package.optional_dependencies)
-    {
-        if let Some(dependency_name) = npm_dependency_name_from_key(dependency) {
-            if protected.insert(dependency_name.clone()) {
-                collect_npm_dependency_closure(&dependency_name, packages, protected);
-            }
+    for field in [
+        "dependencies",
+        "devDependencies",
+        "optionalDependencies",
+        "peerDependencies",
+    ] {
+        if let Some(dependencies) = package.get(field).and_then(serde_json::Value::as_object) {
+            names.extend(dependencies.keys().cloned());
+        }
+    }
+}
+
+fn collect_npm_dependency_closure(
+    name: &str,
+    dependency_graph: &BTreeMap<String, BTreeSet<String>>,
+    protected: &mut BTreeSet<String>,
+) {
+    let Some(dependencies) = dependency_graph.get(name) else {
+        return;
+    };
+    for dependency_name in dependencies {
+        if protected.insert(dependency_name.clone()) {
+            collect_npm_dependency_closure(dependency_name, dependency_graph, protected);
         }
     }
 }
@@ -29178,6 +29260,76 @@ verdict = "accepted"
             .packages
             .iter()
             .any(|package| package.name == "is-number"));
+
+        let _ = fs::remove_dir_all(project);
+    }
+
+    #[test]
+    fn npm_remove_no_save_uses_package_lock_dependency_graph_without_omc_lock() {
+        let project = test_dir("npm-remove-no-save-package-lock-deps-project");
+        for package in ["is-odd", "is-number"] {
+            fs::create_dir_all(project.join("node_modules").join(package)).unwrap();
+            fs::write(
+                project.join("node_modules").join(package).join("index.js"),
+                "module.exports = 42;\n",
+            )
+            .unwrap();
+        }
+        let package_json = r#"{"name":"root","version":"1.0.0","dependencies":{"is-odd":"3.0.1"}}"#;
+        let package_lock = r#"{"name":"root","version":"1.0.0","lockfileVersion":3,"requires":true,"packages":{"":{"name":"root","version":"1.0.0","dependencies":{"is-odd":"3.0.1"}},"node_modules/is-odd":{"version":"3.0.1","dependencies":{"is-number":"^6.0.0"}},"node_modules/is-number":{"version":"6.0.0"}}}"#;
+        fs::write(project.join("package.json"), package_json).unwrap();
+        fs::write(project.join("package-lock.json"), package_lock).unwrap();
+
+        let status =
+            run_npm_compat(&project, &args(&["uninstall", "--no-save", "is-odd"])).unwrap();
+
+        assert_eq!(status, ExitCode::SUCCESS);
+        assert!(!project.join("node_modules").join("is-odd").exists());
+        assert!(!project.join("node_modules").join("is-number").exists());
+        assert_eq!(
+            fs::read_to_string(project.join("package.json")).unwrap(),
+            package_json
+        );
+        assert_eq!(
+            fs::read_to_string(project.join("package-lock.json")).unwrap(),
+            package_lock
+        );
+        assert!(!project.join("omc.lock").exists());
+
+        let _ = fs::remove_dir_all(project);
+    }
+
+    #[test]
+    fn npm_remove_no_save_keeps_transitive_dependency_declared_by_manifest() {
+        let project = test_dir("npm-remove-no-save-keeps-declared-transitive-project");
+        for package in ["is-odd", "is-number"] {
+            fs::create_dir_all(project.join("node_modules").join(package)).unwrap();
+            fs::write(
+                project.join("node_modules").join(package).join("index.js"),
+                "module.exports = 42;\n",
+            )
+            .unwrap();
+        }
+        let package_json = r#"{"name":"root","version":"1.0.0","dependencies":{"is-odd":"3.0.1","is-number":"6.0.0"}}"#;
+        let package_lock = r#"{"name":"root","version":"1.0.0","lockfileVersion":3,"requires":true,"packages":{"":{"name":"root","version":"1.0.0","dependencies":{"is-odd":"3.0.1","is-number":"6.0.0"}},"node_modules/is-odd":{"version":"3.0.1","dependencies":{"is-number":"^6.0.0"}},"node_modules/is-number":{"version":"6.0.0"}}}"#;
+        fs::write(project.join("package.json"), package_json).unwrap();
+        fs::write(project.join("package-lock.json"), package_lock).unwrap();
+
+        let status =
+            run_npm_compat(&project, &args(&["uninstall", "--no-save", "is-odd"])).unwrap();
+
+        assert_eq!(status, ExitCode::SUCCESS);
+        assert!(!project.join("node_modules").join("is-odd").exists());
+        assert!(project.join("node_modules").join("is-number").exists());
+        assert_eq!(
+            fs::read_to_string(project.join("package.json")).unwrap(),
+            package_json
+        );
+        assert_eq!(
+            fs::read_to_string(project.join("package-lock.json")).unwrap(),
+            package_lock
+        );
+        assert!(!project.join("omc.lock").exists());
 
         let _ = fs::remove_dir_all(project);
     }
