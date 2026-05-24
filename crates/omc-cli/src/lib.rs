@@ -1054,6 +1054,7 @@ enum PipCompatAction {
     Show {
         specs: Vec<String>,
         files: bool,
+        user: bool,
     },
     Hash {
         algorithm: PipHashAlgorithm,
@@ -3556,8 +3557,12 @@ fn run_pip_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
                 true,
             )?;
         }
-        PipCompatAction::Show { specs, files } => {
-            return print_locked_pip_show(project_dir, &specs, files)
+        PipCompatAction::Show { specs, files, user } => {
+            if user {
+                let paths = pip_effective_scope_paths(&[], true)?;
+                return print_pip_path_show(project_dir, &paths, &specs, files);
+            }
+            return print_locked_pip_show(project_dir, &specs, files);
         }
         PipCompatAction::Hash { algorithm, paths } => {
             print_pip_hash(project_dir, algorithm, paths)?
@@ -5585,7 +5590,7 @@ fn pip_help_text(topic: Option<&str>) -> String {
         ),
         Some("show") => pip_command_help(
             "pip show <package>...",
-            &["Show locked package metadata. Supports -f/--files."],
+            &["Show locked package metadata. Supports -f/--files and --user for OMC-managed Python user state."],
         ),
         Some("check") => pip_command_help(
             "pip check",
@@ -14848,6 +14853,45 @@ fn print_locked_pip_show(
     Ok(ExitCode::SUCCESS)
 }
 
+fn print_pip_path_show(
+    project_dir: &Path,
+    paths: &[PathBuf],
+    specs: &[String],
+    include_files: bool,
+) -> Result<ExitCode, OmcRegistryError> {
+    if specs.is_empty() {
+        return Err(OmcRegistryError::UnsupportedSpec(
+            "pip show needs at least one package".to_owned(),
+        ));
+    }
+
+    let packages = read_pip_path_packages(project_dir, paths, &[], PipEditableMode::Include)?;
+    let mut missing = Vec::new();
+    let mut printed = false;
+    for spec in specs {
+        let normalized = normalize_pip_show_name(spec);
+        if let Some(package) = packages
+            .iter()
+            .find(|package| normalize_pip_show_name(&package.name) == normalized)
+        {
+            if printed {
+                println!("---");
+            }
+            print_pip_show_installed_package(package, &packages, include_files)?;
+            printed = true;
+        } else {
+            missing.push(spec.clone());
+        }
+    }
+
+    if !missing.is_empty() {
+        eprintln!("WARNING: Package(s) not found: {}", missing.join(", "));
+        return Ok(ExitCode::FAILURE);
+    }
+
+    Ok(ExitCode::SUCCESS)
+}
+
 fn print_locked_pip_check(project_dir: &Path) -> Result<ExitCode, OmcRegistryError> {
     let lock = read_lockfile(project_dir.join("omc.lock"))?;
     let issues = pip_check_installed_packages(project_dir, &lock)?;
@@ -15069,6 +15113,65 @@ fn print_pip_show_editable_package(
     Ok(())
 }
 
+fn print_pip_show_installed_package(
+    package: &InstalledPythonPackage,
+    packages: &[InstalledPythonPackage],
+    include_files: bool,
+) -> Result<(), OmcRegistryError> {
+    let metadata = if let Some(dist_info) = &package.metadata_location {
+        read_pip_show_metadata_from_dist_info(dist_info)?
+    } else if let Some(location) = &package.editable_project_location {
+        read_python_project_show_metadata(&pip_editable_project_root(location))?
+    } else {
+        PipShowMetadata::default()
+    };
+    let requires = if metadata.requires.is_empty() {
+        package
+            .dependencies
+            .iter()
+            .filter_map(|dependency| pip_installed_dependency_name(dependency))
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>()
+    } else {
+        metadata.requires
+    };
+    let location = package
+        .metadata_location
+        .as_ref()
+        .and_then(|path| path.parent())
+        .or(package.editable_project_location.as_deref())
+        .map(Path::to_path_buf)
+        .unwrap_or_default();
+    println!("Name: {}", package.name);
+    println!("Version: {}", package.version);
+    println!("Summary: {}", metadata.summary.unwrap_or_default());
+    println!("Home-page: {}", metadata.home_page.unwrap_or_default());
+    println!("Author: {}", metadata.author.unwrap_or_default());
+    println!(
+        "Author-email: {}",
+        metadata.author_email.unwrap_or_default()
+    );
+    println!("License: {}", metadata.license.unwrap_or_default());
+    println!("Location: {}", location.display());
+    println!("Requires: {}", requires.join(", "));
+    println!(
+        "Required-by: {}",
+        pip_required_by_installed_package_name(&package.name, packages).join(", ")
+    );
+    if include_files {
+        println!("Files:");
+        if let Some(dist_info) = &package.metadata_location {
+            for file in pip_installed_files_from_dist_info(dist_info)? {
+                println!("  {file}");
+            }
+        } else {
+            println!("Cannot locate RECORD or installed-files.txt");
+        }
+    }
+    Ok(())
+}
+
 #[derive(Debug, Default, PartialEq, Eq)]
 struct PipShowMetadata {
     summary: Option<String>,
@@ -15099,6 +15202,12 @@ fn read_pip_show_metadata(
     let Some(dist_info) = match_dist_info_dir(site_packages, package)? else {
         return Ok(PipShowMetadata::default());
     };
+    read_pip_show_metadata_from_dist_info(&dist_info)
+}
+
+fn read_pip_show_metadata_from_dist_info(
+    dist_info: &Path,
+) -> Result<PipShowMetadata, OmcRegistryError> {
     let metadata = dist_info.join("METADATA");
     if !metadata.exists() {
         return Ok(PipShowMetadata::default());
@@ -15165,6 +15274,27 @@ fn pip_required_by_package_name(name: &str, packages: &[LockedPackage]) -> Vec<S
         .collect()
 }
 
+fn pip_required_by_installed_package_name(
+    name: &str,
+    packages: &[InstalledPythonPackage],
+) -> Vec<String> {
+    let target = normalize_pip_show_name(name);
+    packages
+        .iter()
+        .filter(|candidate| normalize_pip_show_name(&candidate.name) != target)
+        .filter(|candidate| {
+            candidate
+                .dependencies
+                .iter()
+                .filter_map(|dependency| pip_installed_dependency_name(dependency))
+                .any(|name| normalize_pip_show_name(&name) == target)
+        })
+        .map(|candidate| candidate.name.clone())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
 fn pip_dependency_name(dependency: &str) -> Option<String> {
     PackageSpec::parse(dependency)
         .ok()
@@ -15192,6 +15322,10 @@ fn pip_installed_files(
     let Some(dist_info) = match_dist_info_dir(site_packages, package)? else {
         return Ok(Vec::new());
     };
+    pip_installed_files_from_dist_info(&dist_info)
+}
+
+fn pip_installed_files_from_dist_info(dist_info: &Path) -> Result<Vec<String>, OmcRegistryError> {
     let record = dist_info.join("RECORD");
     if !record.exists() {
         return Ok(Vec::new());
@@ -21912,6 +22046,7 @@ fn parse_pip_uninstall_args(args: &[String]) -> Result<PipCompatAction, OmcRegis
 fn parse_pip_show_args(args: &[String]) -> Result<PipCompatAction, OmcRegistryError> {
     let mut specs = Vec::new();
     let mut files = false;
+    let mut user = false;
     for arg in args {
         if matches!(
             arg.as_str(),
@@ -21921,6 +22056,14 @@ fn parse_pip_show_args(args: &[String]) -> Result<PipCompatAction, OmcRegistryEr
         }
         if matches!(arg.as_str(), "-f" | "--files") {
             files = true;
+            continue;
+        }
+        if matches!(arg.as_str(), "--user" | "--user=true") {
+            user = true;
+            continue;
+        }
+        if arg == "--user=false" {
+            user = false;
             continue;
         }
         if arg.starts_with('-') {
@@ -21933,7 +22076,7 @@ fn parse_pip_show_args(args: &[String]) -> Result<PipCompatAction, OmcRegistryEr
             "pip show needs at least one package".to_owned(),
         ));
     }
-    Ok(PipCompatAction::Show { specs, files })
+    Ok(PipCompatAction::Show { specs, files, user })
 }
 
 fn parse_pip_hash_args(args: &[String]) -> Result<PipCompatAction, OmcRegistryError> {
@@ -28610,6 +28753,10 @@ print("ok")
             assert_eq!(inspect.len(), 1);
             assert_eq!(inspect[0]["metadata"]["name"], "demoedit");
             assert_eq!(inspect[0]["metadata"]["version"], "0.1.0");
+            assert_eq!(
+                run_pip_compat(&project, &args(&["show", "--user", "demoedit"])).unwrap(),
+                ExitCode::SUCCESS
+            );
 
             #[cfg(unix)]
             {
@@ -28673,6 +28820,10 @@ verdict = "accepted"
                 "requests/__init__.py,,\nrequests-2.32.3.dist-info/RECORD,,\n",
             )
             .unwrap();
+            assert_eq!(
+                run_pip_compat(&project, &args(&["show", "--user", "-f", "requests"])).unwrap(),
+                ExitCode::SUCCESS
+            );
 
             let status =
                 run_pip_compat(&project, &args(&["uninstall", "--user", "-y", "requests"]))
@@ -29700,6 +29851,15 @@ version = "0.2.0"
             PipCompatAction::Show {
                 specs: vec!["requests".to_owned()],
                 files: true,
+                user: false,
+            }
+        );
+        assert_eq!(
+            parse_pip_compat_action(&args(&["show", "--user", "demoedit"])).unwrap(),
+            PipCompatAction::Show {
+                specs: vec!["demoedit".to_owned()],
+                files: false,
+                user: true,
             }
         );
         assert_eq!(

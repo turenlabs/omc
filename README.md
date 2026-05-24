@@ -224,6 +224,7 @@ cargo run -p omc-cli --bin python3 -- --omc-project-dir /tmp/omc-demo -m pip fre
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip freeze
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip freeze -r requirements.txt
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip show requests
+cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip show --user local-package
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip list --format=json
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip list --editable --format=columns
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip list --not-required --format=json
@@ -605,8 +606,8 @@ Supported now:
   `pyproject.toml` dependency groups through OMC's existing pyproject
   resolver; `pip install --requirements-from-script FILE` installs PEP 723
   inline script dependencies through OMC; `pip list --user`,
-  `pip freeze --user`, and `pip inspect --user` read OMC-managed Python user
-  site-packages; `pip freeze -r requirements.txt`
+  `pip freeze --user`, `pip inspect --user`, and `pip show --user` read
+  OMC-managed Python user site-packages; `pip freeze -r requirements.txt`
   preserves requirement-file order
   and comments while appending additional frozen packages; read-only
   `pip freeze --path DIR`, `pip list --path DIR`, and
