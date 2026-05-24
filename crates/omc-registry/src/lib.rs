@@ -641,6 +641,7 @@ pub struct LinkOptions {
     pub pypi_target_abis: Vec<String>,
     pub pypi_environment_base_dir: Option<PathBuf>,
     pub python_target_dir: Option<PathBuf>,
+    pub python_bin_dir: Option<PathBuf>,
     pub npm_local_paths: Vec<PathBuf>,
     pub python_local_paths: Vec<PathBuf>,
     pub python_local_requirements: Vec<PythonLocalRequirement>,
@@ -683,6 +684,7 @@ impl LinkOptions {
             pypi_target_abis: Vec::new(),
             pypi_environment_base_dir: None,
             python_target_dir: None,
+            python_bin_dir: None,
             npm_local_paths: Vec::new(),
             python_local_paths: Vec::new(),
             python_local_requirements: Vec::new(),
@@ -1198,6 +1200,7 @@ pub fn install_project(options: &LinkOptions) -> Result<InstallReport> {
         &options.project_dir,
         &lock,
         options.python_target_dir.as_deref(),
+        options.python_bin_dir.as_deref(),
     )?;
     report.npm_bins += install_npm_project_links(
         &options.project_dir,
@@ -1263,6 +1266,7 @@ pub fn install_locked_project(options: &LinkOptions) -> Result<InstallReport> {
         &options.project_dir,
         &selected,
         options.python_target_dir.as_deref(),
+        options.python_bin_dir.as_deref(),
     )?;
     report.npm_bins += install_npm_project_links(
         &options.project_dir,
@@ -6551,8 +6555,12 @@ pub fn install_locked_packages_with_python_target(
         )?;
         extend_project_requirements(&mut project, vcs_requirements.requirements);
     }
-    let mut report =
-        install_lock_with_python_target(project_dir, &lock, Some(python_target_dir.as_ref()))?;
+    let mut report = install_lock_with_python_target(
+        project_dir,
+        &lock,
+        Some(python_target_dir.as_ref()),
+        None,
+    )?;
     report.npm_bins +=
         install_npm_project_links(project_dir, &report.node_modules, &report.npm_bin_dir, true)?;
     report.python_scripts += install_python_local_paths(
@@ -6564,13 +6572,14 @@ pub fn install_locked_packages_with_python_target(
 }
 
 fn install_lock(project_dir: &Path, lock: &OmcLock) -> Result<InstallReport> {
-    install_lock_with_python_target(project_dir, lock, None)
+    install_lock_with_python_target(project_dir, lock, None, None)
 }
 
 fn install_lock_with_python_target(
     project_dir: &Path,
     lock: &OmcLock,
     python_target_dir: Option<&Path>,
+    python_bin_dir: Option<&Path>,
 ) -> Result<InstallReport> {
     let node_modules = project_dir.join("node_modules");
     let npm_bin_dir = node_modules.join(".bin");
@@ -6583,9 +6592,13 @@ fn install_lock_with_python_target(
         Some(path) => project_dir.join(path),
         None => default_python_site_packages,
     };
-    let python_bin_dir = match python_target_dir {
-        Some(_) => python_site_packages.join("bin"),
-        None => project_dir.join(".omc").join("python").join("bin"),
+    let python_bin_dir = match python_bin_dir {
+        Some(path) if path.is_absolute() => path.to_path_buf(),
+        Some(path) => project_dir.join(path),
+        None => match python_target_dir {
+            Some(_) => python_site_packages.join("bin"),
+            None => project_dir.join(".omc").join("python").join("bin"),
+        },
     };
     let python_sdists_dir = project_dir.join(".omc").join("python").join("sdists");
     let python_local_paths = python_local_paths_file_for_site_packages(&python_site_packages)?;
@@ -18291,6 +18304,7 @@ print("hi")
                 python_vcs: Vec::new(),
             },
             Some(&target),
+            None,
         )
         .unwrap();
         assert_eq!(report.pypi_packages, 1);

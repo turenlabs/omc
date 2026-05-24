@@ -217,6 +217,7 @@ cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip install -e ../
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip install -e 'git+https://example.com/acme/pkg.git@main#egg=acme-pkg'
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip install --no-deps ./dist/local_pkg-1.0.0-py3-none-any.whl
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip install --target vendor ./dist/local_pkg-1.0.0.tar.gz
+cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip install --prefix .venv ./dist/local_pkg-1.0.0-py3-none-any.whl
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip install --target vendor --platform macosx_14_0_arm64 --python-version 3.12 --implementation cp --abi cp312 orjson
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip install --user -e ../local-package
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip install ./dist/local_pkg-1.0.0-py3-none-any.whl
@@ -318,8 +319,8 @@ use `omc.toml` PyPI simple-index settings for OMC-managed PyPI adds
 use project/user `pip.conf` PyPI simple-index settings when no project index is set
 use `PIP_INDEX_URL` / `PIP_EXTRA_INDEX_URL` when no project PyPI index is set
 use pip-style `find-links`, `no-index`, and binary-format config/env values for wheelhouses
-use pip install-mode env defaults such as `PIP_TARGET`, `PIP_USER`,
-`PIP_NO_DEPS`, `PIP_REQUIRE_HASHES`, `PIP_DRY_RUN`, `PIP_REPORT`,
+use pip install-mode env defaults such as `PIP_TARGET`, `PIP_PREFIX`,
+`PIP_USER`, `PIP_NO_DEPS`, `PIP_REQUIRE_HASHES`, `PIP_DRY_RUN`, `PIP_REPORT`,
 `PIP_PRE`, `PIP_PLATFORM`, `PIP_PYTHON_VERSION`, `PIP_IMPLEMENTATION`,
 and `PIP_ABI`
 verify npm shasum/integrity and PyPI sha256 when the registry provides them
@@ -430,7 +431,7 @@ Supported now:
 - pip install/download/wheel env defaults for `PIP_NO_DEPS`,
   `PIP_REQUIRE_HASHES`, `PIP_PRE`, `PIP_PLATFORM`, `PIP_PYTHON_VERSION`,
   `PIP_IMPLEMENTATION`, and `PIP_ABI`, plus install-only defaults for
-  `PIP_TARGET`, `PIP_USER`, `PIP_DRY_RUN`, and `PIP_REPORT`
+  `PIP_TARGET`, `PIP_PREFIX`, `PIP_USER`, `PIP_DRY_RUN`, and `PIP_REPORT`
 - credential-bearing PyPI simple-index URLs are used for downloads without
   recording those credentials in `omc.lock`
 - PyPI dependency range resolution with local `python3` `Requires-Python`
@@ -631,7 +632,9 @@ Supported now:
   site-packages; real `pip install --target DIR` installs into the requested
   target through transient OMC state without writing the current manifest or
   lockfile, with the same target compatibility flags used by `pip download`
-  and `pip wheel`; real `pip install --user` installs into Python's user
+  and `pip wheel`; real `pip install --prefix DIR` installs packages under the
+  prefix lib/python site-packages path and scripts under the prefix bin
+  directory; real `pip install --user` installs into Python's user
   site-packages through OMC-managed user state and mirrors generated scripts
   into the user bin directory; `pip install --group GROUP` installs current-project
   `pyproject.toml` dependency groups, and path-qualified groups such as
