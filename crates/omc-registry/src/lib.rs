@@ -633,6 +633,7 @@ pub struct LinkOptions {
     pub npm_resolved: BTreeMap<String, String>,
     pub npm_registry_url: Option<String>,
     pub npm_before: Option<String>,
+    pub npm_engine_strict: bool,
     pub pypi_binary_all: Option<PypiBinaryMode>,
     pub pypi_binary_packages: BTreeMap<String, PypiBinaryMode>,
     pub pypi_index_url: Option<String>,
@@ -681,6 +682,7 @@ impl LinkOptions {
             npm_resolved: BTreeMap::new(),
             npm_registry_url: None,
             npm_before: None,
+            npm_engine_strict: false,
             pypi_binary_all: None,
             pypi_binary_packages: BTreeMap::new(),
             pypi_index_url: None,
@@ -2628,7 +2630,8 @@ fn link_package_inner(
                 resolved.name, resolved.version, manifest.version
             )));
         }
-        resolved.platform_compatible = npm_manifest_platform_compatible(&manifest);
+        resolved.platform_compatible = npm_manifest_platform_compatible(&manifest)
+            && npm_manifest_engine_compatible(&manifest, options);
         resolved.npm_scripts = manifest.scripts.clone().unwrap_or_default();
         npm_manifest_runtime_dependencies(&manifest)
     } else if resolved.pypi_direct_wheel {
@@ -8092,6 +8095,10 @@ fn npm_manifest_platform_compatible(manifest: &NpmPackageManifest) -> bool {
     )
 }
 
+fn npm_manifest_engine_compatible(manifest: &NpmPackageManifest, options: &LinkOptions) -> bool {
+    npm_engine_compatible(manifest.engines.as_ref(), options.npm_engine_strict)
+}
+
 fn npm_install_target(node_modules: &Path, name: &str) -> PathBuf {
     if let Some((scope, package)) = name.split_once('/') {
         node_modules.join(scope).join(package)
@@ -9427,7 +9434,8 @@ fn resolve_npm(
         return Err(OmcRegistryError::PackageNotFound(spec.requested()));
     }
     let version_doc = response.error_for_status()?.json::<NpmVersion>()?;
-    let platform_compatible = npm_platform_compatible(&version_doc);
+    let platform_compatible = npm_platform_compatible(&version_doc)
+        && npm_version_engine_compatible(&version_doc, options);
     let dependencies = npm_runtime_dependencies(&version_doc);
     let filename = version_doc
         .dist
@@ -12821,6 +12829,64 @@ fn npm_platform_compatible(version_doc: &NpmVersion) -> bool {
         version_doc.cpu.as_ref(),
         version_doc.libc.as_ref(),
     )
+}
+
+fn npm_version_engine_compatible(version_doc: &NpmVersion, options: &LinkOptions) -> bool {
+    npm_engine_compatible(version_doc.engines.as_ref(), options.npm_engine_strict)
+}
+
+fn npm_engine_compatible(engines: Option<&BTreeMap<String, String>>, strict: bool) -> bool {
+    if !strict {
+        return true;
+    }
+    let Some(node_requirement) = engines.and_then(|engines| engines.get("node")) else {
+        return true;
+    };
+    let Some(node_version) = current_node_version() else {
+        return true;
+    };
+    npm_engine_requirement_satisfied(&node_version, node_requirement)
+}
+
+fn current_node_version() -> Option<Version> {
+    static CURRENT_NODE_VERSION: OnceLock<Option<Version>> = OnceLock::new();
+    CURRENT_NODE_VERSION
+        .get_or_init(|| {
+            let output = Command::new("node").arg("--version").output().ok()?;
+            if !output.status.success() {
+                return None;
+            }
+            let version = String::from_utf8_lossy(&output.stdout);
+            Version::parse(version.trim().trim_start_matches('v')).ok()
+        })
+        .clone()
+}
+
+fn npm_engine_requirement_satisfied(version: &Version, requirement: &str) -> bool {
+    let version = version.to_string();
+    requirement
+        .split("||")
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .any(|part| npm_version_satisfies(&version, &normalize_npm_engine_requirement(part)))
+}
+
+fn normalize_npm_engine_requirement(requirement: &str) -> String {
+    let mut normalized = String::new();
+    let mut previous_was_operator = false;
+    for token in requirement.split_whitespace() {
+        if previous_was_operator {
+            normalized.push_str(token);
+            previous_was_operator = false;
+            continue;
+        }
+        if !normalized.is_empty() {
+            normalized.push(' ');
+        }
+        normalized.push_str(token);
+        previous_was_operator = matches!(token, ">" | ">=" | "<" | "<=" | "=");
+    }
+    normalized
 }
 
 fn npm_platform_fields(
@@ -17226,6 +17292,8 @@ struct NpmVersion {
     #[serde(default)]
     libc: Option<NpmStringList>,
     #[serde(default)]
+    engines: Option<BTreeMap<String, String>>,
+    #[serde(default)]
     scripts: Option<BTreeMap<String, String>>,
     #[serde(default)]
     dependencies: Option<BTreeMap<String, String>>,
@@ -17263,6 +17331,8 @@ struct NpmPackageManifest {
     cpu: Option<NpmStringList>,
     #[serde(default)]
     libc: Option<NpmStringList>,
+    #[serde(default)]
+    engines: Option<BTreeMap<String, String>>,
     #[serde(default)]
     scripts: Option<BTreeMap<String, String>>,
     #[serde(default)]
@@ -18534,6 +18604,7 @@ mod tests {
             os: None,
             cpu: None,
             libc: None,
+            engines: None,
             scripts: None,
             dependencies: Some(BTreeMap::from([(
                 "runtime".to_owned(),
@@ -18604,6 +18675,17 @@ mod tests {
     }
 
     #[test]
+    fn evaluates_npm_engine_requirements() {
+        let node = Version::new(20, 11, 1);
+
+        assert!(npm_engine_requirement_satisfied(&node, ">=18"));
+        assert!(npm_engine_requirement_satisfied(&node, ">= 18 < 21"));
+        assert!(npm_engine_requirement_satisfied(&node, "^16 || >=20"));
+        assert!(!npm_engine_requirement_satisfied(&node, "<18"));
+        assert!(!npm_engine_requirement_satisfied(&node, "^16 || ^18"));
+    }
+
+    #[test]
     fn skips_npm_bundled_dependencies() {
         let version_doc = NpmVersion {
             version: "1.0.0".to_owned(),
@@ -18615,6 +18697,7 @@ mod tests {
             os: None,
             cpu: None,
             libc: None,
+            engines: None,
             scripts: None,
             dependencies: Some(BTreeMap::from([
                 ("bundled-runtime".to_owned(), "^1.0.0".to_owned()),
@@ -18657,6 +18740,7 @@ mod tests {
             os: None,
             cpu: None,
             libc: None,
+            engines: None,
             scripts: None,
             dependencies: Some(BTreeMap::from([(
                 "bundled-runtime".to_owned(),

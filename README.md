@@ -131,6 +131,7 @@ cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm install --dry-
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm install --dry-run --json left-pad@1.3.0
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm install --tag beta some-package
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm install --before 2025-01-01 some-package
+cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm install --engine-strict left-pad@1.3.0
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm install --install-links=false ./local-package
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/local-util npm link
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm link local-util
@@ -330,11 +331,11 @@ use global/project/user `.npmrc` registry, scoped registry, auth token settings,
 npm globalconfig/userconfig env vars, npm registry env vars, and npm
 install-mode `.npmrc`/env defaults such as `production`, `only`, `also`,
 `optional`, `omit`, `include`, `global`, `dry-run`, `json`, `package-lock-only`,
-`save`, `save-prod`, `save-dev`, `save-optional`, `save-peer`, `save-exact`,
-`save-bundle`, `save-prefix`, `before`, `NODE_ENV=production`,
+`engine-strict`, `save`, `save-prod`, `save-dev`, `save-optional`, `save-peer`,
+`save-exact`, `save-bundle`, `save-prefix`, `before`, `NODE_ENV=production`,
 `NPM_CONFIG_PRODUCTION`, `NPM_CONFIG_ONLY`, `NPM_CONFIG_ALSO`,
-`NPM_CONFIG_OPTIONAL`, `NPM_CONFIG_OMIT`, `NPM_CONFIG_INCLUDE`, and
-`NPM_CONFIG_BEFORE`
+`NPM_CONFIG_OPTIONAL`, `NPM_CONFIG_OMIT`, `NPM_CONFIG_INCLUDE`,
+`NPM_CONFIG_ENGINE_STRICT`, and `NPM_CONFIG_BEFORE`
 use `omc.toml` PyPI simple-index settings for OMC-managed PyPI adds
 use project/user `pip.conf` PyPI simple-index settings when no project index is set
 use `PIP_INDEX_URL` / `PIP_EXTRA_INDEX_URL` when no project PyPI index is set
@@ -656,7 +657,8 @@ Supported now:
   package specs and explicit `--package` specs are installed into a temporary
   verified OMC project before dispatching to the requested executable; `--no-save`,
   `--save-exact`, `--save-bundle`, `--save-prefix`, `--package-lock-only`,
-  `--package-lock=false`, `--dry-run`, `--json`, `--tag`, `--before`, `--registry`, `--prefer-offline`,
+  `--package-lock=false`, `--dry-run`, `--json`, `--tag`, `--before`,
+  `--engine-strict`, `--registry`, `--prefer-offline`,
   `--prefer-online`, `--silent`, `--loglevel=...`, `--no-progress`, `--color=false`,
   `--only=...`, `--also=...`, `--no-optional`, `--optional=false`, `--omit=...`,
   `--include=...`, `--install-links`, and common audit/fund/peer/install-strategy flags are
