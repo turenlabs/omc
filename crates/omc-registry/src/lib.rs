@@ -632,6 +632,7 @@ pub struct LinkOptions {
     pub npm_integrities: BTreeMap<String, BTreeSet<String>>,
     pub npm_resolved: BTreeMap<String, String>,
     pub npm_registry_url: Option<String>,
+    pub npm_before: Option<String>,
     pub pypi_binary_all: Option<PypiBinaryMode>,
     pub pypi_binary_packages: BTreeMap<String, PypiBinaryMode>,
     pub pypi_index_url: Option<String>,
@@ -679,6 +680,7 @@ impl LinkOptions {
             npm_integrities: BTreeMap::new(),
             npm_resolved: BTreeMap::new(),
             npm_registry_url: None,
+            npm_before: None,
             pypi_binary_all: None,
             pypi_binary_packages: BTreeMap::new(),
             pypi_index_url: None,
@@ -9381,10 +9383,15 @@ fn resolve_npm(
 
     let (registry_name, version_requirement) = npm_registry_name_and_requirement(spec)?;
     let install_name = spec.name.clone();
-    if let Some(resolved) =
-        resolve_npm_lockfile_tarball(spec, &install_name, version_requirement.as_deref(), options)?
-    {
-        return Ok(resolved);
+    if options.npm_before.is_none() {
+        if let Some(resolved) = resolve_npm_lockfile_tarball(
+            spec,
+            &install_name,
+            version_requirement.as_deref(),
+            options,
+        )? {
+            return Ok(resolved);
+        }
     }
 
     let npm_config = read_npm_config_for_options(&options.project_dir, options)?;
@@ -9392,15 +9399,18 @@ fn resolve_npm(
     let encoded = urlencoding::encode(&registry_name);
     let constrained_requirement =
         constrained_npm_requirement(spec, version_requirement.as_deref(), &options.constraints);
+    let npm_before = options.npm_before.as_deref();
     let version = match constrained_requirement.as_deref() {
-        Some(requirement) if is_exact_npm_version(requirement) => requirement.to_owned(),
+        Some(requirement) if is_exact_npm_version(requirement) && npm_before.is_none() => {
+            requirement.to_owned()
+        }
         Some(requirement) => {
             let url = npm_registry_package_url(registry, &encoded);
             let root = npm_get(client, &url, &npm_config)
                 .send()?
                 .error_for_status()?
                 .json::<NpmRoot>()?;
-            choose_npm_version(&registry_name, requirement, &root)?
+            choose_npm_version(&registry_name, requirement, &root, npm_before)?
         }
         None => {
             let url = npm_registry_package_url(registry, &encoded);
@@ -9408,7 +9418,7 @@ fn resolve_npm(
                 .send()?
                 .error_for_status()?
                 .json::<NpmRoot>()?;
-            root.dist_tags.latest
+            choose_npm_version(&registry_name, "latest", &root, npm_before)?
         }
     };
     let url = npm_registry_package_version_url(registry, &encoded, &version);
@@ -9478,7 +9488,7 @@ pub fn read_npm_package_metadata_with_userconfig(
     let root = serde_json::from_value::<NpmRoot>(root_value.clone())?;
     let version = match version_requirement.as_deref() {
         Some(requirement) if is_exact_npm_version(requirement) => requirement.to_owned(),
-        Some(requirement) => choose_npm_version(&registry_name, requirement, &root)?,
+        Some(requirement) => choose_npm_version(&registry_name, requirement, &root, None)?,
         None => root.dist_tags.latest,
     };
     let version_url = npm_registry_package_version_url(registry, &encoded, &version);
@@ -13921,20 +13931,92 @@ fn is_python_sdist_filename(filename: &str) -> bool {
     filename.ends_with(".tar.gz") || filename.ends_with(".tgz") || filename.ends_with(".zip")
 }
 
-fn choose_npm_version(name: &str, requirement: &str, root: &NpmRoot) -> Result<String> {
+fn choose_npm_version(
+    name: &str,
+    requirement: &str,
+    root: &NpmRoot,
+    before: Option<&str>,
+) -> Result<String> {
+    let cutoff = before.map(parse_npm_before).transpose()?;
     if let Some(version) = root.dist_tags.get(requirement) {
-        return Ok(version.to_owned());
+        if npm_version_published_before(root, version, cutoff.as_ref())? {
+            return Ok(version.to_owned());
+        }
     }
 
     root.versions
         .keys()
         .filter(|version| npm_version_satisfies(version, requirement))
+        .filter_map(
+            |version| match npm_version_published_before(root, version, cutoff.as_ref()) {
+                Ok(true) => Some(Ok(version)),
+                Ok(false) => None,
+                Err(err) => Some(Err(err)),
+            },
+        )
+        .collect::<Result<Vec<_>>>()?
+        .into_iter()
         .max_by(|left, right| compare_npm_versions(left, right))
         .cloned()
         .ok_or_else(|| OmcRegistryError::UnsatisfiedRequirement {
             name: name.to_owned(),
             requirement: requirement.to_owned(),
         })
+}
+
+fn npm_version_published_before(
+    root: &NpmRoot,
+    version: &str,
+    cutoff: Option<&DateTime<Utc>>,
+) -> Result<bool> {
+    let Some(cutoff) = cutoff else {
+        return Ok(true);
+    };
+    let Some(published) = root.time.get(version) else {
+        return Err(npm_missing_publish_time_error(version));
+    };
+    let Some(published) = parse_npm_publish_time(published) else {
+        return Err(npm_missing_publish_time_error(version));
+    };
+    Ok(published <= *cutoff)
+}
+
+fn npm_missing_publish_time_error(version: &str) -> OmcRegistryError {
+    OmcRegistryError::UnsupportedSpec(format!(
+        "npm --before requires publish-time metadata for npm version {version}"
+    ))
+}
+
+fn parse_npm_before(value: &str) -> Result<DateTime<Utc>> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Err(OmcRegistryError::UnsupportedSpec(
+            "npm --before needs a datetime or YYYY-MM-DD date".to_owned(),
+        ));
+    }
+    if let Some(timestamp) = parse_npm_publish_time(value) {
+        return Ok(timestamp);
+    }
+    if let Ok(date) = NaiveDate::parse_from_str(value, "%Y-%m-%d") {
+        let Some(naive) = date.and_hms_opt(0, 0, 0) else {
+            return Err(OmcRegistryError::UnsupportedSpec(value.to_owned()));
+        };
+        return Ok(DateTime::<Utc>::from_naive_utc_and_offset(naive, Utc));
+    }
+    for format in ["%Y-%m-%dT%H:%M:%S%.f", "%Y-%m-%d %H:%M:%S%.f"] {
+        if let Ok(naive) = NaiveDateTime::parse_from_str(value, format) {
+            return Ok(local_naive_to_utc(naive));
+        }
+    }
+    Err(OmcRegistryError::UnsupportedSpec(format!(
+        "unsupported npm --before value `{value}`"
+    )))
+}
+
+fn parse_npm_publish_time(value: &str) -> Option<DateTime<Utc>> {
+    DateTime::parse_from_rfc3339(value)
+        .ok()
+        .map(|timestamp| timestamp.with_timezone(&Utc))
 }
 
 fn is_exact_npm_version(requirement: &str) -> bool {
@@ -17111,6 +17193,8 @@ struct PythonEntryPoint {
 struct NpmRoot {
     #[serde(rename = "dist-tags")]
     dist_tags: NpmDistTags,
+    #[serde(default)]
+    time: BTreeMap<String, String>,
     versions: BTreeMap<String, NpmVersion>,
 }
 
@@ -17423,18 +17507,64 @@ mod tests {
                 "latest": "2.0.0",
                 "beta": "3.0.0-beta.1"
             },
+            "time": {},
             "versions": {}
         }))
         .unwrap();
 
         assert_eq!(
-            choose_npm_version("demo", "latest", &root).unwrap(),
+            choose_npm_version("demo", "latest", &root, None).unwrap(),
             "2.0.0"
         );
         assert_eq!(
-            choose_npm_version("demo", "beta", &root).unwrap(),
+            choose_npm_version("demo", "beta", &root, None).unwrap(),
             "3.0.0-beta.1"
         );
+    }
+
+    #[test]
+    fn resolves_npm_versions_before_publish_time() {
+        let root: NpmRoot = serde_json::from_value(serde_json::json!({
+            "dist-tags": {
+                "latest": "2.0.0",
+                "beta": "3.0.0-beta.1"
+            },
+            "time": {
+                "1.0.0": "2023-01-01T00:00:00.000Z",
+                "1.1.0": "2023-06-01T00:00:00.000Z",
+                "2.0.0": "2024-01-01T00:00:00.000Z",
+                "3.0.0-beta.1": "2024-02-01T00:00:00.000Z"
+            },
+            "versions": {
+                "1.0.0": {
+                    "version": "1.0.0",
+                    "dist": { "tarball": "https://registry.example.invalid/demo/-/demo-1.0.0.tgz" }
+                },
+                "1.1.0": {
+                    "version": "1.1.0",
+                    "dist": { "tarball": "https://registry.example.invalid/demo/-/demo-1.1.0.tgz" }
+                },
+                "2.0.0": {
+                    "version": "2.0.0",
+                    "dist": { "tarball": "https://registry.example.invalid/demo/-/demo-2.0.0.tgz" }
+                },
+                "3.0.0-beta.1": {
+                    "version": "3.0.0-beta.1",
+                    "dist": { "tarball": "https://registry.example.invalid/demo/-/demo-3.0.0-beta.1.tgz" }
+                }
+            }
+        }))
+        .unwrap();
+
+        assert_eq!(
+            choose_npm_version("demo", "latest", &root, Some("2023-12-31T23:59:59Z")).unwrap(),
+            "1.1.0"
+        );
+        assert_eq!(
+            choose_npm_version("demo", "^1.0.0", &root, Some("2023-02-01")).unwrap(),
+            "1.0.0"
+        );
+        assert!(choose_npm_version("demo", "2.0.0", &root, Some("2023-12-31T23:59:59Z")).is_err());
     }
 
     #[test]

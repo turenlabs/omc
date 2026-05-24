@@ -363,6 +363,7 @@ enum NpmCompatAction {
         dry_run: bool,
         json: bool,
         npm_registry: Option<String>,
+        npm_before: Option<String>,
         allow: Vec<String>,
         allow_flow: Vec<String>,
         allow_all_host: bool,
@@ -388,6 +389,7 @@ enum NpmCompatAction {
         dry_run: bool,
         json: bool,
         npm_registry: Option<String>,
+        npm_before: Option<String>,
         allow: Vec<String>,
         allow_flow: Vec<String>,
         allow_all_host: bool,
@@ -3133,6 +3135,7 @@ struct NpmInstallCompatRequest {
     dry_run: bool,
     json: bool,
     npm_registry: Option<String>,
+    npm_before: Option<String>,
     allow: Vec<String>,
     allow_flow: Vec<String>,
     allow_all_host: bool,
@@ -3186,6 +3189,7 @@ fn run_npm_install_compat(
         dry_run,
         json,
         npm_registry,
+        npm_before,
         allow,
         allow_flow,
         allow_all_host,
@@ -3213,6 +3217,7 @@ fn run_npm_install_compat(
                 dry_run,
                 json,
                 npm_registry,
+                npm_before,
                 allow,
                 allow_flow,
                 allow_all_host,
@@ -3242,6 +3247,7 @@ fn run_npm_install_compat(
                 dry_run,
                 json,
                 npm_registry,
+                npm_before,
                 allow,
                 allow_flow,
                 allow_all_host,
@@ -3274,6 +3280,7 @@ fn run_npm_install_compat(
                 dry_run,
                 json,
                 npm_registry,
+                npm_before,
                 allow: Vec::new(),
                 allow_flow: Vec::new(),
                 allow_all_host: false,
@@ -3290,6 +3297,7 @@ fn run_npm_install_compat(
         options.allowed_capabilities = allowed_capabilities;
         options.allowed_flows = allowed_flows;
         options.npm_registry_url = npm_registry.clone();
+        options.npm_before = npm_before.clone();
         apply_dependency_omit_flags(&mut options, omit_dev, omit_optional, omit_peer);
         options.npm_local_paths = absolutize_paths(project_dir, local_paths.clone());
         if save && !local_paths.is_empty() {
@@ -3343,6 +3351,7 @@ fn run_npm_install_compat(
         options.allowed_capabilities = allowed_capabilities;
         options.allowed_flows = allowed_flows;
         options.npm_registry_url = npm_registry.clone();
+        options.npm_before = npm_before.clone();
         options.save_manifest_dependency = save;
         options.save_dependency_kind = dependency_kind;
         apply_dependency_omit_flags(&mut options, omit_dev, omit_optional, omit_peer);
@@ -3578,6 +3587,7 @@ fn run_npm_install_workspace_compat(
         dry_run: _,
         json,
         npm_registry,
+        npm_before,
         allow: _,
         allow_flow: _,
         allow_all_host: _,
@@ -3602,6 +3612,7 @@ fn run_npm_install_workspace_compat(
     options.allowed_capabilities = allowed_capabilities;
     options.allowed_flows = allowed_flows;
     options.npm_registry_url = npm_registry;
+    options.npm_before = npm_before;
     options.save_manifest_dependency = false;
     apply_dependency_omit_flags(&mut options, omit_dev, omit_optional, omit_peer);
     options.npm_local_paths = absolutize_paths(project_dir, local_paths.clone());
@@ -3880,6 +3891,7 @@ fn run_npm_link_compat(
                     dry_run,
                     json: false,
                     npm_registry,
+                    npm_before: None,
                     allow,
                     allow_flow,
                     allow_all_host,
@@ -4014,6 +4026,7 @@ fn run_npm_install_dry_run(
         dry_run: _,
         json,
         npm_registry,
+        npm_before,
         allow,
         allow_flow,
         allow_all_host,
@@ -4028,6 +4041,7 @@ fn run_npm_install_dry_run(
     options.discover_project_requirements = specs.is_empty() && archive_references.is_empty();
     apply_cli_policy_options(&mut options, &allow, &allow_flow, allow_all_host)?;
     options.npm_registry_url = npm_registry.clone();
+    options.npm_before = npm_before;
     apply_dependency_omit_flags(&mut options, omit_dev, omit_optional, omit_peer);
 
     let mut reports = Vec::new();
@@ -4269,6 +4283,7 @@ fn run_npm_compat_with_cwd(
             dry_run,
             json,
             npm_registry,
+            npm_before,
             allow,
             allow_flow,
             allow_all_host,
@@ -4293,6 +4308,7 @@ fn run_npm_compat_with_cwd(
                 dry_run,
                 json,
                 npm_registry,
+                npm_before,
                 allow,
                 allow_flow,
                 allow_all_host,
@@ -4321,6 +4337,7 @@ fn run_npm_compat_with_cwd(
             dry_run,
             json,
             npm_registry,
+            npm_before,
             allow,
             allow_flow,
             allow_all_host,
@@ -4365,6 +4382,7 @@ fn run_npm_compat_with_cwd(
                     dry_run,
                     json,
                     npm_registry,
+                    npm_before,
                     allow,
                     allow_flow,
                     allow_all_host,
@@ -4847,6 +4865,9 @@ fn npm_environment_default_args() -> Vec<String> {
     if let Some(save_prefix) = npm_config_env("save-prefix") {
         args.push(format!("--save-prefix={save_prefix}"));
     }
+    if let Some(before) = npm_config_env("before") {
+        args.push(format!("--before={before}"));
+    }
 
     args
 }
@@ -4967,6 +4988,7 @@ fn npm_cli_default_config_key(key: &str) -> bool {
             | "save-exact"
             | "save-bundle"
             | "save-prefix"
+            | "before"
     )
 }
 
@@ -5069,6 +5091,12 @@ fn append_npm_default_args_from_config(values: &BTreeMap<String, String>, args: 
         .filter(|value| !value.trim().is_empty())
     {
         args.push(format!("--save-prefix={save_prefix}"));
+    }
+    if let Some(before) = values
+        .get("before")
+        .filter(|value| !value.trim().is_empty())
+    {
+        args.push(format!("--before={before}"));
     }
 }
 
@@ -8264,7 +8292,7 @@ fn npm_help_text(topic: Option<&str>) -> String {
             &[
                 "Resolve, verify, lock, and install npm packages with OMC.",
                 "Aliases: i, add, update, up, upgrade, udpate.",
-                "Common flags: --save, --no-save, --save-dev, --save-optional, --save-peer, --only=prod|dev, --also=dev, --no-optional, --omit=dev|optional|peer, --include=dev|optional|peer, --workspace, --workspaces, --include-workspace-root, --package-lock-only, --prefer-offline, --prefer-online, --dry-run, --json, --tag, --install-links, --registry, --allow, --allow-all-host.",
+                "Common flags: --save, --no-save, --save-dev, --save-optional, --save-peer, --only=prod|dev, --also=dev, --no-optional, --omit=dev|optional|peer, --include=dev|optional|peer, --workspace, --workspaces, --include-workspace-root, --package-lock-only, --prefer-offline, --prefer-online, --dry-run, --json, --tag, --before, --install-links, --registry, --allow, --allow-all-host.",
                 "Direct local inputs are supported for .tgz archives and local package directories.",
                 "Workspace installs save dependencies into selected workspace package.json files and install the root OMC graph.",
             ],
@@ -21764,6 +21792,7 @@ fn parse_npm_compat_action(args: &[String]) -> Result<NpmCompatAction, OmcRegist
             dry_run: false,
             json: false,
             npm_registry: None,
+            npm_before: None,
             allow: Vec::new(),
             allow_flow: Vec::new(),
             allow_all_host: false,
@@ -22404,6 +22433,29 @@ fn npm_global_arg_supported_by_command(command: &str, arg: &str) -> bool {
                 | "dist-tags"
         );
     }
+    if matches!(arg, "--before") || arg.starts_with("--before=") {
+        return matches!(
+            command,
+            "install"
+                | "i"
+                | "in"
+                | "ins"
+                | "inst"
+                | "insta"
+                | "instal"
+                | "isnt"
+                | "isnta"
+                | "isntal"
+                | "isntall"
+                | "add"
+                | "update"
+                | "up"
+                | "upgrade"
+                | "udpate"
+                | "install-test"
+                | "it"
+        );
+    }
     if matches!(arg, "--access" | "--provenance-file")
         || arg.starts_with("--access=")
         || arg.starts_with("--provenance-file=")
@@ -22876,6 +22928,7 @@ fn npm_global_preserved_value_flag(arg: &str) -> bool {
             | "--token"
             | "--auth-token"
             | "--tag"
+            | "--before"
             | "--access"
             | "--provenance-file"
             | "--scope"
@@ -22943,6 +22996,7 @@ fn npm_global_preserved_equals_flag(arg: &str) -> bool {
         "--token=",
         "--auth-token=",
         "--tag=",
+        "--before=",
         "--access=",
         "--dry-run=",
         "--force=",
@@ -23480,6 +23534,7 @@ fn parse_npm_install_args(
     let mut global = false;
     let mut dry_run = false;
     let mut npm_tag = None;
+    let mut npm_before = None;
     let mut filtered = Vec::new();
     let mut index = 0;
     while index < args.len() {
@@ -23498,6 +23553,16 @@ fn parse_npm_install_args(
             npm_tag = Some(normalize_npm_install_tag(tag)?);
         } else if let Some(tag) = arg.strip_prefix("--tag=") {
             npm_tag = Some(normalize_npm_install_tag(tag)?);
+        } else if arg == "--before" {
+            index += 1;
+            let Some(value) = args.get(index) else {
+                return Err(OmcRegistryError::UnsupportedSpec(
+                    "--before needs a value".to_owned(),
+                ));
+            };
+            npm_before = Some(normalize_npm_before(value)?);
+        } else if let Some(value) = arg.strip_prefix("--before=") {
+            npm_before = Some(normalize_npm_before(value)?);
         } else if let Some(value) = npm_global_location_flag_value(args, &mut index, arg)? {
             global = value;
         } else if is_npm_archive_arg(arg) {
@@ -23568,6 +23633,7 @@ fn parse_npm_install_args(
         dry_run,
         json,
         npm_registry,
+        npm_before,
         allow,
         allow_flow,
         allow_all_host,
@@ -23589,6 +23655,16 @@ fn normalize_npm_install_tag(tag: &str) -> Result<String, OmcRegistryError> {
         ));
     }
     Ok(tag.to_owned())
+}
+
+fn normalize_npm_before(value: &str) -> Result<String, OmcRegistryError> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Err(OmcRegistryError::UnsupportedSpec(
+            "npm --before cannot be empty".to_owned(),
+        ));
+    }
+    Ok(value.to_owned())
 }
 
 fn npm_install_specs_with_tag(
@@ -23817,6 +23893,7 @@ fn parse_npm_install_test_args(
             dry_run,
             json,
             npm_registry: None,
+            npm_before: None,
             allow,
             allow_flow,
             allow_all_host,
@@ -23845,6 +23922,7 @@ fn parse_npm_install_test_args(
         dry_run,
         json,
         npm_registry,
+        npm_before,
         allow,
         allow_flow,
         allow_all_host,
@@ -23878,6 +23956,7 @@ fn parse_npm_install_test_args(
         dry_run,
         json,
         npm_registry,
+        npm_before,
         allow,
         allow_flow,
         allow_all_host,
@@ -31616,6 +31695,8 @@ mod tests {
                 ("npm_config_save_bundle", None),
                 ("NPM_CONFIG_SAVE_PREFIX", None),
                 ("npm_config_save_prefix", None),
+                ("NPM_CONFIG_BEFORE", None),
+                ("npm_config_before", None),
             ],
             || {
                 assert_eq!(
@@ -31674,6 +31755,8 @@ mod tests {
                 ("npm_config_save_bundle", None),
                 ("NPM_CONFIG_SAVE_PREFIX", None),
                 ("npm_config_save_prefix", None),
+                ("NPM_CONFIG_BEFORE", None),
+                ("npm_config_before", None),
             ],
             || {
                 assert_eq!(
@@ -31729,6 +31812,8 @@ mod tests {
                 ("npm_config_save_bundle", None),
                 ("NPM_CONFIG_SAVE_PREFIX", None),
                 ("npm_config_save_prefix", None),
+                ("NPM_CONFIG_BEFORE", None),
+                ("npm_config_before", None),
             ],
             || {
                 assert_eq!(
@@ -31784,6 +31869,8 @@ mod tests {
                 ("npm_config_save_bundle", None),
                 ("NPM_CONFIG_SAVE_PREFIX", None),
                 ("npm_config_save_prefix", None),
+                ("NPM_CONFIG_BEFORE", None),
+                ("npm_config_before", None),
             ],
             || {
                 assert_eq!(
@@ -31850,6 +31937,8 @@ mod tests {
                 ("npm_config_save_bundle", None),
                 ("NPM_CONFIG_SAVE_PREFIX", Some("~")),
                 ("npm_config_save_prefix", None),
+                ("NPM_CONFIG_BEFORE", Some("2025-01-01")),
+                ("npm_config_before", None),
             ],
             || {
                 assert_eq!(
@@ -31865,6 +31954,7 @@ mod tests {
                         "--save-exact",
                         "--no-save",
                         "--save-prefix=~",
+                        "--before=2025-01-01",
                         "install",
                         "left-pad",
                     ])
@@ -31885,6 +31975,7 @@ mod tests {
                     lock_only,
                     dry_run,
                     save_prefix,
+                    npm_before,
                     ..
                 } = action
                 else {
@@ -31898,6 +31989,7 @@ mod tests {
                 assert!(lock_only);
                 assert!(dry_run);
                 assert_eq!(save_prefix, DEFAULT_NPM_SAVE_PREFIX);
+                assert_eq!(npm_before.as_deref(), Some("2025-01-01"));
             },
         );
 
@@ -31940,6 +32032,8 @@ mod tests {
                 ("npm_config_save_bundle", None),
                 ("NPM_CONFIG_SAVE_PREFIX", None),
                 ("npm_config_save_prefix", None),
+                ("NPM_CONFIG_BEFORE", None),
+                ("npm_config_before", None),
             ],
             || {
                 assert_eq!(
@@ -32001,6 +32095,8 @@ mod tests {
                 ("npm_config_save_bundle", None),
                 ("NPM_CONFIG_SAVE_PREFIX", None),
                 ("npm_config_save_prefix", None),
+                ("NPM_CONFIG_BEFORE", None),
+                ("npm_config_before", None),
             ],
             || {
                 assert_eq!(
@@ -32101,6 +32197,8 @@ mod tests {
                 ("npm_config_save_bundle", None),
                 ("NPM_CONFIG_SAVE_PREFIX", None),
                 ("npm_config_save_prefix", None),
+                ("NPM_CONFIG_BEFORE", None),
+                ("npm_config_before", None),
             ],
             || {
                 assert_eq!(
@@ -32219,6 +32317,8 @@ mod tests {
                 ("npm_config_save_bundle", None),
                 ("NPM_CONFIG_SAVE_PREFIX", None),
                 ("npm_config_save_prefix", None),
+                ("NPM_CONFIG_BEFORE", None),
+                ("npm_config_before", None),
             ],
             || {
                 assert_eq!(
@@ -32294,6 +32394,8 @@ mod tests {
                 ("npm_config_save_bundle", None),
                 ("NPM_CONFIG_SAVE_PREFIX", None),
                 ("npm_config_save_prefix", None),
+                ("NPM_CONFIG_BEFORE", None),
+                ("npm_config_before", None),
             ],
             || {
                 assert_eq!(
@@ -32371,6 +32473,8 @@ mod tests {
                 ("npm_config_save_bundle", None),
                 ("NPM_CONFIG_SAVE_PREFIX", None),
                 ("npm_config_save_prefix", None),
+                ("NPM_CONFIG_BEFORE", None),
+                ("npm_config_before", None),
             ],
             || {
                 assert_eq!(
@@ -32452,6 +32556,8 @@ mod tests {
                 ("npm_config_save_bundle", None),
                 ("NPM_CONFIG_SAVE_PREFIX", None),
                 ("npm_config_save_prefix", None),
+                ("NPM_CONFIG_BEFORE", None),
+                ("npm_config_before", None),
             ],
             || {
                 assert_eq!(
@@ -34857,6 +34963,7 @@ verdict = "accepted"
                 dry_run: false,
                 json: false,
                 npm_registry: Some("https://registry.example.invalid/npm".to_owned()),
+                npm_before: None,
                 allow: Vec::new(),
                 allow_flow: Vec::new(),
                 allow_all_host: false,
@@ -35069,6 +35176,7 @@ verdict = "accepted"
                 dry_run: true,
                 json: false,
                 npm_registry: Some("https://registry.example.invalid/npm".to_owned()),
+                npm_before: None,
                 allow: Vec::new(),
                 allow_flow: Vec::new(),
                 allow_all_host: true,
@@ -35194,6 +35302,7 @@ verdict = "accepted"
                 dry_run: false,
                 json: false,
                 npm_registry: None,
+                npm_before: None,
                 allow: Vec::new(),
                 allow_flow: Vec::new(),
                 allow_all_host: false,
@@ -35222,6 +35331,7 @@ verdict = "accepted"
                 dry_run: false,
                 json: false,
                 npm_registry: None,
+                npm_before: None,
                 allow: Vec::new(),
                 allow_flow: Vec::new(),
                 allow_all_host: false,
@@ -35259,6 +35369,7 @@ verdict = "accepted"
                 dry_run: false,
                 json: false,
                 npm_registry: None,
+                npm_before: None,
                 allow: Vec::new(),
                 allow_flow: Vec::new(),
                 allow_all_host: false,
@@ -35394,6 +35505,7 @@ verdict = "accepted"
                 dry_run: false,
                 json: false,
                 npm_registry: None,
+                npm_before: None,
                 allow: Vec::new(),
                 allow_flow: Vec::new(),
                 allow_all_host: false,
@@ -35464,6 +35576,7 @@ verdict = "accepted"
                 dry_run: false,
                 json: false,
                 npm_registry: None,
+                npm_before: None,
                 allow: Vec::new(),
                 allow_flow: Vec::new(),
                 allow_all_host: false,
@@ -35530,6 +35643,26 @@ verdict = "accepted"
             specs,
             vec!["@scope/pkg@beta".to_owned(), "left-pad@1.3.0".to_owned()]
         );
+
+        let action =
+            parse_npm_compat_action(&args(&["install", "--before", "2025-01-01", "left-pad"]))
+                .unwrap();
+        let NpmCompatAction::Install {
+            specs, npm_before, ..
+        } = action
+        else {
+            panic!("expected npm install action");
+        };
+        assert_eq!(specs, vec!["left-pad".to_owned()]);
+        assert_eq!(npm_before.as_deref(), Some("2025-01-01"));
+
+        let action =
+            parse_npm_compat_action(&args(&["--before=2025-01-01", "install", "left-pad"]))
+                .unwrap();
+        let NpmCompatAction::Install { npm_before, .. } = action else {
+            panic!("expected npm install action");
+        };
+        assert_eq!(npm_before.as_deref(), Some("2025-01-01"));
 
         let action =
             parse_npm_compat_action(&args(&["install", "--install-links=false", "left-pad"]))
@@ -35693,6 +35826,7 @@ verdict = "accepted"
                 dry_run: false,
                 json: false,
                 npm_registry: None,
+                npm_before: None,
                 allow: Vec::new(),
                 allow_flow: Vec::new(),
                 allow_all_host: false,
@@ -35816,6 +35950,7 @@ verdict = "accepted"
                 dry_run: false,
                 json: false,
                 npm_registry: Some("https://registry.example.invalid/npm".to_owned()),
+                npm_before: None,
                 allow: Vec::new(),
                 allow_flow: Vec::new(),
                 allow_all_host: false,
@@ -35853,6 +35988,7 @@ verdict = "accepted"
                 dry_run: true,
                 json: false,
                 npm_registry: None,
+                npm_before: None,
                 allow: Vec::new(),
                 allow_flow: Vec::new(),
                 allow_all_host: false,
@@ -35891,6 +36027,7 @@ verdict = "accepted"
                 dry_run: false,
                 json: false,
                 npm_registry: Some("https://registry.example.invalid/npm".to_owned()),
+                npm_before: None,
                 allow: Vec::new(),
                 allow_flow: Vec::new(),
                 allow_all_host: false,
@@ -35919,6 +36056,7 @@ verdict = "accepted"
                 dry_run: false,
                 json: false,
                 npm_registry: None,
+                npm_before: None,
                 allow: Vec::new(),
                 allow_flow: Vec::new(),
                 allow_all_host: false,
@@ -35946,6 +36084,7 @@ verdict = "accepted"
                 dry_run: true,
                 json: false,
                 npm_registry: None,
+                npm_before: None,
                 allow: Vec::new(),
                 allow_flow: Vec::new(),
                 allow_all_host: false,
