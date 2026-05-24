@@ -7968,6 +7968,9 @@ fn install_python_entry_point_scripts(
     bin_dir: &Path,
     overwrite_existing: bool,
 ) -> Result<usize> {
+    if !overwrite_existing && bin_dir.exists() {
+        return Ok(0);
+    }
     fs::create_dir_all(bin_dir)?;
     let mut installed = 0;
 
@@ -19227,6 +19230,91 @@ print("hi")
     }
 
     #[test]
+    fn target_no_upgrade_skips_scripts_when_bin_dir_exists() {
+        let dir = tempfile::tempdir().unwrap();
+        let old_wheel = python_package_wheel_with_entry_points_for_test(
+            "script-stale-pkg",
+            "1.0.0",
+            &[(
+                "script_stale_pkg/__init__.py",
+                "def main():\n    print('ok')\n",
+            )],
+            "[console_scripts]\nold-cli = script_stale_pkg:main\n",
+        );
+        let new_wheel = python_package_wheel_with_entry_points_for_test(
+            "script-stale-pkg",
+            "1.1.0",
+            &[(
+                "script_stale_pkg/__init__.py",
+                "def main():\n    print('ok')\n",
+            )],
+            "[console_scripts]\nnew-cli = script_stale_pkg:main\n",
+        );
+        let old_archive = dir
+            .path()
+            .join(".omc")
+            .join("cache")
+            .join("script_stale_pkg-1.0.0-py3-none-any.whl");
+        let new_archive = dir
+            .path()
+            .join(".omc")
+            .join("cache")
+            .join("script_stale_pkg-1.1.0-py3-none-any.whl");
+        fs::create_dir_all(old_archive.parent().unwrap()).unwrap();
+        fs::write(&old_archive, &old_wheel).unwrap();
+        fs::write(&new_archive, &new_wheel).unwrap();
+
+        let mut old_package = locked_package_for_test(Ecosystem::Pypi, "script-stale-pkg", "1.0.0");
+        old_package.source_url =
+            "https://example.invalid/script_stale_pkg-1.0.0-py3-none-any.whl".to_owned();
+        old_package.archive = relative_path(dir.path(), &old_archive);
+        old_package.sha256 = sha256_hex(&old_wheel);
+        write_signed_artifact_for_test(dir.path(), &old_package);
+
+        let mut new_package = locked_package_for_test(Ecosystem::Pypi, "script-stale-pkg", "1.1.0");
+        new_package.source_url =
+            "https://example.invalid/script_stale_pkg-1.1.0-py3-none-any.whl".to_owned();
+        new_package.archive = relative_path(dir.path(), &new_archive);
+        new_package.sha256 = sha256_hex(&new_wheel);
+        write_signed_artifact_for_test(dir.path(), &new_package);
+
+        let target = dir.path().join("vendor");
+        install_lock_with_python_target(
+            dir.path(),
+            &OmcLock {
+                version: 1,
+                packages: vec![old_package],
+                python_vcs: Vec::new(),
+            },
+            Some(&target),
+            None,
+            true,
+        )
+        .unwrap();
+        assert!(target.join("bin").join("old-cli").exists());
+
+        install_lock_with_python_target(
+            dir.path(),
+            &OmcLock {
+                version: 1,
+                packages: vec![new_package],
+                python_vcs: Vec::new(),
+            },
+            Some(&target),
+            None,
+            false,
+        )
+        .unwrap();
+
+        assert!(target.join("bin").join("old-cli").exists());
+        assert!(!target.join("bin").join("new-cli").exists());
+        assert!(target
+            .join("script_stale_pkg-1.1.0.dist-info")
+            .join("entry_points.txt")
+            .exists());
+    }
+
+    #[test]
     fn installs_pure_python_zip_sdist_archives() {
         let dir = tempfile::tempdir().unwrap();
         let bytes = python_zip_sdist_for_test(&[
@@ -25355,6 +25443,29 @@ wheels = [
     }
 
     fn python_package_wheel_for_test(name: &str, version: &str, files: &[(&str, &str)]) -> Vec<u8> {
+        python_package_wheel_with_optional_entry_points_for_test(name, version, files, None)
+    }
+
+    fn python_package_wheel_with_entry_points_for_test(
+        name: &str,
+        version: &str,
+        files: &[(&str, &str)],
+        entry_points: &str,
+    ) -> Vec<u8> {
+        python_package_wheel_with_optional_entry_points_for_test(
+            name,
+            version,
+            files,
+            Some(entry_points),
+        )
+    }
+
+    fn python_package_wheel_with_optional_entry_points_for_test(
+        name: &str,
+        version: &str,
+        files: &[(&str, &str)],
+        entry_points: Option<&str>,
+    ) -> Vec<u8> {
         use std::io::Write as _;
 
         let cursor = Cursor::new(Vec::new());
@@ -25385,6 +25496,13 @@ wheels = [
             )
             .unwrap();
         record_paths.push(wheel_path);
+
+        if let Some(entry_points) = entry_points {
+            let entry_points_path = format!("{dist_info}/entry_points.txt");
+            archive.start_file(&entry_points_path, options).unwrap();
+            archive.write_all(entry_points.as_bytes()).unwrap();
+            record_paths.push(entry_points_path);
+        }
 
         let record_path = format!("{dist_info}/RECORD");
         record_paths.push(record_path.clone());
