@@ -334,13 +334,14 @@ use `PIP_INDEX_URL` / `PIP_EXTRA_INDEX_URL` when no project PyPI index is set
 use pip-style `find-links`, `no-index`, and binary-format config/env values for wheelhouses
 use pip install-mode `pip.conf`/env defaults such as `target`, `prefix`,
 `root`, `user`, `dry-run`, `report`, `no-deps`, `require-hashes`,
-`no-binary`, `only-binary`, `pre`, `uploaded-prior-to`, `platform`,
+`no-binary`, `only-binary`, `pre`, `all-releases`, `only-final`,
+`uploaded-prior-to`, `platform`,
 `python-version`, `implementation`, `abi`, artifact directory defaults such as
 `download.dest`, `wheel.wheel-dir`, `PIP_DEST`, `PIP_DESTINATION_DIR`,
 `PIP_WHEEL_DIR`, `PIP_TARGET`, `PIP_PREFIX`, `PIP_ROOT`, `PIP_USER`,
 `PIP_NO_DEPS`, `PIP_REQUIRE_HASHES`, `PIP_DRY_RUN`, `PIP_REPORT`,
-`PIP_PRE`, `PIP_UPLOADED_PRIOR_TO`, `PIP_PLATFORM`, `PIP_PYTHON_VERSION`,
-`PIP_IMPLEMENTATION`, and `PIP_ABI`
+`PIP_PRE`, `PIP_ALL_RELEASES`, `PIP_ONLY_FINAL`, `PIP_UPLOADED_PRIOR_TO`,
+`PIP_PLATFORM`, `PIP_PYTHON_VERSION`, `PIP_IMPLEMENTATION`, and `PIP_ABI`
 verify npm shasum/integrity and PyPI sha256 when the registry provides them
 use package-lock.json/npm-shrinkwrap.json/yarn.lock/pnpm-lock.yaml npm resolved tarball URLs and integrity hashes when present
 cache the source artifact under .omc/cache
@@ -422,9 +423,11 @@ If the project does not set a PyPI index, OMC also honors pip-style
 global/project/user `pip.conf`, `XDG_CONFIG_HOME/pip/pip.conf`,
 project-relative `PIP_CONFIG_FILE`, `PIP_INDEX_URL`, and `PIP_EXTRA_INDEX_URL`
 settings. Wheelhouse settings such as `find-links`, `requirement`,
-`constraint`, `no-index`, prerelease opt-in, upload-time cutoffs,
+`constraint`, `no-index`, prerelease opt-in, per-package final/prerelease
+controls, upload-time cutoffs,
 `PIP_FIND_LINKS`, `PIP_REQUIREMENT`, `PIP_CONSTRAINT`, `PIP_NO_INDEX`,
-`PIP_PRE`, and `PIP_UPLOADED_PRIOR_TO` feed the same offline resolver.
+`PIP_PRE`, `PIP_ALL_RELEASES`, `PIP_ONLY_FINAL`, and
+`PIP_UPLOADED_PRIOR_TO` feed the same offline resolver.
 
 This is still a prototype. It replaces install-time execution with registry
 resolution, source caching, OMC artifact generation, capability verification,
@@ -461,19 +464,22 @@ Supported now:
 - global/project/user `pip.conf`, `XDG_CONFIG_HOME/pip/pip.conf`, and
   project-relative `PIP_CONFIG_FILE` PyPI support for `index-url`,
   `extra-index-url`, `find-links`, `requirement`, `constraint`, `no-index`,
-  `no-binary`, `only-binary`, and `uploaded-prior-to`
+  `no-binary`, `only-binary`, `all-releases`, `only-final`, and
+  `uploaded-prior-to`
 - global/project/user `pip.conf` install/download/wheel/index defaults for
   `target`, `prefix`, `root`, `user`, `dry-run`, `report`, `no-deps`,
   `require-hashes`, `no-binary`, `only-binary`, `pre`,
-  `uploaded-prior-to`, `platform`, `python-version`, `implementation`, `abi`,
-  `download.dest`, `download.destination-dir`, and `wheel.wheel-dir`
+  `all-releases`, `only-final`, `uploaded-prior-to`, `platform`,
+  `python-version`, `implementation`, `abi`, `download.dest`,
+  `download.destination-dir`, and `wheel.wheel-dir`
 - pip-style `PIP_REQUIREMENT` and `PIP_CONSTRAINT` requirement-file defaults
 - pip-style `PIP_INDEX_URL`, `PIP_EXTRA_INDEX_URL`, `PIP_FIND_LINKS`,
   `PIP_NO_INDEX`, `PIP_NO_BINARY`, and `PIP_ONLY_BINARY` support when no
   project PyPI index is configured
 - pip install/download/wheel env defaults for `PIP_NO_DEPS`,
-  `PIP_REQUIRE_HASHES`, `PIP_PRE`, `PIP_UPLOADED_PRIOR_TO`,
-  `PIP_PLATFORM`, `PIP_PYTHON_VERSION`, `PIP_IMPLEMENTATION`, and `PIP_ABI`,
+  `PIP_REQUIRE_HASHES`, `PIP_PRE`, `PIP_ALL_RELEASES`, `PIP_ONLY_FINAL`,
+  `PIP_UPLOADED_PRIOR_TO`, `PIP_PLATFORM`, `PIP_PYTHON_VERSION`,
+  `PIP_IMPLEMENTATION`, and `PIP_ABI`,
   plus install-only defaults for
   `PIP_TARGET`, `PIP_PREFIX`, `PIP_ROOT`, `PIP_USER`, `PIP_DRY_RUN`, and
   `PIP_REPORT`, `pip download` defaults for `PIP_DEST` and
@@ -533,7 +539,8 @@ Supported now:
   subdirectories, recursive `-r` includes, `-c` constraints, `--index-url` /
   `--extra-index-url` simple indexes, `--find-links` / `-f` local wheel/sdist
   archives or HTML pages, `--no-index`, `--trusted-host`, `--only-binary`,
-  `--no-binary`, `--prefer-binary`, `--pre`, enforced `--require-hashes`, local editable/direct/bare
+  `--no-binary`, `--prefer-binary`, `--pre`, `--all-releases`,
+  `--only-final`, enforced `--require-hashes`, local editable/direct/bare
   directory paths with selected extras, and common Python environment markers
 - `pip download` and `pip wheel` compatibility for registry requirements,
   requirement files, hashes, direct wheel archives, direct source
@@ -680,7 +687,8 @@ Supported now:
   with columns, JSON, and freeze output,
   `-r`, index URL,
   constraints, extra-index, find-links, no-index,
-  require-hashes, no-deps, prerelease opt-in, target-directory, trusted-host, retry/timeout,
+  require-hashes, no-deps, prerelease opt-in, per-package final/prerelease
+  controls, target-directory, trusted-host, retry/timeout,
   reinstall/ignore-installed (`-I`), editable source-dir (`--src`), warning,
   build-isolation, and binary-policy install flags without
   delegating to pip; common global pip flags such as

@@ -641,6 +641,7 @@ pub struct LinkOptions {
     pub pypi_require_hashes: bool,
     pub pypi_include_dependencies: bool,
     pub pypi_allow_prereleases: bool,
+    pub pypi_release_controls: PypiReleaseControls,
     pub pypi_uploaded_prior_to: Option<String>,
     pub pypi_target_python: Option<String>,
     pub pypi_target_implementation: Option<String>,
@@ -687,6 +688,7 @@ impl LinkOptions {
             pypi_require_hashes: false,
             pypi_include_dependencies: true,
             pypi_allow_prereleases: false,
+            pypi_release_controls: PypiReleaseControls::default(),
             pypi_uploaded_prior_to: None,
             pypi_target_python: None,
             pypi_target_implementation: None,
@@ -746,6 +748,47 @@ pub fn apply_pypi_binary_option(
     }
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PypiReleaseControl {
+    pub all: bool,
+    pub packages: BTreeSet<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PypiReleaseControls {
+    pub all_releases: PypiReleaseControl,
+    pub only_final: PypiReleaseControl,
+}
+
+pub fn apply_pypi_release_control(control: &mut PypiReleaseControl, value: &str) {
+    for raw in value.split(',') {
+        let value = raw.trim();
+        if value.is_empty() {
+            continue;
+        }
+        match value {
+            ":all:" => control.all = true,
+            ":none:" => {
+                control.all = false;
+                control.packages.clear();
+            }
+            package => {
+                control.packages.insert(normalize_pypi_name(package));
+            }
+        }
+    }
+}
+
+fn merge_pypi_release_control(target: &mut PypiReleaseControl, source: PypiReleaseControl) {
+    target.all |= source.all;
+    target.packages.extend(source.packages);
+}
+
+fn merge_pypi_release_controls(target: &mut PypiReleaseControls, source: PypiReleaseControls) {
+    merge_pypi_release_control(&mut target.all_releases, source.all_releases);
+    merge_pypi_release_control(&mut target.only_final, source.only_final);
+}
+
 #[derive(Debug, Clone)]
 pub struct LinkReport {
     pub locked: LockedPackage,
@@ -782,6 +825,7 @@ pub struct ProjectRequirements {
     pub pypi_require_hashes: bool,
     pub pypi_no_deps: bool,
     pub pypi_allow_prereleases: bool,
+    pub pypi_release_controls: PypiReleaseControls,
     pub pypi_uploaded_prior_to: Option<String>,
     pub python_local_paths: Vec<PathBuf>,
     pub python_local_requirements: Vec<PythonLocalRequirement>,
@@ -841,6 +885,10 @@ fn extend_project_requirements(
     target.pypi_require_hashes |= requirements.pypi_require_hashes;
     target.pypi_no_deps |= requirements.pypi_no_deps;
     target.pypi_allow_prereleases |= requirements.pypi_allow_prereleases;
+    merge_pypi_release_controls(
+        &mut target.pypi_release_controls,
+        requirements.pypi_release_controls,
+    );
     if requirements.pypi_uploaded_prior_to.is_some() {
         target.pypi_uploaded_prior_to = requirements.pypi_uploaded_prior_to;
     }
@@ -881,6 +929,10 @@ fn apply_project_requirements_to_options(
     options.pypi_no_index |= requirements.pypi_no_index;
     options.pypi_require_hashes |= requirements.pypi_require_hashes;
     options.pypi_allow_prereleases |= requirements.pypi_allow_prereleases;
+    merge_pypi_release_controls(
+        &mut options.pypi_release_controls,
+        requirements.pypi_release_controls,
+    );
     if requirements.pypi_uploaded_prior_to.is_some() {
         options.pypi_uploaded_prior_to = requirements.pypi_uploaded_prior_to;
     }
@@ -2884,6 +2936,8 @@ fn apply_pypi_environment_config(options: &mut LinkOptions, override_index: bool
     let constraint_files = env::var("PIP_CONSTRAINT").ok();
     let no_binary = env::var("PIP_NO_BINARY").ok();
     let only_binary = env::var("PIP_ONLY_BINARY").ok();
+    let all_releases = env::var("PIP_ALL_RELEASES").ok();
+    let only_final = env::var("PIP_ONLY_FINAL").ok();
     let uploaded_prior_to = env::var("PIP_UPLOADED_PRIOR_TO").ok();
     let no_index = env_truthy("PIP_NO_INDEX");
     let allow_prereleases = env_truthy("PIP_PRE");
@@ -2902,6 +2956,8 @@ fn apply_pypi_environment_config(options: &mut LinkOptions, override_index: bool
             constraint_files: constraint_files.as_deref(),
             no_binary: no_binary.as_deref(),
             only_binary: only_binary.as_deref(),
+            all_releases: all_releases.as_deref(),
+            only_final: only_final.as_deref(),
             uploaded_prior_to: uploaded_prior_to.as_deref(),
             no_index,
             allow_prereleases,
@@ -2923,6 +2979,8 @@ struct PypiEnvironmentValues<'a> {
     constraint_files: Option<&'a str>,
     no_binary: Option<&'a str>,
     only_binary: Option<&'a str>,
+    all_releases: Option<&'a str>,
+    only_final: Option<&'a str>,
     uploaded_prior_to: Option<&'a str>,
     no_index: bool,
     allow_prereleases: bool,
@@ -2979,6 +3037,15 @@ fn apply_pypi_environment_values(
             only_binary,
         );
     }
+    if let Some(all_releases) = values.all_releases {
+        apply_pypi_release_control(
+            &mut options.pypi_release_controls.all_releases,
+            all_releases,
+        );
+    }
+    if let Some(only_final) = values.only_final {
+        apply_pypi_release_control(&mut options.pypi_release_controls.only_final, only_final);
+    }
     if let Some(uploaded_prior_to) = values
         .uploaded_prior_to
         .map(str::trim)
@@ -3005,6 +3072,7 @@ struct PipConfig {
     binary_packages: BTreeMap<String, PypiBinaryMode>,
     no_index: bool,
     allow_prereleases: bool,
+    release_controls: PypiReleaseControls,
     uploaded_prior_to: Option<String>,
 }
 
@@ -3017,6 +3085,7 @@ pub struct PipConfigSnapshot {
     pub binary_packages: BTreeMap<String, PypiBinaryMode>,
     pub no_index: bool,
     pub allow_prereleases: bool,
+    pub release_controls: PypiReleaseControls,
     pub uploaded_prior_to: Option<String>,
 }
 
@@ -3043,6 +3112,7 @@ fn apply_pip_config_files(project_dir: &Path, options: &mut LinkOptions) -> Resu
     options.pypi_binary_packages.extend(config.binary_packages);
     options.pypi_no_index |= config.no_index;
     options.pypi_allow_prereleases |= config.allow_prereleases;
+    merge_pypi_release_controls(&mut options.pypi_release_controls, config.release_controls);
     if config.uploaded_prior_to.is_some() {
         options.pypi_uploaded_prior_to = config.uploaded_prior_to;
     }
@@ -3119,6 +3189,7 @@ pub fn read_pip_config_snapshot(project_dir: &Path) -> Result<PipConfigSnapshot>
     options.pypi_binary_packages = config.binary_packages;
     options.pypi_no_index = config.no_index;
     options.pypi_allow_prereleases = config.allow_prereleases;
+    options.pypi_release_controls = config.release_controls;
     options.pypi_uploaded_prior_to = config.uploaded_prior_to;
     apply_pypi_environment_config(&mut options, true);
     Ok(PipConfigSnapshot {
@@ -3131,6 +3202,7 @@ pub fn read_pip_config_snapshot(project_dir: &Path) -> Result<PipConfigSnapshot>
         binary_packages: options.pypi_binary_packages,
         no_index: options.pypi_no_index,
         allow_prereleases: options.pypi_allow_prereleases,
+        release_controls: options.pypi_release_controls,
         uploaded_prior_to: options.pypi_uploaded_prior_to,
     })
 }
@@ -3142,6 +3214,7 @@ pub struct PypiAvailableVersionsOptions {
     pub find_links: Vec<String>,
     pub no_index: bool,
     pub allow_prereleases: bool,
+    pub release_controls: PypiReleaseControls,
     pub uploaded_prior_to: Option<String>,
     pub target_python: Option<String>,
     pub target_implementation: Option<String>,
@@ -3170,6 +3243,7 @@ pub fn read_pypi_available_versions(
         .collect();
     options.pypi_no_index = query.no_index;
     options.pypi_allow_prereleases = query.allow_prereleases;
+    options.pypi_release_controls = query.release_controls;
     options.pypi_uploaded_prior_to = query.uploaded_prior_to;
     options.pypi_target_python = query.target_python;
     options.pypi_target_implementation = query.target_implementation;
@@ -3227,12 +3301,19 @@ pub fn read_pypi_available_versions(
     }
 
     let mut versions = versions.into_iter().collect::<Vec<_>>();
-    if !options.pypi_allow_prereleases
-        && versions
-            .iter()
-            .any(|version| !pypi_version_is_prerelease(version))
-    {
-        versions.retain(|version| !pypi_version_is_prerelease(version));
+    match pypi_prerelease_policy_for_name(&options, &spec.name) {
+        PypiPrereleasePolicy::Allow => {}
+        PypiPrereleasePolicy::OnlyFinal => {
+            versions.retain(|version| !pypi_version_is_prerelease(version));
+        }
+        PypiPrereleasePolicy::Default => {
+            if versions
+                .iter()
+                .any(|version| !pypi_version_is_prerelease(version))
+            {
+                versions.retain(|version| !pypi_version_is_prerelease(version));
+            }
+        }
     }
     versions.sort_by(|left, right| compare_pypi_versions(right, left));
     Ok(PypiVersionListing {
@@ -3354,6 +3435,12 @@ fn apply_pip_config_value(
         }
         "pre" => {
             config.allow_prereleases |= pip_config_bool(value);
+        }
+        "all-releases" => {
+            apply_pypi_release_control(&mut config.release_controls.all_releases, value);
+        }
+        "only-final" => {
+            apply_pypi_release_control(&mut config.release_controls.only_final, value);
         }
         "uploaded-prior-to" => {
             if !value.trim().is_empty() {
@@ -4370,6 +4457,7 @@ fn npm_requirements_from_lock_maps(
         pypi_require_hashes: false,
         pypi_no_deps: false,
         pypi_allow_prereleases: false,
+        pypi_release_controls: PypiReleaseControls::default(),
         pypi_uploaded_prior_to: None,
         python_local_paths: Vec::new(),
         python_local_requirements: Vec::new(),
@@ -6365,6 +6453,26 @@ fn read_requirements_file_inner(
         if parse_requirements_allow_prereleases(line) {
             if mode == RequirementsMode::Install {
                 discovered.pypi_allow_prereleases = true;
+            }
+            continue;
+        }
+
+        if let Some(all_releases) = parse_requirements_all_releases(line) {
+            if mode == RequirementsMode::Install {
+                apply_pypi_release_control(
+                    &mut discovered.pypi_release_controls.all_releases,
+                    &all_releases,
+                );
+            }
+            continue;
+        }
+
+        if let Some(only_final) = parse_requirements_only_final(line) {
+            if mode == RequirementsMode::Install {
+                apply_pypi_release_control(
+                    &mut discovered.pypi_release_controls.only_final,
+                    &only_final,
+                );
             }
             continue;
         }
@@ -12787,6 +12895,7 @@ fn resolve_pypi(
     let target_python = pypi_target_python(options);
     let wheel_compatibility = pypi_wheel_compatibility(options);
     let binary_mode = pypi_binary_mode_for_spec(options, spec);
+    let prerelease_policy = pypi_prerelease_policy_for_name(options, &spec.name);
     let mut candidates = pypi_find_link_candidates(
         client,
         spec,
@@ -12843,7 +12952,7 @@ fn resolve_pypi(
                 target_python.as_deref(),
                 wheel_compatibility.as_ref(),
                 binary_mode,
-                options.pypi_allow_prereleases,
+                prerelease_policy,
             )?
         }
         None => {
@@ -12860,7 +12969,7 @@ fn resolve_pypi(
                 target_python.as_deref(),
                 wheel_compatibility.as_ref(),
                 binary_mode,
-                options.pypi_allow_prereleases,
+                prerelease_policy,
             )?
         }
     };
@@ -13002,9 +13111,12 @@ fn pypi_candidate_to_resolved(
     if let Some(cutoff) = uploaded_prior_to {
         candidates = filter_pypi_candidates_uploaded_prior_to(candidates, cutoff, &spec.name)?;
     }
-    if !pypi_prereleases_allowed(
+    let prerelease_policy = pypi_prerelease_policy_for_name(options, &spec.name);
+    if prerelease_policy == PypiPrereleasePolicy::OnlyFinal {
+        candidates.retain(|candidate| !pypi_version_is_prerelease(&candidate.version));
+    } else if !pypi_prereleases_allowed(
         &requirement,
-        options.pypi_allow_prereleases,
+        prerelease_policy == PypiPrereleasePolicy::Allow,
         candidates
             .iter()
             .map(|candidate| candidate.version.as_str()),
@@ -13930,7 +14042,7 @@ fn choose_pypi_version(
     target_python: Option<&str>,
     wheel_compatibility: Option<&PythonWheelCompatibility>,
     binary_mode: Option<PypiBinaryMode>,
-    allow_prereleases: bool,
+    prerelease_policy: PypiPrereleasePolicy,
 ) -> Result<String> {
     let mut versions = root
         .releases
@@ -13949,9 +14061,11 @@ fn choose_pypi_version(
         .filter(|version| pypi_version_satisfies(version, requirement))
         .cloned()
         .collect::<Vec<_>>();
-    if !pypi_prereleases_allowed(
+    if prerelease_policy == PypiPrereleasePolicy::OnlyFinal {
+        versions.retain(|version| !pypi_version_is_prerelease(version));
+    } else if !pypi_prereleases_allowed(
         requirement,
-        allow_prereleases,
+        prerelease_policy == PypiPrereleasePolicy::Allow,
         versions.iter().map(String::as_str),
     ) {
         versions.retain(|version| !pypi_version_is_prerelease(version));
@@ -13976,6 +14090,37 @@ fn pypi_prereleases_allowed<'a>(
         || !versions
             .into_iter()
             .any(|version| !pypi_version_is_prerelease(version))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PypiPrereleasePolicy {
+    Default,
+    Allow,
+    OnlyFinal,
+}
+
+fn pypi_prerelease_policy_for_name(options: &LinkOptions, package: &str) -> PypiPrereleasePolicy {
+    let package = normalize_pypi_name(package);
+    if options.pypi_release_controls.only_final.all
+        || options
+            .pypi_release_controls
+            .only_final
+            .packages
+            .contains(&package)
+    {
+        PypiPrereleasePolicy::OnlyFinal
+    } else if options.pypi_allow_prereleases
+        || options.pypi_release_controls.all_releases.all
+        || options
+            .pypi_release_controls
+            .all_releases
+            .packages
+            .contains(&package)
+    {
+        PypiPrereleasePolicy::Allow
+    } else {
+        PypiPrereleasePolicy::Default
+    }
 }
 
 fn pypi_requirement_mentions_prerelease(requirement: &str) -> bool {
@@ -15135,6 +15280,14 @@ fn parse_requirements_no_deps(line: &str) -> bool {
 
 fn parse_requirements_allow_prereleases(line: &str) -> bool {
     line == "--pre"
+}
+
+fn parse_requirements_all_releases(line: &str) -> Option<String> {
+    parse_requirements_option_value(line, &["--all-releases=", "--all-releases"])
+}
+
+fn parse_requirements_only_final(line: &str) -> Option<String> {
+    parse_requirements_option_value(line, &["--only-final=", "--only-final"])
 }
 
 fn parse_requirements_uploaded_prior_to(line: &str) -> Option<String> {
@@ -21276,7 +21429,7 @@ wheels = [
         let requirements = dir.path().join("requirements.txt");
         fs::write(
             &requirements,
-            "--trusted-host example.invalid\n--no-binary=:all:\n--only-binary idna\n--prefer-binary\n--require-hashes\n--no-deps\n--pre\n--uploaded-prior-to=2026-01-01T00:00:00Z\nidna==3.7 --hash=sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n",
+            "--trusted-host example.invalid\n--no-binary=:all:\n--only-binary idna\n--prefer-binary\n--require-hashes\n--no-deps\n--pre\n--all-releases previewed\n--only-final=stable-only\n--uploaded-prior-to=2026-01-01T00:00:00Z\nidna==3.7 --hash=sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n",
         )
         .unwrap();
 
@@ -21284,6 +21437,16 @@ wheels = [
         assert!(discovered.pypi_require_hashes);
         assert!(discovered.pypi_no_deps);
         assert!(discovered.pypi_allow_prereleases);
+        assert!(discovered
+            .pypi_release_controls
+            .all_releases
+            .packages
+            .contains("previewed"));
+        assert!(discovered
+            .pypi_release_controls
+            .only_final
+            .packages
+            .contains("stable-only"));
         assert_eq!(
             discovered.pypi_uploaded_prior_to.as_deref(),
             Some("2026-01-01T00:00:00Z")
@@ -22575,7 +22738,7 @@ wheels = [
                 Some("3.11.0"),
                 None,
                 Some(PypiBinaryMode::Source),
-                false,
+                PypiPrereleasePolicy::Default,
             )
             .unwrap(),
             "1.0.0"
@@ -22588,7 +22751,7 @@ wheels = [
                 Some("3.11.0"),
                 None,
                 Some(PypiBinaryMode::Binary),
-                false,
+                PypiPrereleasePolicy::Default,
             )
             .unwrap(),
             "2.0.0"
@@ -22617,14 +22780,41 @@ wheels = [
         };
 
         assert_eq!(
-            choose_pypi_version("previewed", "*", &root, Some("3.11.0"), None, None, false)
-                .unwrap(),
+            choose_pypi_version(
+                "previewed",
+                "*",
+                &root,
+                Some("3.11.0"),
+                None,
+                None,
+                PypiPrereleasePolicy::Default,
+            )
+            .unwrap(),
             "1.9.0"
         );
         assert_eq!(
-            choose_pypi_version("previewed", "*", &root, Some("3.11.0"), None, None, true).unwrap(),
+            choose_pypi_version(
+                "previewed",
+                "*",
+                &root,
+                Some("3.11.0"),
+                None,
+                None,
+                PypiPrereleasePolicy::Allow,
+            )
+            .unwrap(),
             "2.0.0rc1"
         );
+        assert!(choose_pypi_version(
+            "previewed",
+            ">=2.0.0rc1",
+            &root,
+            Some("3.11.0"),
+            None,
+            None,
+            PypiPrereleasePolicy::OnlyFinal,
+        )
+        .is_err());
         assert_eq!(
             choose_pypi_version(
                 "previewed",
@@ -22633,10 +22823,23 @@ wheels = [
                 Some("3.11.0"),
                 None,
                 None,
-                false,
+                PypiPrereleasePolicy::Default,
             )
             .unwrap(),
             "2.0.0rc1"
+        );
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut options = LinkOptions::new(dir.path());
+        apply_pypi_release_control(&mut options.pypi_release_controls.all_releases, "previewed");
+        assert_eq!(
+            pypi_prerelease_policy_for_name(&options, "Previewed"),
+            PypiPrereleasePolicy::Allow
+        );
+        apply_pypi_release_control(&mut options.pypi_release_controls.only_final, "previewed");
+        assert_eq!(
+            pypi_prerelease_policy_for_name(&options, "previewed"),
+            PypiPrereleasePolicy::OnlyFinal
         );
     }
 
@@ -25296,6 +25499,8 @@ wheels = [
                 constraint_files: None,
                 no_binary: Some(":all:"),
                 only_binary: Some("idna"),
+                all_releases: Some("previewed"),
+                only_final: Some("stable-only"),
                 uploaded_prior_to: Some("P7D"),
                 no_index: true,
                 allow_prereleases: true,
@@ -25332,6 +25537,16 @@ wheels = [
         );
         assert!(options.pypi_no_index);
         assert!(options.pypi_allow_prereleases);
+        assert!(options
+            .pypi_release_controls
+            .all_releases
+            .packages
+            .contains("previewed"));
+        assert!(options
+            .pypi_release_controls
+            .only_final
+            .packages
+            .contains("stable-only"));
         assert_eq!(options.pypi_uploaded_prior_to.as_deref(), Some("P7D"));
 
         apply_pypi_environment_values(
@@ -25480,6 +25695,8 @@ wheels = [
             only-binary = idna
             no-index = true
             pre = true
+            all-releases = previewed
+            only-final = stable-only
             uploaded-prior-to = P3D
 
             [download]
@@ -25533,6 +25750,16 @@ wheels = [
         );
         assert!(config.no_index);
         assert!(config.allow_prereleases);
+        assert!(config
+            .release_controls
+            .all_releases
+            .packages
+            .contains("previewed"));
+        assert!(config
+            .release_controls
+            .only_final
+            .packages
+            .contains("stable-only"));
         assert_eq!(config.uploaded_prior_to.as_deref(), Some("P3D"));
     }
 
