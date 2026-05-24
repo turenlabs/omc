@@ -4374,6 +4374,7 @@ fn pip_cli_default_config_key(key: &str) -> bool {
             | "root"
             | "user"
             | "dry-run"
+            | "upgrade"
             | "report"
             | "no-deps"
             | "require-hashes"
@@ -4405,6 +4406,7 @@ fn append_pip_default_args_from_config(
         append_pip_value_arg_from_config(values, args, "root", "--root");
         append_pip_bool_arg_from_config(values, args, "user", "--user", "--user=false");
         append_pip_bool_arg_from_config(values, args, "dry-run", "--dry-run", "--dry-run=false");
+        append_pip_bool_arg_from_config(values, args, "upgrade", "--upgrade", "--upgrade=false");
         append_pip_value_arg_from_config(values, args, "report", "--report");
     }
 
@@ -4531,6 +4533,7 @@ fn pip_environment_default_args(command: &str) -> Vec<String> {
             }
         }
         append_pip_bool_arg_from_env(&mut args, "dry-run", "--dry-run", "--dry-run=false");
+        append_pip_bool_arg_from_env(&mut args, "upgrade", "--upgrade", "--upgrade=false");
         if let Some(report) = pip_config_env("report") {
             args.push(format!("--report={report}"));
         }
@@ -27251,6 +27254,7 @@ mod tests {
                 ("PIP_ROOT", None),
                 ("PIP_USER", None),
                 ("PIP_DRY_RUN", None),
+                ("PIP_UPGRADE", None),
                 ("PIP_REPORT", None),
                 ("PIP_NO_DEPS", None),
                 ("PIP_REQUIRE_HASHES", None),
@@ -27551,6 +27555,7 @@ mod tests {
                 ("PIP_ROOT", Some("staging-root")),
                 ("PIP_USER", Some("true")),
                 ("PIP_DRY_RUN", Some("true")),
+                ("PIP_UPGRADE", Some("yes")),
                 ("PIP_REPORT", Some("report.json")),
                 ("PIP_NO_DEPS", Some("1")),
                 ("PIP_REQUIRE_HASHES", Some("yes")),
@@ -27580,6 +27585,7 @@ mod tests {
                         "--root=staging-root",
                         "--user",
                         "--dry-run",
+                        "--upgrade",
                         "--report=report.json",
                         "--no-deps",
                         "--require-hashes",
@@ -27605,6 +27611,7 @@ mod tests {
                 assert_eq!(action.root, Some(PathBuf::from("staging-root")));
                 assert!(action.user);
                 assert!(action.dry_run);
+                assert!(action.upgrade);
                 assert_eq!(action.report, Some(PathBuf::from("report.json")));
                 assert!(action.no_deps);
                 assert!(action.require_hashes);
@@ -27637,6 +27644,7 @@ mod tests {
                 ("PIP_ROOT", None),
                 ("PIP_USER", Some("true")),
                 ("PIP_DRY_RUN", None),
+                ("PIP_UPGRADE", None),
                 ("PIP_REPORT", None),
                 ("PIP_NO_DEPS", None),
                 ("PIP_REQUIRE_HASHES", None),
@@ -27681,6 +27689,7 @@ mod tests {
                 ("PIP_ROOT", None),
                 ("PIP_USER", None),
                 ("PIP_DRY_RUN", None),
+                ("PIP_UPGRADE", None),
                 ("PIP_REPORT", None),
                 ("PIP_NO_DEPS", None),
                 ("PIP_REQUIRE_HASHES", None),
@@ -27721,6 +27730,7 @@ mod tests {
                 ("PIP_ROOT", Some("stage")),
                 ("PIP_USER", None),
                 ("PIP_DRY_RUN", None),
+                ("PIP_UPGRADE", None),
                 ("PIP_REPORT", None),
                 ("PIP_NO_DEPS", None),
                 ("PIP_REQUIRE_HASHES", None),
@@ -27758,6 +27768,7 @@ mod tests {
                 ("PIP_ROOT", None),
                 ("PIP_USER", None),
                 ("PIP_DRY_RUN", None),
+                ("PIP_UPGRADE", None),
                 ("PIP_REPORT", None),
                 ("PIP_NO_DEPS", Some("true")),
                 ("PIP_REQUIRE_HASHES", None),
@@ -27798,6 +27809,7 @@ mod tests {
                 ("PIP_ROOT", None),
                 ("PIP_USER", None),
                 ("PIP_DRY_RUN", None),
+                ("PIP_UPGRADE", None),
                 ("PIP_REPORT", None),
                 ("PIP_NO_DEPS", None),
                 ("PIP_REQUIRE_HASHES", None),
@@ -27832,6 +27844,7 @@ mod tests {
                 ("PIP_ROOT", Some("stage")),
                 ("PIP_USER", Some("true")),
                 ("PIP_DRY_RUN", Some("true")),
+                ("PIP_UPGRADE", Some("true")),
                 ("PIP_REPORT", Some("report.json")),
                 ("PIP_NO_DEPS", Some("true")),
                 ("PIP_REQUIRE_HASHES", Some("true")),
@@ -32688,7 +32701,7 @@ verdict = "accepted"
         .unwrap();
         fs::write(
             project.join("pip.conf"),
-            "[install]\ntarget = vendor\ndry-run = true\nreport = report.json\nonly-binary = idna\n[download]\ndest = wheelhouse\n[wheel]\nwheel-dir = wheels\n[global]\nplatform = macosx_14_0_arm64 manylinux_2_28_x86_64\nabi = cp312 abi3\n",
+            "[install]\ntarget = vendor\ndry-run = true\nupgrade = true\nreport = report.json\nonly-binary = idna\n[download]\ndest = wheelhouse\n[wheel]\nwheel-dir = wheels\n[global]\nplatform = macosx_14_0_arm64 manylinux_2_28_x86_64\nabi = cp312 abi3\n",
         )
         .unwrap();
 
@@ -32707,6 +32720,7 @@ verdict = "accepted"
                 ("PIP_ROOT", None),
                 ("PIP_USER", None),
                 ("PIP_DRY_RUN", None),
+                ("PIP_UPGRADE", None),
                 ("PIP_REPORT", None),
                 ("PIP_NO_DEPS", None),
                 ("PIP_REQUIRE_HASHES", None),
@@ -32731,6 +32745,7 @@ verdict = "accepted"
                         "install",
                         "--target=vendor",
                         "--dry-run",
+                        "--upgrade",
                         "--report=report.json",
                         "--no-deps",
                         "--require-hashes",
@@ -32749,6 +32764,7 @@ verdict = "accepted"
                 };
                 assert_eq!(action.target, Some(PathBuf::from("vendor")));
                 assert!(action.dry_run);
+                assert!(action.upgrade);
                 assert_eq!(action.report, Some(PathBuf::from("report.json")));
                 assert!(action.no_deps);
                 assert!(action.require_hashes);
@@ -32775,6 +32791,7 @@ verdict = "accepted"
                         "install",
                         "--target=cli-target",
                         "--dry-run=false",
+                        "--upgrade=false",
                         "--no-deps=false",
                         "--require-hashes=false",
                         "--pre=false",
@@ -32788,6 +32805,7 @@ verdict = "accepted"
                 };
                 assert_eq!(action.target, Some(PathBuf::from("cli-target")));
                 assert!(!action.dry_run);
+                assert!(!action.upgrade);
                 assert!(!action.no_deps);
                 assert!(!action.require_hashes);
                 assert!(!action.allow_prereleases);
