@@ -549,10 +549,11 @@ Supported now:
   `--package-lock=false`, `--dry-run`, `--registry`, `--omit=...`,
   `--include=...`, and common audit/fund/peer/install-strategy flags are
   understood for install/ci compatibility; `npm install <pkg>` saves into the
-  root `package.json` when one exists, `npm remove <pkg>` removes root
-  `package.json` entries when present, and workspace-scoped
-  `npm install`/`npm remove` update selected workspace `package.json` files
-  while installing the root OMC graph; common global npm flags such as
+  root `package.json` when one exists, `npm update`/`npm up`/`npm upgrade`
+  default to no `package.json` save unless an explicit save flag is passed,
+  `npm remove <pkg>` removes root `package.json` entries when present, and
+  workspace-scoped `npm install`/`npm remove` update selected workspace
+  `package.json` files while installing the root OMC graph; common global npm flags such as
   `--silent`, `--loglevel`, and `--cache` are accepted before the subcommand,
   while `--registry`, `--userconfig`, and `--json` are forwarded to subcommands
   that support them; package scripts receive npm-style

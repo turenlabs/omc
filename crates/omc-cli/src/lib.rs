@@ -15036,7 +15036,9 @@ fn parse_npm_compat_action(args: &[String]) -> Result<NpmCompatAction, OmcRegist
         "link" | "ln" => parse_npm_link_args(&args[1..]),
         "install-test" | "it" => parse_npm_install_test_args(command, false, &args[1..]),
         "install-ci-test" | "cit" => parse_npm_install_test_args(command, true, &args[1..]),
-        "install" | "i" | "add" | "update" | "up" | "upgrade" => parse_npm_install_args(&args[1..]),
+        "install" | "i" | "add" | "update" | "up" | "upgrade" => {
+            parse_npm_install_args(command, &args[1..])
+        }
         "ci" => {
             let CommonCompatFlags {
                 omit_dev,
@@ -16293,7 +16295,10 @@ fn npm_version_ignored_equals_flag(arg: &str) -> bool {
         .any(|prefix| arg.starts_with(prefix))
 }
 
-fn parse_npm_install_args(args: &[String]) -> Result<NpmCompatAction, OmcRegistryError> {
+fn parse_npm_install_args(
+    command: &str,
+    args: &[String],
+) -> Result<NpmCompatAction, OmcRegistryError> {
     let mut archive_references = Vec::new();
     let mut local_paths = Vec::new();
     let mut dry_run = false;
@@ -16328,6 +16333,7 @@ fn parse_npm_install_args(args: &[String]) -> Result<NpmCompatAction, OmcRegistr
         omit_optional,
         omit_peer,
         save,
+        save_explicit,
         save_prefix,
         lock_only,
         npm_registry,
@@ -16338,6 +16344,12 @@ fn parse_npm_install_args(args: &[String]) -> Result<NpmCompatAction, OmcRegistr
         include_workspace_root,
         positionals,
     } = parse_common_compat_flags(&filtered, true)?;
+
+    let save = if npm_update_defaults_to_no_save(command) && !save_explicit {
+        false
+    } else {
+        save
+    };
 
     Ok(NpmCompatAction::Install {
         specs: positionals,
@@ -16358,6 +16370,10 @@ fn parse_npm_install_args(args: &[String]) -> Result<NpmCompatAction, OmcRegistr
         all_workspaces,
         include_workspace_root,
     })
+}
+
+fn npm_update_defaults_to_no_save(command: &str) -> bool {
+    matches!(command, "update" | "up" | "upgrade")
 }
 
 fn parse_npm_link_args(args: &[String]) -> Result<NpmCompatAction, OmcRegistryError> {
@@ -16506,7 +16522,7 @@ fn parse_npm_install_test_args(
         });
     }
 
-    let install = parse_npm_install_args(&command_args)?;
+    let install = parse_npm_install_args("install", &command_args)?;
     let NpmCompatAction::Install {
         specs,
         archive_references,
@@ -22151,6 +22167,7 @@ struct CommonCompatFlags {
     omit_optional: bool,
     omit_peer: bool,
     save: bool,
+    save_explicit: bool,
     save_prefix: String,
     lock_only: bool,
     npm_registry: Option<String>,
@@ -22170,6 +22187,7 @@ impl Default for CommonCompatFlags {
             omit_optional: false,
             omit_peer: false,
             save: true,
+            save_explicit: false,
             save_prefix: DEFAULT_NPM_SAVE_PREFIX.to_owned(),
             lock_only: false,
             npm_registry: None,
@@ -22209,17 +22227,22 @@ fn parse_common_compat_flags(
         } else if npm_mode && matches!(arg.as_str(), "-D" | "--save-dev" | "--dev") {
             parsed.dependency_kind = ManifestDependencyKind::Dev;
             parsed.save = true;
+            parsed.save_explicit = true;
         } else if npm_mode && matches!(arg.as_str(), "--save-optional" | "-O") {
             parsed.dependency_kind = ManifestDependencyKind::Optional;
             parsed.save = true;
+            parsed.save_explicit = true;
         } else if npm_mode && arg == "--save-peer" {
             parsed.dependency_kind = ManifestDependencyKind::Peer;
             parsed.save = true;
+            parsed.save_explicit = true;
         } else if npm_mode && arg == "--no-save" {
             parsed.save = false;
+            parsed.save_explicit = true;
         } else if npm_mode && matches!(arg.as_str(), "--save" | "-S" | "--save-prod" | "-P") {
             parsed.dependency_kind = ManifestDependencyKind::Production;
             parsed.save = true;
+            parsed.save_explicit = true;
         } else if npm_mode && matches!(arg.as_str(), "--save-exact" | "-E" | "--save-exact=true") {
             parsed.save_prefix.clear();
         } else if npm_mode && arg == "--save-exact=false" {
@@ -23948,7 +23971,7 @@ mod tests {
                 specs: vec!["left-pad".to_owned()],
                 archive_references: Vec::new(),
                 local_paths: Vec::new(),
-                save: true,
+                save: false,
                 save_prefix: DEFAULT_NPM_SAVE_PREFIX.to_owned(),
                 dependency_kind: ManifestDependencyKind::Production,
                 omit_dev: true,
@@ -23957,6 +23980,29 @@ mod tests {
                 lock_only: true,
                 dry_run: false,
                 npm_registry: Some("https://registry.example.invalid/npm".to_owned()),
+                allow: Vec::new(),
+                allow_all_host: false,
+                workspaces: Vec::new(),
+                all_workspaces: false,
+                include_workspace_root: false,
+            }
+        );
+
+        assert_eq!(
+            parse_npm_compat_action(&args(&["up", "--save-dev", "left-pad"])).unwrap(),
+            NpmCompatAction::Install {
+                specs: vec!["left-pad".to_owned()],
+                archive_references: Vec::new(),
+                local_paths: Vec::new(),
+                save: true,
+                save_prefix: DEFAULT_NPM_SAVE_PREFIX.to_owned(),
+                dependency_kind: ManifestDependencyKind::Dev,
+                omit_dev: false,
+                omit_optional: false,
+                omit_peer: false,
+                lock_only: false,
+                dry_run: false,
+                npm_registry: None,
                 allow: Vec::new(),
                 allow_all_host: false,
                 workspaces: Vec::new(),
