@@ -314,8 +314,10 @@ walk runtime dependencies recursively
 download the registry artifact without executing it
 use global/project/user `.npmrc` registry, scoped registry, auth token settings,
 npm globalconfig/userconfig env vars, npm registry env vars, and npm
-install-mode env defaults such as `NODE_ENV=production`,
-`NPM_CONFIG_PRODUCTION`, `NPM_CONFIG_OMIT`, and `NPM_CONFIG_INCLUDE`
+install-mode `.npmrc`/env defaults such as `production`, `omit`, `include`,
+`global`, `dry-run`, `package-lock-only`, `save`, `save-exact`,
+`save-prefix`, `NODE_ENV=production`, `NPM_CONFIG_PRODUCTION`,
+`NPM_CONFIG_OMIT`, and `NPM_CONFIG_INCLUDE`
 use `omc.toml` PyPI simple-index settings for OMC-managed PyPI adds
 use project/user `pip.conf` PyPI simple-index settings when no project index is set
 use `PIP_INDEX_URL` / `PIP_EXTRA_INDEX_URL` when no project PyPI index is set
@@ -420,6 +422,9 @@ Supported now:
   `npm_config_registry` default-registry overrides, `NPM_CONFIG_GLOBALCONFIG` /
   `npm_config_globalconfig` global `.npmrc` path selection, and
   `NPM_CONFIG_USERCONFIG` / `npm_config_userconfig` user `.npmrc` path selection
+- global, project, and user `.npmrc` install defaults for `production`, `only`,
+  `omit`, `include`, `global`, `dry-run`, `package-lock-only`, `save`,
+  `save-exact`, and `save-prefix`
 - project `omc.toml` PyPI simple-index support for `pypi-index-url` and
   `pypi-extra-index-urls`
 - global/project/user `pip.conf` and `PIP_CONFIG_FILE` PyPI support for `index-url`,
@@ -455,6 +460,8 @@ Supported now:
   `--omit=dev|optional|peer` and `--include=dev|optional|peer`
 - npm install-mode environment defaults for `NODE_ENV=production`,
   `NPM_CONFIG_PRODUCTION`, `NPM_CONFIG_OMIT`, `NPM_CONFIG_INCLUDE`,
+  `NPM_CONFIG_GLOBAL`, `NPM_CONFIG_DRY_RUN`,
+  `NPM_CONFIG_PACKAGE_LOCK_ONLY`, `NPM_CONFIG_SAVE`,
   `NPM_CONFIG_SAVE_EXACT`, and `NPM_CONFIG_SAVE_PREFIX`
 - production-style `omc install --omit-dev` installs
 - explicit `omc install -r FILE` and `omc ci -r FILE` requirements-file inputs

@@ -3301,7 +3301,7 @@ fn run_npm_ci_compat(
 }
 
 fn run_npm_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRegistryError> {
-    let args = npm_args_with_environment_defaults(args);
+    let args = npm_args_with_config_defaults(project_dir, args)?;
     match parse_npm_compat_action(&args)? {
         NpmCompatAction::Help { topic } => print_npm_help(topic.as_deref()),
         NpmCompatAction::Version => println!("{}", env!("CARGO_PKG_VERSION")),
@@ -3618,6 +3618,27 @@ fn run_npm_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
     Ok(ExitCode::SUCCESS)
 }
 
+fn npm_args_with_config_defaults(
+    project_dir: &Path,
+    args: &[String],
+) -> Result<Vec<String>, OmcRegistryError> {
+    let mut defaults = npm_config_file_default_args(project_dir)?;
+    defaults.extend(npm_environment_default_args());
+    if defaults.is_empty() {
+        return Ok(args.to_vec());
+    }
+    defaults.extend(args.iter().cloned());
+    Ok(defaults)
+}
+
+fn npm_config_file_default_args(project_dir: &Path) -> Result<Vec<String>, OmcRegistryError> {
+    let values = read_npm_cli_config_defaults(project_dir)?;
+    let mut args = Vec::new();
+    append_npm_default_args_from_config(&values, &mut args);
+    Ok(args)
+}
+
+#[cfg(test)]
 fn npm_args_with_environment_defaults(args: &[String]) -> Vec<String> {
     let mut defaults = npm_environment_default_args();
     if defaults.is_empty() {
@@ -3652,6 +3673,21 @@ fn npm_environment_default_args() -> Vec<String> {
     if let Some(include) = npm_config_env("include") {
         args.push(format!("--include={include}"));
     }
+    append_npm_bool_default_arg(&mut args, "global", "--global", "--global=false");
+    append_npm_bool_default_arg(&mut args, "dry-run", "--dry-run", "--dry-run=false");
+    append_npm_bool_default_arg(
+        &mut args,
+        "package-lock-only",
+        "--package-lock-only",
+        "--package-lock-only=false",
+    );
+    if let Some(save) = npm_config_env("save") {
+        if config_bool(&save) {
+            args.push("--save".to_owned());
+        } else if config_false(&save) {
+            args.push("--no-save".to_owned());
+        }
+    }
     if let Some(save_exact) = npm_config_env("save-exact") {
         if config_bool(&save_exact) {
             args.push("--save-exact".to_owned());
@@ -3664,6 +3700,16 @@ fn npm_environment_default_args() -> Vec<String> {
     }
 
     args
+}
+
+fn append_npm_bool_default_arg(args: &mut Vec<String>, key: &str, true_arg: &str, false_arg: &str) {
+    if let Some(value) = npm_config_env(key) {
+        if config_bool(&value) {
+            args.push(true_arg.to_owned());
+        } else if config_false(&value) {
+            args.push(false_arg.to_owned());
+        }
+    }
 }
 
 fn npm_config_env(name: &str) -> Option<String> {
@@ -3689,6 +3735,157 @@ fn config_false(value: &str) -> bool {
         value.trim().to_ascii_lowercase().as_str(),
         "0" | "no" | "false" | "off"
     )
+}
+
+fn read_npm_cli_config_defaults(
+    project_dir: &Path,
+) -> Result<BTreeMap<String, String>, OmcRegistryError> {
+    let project_dir = absolute_project_dir(project_dir);
+    let mut values = BTreeMap::new();
+    let globalconfig = npm_globalconfig_path(project_dir.as_path(), None);
+    let userconfig = npm_userconfig_path(project_dir.as_path(), None);
+    for path in [globalconfig, userconfig, project_dir.join(".npmrc")] {
+        read_npm_cli_config_defaults_file(&path, &mut values)?;
+    }
+    Ok(values)
+}
+
+fn read_npm_cli_config_defaults_file(
+    path: &Path,
+    values: &mut BTreeMap<String, String>,
+) -> Result<(), OmcRegistryError> {
+    if !path.exists() {
+        return Ok(());
+    }
+    parse_npm_cli_config_defaults_content(&fs::read_to_string(path)?, values);
+    Ok(())
+}
+
+fn parse_npm_cli_config_defaults_content(content: &str, values: &mut BTreeMap<String, String>) {
+    for raw_line in content.lines() {
+        let line = strip_npm_config_comment(raw_line).trim();
+        if line.is_empty() {
+            continue;
+        }
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        let key = key.trim().to_ascii_lowercase();
+        if !npm_cli_default_config_key(&key) {
+            continue;
+        }
+        let Some(value) = expand_npm_config_default_value(value.trim()) else {
+            continue;
+        };
+        values.insert(key, value);
+    }
+}
+
+fn npm_cli_default_config_key(key: &str) -> bool {
+    matches!(
+        key,
+        "production"
+            | "only"
+            | "omit"
+            | "include"
+            | "global"
+            | "dry-run"
+            | "package-lock-only"
+            | "save"
+            | "save-exact"
+            | "save-prefix"
+    )
+}
+
+fn expand_npm_config_default_value(value: &str) -> Option<String> {
+    let mut expanded = String::new();
+    let mut rest = value.trim().trim_matches('"').trim_matches('\'');
+    while let Some(start) = rest.find("${") {
+        expanded.push_str(&rest[..start]);
+        let after_start = &rest[start + 2..];
+        let end = after_start.find('}')?;
+        let key = &after_start[..end];
+        expanded.push_str(&env::var(key).ok()?);
+        rest = &after_start[end + 1..];
+    }
+    expanded.push_str(rest);
+    Some(expanded.trim().to_owned())
+}
+
+fn append_npm_default_args_from_config(values: &BTreeMap<String, String>, args: &mut Vec<String>) {
+    if values
+        .get("production")
+        .map(|value| config_bool(value))
+        .unwrap_or(false)
+        || values
+            .get("only")
+            .map(|value| value.eq_ignore_ascii_case("production"))
+            .unwrap_or(false)
+    {
+        args.push("--omit=dev".to_owned());
+    } else if values
+        .get("production")
+        .map(|value| config_false(value))
+        .unwrap_or(false)
+    {
+        args.push("--include=dev".to_owned());
+    }
+
+    if let Some(omit) = values.get("omit").filter(|value| !value.trim().is_empty()) {
+        args.push("--include=dev,optional,peer".to_owned());
+        args.push(format!("--omit={omit}"));
+    }
+    if let Some(include) = values
+        .get("include")
+        .filter(|value| !value.trim().is_empty())
+    {
+        args.push(format!("--include={include}"));
+    }
+    append_npm_bool_arg_from_config(values, args, "global", "--global", "--global=false");
+    append_npm_bool_arg_from_config(values, args, "dry-run", "--dry-run", "--dry-run=false");
+    append_npm_bool_arg_from_config(
+        values,
+        args,
+        "package-lock-only",
+        "--package-lock-only",
+        "--package-lock-only=false",
+    );
+    if let Some(save) = values.get("save") {
+        if config_bool(save) {
+            args.push("--save".to_owned());
+        } else if config_false(save) {
+            args.push("--no-save".to_owned());
+        }
+    }
+    if let Some(save_exact) = values.get("save-exact") {
+        if config_bool(save_exact) {
+            args.push("--save-exact".to_owned());
+        } else if config_false(save_exact) {
+            args.push("--save-exact=false".to_owned());
+        }
+    }
+    if let Some(save_prefix) = values
+        .get("save-prefix")
+        .filter(|value| !value.trim().is_empty())
+    {
+        args.push(format!("--save-prefix={save_prefix}"));
+    }
+}
+
+fn append_npm_bool_arg_from_config(
+    values: &BTreeMap<String, String>,
+    args: &mut Vec<String>,
+    key: &str,
+    true_arg: &str,
+    false_arg: &str,
+) {
+    if let Some(value) = values.get(key) {
+        if config_bool(value) {
+            args.push(true_arg.to_owned());
+        } else if config_false(value) {
+            args.push(false_arg.to_owned());
+        }
+    }
 }
 
 fn pip_args_with_environment_defaults(args: &[String]) -> Result<Vec<String>, OmcRegistryError> {
@@ -25144,6 +25341,14 @@ mod tests {
                 ("npm_config_omit", None),
                 ("NPM_CONFIG_INCLUDE", None),
                 ("npm_config_include", None),
+                ("NPM_CONFIG_GLOBAL", None),
+                ("npm_config_global", None),
+                ("NPM_CONFIG_DRY_RUN", None),
+                ("npm_config_dry_run", None),
+                ("NPM_CONFIG_PACKAGE_LOCK_ONLY", None),
+                ("npm_config_package_lock_only", None),
+                ("NPM_CONFIG_SAVE", None),
+                ("npm_config_save", None),
                 ("NPM_CONFIG_SAVE_EXACT", None),
                 ("npm_config_save_exact", None),
                 ("NPM_CONFIG_SAVE_PREFIX", None),
@@ -25176,6 +25381,14 @@ mod tests {
                 ("npm_config_omit", None),
                 ("NPM_CONFIG_INCLUDE", None),
                 ("npm_config_include", None),
+                ("NPM_CONFIG_GLOBAL", None),
+                ("npm_config_global", None),
+                ("NPM_CONFIG_DRY_RUN", None),
+                ("npm_config_dry_run", None),
+                ("NPM_CONFIG_PACKAGE_LOCK_ONLY", None),
+                ("npm_config_package_lock_only", None),
+                ("NPM_CONFIG_SAVE", None),
+                ("npm_config_save", None),
                 ("NPM_CONFIG_SAVE_EXACT", None),
                 ("npm_config_save_exact", None),
                 ("NPM_CONFIG_SAVE_PREFIX", None),
@@ -25205,6 +25418,14 @@ mod tests {
                 ("npm_config_omit", None),
                 ("NPM_CONFIG_INCLUDE", Some("peer")),
                 ("npm_config_include", None),
+                ("NPM_CONFIG_GLOBAL", Some("true")),
+                ("npm_config_global", None),
+                ("NPM_CONFIG_DRY_RUN", Some("true")),
+                ("npm_config_dry_run", None),
+                ("NPM_CONFIG_PACKAGE_LOCK_ONLY", Some("true")),
+                ("npm_config_package_lock_only", None),
+                ("NPM_CONFIG_SAVE", Some("false")),
+                ("npm_config_save", None),
                 ("NPM_CONFIG_SAVE_EXACT", Some("true")),
                 ("npm_config_save_exact", None),
                 ("NPM_CONFIG_SAVE_PREFIX", Some("~")),
@@ -25218,6 +25439,10 @@ mod tests {
                         "--include=dev,optional,peer",
                         "--omit=optional,peer",
                         "--include=peer",
+                        "--global",
+                        "--dry-run",
+                        "--package-lock-only",
+                        "--no-save",
                         "--save-exact",
                         "--save-prefix=~",
                         "install",
@@ -25235,6 +25460,10 @@ mod tests {
                     omit_dev,
                     omit_optional,
                     omit_peer,
+                    global,
+                    save,
+                    lock_only,
+                    dry_run,
                     save_prefix,
                     ..
                 } = action
@@ -25244,6 +25473,122 @@ mod tests {
                 assert!(!omit_dev);
                 assert!(omit_optional);
                 assert!(!omit_peer);
+                assert!(global);
+                assert!(!save);
+                assert!(lock_only);
+                assert!(dry_run);
+                assert_eq!(save_prefix, DEFAULT_NPM_SAVE_PREFIX);
+            },
+        );
+    }
+
+    #[test]
+    fn npm_config_file_defaults_behave_like_global_config_flags() {
+        let project = test_dir("npm-config-file-defaults");
+        let user_config = project.join("user.npmrc");
+        let global_config = project.join("global.npmrc");
+        fs::write(
+            &global_config,
+            "production=true\nomit=optional\nsave-prefix=~\n",
+        )
+        .unwrap();
+        fs::write(
+            &user_config,
+            "include=optional\nsave=false\nsave-exact=true\n",
+        )
+        .unwrap();
+        fs::write(
+            project.join(".npmrc"),
+            "omit=dev,peer\ninclude=peer\nglobal=true\ndry-run=true\npackage-lock-only=true\n",
+        )
+        .unwrap();
+
+        with_env_values(
+            &[
+                ("NODE_ENV", None),
+                (
+                    "NPM_CONFIG_GLOBALCONFIG",
+                    Some(global_config.to_str().unwrap()),
+                ),
+                ("npm_config_globalconfig", None),
+                ("NPM_CONFIG_USERCONFIG", Some(user_config.to_str().unwrap())),
+                ("npm_config_userconfig", None),
+                ("NPM_CONFIG_PRODUCTION", None),
+                ("npm_config_production", None),
+                ("NPM_CONFIG_OMIT", None),
+                ("npm_config_omit", None),
+                ("NPM_CONFIG_INCLUDE", None),
+                ("npm_config_include", None),
+                ("NPM_CONFIG_GLOBAL", None),
+                ("npm_config_global", None),
+                ("NPM_CONFIG_DRY_RUN", None),
+                ("npm_config_dry_run", None),
+                ("NPM_CONFIG_PACKAGE_LOCK_ONLY", None),
+                ("npm_config_package_lock_only", None),
+                ("NPM_CONFIG_SAVE", None),
+                ("npm_config_save", None),
+                ("NPM_CONFIG_SAVE_EXACT", None),
+                ("npm_config_save_exact", None),
+                ("NPM_CONFIG_SAVE_PREFIX", None),
+                ("npm_config_save_prefix", None),
+            ],
+            || {
+                assert_eq!(
+                    npm_args_with_config_defaults(&project, &args(&["install", "left-pad"]))
+                        .unwrap(),
+                    args(&[
+                        "--omit=dev",
+                        "--include=dev,optional,peer",
+                        "--omit=dev,peer",
+                        "--include=peer",
+                        "--global",
+                        "--dry-run",
+                        "--package-lock-only",
+                        "--no-save",
+                        "--save-exact",
+                        "--save-prefix=~",
+                        "install",
+                        "left-pad",
+                    ])
+                );
+                let action = parse_npm_compat_action(
+                    &npm_args_with_config_defaults(
+                        &project,
+                        &args(&[
+                            "install",
+                            "--global=false",
+                            "--dry-run=false",
+                            "--package-lock-only=false",
+                            "--save",
+                            "--save-exact=false",
+                            "--include=dev",
+                            "left-pad",
+                        ]),
+                    )
+                    .unwrap(),
+                )
+                .unwrap();
+                let NpmCompatAction::Install {
+                    omit_dev,
+                    omit_optional,
+                    omit_peer,
+                    global,
+                    save,
+                    lock_only,
+                    dry_run,
+                    save_prefix,
+                    ..
+                } = action
+                else {
+                    panic!("expected npm install action");
+                };
+                assert!(!omit_dev);
+                assert!(!omit_optional);
+                assert!(!omit_peer);
+                assert!(!global);
+                assert!(save);
+                assert!(!lock_only);
+                assert!(!dry_run);
                 assert_eq!(save_prefix, DEFAULT_NPM_SAVE_PREFIX);
             },
         );
