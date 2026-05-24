@@ -1181,6 +1181,7 @@ struct PipInstallAction {
     compatibility: PipCompatibilityTarget,
     target: Option<PathBuf>,
     prefix: Option<PathBuf>,
+    root: Option<PathBuf>,
     user: bool,
     vcs_requirements: Vec<PythonVcsRequirement>,
     allow: Vec<String>,
@@ -1735,6 +1736,7 @@ fn run_pip_lock(project_dir: &Path, action: PipLockAction) -> Result<ExitCode, O
         compatibility,
         target,
         prefix,
+        root,
         user,
         vcs_requirements,
         allow,
@@ -1754,6 +1756,11 @@ fn run_pip_lock(project_dir: &Path, action: PipLockAction) -> Result<ExitCode, O
     if prefix.is_some() {
         return Err(OmcRegistryError::UnsupportedSpec(
             "pip lock does not support --prefix".to_owned(),
+        ));
+    }
+    if root.is_some() {
+        return Err(OmcRegistryError::UnsupportedSpec(
+            "pip lock does not support --root".to_owned(),
         ));
     }
 
@@ -3723,6 +3730,9 @@ fn pip_environment_default_args(command: &str) -> Vec<String> {
         if let Some(prefix) = pip_config_env("prefix") {
             args.push(format!("--prefix={prefix}"));
         }
+        if let Some(root) = pip_config_env("root") {
+            args.push(format!("--root={root}"));
+        }
         if let Some(user) = pip_config_env("user") {
             if config_bool(&user) {
                 args.push("--user".to_owned());
@@ -3871,6 +3881,9 @@ fn run_pip_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
             if action.prefix.is_some() {
                 return run_pip_install_prefix(project_dir, action);
             }
+            if action.root.is_some() {
+                return run_pip_install_root(project_dir, action);
+            }
             let PipInstallAction {
                 specs,
                 requirements,
@@ -3893,6 +3906,7 @@ fn run_pip_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
                 compatibility,
                 target,
                 prefix: _,
+                root: _,
                 user: _,
                 vcs_requirements,
                 allow,
@@ -4668,6 +4682,7 @@ fn run_pip_install_dry_run(
         compatibility,
         target,
         prefix,
+        root,
         user,
         vcs_requirements,
         allow,
@@ -4676,16 +4691,36 @@ fn run_pip_install_dry_run(
 
     let dry_run_project = TempOmcProject::new("pip-dry-run", project_dir)?;
     let (dry_run_target, dry_run_bin_dir) = if user {
-        (Some(pip_user_paths()?.site_packages), None)
+        let paths = pip_user_paths()?;
+        (
+            Some(pip_apply_root(
+                project_dir,
+                root.as_deref(),
+                paths.site_packages,
+            )),
+            Some(pip_apply_root(project_dir, root.as_deref(), paths.bin_dir)),
+        )
     } else if let Some(prefix) = prefix.as_ref() {
         let paths = pip_prefix_paths(project_dir, prefix.clone());
-        (Some(paths.site_packages), Some(paths.bin_dir))
+        (
+            Some(pip_apply_root(
+                project_dir,
+                root.as_deref(),
+                paths.site_packages,
+            )),
+            Some(pip_apply_root(project_dir, root.as_deref(), paths.bin_dir)),
+        )
     } else {
         (
             target
                 .as_ref()
-                .map(|path| absolutize_path(project_dir, path.clone())),
-            None,
+                .map(|path| pip_rooted_project_path(project_dir, root.as_deref(), path.clone()))
+                .or_else(|| {
+                    root.as_ref()
+                        .map(|root| pip_default_scheme_paths(project_dir, root).site_packages)
+                }),
+            root.as_ref()
+                .map(|root| pip_default_scheme_paths(project_dir, root).bin_dir),
         )
     };
     let mut options = LinkOptions::new(dry_run_project.path());
@@ -4880,6 +4915,7 @@ fn run_pip_install_target(
         compatibility,
         target,
         prefix: _,
+        root,
         user: _,
         vcs_requirements,
         allow,
@@ -4912,7 +4948,11 @@ fn run_pip_install_target(
     options.pypi_binary_all = binary_all;
     options.pypi_binary_packages = binary_packages;
     apply_pip_compatibility_target(&mut options, compatibility);
-    options.python_target_dir = Some(absolutize_path(project_dir, target));
+    options.python_target_dir = Some(pip_rooted_project_path(
+        project_dir,
+        root.as_deref(),
+        target,
+    ));
     options.python_vcs_requirements = vcs_requirements;
 
     let mut resolved_specs = parse_package_specs(&specs, Some(Ecosystem::Pypi))?;
@@ -4983,6 +5023,7 @@ fn run_pip_install_prefix(
         compatibility,
         target: _,
         prefix,
+        root,
         user: _,
         vcs_requirements,
         allow,
@@ -4991,7 +5032,9 @@ fn run_pip_install_prefix(
     let prefix = prefix.ok_or_else(|| {
         OmcRegistryError::UnsupportedSpec("pip install --prefix needs a path".to_owned())
     })?;
-    let paths = pip_prefix_paths(project_dir, prefix);
+    let mut paths = pip_prefix_paths(project_dir, prefix);
+    paths.site_packages = pip_apply_root(project_dir, root.as_deref(), paths.site_packages);
+    paths.bin_dir = pip_apply_root(project_dir, root.as_deref(), paths.bin_dir);
 
     let prefix_project = TempOmcProject::new("pip-prefix", project_dir)?;
     let mut options = LinkOptions::new(prefix_project.path());
@@ -5062,6 +5105,112 @@ fn run_pip_install_prefix(
     Ok(ExitCode::SUCCESS)
 }
 
+fn run_pip_install_root(
+    project_dir: &Path,
+    action: PipInstallAction,
+) -> Result<ExitCode, OmcRegistryError> {
+    let PipInstallAction {
+        specs,
+        requirements,
+        constraints,
+        script_requirements,
+        groups,
+        report,
+        dry_run: _,
+        archive_references,
+        local_paths,
+        index_url,
+        extra_index_urls,
+        find_links,
+        no_index,
+        binary_all,
+        binary_packages,
+        require_hashes,
+        no_deps,
+        allow_prereleases,
+        compatibility,
+        target: _,
+        prefix: _,
+        root,
+        user: _,
+        vcs_requirements,
+        allow,
+        allow_all_host,
+    } = action;
+    let root = root.ok_or_else(|| {
+        OmcRegistryError::UnsupportedSpec("pip install --root needs a path".to_owned())
+    })?;
+    let paths = pip_default_scheme_paths(project_dir, &root);
+
+    let root_project = TempOmcProject::new("pip-root", project_dir)?;
+    let mut options = LinkOptions::new(root_project.path());
+    options.discover_project_requirements = !groups.is_empty();
+    options.allowed_capabilities = parse_grants(&allow, allow_all_host)?;
+    options.requirement_files = absolutize_paths(project_dir, requirements);
+    options.constraint_files = absolutize_paths(project_dir, constraints);
+    options.python_local_requirements =
+        absolutize_python_local_requirements(project_dir, local_paths);
+    options.project_extras = groups.into_iter().collect();
+    apply_pip_compat_index_options(
+        &mut options,
+        index_url,
+        extra_index_urls,
+        find_links,
+        no_index,
+    );
+    apply_pip_environment_defaults_for_project(&mut options, project_dir);
+    options.pypi_require_hashes = require_hashes;
+    options.pypi_include_dependencies = !no_deps;
+    options.pypi_allow_prereleases = allow_prereleases;
+    options.pypi_binary_all = binary_all;
+    options.pypi_binary_packages = binary_packages;
+    apply_pip_compatibility_target(&mut options, compatibility);
+    options.python_target_dir = Some(paths.site_packages);
+    options.python_bin_dir = Some(paths.bin_dir);
+    options.python_vcs_requirements = vcs_requirements;
+
+    let mut resolved_specs = parse_package_specs(&specs, Some(Ecosystem::Pypi))?;
+    resolved_specs.extend(parse_pip_archive_references(
+        project_dir,
+        &archive_references,
+        &mut options,
+    )?);
+    if !script_requirements.is_empty() {
+        let requirements =
+            read_script_requirement_files(&absolutize_paths(project_dir, script_requirements))?;
+        apply_pypi_install_requirements(&mut options, &mut resolved_specs, requirements);
+    }
+    let requested_count = resolved_specs.len()
+        + options.requirement_files.len()
+        + options.python_local_paths.len()
+        + options.python_local_requirements.len()
+        + options.python_vcs_requirements.len()
+        + options.project_extras.len();
+    if requested_count == 0 {
+        return Err(OmcRegistryError::UnsupportedSpec(
+            "pip install --root needs at least one package, archive, local path, VCS requirement, or requirement file"
+                .to_owned(),
+        ));
+    }
+
+    let mut reports = Vec::new();
+    for spec in &resolved_specs {
+        reports.extend(add_package_graph(spec, &options)?);
+    }
+    print_link_reports(&reports);
+
+    let install = install_project(&options)?;
+    println!();
+    print_install_report(&install);
+    write_pip_install_report_from(
+        root_project.path(),
+        project_dir,
+        report.as_deref(),
+        &install,
+    )?;
+    Ok(ExitCode::SUCCESS)
+}
+
 fn run_pip_install_user(
     project_dir: &Path,
     action: PipInstallAction,
@@ -5088,6 +5237,7 @@ fn run_pip_install_user(
         compatibility,
         target: _,
         prefix: _,
+        root,
         user: _,
         vcs_requirements,
         allow,
@@ -5095,8 +5245,28 @@ fn run_pip_install_user(
     } = action;
 
     let user_paths = pip_user_paths()?;
-    fs::create_dir_all(&user_paths.state_project)?;
-    let mut options = LinkOptions::new(&user_paths.state_project);
+    let root_install = root.is_some();
+    let root_project = if root_install {
+        Some(TempOmcProject::new("pip-user-root", project_dir)?)
+    } else {
+        None
+    };
+    let state_project = root_project
+        .as_ref()
+        .map(|project| project.path().to_path_buf())
+        .unwrap_or_else(|| user_paths.state_project.clone());
+    let site_packages = pip_apply_root(
+        project_dir,
+        root.as_deref(),
+        user_paths.site_packages.clone(),
+    );
+    let install_bin_dir = if root_install {
+        pip_apply_root(project_dir, root.as_deref(), user_paths.bin_dir.clone())
+    } else {
+        site_packages.join("bin")
+    };
+    fs::create_dir_all(&state_project)?;
+    let mut options = LinkOptions::new(&state_project);
     options.allowed_capabilities = parse_grants(&allow, allow_all_host)?;
     options.requirement_files = absolutize_paths(project_dir, requirements);
     options.constraint_files = absolutize_paths(project_dir, constraints);
@@ -5117,7 +5287,8 @@ fn run_pip_install_user(
     options.pypi_binary_all = binary_all;
     options.pypi_binary_packages = binary_packages;
     apply_pip_compatibility_target(&mut options, compatibility);
-    options.python_target_dir = Some(user_paths.site_packages.clone());
+    options.python_target_dir = Some(site_packages.clone());
+    options.python_bin_dir = Some(install_bin_dir);
     options.python_vcs_requirements = vcs_requirements;
 
     let mut resolved_specs = parse_package_specs(&specs, Some(Ecosystem::Pypi))?;
@@ -5151,16 +5322,13 @@ fn run_pip_install_user(
     print_link_reports(&reports);
 
     let install = install_project(&options)?;
-    sync_pip_user_script_local_paths(&user_paths)?;
-    sync_pip_user_scripts(&user_paths)?;
+    if !root_install {
+        sync_pip_user_script_local_paths(&user_paths)?;
+        sync_pip_user_scripts(&user_paths)?;
+    }
     println!();
     print_install_report(&install);
-    write_pip_install_report_from(
-        &user_paths.state_project,
-        project_dir,
-        report.as_deref(),
-        &install,
-    )?;
+    write_pip_install_report_from(&state_project, project_dir, report.as_deref(), &install)?;
     Ok(ExitCode::SUCCESS)
 }
 
@@ -5296,6 +5464,66 @@ fn pip_prefix_paths(project_dir: &Path, prefix: PathBuf) -> PipPrefixPaths {
     PipPrefixPaths {
         site_packages: prefix.join("lib").join(python_tag).join("site-packages"),
         bin_dir: pip_prefix_bin_dir(&prefix),
+    }
+}
+
+fn pip_default_scheme_paths(project_dir: &Path, root: &Path) -> PipPrefixPaths {
+    let paths = pip_default_scheme_paths_from_python().unwrap_or_else(|| PipPrefixPaths {
+        site_packages: PathBuf::from("lib").join("python").join("site-packages"),
+        bin_dir: PathBuf::from("bin"),
+    });
+    PipPrefixPaths {
+        site_packages: pip_apply_root(project_dir, Some(root), paths.site_packages),
+        bin_dir: pip_apply_root(project_dir, Some(root), paths.bin_dir),
+    }
+}
+
+fn pip_default_scheme_paths_from_python() -> Option<PipPrefixPaths> {
+    let output = ProcessCommand::new(host_python_program().ok()?)
+        .arg("-c")
+        .arg(
+            "import json, sysconfig; print(json.dumps({'purelib': sysconfig.get_path('purelib'), 'scripts': sysconfig.get_path('scripts')}))",
+        )
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let value = serde_json::from_slice::<serde_json::Value>(&output.stdout).ok()?;
+    let site_packages = value
+        .get("purelib")
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)?;
+    let bin_dir = value
+        .get("scripts")
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)?;
+    Some(PipPrefixPaths {
+        site_packages,
+        bin_dir,
+    })
+}
+
+fn pip_rooted_project_path(project_dir: &Path, root: Option<&Path>, path: PathBuf) -> PathBuf {
+    let path = absolutize_path(project_dir, path);
+    pip_apply_root(project_dir, root, path)
+}
+
+fn pip_apply_root(project_dir: &Path, root: Option<&Path>, path: PathBuf) -> PathBuf {
+    let Some(root) = root else {
+        return path;
+    };
+    let root = absolutize_path(project_dir, root.to_path_buf());
+    if path.is_absolute() {
+        let relative = path
+            .components()
+            .filter(|component| !matches!(component, std::path::Component::RootDir))
+            .collect::<PathBuf>();
+        root.join(relative)
+    } else {
+        root.join(path)
     }
 }
 
@@ -23203,6 +23431,7 @@ fn parse_pip_install_args(args: &[String]) -> Result<PipCompatAction, OmcRegistr
     let mut compatibility = PipCompatibilityTarget::default();
     let mut target = None;
     let mut prefix = None;
+    let mut root = None;
     let mut user = false;
     let mut groups = Vec::new();
     let mut archive_references = Vec::new();
@@ -23332,6 +23561,16 @@ fn parse_pip_install_args(args: &[String]) -> Result<PipCompatAction, OmcRegistr
             prefix = Some(PathBuf::from(path));
         } else if let Some(path) = arg.strip_prefix("--prefix=") {
             prefix = Some(PathBuf::from(path));
+        } else if arg == "--root" {
+            index += 1;
+            let Some(path) = args.get(index) else {
+                return Err(OmcRegistryError::UnsupportedSpec(format!(
+                    "{arg} needs a path"
+                )));
+            };
+            root = Some(PathBuf::from(path));
+        } else if let Some(path) = arg.strip_prefix("--root=") {
+            root = Some(PathBuf::from(path));
         } else if matches!(arg.as_str(), "--user" | "--user=true") {
             user = true;
         } else if arg == "--user=false" {
@@ -23477,6 +23716,7 @@ fn parse_pip_install_args(args: &[String]) -> Result<PipCompatAction, OmcRegistr
         compatibility,
         target,
         prefix,
+        root,
         user,
         vcs_requirements,
         allow,
@@ -25016,6 +25256,7 @@ mod tests {
                 ("PIP_ISOLATED", None),
                 ("PIP_TARGET", Some("vendor")),
                 ("PIP_PREFIX", None),
+                ("PIP_ROOT", Some("staging-root")),
                 ("PIP_USER", Some("true")),
                 ("PIP_DRY_RUN", Some("true")),
                 ("PIP_REPORT", Some("report.json")),
@@ -25041,6 +25282,7 @@ mod tests {
                     args(&[
                         "install",
                         "--target=vendor",
+                        "--root=staging-root",
                         "--user",
                         "--dry-run",
                         "--report=report.json",
@@ -25065,6 +25307,7 @@ mod tests {
                 };
                 assert_eq!(action.target, Some(PathBuf::from("vendor")));
                 assert_eq!(action.prefix, None);
+                assert_eq!(action.root, Some(PathBuf::from("staging-root")));
                 assert!(action.user);
                 assert!(action.dry_run);
                 assert_eq!(action.report, Some(PathBuf::from("report.json")));
@@ -25096,6 +25339,7 @@ mod tests {
                 ("PIP_ISOLATED", None),
                 ("PIP_TARGET", Some("vendor")),
                 ("PIP_PREFIX", None),
+                ("PIP_ROOT", None),
                 ("PIP_USER", Some("true")),
                 ("PIP_DRY_RUN", None),
                 ("PIP_REPORT", None),
@@ -25126,6 +25370,7 @@ mod tests {
                 };
                 assert_eq!(action.target, Some(PathBuf::from("override")));
                 assert_eq!(action.prefix, None);
+                assert_eq!(action.root, None);
                 assert!(!action.user);
             },
         );
@@ -25135,6 +25380,7 @@ mod tests {
                 ("PIP_ISOLATED", None),
                 ("PIP_TARGET", None),
                 ("PIP_PREFIX", Some("prefix-dir")),
+                ("PIP_ROOT", None),
                 ("PIP_USER", None),
                 ("PIP_DRY_RUN", None),
                 ("PIP_REPORT", None),
@@ -25161,6 +25407,7 @@ mod tests {
                 };
                 assert_eq!(action.target, None);
                 assert_eq!(action.prefix, Some(PathBuf::from("prefix-dir")));
+                assert_eq!(action.root, None);
                 assert!(!action.user);
             },
         );
@@ -25170,6 +25417,41 @@ mod tests {
                 ("PIP_ISOLATED", None),
                 ("PIP_TARGET", None),
                 ("PIP_PREFIX", None),
+                ("PIP_ROOT", Some("stage")),
+                ("PIP_USER", None),
+                ("PIP_DRY_RUN", None),
+                ("PIP_REPORT", None),
+                ("PIP_NO_DEPS", None),
+                ("PIP_REQUIRE_HASHES", None),
+                ("PIP_NO_BINARY", None),
+                ("PIP_ONLY_BINARY", None),
+                ("PIP_PRE", None),
+                ("PIP_PLATFORM", None),
+                ("PIP_PYTHON_VERSION", None),
+                ("PIP_IMPLEMENTATION", None),
+                ("PIP_ABI", None),
+            ],
+            || {
+                let merged =
+                    pip_args_with_environment_defaults(&args(&["install", "requests"])).unwrap();
+                assert_eq!(merged, args(&["install", "--root=stage", "requests"]));
+                let action = parse_pip_compat_action(&merged).unwrap();
+                let PipCompatAction::Install(action) = action else {
+                    panic!("expected pip install action");
+                };
+                assert_eq!(action.target, None);
+                assert_eq!(action.prefix, None);
+                assert_eq!(action.root, Some(PathBuf::from("stage")));
+                assert!(!action.user);
+            },
+        );
+
+        with_env_values(
+            &[
+                ("PIP_ISOLATED", None),
+                ("PIP_TARGET", None),
+                ("PIP_PREFIX", None),
+                ("PIP_ROOT", None),
                 ("PIP_USER", None),
                 ("PIP_DRY_RUN", None),
                 ("PIP_REPORT", None),
@@ -25205,6 +25487,7 @@ mod tests {
                 ("PIP_ISOLATED", Some("true")),
                 ("PIP_TARGET", Some("vendor")),
                 ("PIP_PREFIX", Some("prefix-dir")),
+                ("PIP_ROOT", Some("stage")),
                 ("PIP_USER", Some("true")),
                 ("PIP_DRY_RUN", Some("true")),
                 ("PIP_REPORT", Some("report.json")),
@@ -29598,6 +29881,7 @@ verdict = "accepted"
                 },
                 target: Some(PathBuf::from("vendor")),
                 prefix: None,
+                root: None,
                 user: false,
                 vcs_requirements: Vec::new(),
                 allow: Vec::new(),
@@ -29623,6 +29907,23 @@ verdict = "accepted"
         {
             PipCompatAction::Install(action) => {
                 assert_eq!(action.prefix, Some(PathBuf::from("prefix-dir")));
+                assert_eq!(action.target, None);
+                assert_eq!(action.root, None);
+                assert!(!action.user);
+            }
+            other => panic!("expected pip install action, got {other:?}"),
+        }
+        match parse_pip_compat_action(&args(&[
+            "install",
+            "--root",
+            "staging-root",
+            "requests==2.32.3",
+        ]))
+        .unwrap()
+        {
+            PipCompatAction::Install(action) => {
+                assert_eq!(action.root, Some(PathBuf::from("staging-root")));
+                assert_eq!(action.prefix, None);
                 assert_eq!(action.target, None);
                 assert!(!action.user);
             }
@@ -29826,6 +30127,7 @@ verdict = "accepted"
                 compatibility: PipCompatibilityTarget::default(),
                 target: None,
                 prefix: None,
+                root: None,
                 user: false,
                 vcs_requirements: Vec::new(),
                 allow: Vec::new(),
@@ -29863,6 +30165,7 @@ verdict = "accepted"
                 compatibility: PipCompatibilityTarget::default(),
                 target: None,
                 prefix: None,
+                root: None,
                 user: false,
                 vcs_requirements: vec![
                     PythonVcsRequirement {
@@ -29926,6 +30229,7 @@ version = "0.1.0"
                 compatibility: PipCompatibilityTarget::default(),
                 target: None,
                 prefix: None,
+                root: None,
                 user: false,
                 vcs_requirements: Vec::new(),
                 allow: Vec::new(),
@@ -30461,6 +30765,7 @@ verdict = "accepted"
                 compatibility: PipCompatibilityTarget::default(),
                 target: None,
                 prefix: None,
+                root: None,
                 user: false,
                 vcs_requirements: Vec::new(),
                 allow: Vec::new(),
