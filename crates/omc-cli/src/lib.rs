@@ -1059,10 +1059,15 @@ enum PipCompatAction {
         action: PipDebugAction,
     },
     Inspect,
-    Freeze,
+    Freeze {
+        action: PipFreezeAction,
+    },
     List {
         format: PipListFormat,
         outdated: bool,
+        paths: Vec<PathBuf>,
+        exclude: Vec<String>,
+        exclude_editable: bool,
         index_url: Option<String>,
         extra_index_urls: Vec<String>,
         find_links: Vec<String>,
@@ -1174,6 +1179,13 @@ enum PipListFormat {
     Columns,
     Freeze,
     Json,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+struct PipFreezeAction {
+    paths: Vec<PathBuf>,
+    exclude: Vec<String>,
+    exclude_editable: bool,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -3361,10 +3373,19 @@ fn run_pip_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
         PipCompatAction::Check => return print_locked_pip_check(project_dir),
         PipCompatAction::Debug { action } => print_pip_debug(project_dir, action)?,
         PipCompatAction::Inspect => print_locked_pip_inspect(project_dir)?,
-        PipCompatAction::Freeze => print_locked_freeze(project_dir)?,
+        PipCompatAction::Freeze { action } => {
+            if action.paths.is_empty() {
+                print_locked_freeze(project_dir, &action.exclude, action.exclude_editable)?
+            } else {
+                print_pip_path_freeze(project_dir, &action.paths, &action.exclude)?
+            }
+        }
         PipCompatAction::List {
             format,
             outdated,
+            paths,
+            exclude,
+            exclude_editable,
             index_url,
             extra_index_urls,
             find_links,
@@ -3372,22 +3393,28 @@ fn run_pip_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
             allow_prereleases,
         } => {
             if outdated {
-                print_locked_pip_outdated(
+                print_pip_outdated(
                     project_dir,
-                    format,
-                    index_url,
-                    extra_index_urls,
-                    find_links,
-                    no_index,
-                    allow_prereleases,
+                    PipOutdatedOptions {
+                        format,
+                        paths: &paths,
+                        exclude: &exclude,
+                        index_url,
+                        extra_index_urls,
+                        find_links,
+                        no_index,
+                        allow_prereleases,
+                    },
                 )?;
+            } else if !paths.is_empty() {
+                print_pip_path_list(project_dir, format, &paths, &exclude)?;
             } else {
                 match format {
-                    PipListFormat::Columns => {
-                        print_locked_packages(project_dir, Some(Ecosystem::Pypi), false, &[])?
+                    PipListFormat::Columns => print_locked_pip_list_columns(project_dir, &exclude)?,
+                    PipListFormat::Freeze => {
+                        print_locked_freeze(project_dir, &exclude, exclude_editable)?
                     }
-                    PipListFormat::Freeze => print_locked_freeze(project_dir)?,
-                    PipListFormat::Json => print_locked_pip_json(project_dir)?,
+                    PipListFormat::Json => print_locked_pip_json(project_dir, &exclude)?,
                 }
             }
         }
@@ -12239,20 +12266,43 @@ fn package_list_filter_names(
         .collect()
 }
 
-fn print_locked_freeze(project_dir: &Path) -> Result<(), OmcRegistryError> {
+fn print_locked_freeze(
+    project_dir: &Path,
+    exclude: &[String],
+    exclude_editable: bool,
+) -> Result<(), OmcRegistryError> {
+    let excluded = pip_excluded_names(exclude);
     let lock = read_lockfile(project_dir.join("omc.lock"))?;
     for package in lock
         .packages
         .iter()
         .filter(|package| package.ecosystem == Ecosystem::Pypi)
+        .filter(|package| !pip_name_excluded(&package.name, &excluded))
     {
         println!("{}=={}", package.name, package.version);
     }
-    for dependency in &lock.python_vcs {
+    for dependency in lock
+        .python_vcs
+        .iter()
+        .filter(|dependency| !pip_name_excluded(&dependency.name, &excluded))
+    {
         println!("{}", pip_freeze_vcs_requirement(dependency));
     }
-    for requirement in pip_freeze_local_path_requirements(project_dir)? {
-        println!("{requirement}");
+    if !exclude_editable {
+        for requirement in pip_freeze_local_path_requirements(project_dir)? {
+            println!("{requirement}");
+        }
+    }
+    Ok(())
+}
+
+fn print_pip_path_freeze(
+    project_dir: &Path,
+    paths: &[PathBuf],
+    exclude: &[String],
+) -> Result<(), OmcRegistryError> {
+    for package in read_pip_path_packages(project_dir, paths, exclude)? {
+        println!("{}=={}", package.name, package.version);
     }
     Ok(())
 }
@@ -12301,12 +12351,14 @@ fn pip_freeze_vcs_requirement(dependency: &LockedPythonVcsDependency) -> String 
     format!("{name} @ {url}")
 }
 
-fn print_locked_pip_json(project_dir: &Path) -> Result<(), OmcRegistryError> {
+fn print_locked_pip_json(project_dir: &Path, exclude: &[String]) -> Result<(), OmcRegistryError> {
+    let excluded = pip_excluded_names(exclude);
     let lock = read_lockfile(project_dir.join("omc.lock"))?;
     let packages = lock
         .packages
         .into_iter()
         .filter(|package| package.ecosystem == Ecosystem::Pypi)
+        .filter(|package| !pip_name_excluded(&package.name, &excluded))
         .map(|package| {
             serde_json::json!({
                 "name": package.name,
@@ -12316,6 +12368,156 @@ fn print_locked_pip_json(project_dir: &Path) -> Result<(), OmcRegistryError> {
         .collect::<Vec<_>>();
     println!("{}", serde_json::to_string_pretty(&packages)?);
     Ok(())
+}
+
+fn print_locked_pip_list_columns(
+    project_dir: &Path,
+    exclude: &[String],
+) -> Result<(), OmcRegistryError> {
+    let packages = locked_pip_installed_packages(project_dir, exclude)?;
+    print_pip_installed_list(PipListFormat::Columns, &packages)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct InstalledPythonPackage {
+    name: String,
+    version: String,
+}
+
+fn print_pip_path_list(
+    project_dir: &Path,
+    format: PipListFormat,
+    paths: &[PathBuf],
+    exclude: &[String],
+) -> Result<(), OmcRegistryError> {
+    let packages = read_pip_path_packages(project_dir, paths, exclude)?;
+    print_pip_installed_list(format, &packages)
+}
+
+fn print_pip_installed_list(
+    format: PipListFormat,
+    packages: &[InstalledPythonPackage],
+) -> Result<(), OmcRegistryError> {
+    match format {
+        PipListFormat::Columns => {
+            if !packages.is_empty() {
+                println!("Package Version");
+                for package in packages {
+                    println!("{} {}", package.name, package.version);
+                }
+            }
+        }
+        PipListFormat::Freeze => {
+            for package in packages {
+                println!("{}=={}", package.name, package.version);
+            }
+        }
+        PipListFormat::Json => {
+            let packages = packages
+                .iter()
+                .map(|package| {
+                    serde_json::json!({
+                        "name": package.name,
+                        "version": package.version,
+                    })
+                })
+                .collect::<Vec<_>>();
+            println!("{}", serde_json::to_string_pretty(&packages)?);
+        }
+    }
+    Ok(())
+}
+
+fn read_pip_path_packages(
+    project_dir: &Path,
+    paths: &[PathBuf],
+    exclude: &[String],
+) -> Result<Vec<InstalledPythonPackage>, OmcRegistryError> {
+    let excluded = pip_excluded_names(exclude);
+    let mut packages = BTreeMap::new();
+    for path in paths {
+        let site_packages = absolutize_path(project_dir, path.clone());
+        for package in read_site_packages_metadata(&site_packages)? {
+            if !pip_name_excluded(&package.name, &excluded) {
+                packages.insert(normalize_pip_show_name(&package.name), package);
+            }
+        }
+    }
+    Ok(packages.into_values().collect())
+}
+
+fn read_site_packages_metadata(
+    site_packages: &Path,
+) -> Result<Vec<InstalledPythonPackage>, OmcRegistryError> {
+    if !site_packages.exists() {
+        return Ok(Vec::new());
+    }
+    let mut packages = Vec::new();
+    for entry in fs::read_dir(site_packages)? {
+        let entry = entry?;
+        if !entry.file_type()?.is_dir() {
+            continue;
+        }
+        let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+            continue;
+        };
+        if !name.ends_with(".dist-info") {
+            continue;
+        }
+        if let Some(package) = read_dist_info_metadata(&entry.path(), &name)? {
+            packages.push(package);
+        }
+    }
+    packages.sort_by(|left, right| {
+        normalize_pip_show_name(&left.name).cmp(&normalize_pip_show_name(&right.name))
+    });
+    Ok(packages)
+}
+
+fn read_dist_info_metadata(
+    dist_info: &Path,
+    dist_info_name: &str,
+) -> Result<Option<InstalledPythonPackage>, OmcRegistryError> {
+    let metadata = dist_info.join("METADATA");
+    if metadata.exists() {
+        let mut name = None;
+        let mut version = None;
+        for line in fs::read_to_string(metadata)?.lines() {
+            if let Some(value) = line.strip_prefix("Name:") {
+                name = Some(value.trim().to_owned());
+            } else if let Some(value) = line.strip_prefix("Version:") {
+                version = Some(value.trim().to_owned());
+            }
+            if name.is_some() && version.is_some() {
+                break;
+            }
+        }
+        if let (Some(name), Some(version)) = (name, version) {
+            return Ok(Some(InstalledPythonPackage { name, version }));
+        }
+    }
+
+    let Some(stem) = dist_info_name.strip_suffix(".dist-info") else {
+        return Ok(None);
+    };
+    let Some((name, version)) = stem.rsplit_once('-') else {
+        return Ok(None);
+    };
+    Ok(Some(InstalledPythonPackage {
+        name: name.replace('_', "-"),
+        version: version.to_owned(),
+    }))
+}
+
+fn pip_excluded_names(exclude: &[String]) -> BTreeSet<String> {
+    exclude
+        .iter()
+        .map(|name| normalize_pip_show_name(name))
+        .collect()
+}
+
+fn pip_name_excluded(name: &str, excluded: &BTreeSet<String>) -> bool {
+    excluded.contains(&normalize_pip_show_name(name))
 }
 
 fn print_locked_pip_inspect(project_dir: &Path) -> Result<(), OmcRegistryError> {
@@ -12362,30 +12564,77 @@ struct PipOutdatedPackage {
     latest_filetype: String,
 }
 
-fn print_locked_pip_outdated(
-    project_dir: &Path,
+struct PipOutdatedOptions<'a> {
     format: PipListFormat,
+    paths: &'a [PathBuf],
+    exclude: &'a [String],
     index_url: Option<String>,
     extra_index_urls: Vec<String>,
     find_links: Vec<String>,
     no_index: bool,
     allow_prereleases: bool,
+}
+
+fn print_pip_outdated(
+    project_dir: &Path,
+    options: PipOutdatedOptions<'_>,
 ) -> Result<(), OmcRegistryError> {
+    if options.paths.is_empty() {
+        return print_locked_pip_outdated(project_dir, options);
+    }
+
+    let packages = read_pip_path_packages(project_dir, options.paths, options.exclude)?;
+    let mut rows = Vec::new();
+    for package in packages {
+        let listing = match read_pypi_available_versions(
+            project_dir,
+            &package.name,
+            options.index_url.clone(),
+            options.extra_index_urls.clone(),
+            options.find_links.clone(),
+            options.no_index,
+            options.allow_prereleases,
+        ) {
+            Ok(listing) => listing,
+            Err(OmcRegistryError::PackageNotFound(_)) => continue,
+            Err(error) => return Err(error),
+        };
+        let Some(latest_version) = listing.versions.first() else {
+            continue;
+        };
+        if compare_pypi_versions(latest_version, &package.version).is_gt() {
+            rows.push(PipOutdatedPackage {
+                name: package.name,
+                version: package.version,
+                latest_version: latest_version.clone(),
+                latest_filetype: "wheel".to_owned(),
+            });
+        }
+    }
+    print_pip_outdated_rows(options.format, rows)
+}
+
+fn print_locked_pip_outdated(
+    project_dir: &Path,
+    options: PipOutdatedOptions<'_>,
+) -> Result<(), OmcRegistryError> {
+    let excluded = pip_excluded_names(options.exclude);
     let lock = read_lockfile(project_dir.join("omc.lock"))?;
     let mut rows = Vec::new();
     for package in lock
         .packages
         .into_iter()
         .filter(|package| package.ecosystem == Ecosystem::Pypi)
+        .filter(|package| !pip_name_excluded(&package.name, &excluded))
     {
         let listing = match read_pypi_available_versions(
             project_dir,
             &package.name,
-            index_url.clone(),
-            extra_index_urls.clone(),
-            find_links.clone(),
-            no_index,
-            allow_prereleases,
+            options.index_url.clone(),
+            options.extra_index_urls.clone(),
+            options.find_links.clone(),
+            options.no_index,
+            options.allow_prereleases,
         ) {
             Ok(listing) => listing,
             Err(OmcRegistryError::PackageNotFound(_)) => continue,
@@ -12403,6 +12652,13 @@ fn print_locked_pip_outdated(
             });
         }
     }
+    print_pip_outdated_rows(options.format, rows)
+}
+
+fn print_pip_outdated_rows(
+    format: PipListFormat,
+    mut rows: Vec<PipOutdatedPackage>,
+) -> Result<(), OmcRegistryError> {
     rows.sort_by(|left, right| left.name.cmp(&right.name));
 
     match format {
@@ -12438,6 +12694,28 @@ fn print_locked_pip_outdated(
         }
     }
     Ok(())
+}
+
+fn locked_pip_installed_packages(
+    project_dir: &Path,
+    exclude: &[String],
+) -> Result<Vec<InstalledPythonPackage>, OmcRegistryError> {
+    let excluded = pip_excluded_names(exclude);
+    let lock = read_lockfile(project_dir.join("omc.lock"))?;
+    let mut packages = lock
+        .packages
+        .into_iter()
+        .filter(|package| package.ecosystem == Ecosystem::Pypi)
+        .filter(|package| !pip_name_excluded(&package.name, &excluded))
+        .map(|package| InstalledPythonPackage {
+            name: package.name,
+            version: package.version,
+        })
+        .collect::<Vec<_>>();
+    packages.sort_by(|left, right| {
+        normalize_pip_show_name(&left.name).cmp(&normalize_pip_show_name(&right.name))
+    });
+    Ok(packages)
 }
 
 fn pip_locked_package_filetype(package: &LockedPackage) -> &'static str {
@@ -18521,8 +18799,8 @@ fn parse_pip_compat_action(args: &[String]) -> Result<PipCompatAction, OmcRegist
             Ok(PipCompatAction::Inspect)
         }
         "freeze" => {
-            parse_pip_freeze_args(&args[1..])?;
-            Ok(PipCompatAction::Freeze)
+            let action = parse_pip_freeze_args(&args[1..])?;
+            Ok(PipCompatAction::Freeze { action })
         }
         "list" => parse_pip_list_args(&args[1..]),
         "index" => parse_pip_index_args(&args[1..]),
@@ -19502,7 +19780,8 @@ fn parse_pip_inspect_args(args: &[String]) -> Result<(), OmcRegistryError> {
     Ok(())
 }
 
-fn parse_pip_freeze_args(args: &[String]) -> Result<(), OmcRegistryError> {
+fn parse_pip_freeze_args(args: &[String]) -> Result<PipFreezeAction, OmcRegistryError> {
+    let mut action = PipFreezeAction::default();
     let mut index = 0;
     while index < args.len() {
         let arg = &args[index];
@@ -19518,23 +19797,35 @@ fn parse_pip_freeze_args(args: &[String]) -> Result<(), OmcRegistryError> {
                 | "-q"
                 | "--quiet"
         ) {
+            if arg == "--exclude-editable" {
+                action.exclude_editable = true;
+            }
         } else if matches!(
             arg.as_str(),
             "-r" | "--requirement" | "--path" | "--exclude"
         ) {
             index += 1;
-            if args.get(index).is_none() {
+            let Some(value) = args.get(index) else {
                 return Err(OmcRegistryError::UnsupportedSpec(format!(
                     "{arg} needs a value"
                 )));
+            };
+            if arg == "--path" {
+                action.paths.push(PathBuf::from(value));
+            } else if arg == "--exclude" {
+                action.exclude.push(value.clone());
             }
-        } else if pip_freeze_equals_value_flag(arg) {
+        } else if let Some(path) = arg.strip_prefix("--path=") {
+            action.paths.push(PathBuf::from(path));
+        } else if let Some(exclude) = arg.strip_prefix("--exclude=") {
+            action.exclude.push(exclude.to_owned());
+        } else if arg.starts_with("--requirement=") {
         } else {
             return Err(unsupported_compat_arg("pip freeze", arg));
         }
         index += 1;
     }
-    Ok(())
+    Ok(action)
 }
 
 fn parse_pip_install_args(args: &[String]) -> Result<PipCompatAction, OmcRegistryError> {
@@ -20586,6 +20877,9 @@ fn parse_pip_list_args(args: &[String]) -> Result<PipCompatAction, OmcRegistryEr
     let mut find_links = Vec::new();
     let mut no_index = false;
     let mut allow_prereleases = false;
+    let mut paths = Vec::new();
+    let mut exclude = Vec::new();
+    let mut exclude_editable = false;
     let mut index = 0;
     while index < args.len() {
         let arg = &args[index];
@@ -20650,14 +20944,25 @@ fn parse_pip_list_args(args: &[String]) -> Result<PipCompatAction, OmcRegistryEr
                 | "-q"
                 | "--quiet"
         ) {
+            if arg == "--exclude-editable" {
+                exclude_editable = true;
+            }
         } else if matches!(arg.as_str(), "--path" | "--exclude") {
             index += 1;
-            if args.get(index).is_none() {
+            let Some(value) = args.get(index) else {
                 return Err(OmcRegistryError::UnsupportedSpec(format!(
                     "{arg} needs a value"
                 )));
+            };
+            if arg == "--path" {
+                paths.push(PathBuf::from(value));
+            } else {
+                exclude.push(value.clone());
             }
-        } else if pip_path_or_exclude_equals_value_flag(arg) {
+        } else if let Some(path) = arg.strip_prefix("--path=") {
+            paths.push(PathBuf::from(path));
+        } else if let Some(name) = arg.strip_prefix("--exclude=") {
+            exclude.push(name.to_owned());
         } else if pip_index_ignored_value_flag(arg) {
             index += 1;
             if args.get(index).is_none() {
@@ -20674,6 +20979,9 @@ fn parse_pip_list_args(args: &[String]) -> Result<PipCompatAction, OmcRegistryEr
     Ok(PipCompatAction::List {
         format,
         outdated,
+        paths,
+        exclude,
+        exclude_editable,
         index_url,
         extra_index_urls,
         find_links,
@@ -20691,18 +20999,6 @@ fn parse_pip_list_format_value(value: &str) -> Result<PipListFormat, OmcRegistry
             "unsupported pip list format `{other}`"
         ))),
     }
-}
-
-fn pip_freeze_equals_value_flag(arg: &str) -> bool {
-    ["--path=", "--exclude=", "--requirement="]
-        .iter()
-        .any(|prefix| arg.starts_with(prefix))
-}
-
-fn pip_path_or_exclude_equals_value_flag(arg: &str) -> bool {
-    ["--path=", "--exclude="]
-        .iter()
-        .any(|prefix| arg.starts_with(prefix))
 }
 
 fn pip_uninstall_specs_from_requirements(
@@ -25259,6 +25555,18 @@ version = "0.1.0"
             fs::read_to_string(project.join("vendor/demo_pkg/__init__.py")).unwrap(),
             "VALUE = 'target'\n"
         );
+        assert!(project
+            .join("vendor")
+            .join("demo_pkg-1.0.0.dist-info")
+            .join("METADATA")
+            .exists());
+        assert_eq!(
+            read_pip_path_packages(&project, &[PathBuf::from("vendor")], &[]).unwrap(),
+            vec![InstalledPythonPackage {
+                name: "demo-pkg".to_owned(),
+                version: "1.0.0".to_owned(),
+            }]
+        );
         assert!(!project.join("omc.toml").exists());
         assert!(!project.join("omc.lock").exists());
         assert!(!project.join(".omc").exists());
@@ -25666,7 +25974,9 @@ version = "0.1.0"
         );
         assert_eq!(
             parse_pip_compat_action(&args(&["freeze"])).unwrap(),
-            PipCompatAction::Freeze
+            PipCompatAction::Freeze {
+                action: PipFreezeAction::default(),
+            }
         );
         assert_eq!(
             pip_freeze_vcs_requirement(&LockedPythonVcsDependency {
@@ -25898,13 +26208,22 @@ resolved_commit = "0123456789abcdef0123456789abcdef01234567"
                 "requirements.txt",
             ]))
             .unwrap(),
-            PipCompatAction::Freeze
+            PipCompatAction::Freeze {
+                action: PipFreezeAction {
+                    paths: vec![PathBuf::from("vendor")],
+                    exclude: vec!["requests".to_owned()],
+                    exclude_editable: false,
+                },
+            }
         );
         assert_eq!(
             parse_pip_compat_action(&args(&["list", "--format=freeze"])).unwrap(),
             PipCompatAction::List {
                 format: PipListFormat::Freeze,
                 outdated: false,
+                paths: Vec::new(),
+                exclude: Vec::new(),
+                exclude_editable: false,
                 index_url: None,
                 extra_index_urls: Vec::new(),
                 find_links: Vec::new(),
@@ -25917,6 +26236,9 @@ resolved_commit = "0123456789abcdef0123456789abcdef01234567"
             PipCompatAction::List {
                 format: PipListFormat::Json,
                 outdated: false,
+                paths: Vec::new(),
+                exclude: Vec::new(),
+                exclude_editable: false,
                 index_url: None,
                 extra_index_urls: Vec::new(),
                 find_links: Vec::new(),
@@ -25938,6 +26260,9 @@ resolved_commit = "0123456789abcdef0123456789abcdef01234567"
             PipCompatAction::List {
                 format: PipListFormat::Json,
                 outdated: false,
+                paths: vec![PathBuf::from("vendor")],
+                exclude: vec!["requests".to_owned()],
+                exclude_editable: true,
                 index_url: None,
                 extra_index_urls: Vec::new(),
                 find_links: Vec::new(),
@@ -25959,6 +26284,9 @@ resolved_commit = "0123456789abcdef0123456789abcdef01234567"
             PipCompatAction::List {
                 format: PipListFormat::Json,
                 outdated: true,
+                paths: Vec::new(),
+                exclude: Vec::new(),
+                exclude_editable: false,
                 index_url: None,
                 extra_index_urls: Vec::new(),
                 find_links: vec!["wheelhouse".to_owned()],
@@ -25972,6 +26300,9 @@ resolved_commit = "0123456789abcdef0123456789abcdef01234567"
             PipCompatAction::List {
                 format: PipListFormat::Freeze,
                 outdated: true,
+                paths: Vec::new(),
+                exclude: Vec::new(),
+                exclude_editable: false,
                 index_url: None,
                 extra_index_urls: Vec::new(),
                 find_links: Vec::new(),

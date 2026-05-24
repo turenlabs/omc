@@ -6946,8 +6946,34 @@ fn install_pypi_sdist_package(
         source_dir.clone()
     };
     copy_python_sdist_import_tree(&import_root, site_packages)?;
+    write_python_sdist_dist_info(site_packages, package)?;
     let entry_points = read_python_local_entry_points(&source_dir)?;
     install_python_entry_point_scripts(&entry_points, bin_dir)
+}
+
+fn write_python_sdist_dist_info(site_packages: &Path, package: &LockedPackage) -> Result<()> {
+    let dist_info = site_packages.join(format!(
+        "{}-{}.dist-info",
+        python_dist_info_component(&package.name),
+        package.version
+    ));
+    fs::create_dir_all(&dist_info)?;
+    fs::write(
+        dist_info.join("METADATA"),
+        format!(
+            "Metadata-Version: 2.1\nName: {}\nVersion: {}\n",
+            package.name, package.version
+        ),
+    )?;
+    fs::write(dist_info.join("INSTALLER"), "omc\n")?;
+    Ok(())
+}
+
+fn python_dist_info_component(value: &str) -> String {
+    value
+        .chars()
+        .map(|ch| if matches!(ch, '-' | '.') { '_' } else { ch })
+        .collect()
 }
 
 fn unpack_python_sdist(bytes: &[u8], filename: &str, target: &Path) -> Result<()> {
