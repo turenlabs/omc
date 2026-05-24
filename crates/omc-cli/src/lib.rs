@@ -1139,6 +1139,7 @@ struct PipInstallAction {
     specs: Vec<String>,
     requirements: Vec<PathBuf>,
     constraints: Vec<PathBuf>,
+    groups: Vec<String>,
     report: Option<PathBuf>,
     dry_run: bool,
     archive_references: Vec<String>,
@@ -1729,6 +1730,7 @@ impl TempOmcProject {
         let path = Self::create_path(prefix)?;
         for file in [
             "omc.toml",
+            "pyproject.toml",
             "package.json",
             "package-lock.json",
             "npm-shrinkwrap.json",
@@ -3262,6 +3264,7 @@ fn run_pip_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
                 specs,
                 requirements,
                 constraints,
+                groups,
                 report,
                 dry_run: _,
                 archive_references,
@@ -3288,6 +3291,7 @@ fn run_pip_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
                 options.constraint_files = absolutize_paths(project_dir, constraints);
                 options.python_local_requirements =
                     absolutize_python_local_requirements(project_dir, local_paths);
+                options.project_extras = groups.into_iter().collect();
                 apply_pip_compat_index_options(
                     &mut options,
                     index_url,
@@ -3312,6 +3316,7 @@ fn run_pip_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
                 options.constraint_files = absolutize_paths(project_dir, constraints);
                 options.python_local_requirements =
                     absolutize_python_local_requirements(project_dir, local_paths);
+                options.project_extras = groups.into_iter().collect();
                 apply_pip_compat_index_options(
                     &mut options,
                     index_url,
@@ -3342,6 +3347,7 @@ fn run_pip_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
                     && options.python_local_paths.is_empty()
                     && options.python_local_requirements.is_empty()
                     && options.python_target_dir.is_none()
+                    && options.project_extras.is_empty()
                     && options.pypi_include_dependencies
                 {
                     install_locked_packages(project_dir)?
@@ -4000,6 +4006,7 @@ fn run_pip_install_dry_run(
         specs,
         requirements,
         constraints,
+        groups,
         report,
         dry_run: _,
         archive_references,
@@ -4022,7 +4029,7 @@ fn run_pip_install_dry_run(
     let dry_run_project = TempOmcProject::new("pip-dry-run", project_dir)?;
     let mut options = LinkOptions::new(dry_run_project.path());
     options.save_manifest_dependency = false;
-    options.discover_project_requirements = false;
+    options.discover_project_requirements = !groups.is_empty();
     options.allowed_capabilities = parse_grants(&allow, allow_all_host)?;
     apply_pip_compat_index_options(
         &mut options,
@@ -4038,6 +4045,7 @@ fn run_pip_install_dry_run(
     options.pypi_binary_packages = binary_packages;
     options.python_local_requirements =
         absolutize_python_local_requirements(project_dir, local_paths);
+    options.project_extras = groups.into_iter().collect();
     options.python_vcs_requirements = vcs_requirements;
 
     let mut resolved_specs = parse_package_specs(&specs, Some(Ecosystem::Pypi))?;
@@ -4057,11 +4065,44 @@ fn run_pip_install_dry_run(
     let local_path_count =
         options.python_local_paths.len() + options.python_local_requirements.len();
     let vcs_count = options.python_vcs_requirements.len();
-    if resolved_specs.is_empty() && local_path_count == 0 && vcs_count == 0 {
+    if resolved_specs.is_empty()
+        && local_path_count == 0
+        && vcs_count == 0
+        && options.project_extras.is_empty()
+    {
         return Err(OmcRegistryError::UnsupportedSpec(
             "pip install --dry-run needs at least one package, archive, local path, VCS requirement, or requirement file"
                 .to_owned(),
         ));
+    }
+
+    if !options.project_extras.is_empty() {
+        let mut manifest_options = options.clone();
+        manifest_options.save_manifest_dependency = true;
+        let mut reports = Vec::new();
+        for spec in &resolved_specs {
+            reports.extend(add_package_graph(spec, &manifest_options)?);
+        }
+        print_link_reports(&reports);
+
+        let mut install = install_project(&manifest_options)?;
+        rewrite_pip_dry_run_install_paths(project_dir, target.as_deref(), &mut install);
+        println!();
+        println!(
+            "dry-run: would install pypi={} local_paths={} vcs={} groups={} python_site_packages={}",
+            install.pypi_packages,
+            local_path_count,
+            vcs_count,
+            manifest_options.project_extras.len(),
+            install.python_site_packages.display()
+        );
+        write_pip_install_report_from(
+            dry_run_project.path(),
+            project_dir,
+            report.as_deref(),
+            &install,
+        )?;
+        return Ok(ExitCode::SUCCESS);
     }
 
     if local_path_count > 0 || vcs_count > 0 {
@@ -4143,6 +4184,7 @@ fn run_pip_install_target(
         specs,
         requirements,
         constraints,
+        groups,
         report,
         dry_run: _,
         archive_references,
@@ -4165,14 +4207,15 @@ fn run_pip_install_target(
         OmcRegistryError::UnsupportedSpec("pip install --target needs a path".to_owned())
     })?;
 
-    let target_project = TempOmcProject::empty("pip-target")?;
+    let target_project = TempOmcProject::new("pip-target", project_dir)?;
     let mut options = LinkOptions::new(target_project.path());
-    options.discover_project_requirements = false;
+    options.discover_project_requirements = !groups.is_empty();
     options.allowed_capabilities = parse_grants(&allow, allow_all_host)?;
     options.requirement_files = absolutize_paths(project_dir, requirements);
     options.constraint_files = absolutize_paths(project_dir, constraints);
     options.python_local_requirements =
         absolutize_python_local_requirements(project_dir, local_paths);
+    options.project_extras = groups.into_iter().collect();
     apply_pip_compat_index_options(
         &mut options,
         index_url,
@@ -4197,7 +4240,8 @@ fn run_pip_install_target(
     let requested_count = resolved_specs.len()
         + options.requirement_files.len()
         + options.python_local_requirements.len()
-        + options.python_vcs_requirements.len();
+        + options.python_vcs_requirements.len()
+        + options.project_extras.len();
     if requested_count == 0 {
         return Err(OmcRegistryError::UnsupportedSpec(
             "pip install --target needs at least one package, archive, local path, VCS requirement, or requirement file"
@@ -21306,6 +21350,7 @@ fn parse_pip_install_args(args: &[String]) -> Result<PipCompatAction, OmcRegistr
     let mut no_deps = false;
     let mut allow_prereleases = false;
     let mut target = None;
+    let mut groups = Vec::new();
     let mut archive_references = Vec::new();
     let mut local_paths = Vec::new();
     let mut vcs_requirements = Vec::new();
@@ -21393,6 +21438,16 @@ fn parse_pip_install_args(args: &[String]) -> Result<PipCompatAction, OmcRegistr
             target = Some(PathBuf::from(path));
         } else if let Some(path) = arg.strip_prefix("--target=") {
             target = Some(PathBuf::from(path));
+        } else if arg == "--group" {
+            index += 1;
+            let Some(group) = args.get(index) else {
+                return Err(OmcRegistryError::UnsupportedSpec(format!(
+                    "{arg} needs a group"
+                )));
+            };
+            groups.push(pip_project_group_arg(group)?);
+        } else if let Some(group) = arg.strip_prefix("--group=") {
+            groups.push(pip_project_group_arg(group)?);
         } else if arg == "--prefer-binary" {
         } else if arg == "--only-binary" || arg == "--no-binary" {
             index += 1;
@@ -21501,6 +21556,7 @@ fn parse_pip_install_args(args: &[String]) -> Result<PipCompatAction, OmcRegistr
         specs: positionals.into_iter().filter(|spec| spec != ".").collect(),
         requirements,
         constraints,
+        groups,
         report,
         dry_run,
         archive_references,
@@ -21799,6 +21855,31 @@ fn pip_ignored_install_equals_flag(arg: &str) -> bool {
     ]
     .iter()
     .any(|prefix| arg.starts_with(prefix))
+}
+
+fn pip_project_group_arg(value: &str) -> Result<String, OmcRegistryError> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Err(OmcRegistryError::UnsupportedSpec(
+            "pip install --group needs a non-empty group".to_owned(),
+        ));
+    }
+    if let Some((path, group)) = value.rsplit_once(':') {
+        let path = path.trim();
+        if !matches!(path, "" | "pyproject.toml" | "./pyproject.toml") {
+            return Err(OmcRegistryError::UnsupportedSpec(format!(
+                "pip install --group currently supports only groups from the current pyproject.toml, not `{path}`"
+            )));
+        }
+        let group = normalize_extra(group);
+        if group.is_empty() {
+            return Err(OmcRegistryError::UnsupportedSpec(
+                "pip install --group needs a non-empty group".to_owned(),
+            ));
+        }
+        return Ok(group);
+    }
+    Ok(normalize_extra(value))
 }
 
 fn pip_ignored_wheel_value_flag(arg: &str) -> bool {
@@ -26853,6 +26934,9 @@ verdict = "accepted"
             "--install-option",
             "--install-scripts=/tmp/bin",
             "--no-clean",
+            "--group",
+            "Dev",
+            "--group=pyproject.toml:test",
             "--no-warn-script-location",
             "--no-compile",
             "--report",
@@ -26869,6 +26953,7 @@ verdict = "accepted"
                 specs: vec!["requests==2.32.3".to_owned()],
                 requirements: vec![PathBuf::from("requirements.txt")],
                 constraints: vec![PathBuf::from("constraints.txt")],
+                groups: vec!["dev".to_owned(), "test".to_owned()],
                 report: Some(PathBuf::from("install-report.json")),
                 dry_run: true,
                 archive_references: Vec::new(),
@@ -27028,6 +27113,7 @@ verdict = "accepted"
                 specs: vec!["requests==2.32.3".to_owned()],
                 requirements: Vec::new(),
                 constraints: Vec::new(),
+                groups: Vec::new(),
                 report: None,
                 dry_run: false,
                 archive_references: Vec::new(),
@@ -27067,6 +27153,7 @@ verdict = "accepted"
                 specs: Vec::new(),
                 requirements: Vec::new(),
                 constraints: Vec::new(),
+                groups: Vec::new(),
                 report: None,
                 dry_run: false,
                 archive_references: Vec::new(),
@@ -27125,6 +27212,7 @@ version = "0.1.0"
                 specs: Vec::new(),
                 requirements: Vec::new(),
                 constraints: Vec::new(),
+                groups: Vec::new(),
                 report: None,
                 dry_run: true,
                 archive_references: Vec::new(),
@@ -27149,6 +27237,57 @@ version = "0.1.0"
         assert!(!project.join("omc.toml").exists());
         assert!(!project.join("omc.lock").exists());
         assert!(!project.join(".omc").exists());
+    }
+
+    #[test]
+    fn pip_install_group_uses_pyproject_dependency_group() {
+        let project = test_dir("pip-install-group-project");
+        fs::create_dir_all(project.join("src").join("rootpkg")).unwrap();
+        fs::create_dir_all(project.join("groupdep").join("src").join("groupdep")).unwrap();
+        fs::write(project.join("src").join("rootpkg").join("__init__.py"), "").unwrap();
+        fs::write(
+            project
+                .join("groupdep")
+                .join("src")
+                .join("groupdep")
+                .join("__init__.py"),
+            "",
+        )
+        .unwrap();
+        fs::write(
+            project.join("pyproject.toml"),
+            r#"
+[project]
+name = "rootpkg"
+version = "0.1.0"
+
+[dependency-groups]
+tools = ["groupdep @ ./groupdep"]
+"#,
+        )
+        .unwrap();
+        fs::write(
+            project.join("groupdep").join("pyproject.toml"),
+            r#"
+[project]
+name = "groupdep"
+version = "0.1.0"
+"#,
+        )
+        .unwrap();
+
+        let status = run_pip_compat(
+            &project,
+            &args(&["install", "--group", "Tools", "--no-index"]),
+        )
+        .unwrap();
+
+        assert_eq!(status, ExitCode::SUCCESS);
+        let local_paths =
+            fs::read_to_string(project.join(".omc").join("python").join("local-paths")).unwrap();
+        assert!(local_paths.contains("groupdep/src"));
+        assert!(local_paths.contains("src"));
+        fs::remove_dir_all(project).unwrap();
     }
 
     #[test]
@@ -27247,6 +27386,7 @@ version = "0.1.0"
                 specs: Vec::new(),
                 requirements: Vec::new(),
                 constraints: Vec::new(),
+                groups: Vec::new(),
                 report: None,
                 dry_run: false,
                 archive_references: vec![

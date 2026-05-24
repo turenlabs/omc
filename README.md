@@ -588,7 +588,9 @@ Supported now:
   requirements, without writing the current OMC manifest, lockfile, or
   site-packages; real `pip install --target DIR` installs into the requested
   target through transient OMC state without writing the current manifest or
-  lockfile; `pip freeze -r requirements.txt` preserves requirement-file order
+  lockfile; `pip install --group GROUP` installs current-project
+  `pyproject.toml` dependency groups through OMC's existing pyproject
+  resolver; `pip freeze -r requirements.txt` preserves requirement-file order
   and comments while appending additional frozen packages; read-only
   `pip freeze --path DIR`, `pip list --path DIR`, and
   `pip inspect --path DIR` inspect target-directory `.dist-info` metadata,
