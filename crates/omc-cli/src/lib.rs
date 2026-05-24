@@ -1067,6 +1067,7 @@ enum PipCompatAction {
     List {
         format: PipListFormat,
         outdated: bool,
+        uptodate: bool,
         paths: Vec<PathBuf>,
         exclude: Vec<String>,
         exclude_editable: bool,
@@ -3403,6 +3404,7 @@ fn run_pip_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
         PipCompatAction::List {
             format,
             outdated,
+            uptodate,
             paths,
             exclude,
             exclude_editable,
@@ -3413,7 +3415,7 @@ fn run_pip_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
             no_index,
             allow_prereleases,
         } => {
-            if outdated {
+            if outdated || uptodate {
                 print_pip_outdated(
                     project_dir,
                     PipOutdatedOptions {
@@ -3421,6 +3423,7 @@ fn run_pip_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
                         paths: &paths,
                         exclude: &exclude,
                         not_required,
+                        uptodate,
                         index_url,
                         extra_index_urls,
                         find_links,
@@ -13016,6 +13019,7 @@ struct PipOutdatedOptions<'a> {
     paths: &'a [PathBuf],
     exclude: &'a [String],
     not_required: bool,
+    uptodate: bool,
     index_url: Option<String>,
     extra_index_urls: Vec<String>,
     find_links: Vec<String>,
@@ -13053,7 +13057,7 @@ fn print_pip_outdated(
         let Some(latest_version) = listing.versions.first() else {
             continue;
         };
-        if compare_pypi_versions(latest_version, &package.version).is_gt() {
+        if pip_version_status_matches(latest_version, &package.version, options.uptodate) {
             rows.push(PipOutdatedPackage {
                 name: package.name,
                 version: package.version,
@@ -13107,7 +13111,7 @@ fn print_locked_pip_outdated(
         let Some(latest_version) = listing.versions.first() else {
             continue;
         };
-        if compare_pypi_versions(latest_version, &package.version).is_gt() {
+        if pip_version_status_matches(latest_version, &package.version, options.uptodate) {
             rows.push(PipOutdatedPackage {
                 name: package.name.clone(),
                 version: package.version.clone(),
@@ -13117,6 +13121,15 @@ fn print_locked_pip_outdated(
         }
     }
     print_pip_outdated_rows(options.format, rows)
+}
+
+fn pip_version_status_matches(latest_version: &str, current_version: &str, uptodate: bool) -> bool {
+    let latest_is_newer = compare_pypi_versions(latest_version, current_version).is_gt();
+    if uptodate {
+        !latest_is_newer
+    } else {
+        latest_is_newer
+    }
 }
 
 fn print_pip_outdated_rows(
@@ -21418,6 +21431,7 @@ fn npm_list_ignored_equals_flag(arg: &str) -> bool {
 fn parse_pip_list_args(args: &[String]) -> Result<PipCompatAction, OmcRegistryError> {
     let mut format = PipListFormat::Columns;
     let mut outdated = false;
+    let mut uptodate = false;
     let mut index_url = None;
     let mut extra_index_urls = Vec::new();
     let mut find_links = Vec::new();
@@ -21442,6 +21456,8 @@ fn parse_pip_list_args(args: &[String]) -> Result<PipCompatAction, OmcRegistryEr
             format = parse_pip_list_format_value(value)?;
         } else if arg == "-o" || arg == "--outdated" {
             outdated = true;
+        } else if arg == "-u" || arg == "--uptodate" {
+            uptodate = true;
         } else if arg == "-i" || arg == "--index-url" {
             index += 1;
             let Some(url) = args.get(index) else {
@@ -21522,9 +21538,15 @@ fn parse_pip_list_args(args: &[String]) -> Result<PipCompatAction, OmcRegistryEr
         }
         index += 1;
     }
+    if outdated && uptodate {
+        return Err(OmcRegistryError::UnsupportedSpec(
+            "pip list cannot combine --outdated and --uptodate".to_owned(),
+        ));
+    }
     Ok(PipCompatAction::List {
         format,
         outdated,
+        uptodate,
         paths,
         exclude,
         exclude_editable,
@@ -26635,6 +26657,14 @@ version = "0.1.0"
     }
 
     #[test]
+    fn detects_pip_list_version_status() {
+        assert!(pip_version_status_matches("2.0.0", "1.0.0", false));
+        assert!(!pip_version_status_matches("1.0.0", "1.0.0", false));
+        assert!(!pip_version_status_matches("2.0.0", "1.0.0", true));
+        assert!(pip_version_status_matches("1.0.0", "1.0.0", true));
+    }
+
+    #[test]
     fn parses_pip_uninstall_and_freeze() {
         assert_eq!(
             parse_pip_compat_action(&args(&["--version"])).unwrap(),
@@ -26954,6 +26984,7 @@ resolved_commit = "0123456789abcdef0123456789abcdef01234567"
             PipCompatAction::List {
                 format: PipListFormat::Freeze,
                 outdated: false,
+                uptodate: false,
                 paths: Vec::new(),
                 exclude: Vec::new(),
                 exclude_editable: false,
@@ -26971,6 +27002,7 @@ resolved_commit = "0123456789abcdef0123456789abcdef01234567"
             PipCompatAction::List {
                 format: PipListFormat::Json,
                 outdated: false,
+                uptodate: false,
                 paths: Vec::new(),
                 exclude: Vec::new(),
                 exclude_editable: false,
@@ -26996,6 +27028,7 @@ resolved_commit = "0123456789abcdef0123456789abcdef01234567"
             PipCompatAction::List {
                 format: PipListFormat::Json,
                 outdated: false,
+                uptodate: false,
                 paths: vec![PathBuf::from("vendor")],
                 exclude: vec!["requests".to_owned()],
                 exclude_editable: true,
@@ -27010,7 +27043,7 @@ resolved_commit = "0123456789abcdef0123456789abcdef01234567"
         assert_eq!(
             parse_pip_compat_action(&args(&[
                 "list",
-                "--outdated",
+                "--uptodate",
                 "--format=json",
                 "--no-index",
                 "--find-links=wheelhouse",
@@ -27020,7 +27053,8 @@ resolved_commit = "0123456789abcdef0123456789abcdef01234567"
             .unwrap(),
             PipCompatAction::List {
                 format: PipListFormat::Json,
-                outdated: true,
+                outdated: false,
+                uptodate: true,
                 paths: Vec::new(),
                 exclude: Vec::new(),
                 exclude_editable: false,
@@ -27038,6 +27072,7 @@ resolved_commit = "0123456789abcdef0123456789abcdef01234567"
             PipCompatAction::List {
                 format: PipListFormat::Freeze,
                 outdated: true,
+                uptodate: false,
                 paths: Vec::new(),
                 exclude: Vec::new(),
                 exclude_editable: false,
@@ -27049,6 +27084,7 @@ resolved_commit = "0123456789abcdef0123456789abcdef01234567"
                 allow_prereleases: true,
             }
         );
+        assert!(parse_pip_compat_action(&args(&["list", "--outdated", "--uptodate"])).is_err());
         assert_eq!(
             parse_pip_compat_action(&args(&[
                 "index",

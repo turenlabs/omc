@@ -229,6 +229,7 @@ cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip inspect
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip debug --verbose
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip list --outdated --format=json
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip list --outdated --format=freeze
+cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip list --uptodate --format=json
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip index versions requests
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip hash ./dist/local_pkg-1.0.0-py3-none-any.whl
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip cache list
@@ -565,6 +566,7 @@ Supported now:
   `download`, `check`, `debug`, `help`, `inspect`, `show`, `hash`, `cache dir/list/remove/purge`,
   `wheel`, `index versions`, `config get/set/unset/list`, and
   `list --format=columns|freeze|json` flows, including `pip list --outdated`
+  and `pip list --uptodate`
   with columns, JSON, and freeze output,
   `-r`, index URL,
   constraints, extra-index, find-links, no-index,
