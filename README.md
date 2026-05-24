@@ -325,10 +325,12 @@ use pip-style `find-links`, `no-index`, and binary-format config/env values for 
 use pip install-mode `pip.conf`/env defaults such as `target`, `prefix`,
 `root`, `user`, `dry-run`, `report`, `no-deps`, `require-hashes`,
 `no-binary`, `only-binary`, `pre`, `platform`, `python-version`,
-`implementation`, `abi`, `PIP_TARGET`, `PIP_PREFIX`, `PIP_ROOT`,
-`PIP_USER`, `PIP_NO_DEPS`, `PIP_REQUIRE_HASHES`, `PIP_DRY_RUN`,
-`PIP_REPORT`, `PIP_PRE`, `PIP_PLATFORM`, `PIP_PYTHON_VERSION`,
-`PIP_IMPLEMENTATION`, and `PIP_ABI`
+`implementation`, `abi`, artifact directory defaults such as
+`download.dest`, `wheel.wheel-dir`, `PIP_DEST`, `PIP_DESTINATION_DIR`,
+`PIP_WHEEL_DIR`, `PIP_TARGET`, `PIP_PREFIX`, `PIP_ROOT`, `PIP_USER`,
+`PIP_NO_DEPS`, `PIP_REQUIRE_HASHES`, `PIP_DRY_RUN`, `PIP_REPORT`,
+`PIP_PRE`, `PIP_PLATFORM`, `PIP_PYTHON_VERSION`, `PIP_IMPLEMENTATION`, and
+`PIP_ABI`
 verify npm shasum/integrity and PyPI sha256 when the registry provides them
 use package-lock.json/npm-shrinkwrap.json/yarn.lock/pnpm-lock.yaml npm resolved tarball URLs and integrity hashes when present
 cache the source artifact under .omc/cache
@@ -436,7 +438,8 @@ Supported now:
 - global/project/user `pip.conf` install/download/wheel/index defaults for
   `target`, `prefix`, `root`, `user`, `dry-run`, `report`, `no-deps`,
   `require-hashes`, `no-binary`, `only-binary`, `pre`, `platform`,
-  `python-version`, `implementation`, and `abi`
+  `python-version`, `implementation`, `abi`, `download.dest`,
+  `download.destination-dir`, and `wheel.wheel-dir`
 - pip-style `PIP_REQUIREMENT` and `PIP_CONSTRAINT` requirement-file defaults
 - pip-style `PIP_INDEX_URL`, `PIP_EXTRA_INDEX_URL`, `PIP_FIND_LINKS`,
   `PIP_NO_INDEX`, `PIP_NO_BINARY`, and `PIP_ONLY_BINARY` support when no
@@ -445,7 +448,8 @@ Supported now:
   `PIP_REQUIRE_HASHES`, `PIP_PRE`, `PIP_PLATFORM`, `PIP_PYTHON_VERSION`,
   `PIP_IMPLEMENTATION`, and `PIP_ABI`, plus install-only defaults for
   `PIP_TARGET`, `PIP_PREFIX`, `PIP_ROOT`, `PIP_USER`, `PIP_DRY_RUN`, and
-  `PIP_REPORT`
+  `PIP_REPORT`, `pip download` defaults for `PIP_DEST` and
+  `PIP_DESTINATION_DIR`, and `pip wheel` defaults for `PIP_WHEEL_DIR`
 - credential-bearing PyPI simple-index URLs are used for downloads without
   recording those credentials in `omc.lock`
 - PyPI dependency range resolution with local `python3` `Requires-Python`

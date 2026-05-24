@@ -3943,19 +3943,31 @@ fn pip_isolated_requested(args: &[String]) -> bool {
 
 #[derive(Debug, Default)]
 struct PipCliConfigDefaults {
+    entries: Vec<(String, String)>,
     values: BTreeMap<String, Vec<String>>,
 }
 
 impl PipCliConfigDefaults {
     fn push(&mut self, key: String, value: String) {
+        self.entries.push((key.clone(), value.clone()));
         self.values.entry(key).or_default().push(value);
     }
 
     fn last(&self, key: &str) -> Option<&str> {
-        self.values
-            .get(key)
-            .and_then(|values| values.last())
-            .map(String::as_str)
+        self.entries
+            .iter()
+            .rev()
+            .find_map(|(entry_key, value)| (entry_key == key).then_some(value.as_str()))
+            .filter(|value| !value.trim().is_empty())
+    }
+
+    fn last_any(&self, keys: &[&str]) -> Option<&str> {
+        self.entries
+            .iter()
+            .rev()
+            .find_map(|(entry_key, value)| {
+                keys.contains(&entry_key.as_str()).then_some(value.as_str())
+            })
             .filter(|value| !value.trim().is_empty())
     }
 
@@ -4120,6 +4132,9 @@ fn pip_cli_default_config_key(key: &str) -> bool {
             | "python-version"
             | "implementation"
             | "abi"
+            | "dest"
+            | "destination-dir"
+            | "wheel-dir"
     )
 }
 
@@ -4161,6 +4176,19 @@ fn append_pip_default_args_from_config(
         append_pip_value_arg_from_config(values, args, "implementation", "--implementation");
         append_pip_token_args_from_config(values, args, "abi", "--abi");
     }
+
+    if command == "download" {
+        append_pip_value_arg_from_config_aliases(
+            values,
+            args,
+            &["dest", "destination-dir"],
+            "--dest",
+        );
+    }
+
+    if command == "wheel" {
+        append_pip_value_arg_from_config(values, args, "wheel-dir", "--wheel-dir");
+    }
 }
 
 fn append_pip_value_arg_from_config(
@@ -4170,6 +4198,17 @@ fn append_pip_value_arg_from_config(
     flag: &str,
 ) {
     if let Some(value) = values.last(key) {
+        args.push(format!("{flag}={value}"));
+    }
+}
+
+fn append_pip_value_arg_from_config_aliases(
+    values: &PipCliConfigDefaults,
+    args: &mut Vec<String>,
+    keys: &[&str],
+    flag: &str,
+) {
+    if let Some(value) = values.last_any(keys) {
         args.push(format!("{flag}={value}"));
     }
 }
@@ -4274,6 +4313,18 @@ fn pip_environment_default_args(command: &str) -> Vec<String> {
         }
         for abi in pip_config_env_tokens("abi") {
             args.push(format!("--abi={abi}"));
+        }
+    }
+
+    if command == "download" {
+        if let Some(dest) = pip_config_env("dest").or_else(|| pip_config_env("destination-dir")) {
+            args.push(format!("--dest={dest}"));
+        }
+    }
+
+    if command == "wheel" {
+        if let Some(wheel_dir) = pip_config_env("wheel-dir") {
+            args.push(format!("--wheel-dir={wheel_dir}"));
         }
     }
 
@@ -25943,6 +25994,9 @@ mod tests {
                 ("PIP_PYTHON_VERSION", Some("3.12")),
                 ("PIP_IMPLEMENTATION", Some("cp")),
                 ("PIP_ABI", Some("cp312 abi3")),
+                ("PIP_DEST", None),
+                ("PIP_DESTINATION_DIR", None),
+                ("PIP_WHEEL_DIR", None),
             ],
             || {
                 let merged =
@@ -26023,6 +26077,9 @@ mod tests {
                 ("PIP_PYTHON_VERSION", None),
                 ("PIP_IMPLEMENTATION", None),
                 ("PIP_ABI", None),
+                ("PIP_DEST", None),
+                ("PIP_DESTINATION_DIR", None),
+                ("PIP_WHEEL_DIR", None),
             ],
             || {
                 let action = parse_pip_compat_action(
@@ -26064,6 +26121,9 @@ mod tests {
                 ("PIP_PYTHON_VERSION", None),
                 ("PIP_IMPLEMENTATION", None),
                 ("PIP_ABI", None),
+                ("PIP_DEST", None),
+                ("PIP_DESTINATION_DIR", None),
+                ("PIP_WHEEL_DIR", None),
             ],
             || {
                 let merged =
@@ -26101,6 +26161,9 @@ mod tests {
                 ("PIP_PYTHON_VERSION", None),
                 ("PIP_IMPLEMENTATION", None),
                 ("PIP_ABI", None),
+                ("PIP_DEST", None),
+                ("PIP_DESTINATION_DIR", None),
+                ("PIP_WHEEL_DIR", None),
             ],
             || {
                 let merged =
@@ -26135,6 +26198,9 @@ mod tests {
                 ("PIP_PYTHON_VERSION", None),
                 ("PIP_IMPLEMENTATION", None),
                 ("PIP_ABI", None),
+                ("PIP_DEST", Some("wheelhouse")),
+                ("PIP_DESTINATION_DIR", None),
+                ("PIP_WHEEL_DIR", None),
             ],
             || {
                 let action = parse_pip_compat_action(
@@ -26150,6 +26216,41 @@ mod tests {
                     action.compatibility.platforms,
                     vec!["manylinux_2_28_aarch64".to_owned()]
                 );
+                assert_eq!(action.destination, PathBuf::from("wheelhouse"));
+            },
+        );
+
+        with_env_values(
+            &[
+                ("PIP_ISOLATED", None),
+                ("PIP_TARGET", None),
+                ("PIP_PREFIX", None),
+                ("PIP_ROOT", None),
+                ("PIP_USER", None),
+                ("PIP_DRY_RUN", None),
+                ("PIP_REPORT", None),
+                ("PIP_NO_DEPS", None),
+                ("PIP_REQUIRE_HASHES", None),
+                ("PIP_NO_BINARY", None),
+                ("PIP_ONLY_BINARY", None),
+                ("PIP_PRE", None),
+                ("PIP_PLATFORM", None),
+                ("PIP_PYTHON_VERSION", None),
+                ("PIP_IMPLEMENTATION", None),
+                ("PIP_ABI", None),
+                ("PIP_DEST", None),
+                ("PIP_DESTINATION_DIR", None),
+                ("PIP_WHEEL_DIR", Some("wheels")),
+            ],
+            || {
+                let action = parse_pip_compat_action(
+                    &pip_args_with_environment_defaults(&args(&["wheel", "idna"])).unwrap(),
+                )
+                .unwrap();
+                let PipCompatAction::Wheel(action) = action else {
+                    panic!("expected pip wheel action");
+                };
+                assert_eq!(action.destination, PathBuf::from("wheels"));
             },
         );
 
@@ -26171,6 +26272,9 @@ mod tests {
                 ("PIP_PYTHON_VERSION", Some("3.12")),
                 ("PIP_IMPLEMENTATION", Some("cp")),
                 ("PIP_ABI", Some("cp312")),
+                ("PIP_DEST", Some("wheelhouse")),
+                ("PIP_DESTINATION_DIR", Some("dist")),
+                ("PIP_WHEEL_DIR", Some("wheels")),
             ],
             || {
                 assert_eq!(
@@ -30466,7 +30570,7 @@ verdict = "accepted"
         .unwrap();
         fs::write(
             project.join("pip.conf"),
-            "[install]\ntarget = vendor\ndry-run = true\nreport = report.json\nonly-binary = idna\n[global]\nplatform = macosx_14_0_arm64 manylinux_2_28_x86_64\nabi = cp312 abi3\n",
+            "[install]\ntarget = vendor\ndry-run = true\nreport = report.json\nonly-binary = idna\n[download]\ndest = wheelhouse\n[wheel]\nwheel-dir = wheels\n[global]\nplatform = macosx_14_0_arm64 manylinux_2_28_x86_64\nabi = cp312 abi3\n",
         )
         .unwrap();
 
@@ -30495,6 +30599,9 @@ verdict = "accepted"
                 ("PIP_PYTHON_VERSION", None),
                 ("PIP_IMPLEMENTATION", None),
                 ("PIP_ABI", None),
+                ("PIP_DEST", None),
+                ("PIP_DESTINATION_DIR", None),
+                ("PIP_WHEEL_DIR", None),
             ],
             || {
                 let merged =
@@ -30566,6 +30673,60 @@ verdict = "accepted"
                 assert!(!action.no_deps);
                 assert!(!action.require_hashes);
                 assert!(!action.allow_prereleases);
+
+                let download =
+                    pip_args_with_config_defaults(&project, &args(&["download", "requests"]))
+                        .unwrap();
+                assert_eq!(
+                    download,
+                    args(&[
+                        "download",
+                        "--pre",
+                        "--platform=macosx_14_0_arm64",
+                        "--platform=manylinux_2_28_x86_64",
+                        "--abi=cp312",
+                        "--abi=abi3",
+                        "--dest=wheelhouse",
+                        "requests",
+                    ])
+                );
+                let action = parse_pip_compat_action(&download).unwrap();
+                let PipCompatAction::Download(action) = action else {
+                    panic!("expected pip download action");
+                };
+                assert_eq!(action.destination, PathBuf::from("wheelhouse"));
+
+                let wheel =
+                    pip_args_with_config_defaults(&project, &args(&["wheel", "requests"])).unwrap();
+                assert_eq!(
+                    wheel,
+                    args(&[
+                        "wheel",
+                        "--pre",
+                        "--platform=macosx_14_0_arm64",
+                        "--platform=manylinux_2_28_x86_64",
+                        "--abi=cp312",
+                        "--abi=abi3",
+                        "--wheel-dir=wheels",
+                        "requests",
+                    ])
+                );
+                let action = parse_pip_compat_action(&wheel).unwrap();
+                let PipCompatAction::Wheel(action) = action else {
+                    panic!("expected pip wheel action");
+                };
+                assert_eq!(action.destination, PathBuf::from("wheels"));
+
+                let overridden_download = pip_args_with_config_defaults(
+                    &project,
+                    &args(&["download", "--dest=cli-wheelhouse", "requests"]),
+                )
+                .unwrap();
+                let action = parse_pip_compat_action(&overridden_download).unwrap();
+                let PipCompatAction::Download(action) = action else {
+                    panic!("expected pip download action");
+                };
+                assert_eq!(action.destination, PathBuf::from("cli-wheelhouse"));
             },
         );
     }
