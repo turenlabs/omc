@@ -626,9 +626,9 @@ Supported now:
   understood for install/ci compatibility; `npm install <pkg>` saves into the
   root `package.json` when one exists, `npm update`/`npm up`/`npm upgrade`
   default to no `package.json` save unless an explicit save flag is passed,
-  `npm ci` can bootstrap an OMC lock/install from an existing
-  `package-lock.json` or `npm-shrinkwrap.json` before switching to strict
-  `omc.lock` installs,
+  `npm ci` treats an existing `package-lock.json` or `npm-shrinkwrap.json` as
+  the source of truth for the OMC lock/install and falls back to strict
+  `omc.lock` installs when no npm lockfile is present,
   `npm install -g <pkg>` and `npm remove -g <pkg>` use the configured npm
   prefix as an OMC-managed global project and mirror generated package bins
   into the prefix bin directory,

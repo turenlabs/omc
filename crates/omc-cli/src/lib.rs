@@ -3438,19 +3438,14 @@ enum NpmCiLockSource {
 }
 
 fn npm_ci_lock_source(project_dir: &Path) -> Result<NpmCiLockSource, OmcRegistryError> {
-    let has_project_lock = npm_project_has_npm_lockfile(project_dir);
-    let omc_lockfile = project_dir.join("omc.lock");
-    if !omc_lockfile.exists() {
-        if has_project_lock {
-            return Ok(NpmCiLockSource::ProjectLock);
-        }
+    if npm_project_has_npm_lockfile(project_dir) {
+        return Ok(NpmCiLockSource::ProjectLock);
+    }
+
+    if !project_dir.join("omc.lock").exists() {
         return Err(OmcRegistryError::UnsupportedSpec(
             "npm ci needs package-lock.json, npm-shrinkwrap.json, or omc.lock".to_owned(),
         ));
-    }
-
-    if has_project_lock && omc_lockfile_is_empty(&omc_lockfile)? {
-        return Ok(NpmCiLockSource::ProjectLock);
     }
 
     Ok(NpmCiLockSource::OmcLock)
@@ -3460,11 +3455,6 @@ fn npm_project_has_npm_lockfile(project_dir: &Path) -> bool {
     ["package-lock.json", "npm-shrinkwrap.json"]
         .iter()
         .any(|name| project_dir.join(name).exists())
-}
-
-fn omc_lockfile_is_empty(lockfile: &Path) -> Result<bool, OmcRegistryError> {
-    let lock = read_lockfile(lockfile)?;
-    Ok(lock.packages.is_empty() && lock.python_vcs.is_empty())
 }
 
 fn run_npm_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRegistryError> {
@@ -27964,6 +27954,90 @@ mod tests {
 
         let _ = fs::remove_dir_all(project);
         let _ = fs::remove_dir_all(package);
+    }
+
+    #[test]
+    fn npm_ci_package_lock_rehydrates_after_omit_bootstrap() {
+        let project = test_dir("npm-ci-omit-dev-bootstrap-project");
+        let prod = test_dir("npm-ci-omit-dev-bootstrap-prod");
+        fs::write(
+            prod.join("package.json"),
+            r#"{"name":"prod-tarball","version":"1.0.0"}"#,
+        )
+        .unwrap();
+        fs::write(prod.join("index.js"), "module.exports = 'prod';\n").unwrap();
+        let prod_tarball = project.join("prod-tarball-1.0.0.tgz");
+        let files = collect_npm_pack_files(&prod).unwrap();
+        write_npm_pack_tarball(&prod_tarball, &files).unwrap();
+
+        let dev = test_dir("npm-ci-omit-dev-bootstrap-dev");
+        fs::write(
+            dev.join("package.json"),
+            r#"{"name":"dev-tarball","version":"2.0.0"}"#,
+        )
+        .unwrap();
+        fs::write(dev.join("index.js"), "module.exports = 'dev';\n").unwrap();
+        let dev_tarball = project.join("dev-tarball-2.0.0.tgz");
+        let files = collect_npm_pack_files(&dev).unwrap();
+        write_npm_pack_tarball(&dev_tarball, &files).unwrap();
+
+        fs::write(
+            project.join("package.json"),
+            r#"{"name":"root","version":"1.0.0","dependencies":{"prod-tarball":"file:prod-tarball-1.0.0.tgz"},"devDependencies":{"dev-tarball":"file:dev-tarball-2.0.0.tgz"}}"#,
+        )
+        .unwrap();
+        fs::write(
+            project.join("package-lock.json"),
+            r#"{
+                "name": "root",
+                "version": "1.0.0",
+                "lockfileVersion": 3,
+                "requires": true,
+                "packages": {
+                    "": {
+                        "name": "root",
+                        "version": "1.0.0",
+                        "dependencies": {
+                            "prod-tarball": "file:prod-tarball-1.0.0.tgz"
+                        },
+                        "devDependencies": {
+                            "dev-tarball": "file:dev-tarball-2.0.0.tgz"
+                        }
+                    },
+                    "node_modules/prod-tarball": {
+                        "version": "1.0.0",
+                        "resolved": "file:prod-tarball-1.0.0.tgz"
+                    },
+                    "node_modules/dev-tarball": {
+                        "version": "2.0.0",
+                        "resolved": "file:dev-tarball-2.0.0.tgz",
+                        "dev": true
+                    }
+                }
+            }"#,
+        )
+        .unwrap();
+
+        let status = run_npm_compat(&project, &args(&["ci", "--omit=dev"])).unwrap();
+        assert_eq!(status, ExitCode::SUCCESS);
+        assert!(project.join("node_modules/prod-tarball/index.js").exists());
+        assert!(!project.join("node_modules/dev-tarball/index.js").exists());
+
+        let status = run_npm_compat(&project, &args(&["ci"])).unwrap();
+        assert_eq!(status, ExitCode::SUCCESS);
+        assert_eq!(
+            fs::read_to_string(project.join("node_modules/dev-tarball/index.js")).unwrap(),
+            "module.exports = 'dev';\n"
+        );
+        let lock = read_lockfile(project.join("omc.lock")).unwrap();
+        assert!(lock
+            .packages
+            .iter()
+            .any(|package| package.name == "dev-tarball" && package.version == "2.0.0"));
+
+        let _ = fs::remove_dir_all(project);
+        let _ = fs::remove_dir_all(prod);
+        let _ = fs::remove_dir_all(dev);
     }
 
     #[test]
