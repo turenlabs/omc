@@ -4114,6 +4114,72 @@ pub fn read_constraint_files(paths: &[PathBuf]) -> Result<ProjectRequirements> {
     Ok(discovered)
 }
 
+pub fn read_script_requirement_files(paths: &[PathBuf]) -> Result<ProjectRequirements> {
+    let mut discovered = ProjectRequirements::default();
+    for path in paths {
+        extend_project_requirements(&mut discovered, read_script_requirements(path)?);
+    }
+    Ok(discovered)
+}
+
+fn read_script_requirements(path: &Path) -> Result<ProjectRequirements> {
+    let content = fs::read_to_string(path)?;
+    let Some(metadata) = inline_script_metadata(&content)? else {
+        return Ok(ProjectRequirements::default());
+    };
+    let metadata = toml::from_str::<InlineScriptMetadata>(&metadata)?;
+    let base_dir = path.parent().unwrap_or_else(|| Path::new("."));
+    let mut requirements = ProjectRequirements::default();
+    let local_sources = BTreeMap::new();
+    for dependency in metadata.dependencies {
+        collect_pypi_project_requirement(
+            &mut requirements,
+            &dependency,
+            &BTreeSet::new(),
+            base_dir,
+            &local_sources,
+        )?;
+    }
+    Ok(requirements)
+}
+
+fn inline_script_metadata(content: &str) -> Result<Option<String>> {
+    let mut script_metadata = None;
+    let mut lines = content.lines();
+
+    while let Some(line) = lines.next() {
+        if line != "# /// script" {
+            continue;
+        }
+        let mut block = String::new();
+        let mut closed = false;
+        for line in lines.by_ref() {
+            if line == "# ///" {
+                closed = true;
+                break;
+            }
+            if let Some(content) = line.strip_prefix("# ") {
+                block.push_str(content);
+                block.push('\n');
+            } else if line == "#" {
+                block.push('\n');
+            } else {
+                break;
+            }
+        }
+        if !closed {
+            continue;
+        }
+        if script_metadata.replace(block).is_some() {
+            return Err(OmcRegistryError::UnsupportedRequirement(
+                "multiple inline script metadata blocks found".to_owned(),
+            ));
+        }
+    }
+
+    Ok(script_metadata)
+}
+
 fn read_pipfile_lock_requirements(
     path: &Path,
     include_dev_dependencies: bool,
@@ -15123,6 +15189,12 @@ enum PyProjectDependencyGroupItem {
     },
 }
 
+#[derive(Debug, Default, Deserialize)]
+struct InlineScriptMetadata {
+    #[serde(default)]
+    dependencies: Vec<String>,
+}
+
 #[derive(Debug, Deserialize)]
 struct PyProjectTool {
     poetry: Option<PoetryProject>,
@@ -17562,6 +17634,58 @@ packages:
                 .map(String::as_str),
             Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
         );
+    }
+
+    #[test]
+    fn reads_inline_script_metadata_requirements() {
+        let dir = tempfile::tempdir().unwrap();
+        let local = dir.path().join("vendor").join("localpkg");
+        fs::create_dir_all(&local).unwrap();
+        let script = dir.path().join("tool.py");
+        fs::write(
+            &script,
+            r#"
+# /// script
+# dependencies = [
+#   "idna==3.7",
+#   "localpkg @ ./vendor/localpkg",
+# ]
+# ///
+print("hi")
+"#,
+        )
+        .unwrap();
+
+        let discovered = read_script_requirement_files(&[script]).unwrap();
+        assert!(has_spec(&discovered.specs, "idna", "==3.7"));
+        assert_eq!(discovered.python_local_paths, vec![local.clone()]);
+        assert_eq!(
+            discovered.python_local_requirements,
+            vec![PythonLocalRequirement::new(local, BTreeSet::new())]
+        );
+    }
+
+    #[test]
+    fn rejects_multiple_inline_script_metadata_blocks() {
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("tool.py");
+        fs::write(
+            &script,
+            r#"
+# /// script
+# dependencies = ["idna==3.7"]
+# ///
+# /// script
+# dependencies = ["urllib3==2.2.1"]
+# ///
+"#,
+        )
+        .unwrap();
+
+        let error = read_script_requirement_files(&[script]).unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("multiple inline script metadata blocks found"));
     }
 
     #[test]

@@ -590,7 +590,9 @@ Supported now:
   target through transient OMC state without writing the current manifest or
   lockfile; `pip install --group GROUP` installs current-project
   `pyproject.toml` dependency groups through OMC's existing pyproject
-  resolver; `pip freeze -r requirements.txt` preserves requirement-file order
+  resolver; `pip install --requirements-from-script FILE` installs PEP 723
+  inline script dependencies through OMC; `pip freeze -r requirements.txt`
+  preserves requirement-file order
   and comments while appending additional frozen packages; read-only
   `pip freeze --path DIR`, `pip list --path DIR`, and
   `pip inspect --path DIR` inspect target-directory `.dist-info` metadata,

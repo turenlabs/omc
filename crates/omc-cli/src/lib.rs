@@ -26,21 +26,21 @@ use omc_registry::{
     read_npm_package_owners, read_npm_ping_with_userconfig, read_npm_profile, read_npm_search,
     read_npm_stars, read_npm_team_users, read_npm_teams, read_npm_token_list, read_npm_whoami,
     read_npm_workspace_packages, read_package_scripts, read_pip_config_snapshot,
-    read_pypi_available_versions, read_requirements_files, remove_locked_packages,
-    remove_manifest_dependency, remove_npm_dist_tag, remove_npm_org_user, remove_npm_team_user,
-    revoke_npm_access, revoke_npm_token, set_npm_access_mfa, set_npm_access_status,
-    set_npm_org_user, set_npm_profile_property, unpublish_npm_package, upload_pypi_distribution,
-    Behavior, Ecosystem, InstallReport, LinkOptions, LockedPackage, LockedPythonVcsDependency,
-    ManifestDependencyKind, NpmAccessMapResult, NpmAccessMutationResult, NpmAccessStatusResult,
-    NpmAccessToken, NpmDeprecateResult, NpmDistTagMutationResult, NpmOrgListResult,
-    NpmOrgMutationResult, NpmOwnerListResult, NpmOwnerMutationResult, NpmPackageTarball,
-    NpmPingResult, NpmProfileMutationResult, NpmProfileResult, NpmProvenanceBundle,
-    NpmPublishPackage, NpmPublishResult, NpmSearchPackage, NpmStarMutationResult, NpmStarsResult,
-    NpmTeamListResult, NpmTeamMutationResult, NpmTokenCreateOptions, NpmTokenCreateResult,
-    NpmTokenListResult, NpmTokenRevokeResult, NpmUnpublishResult, NpmWhoamiResult,
-    NpmWorkspacePackage, OmcLock, OmcRegistryError, PackageSpec, ProjectRequirements,
-    PypiBinaryMode, PypiCheckIssue, PypiUploadOptions, PypiUploadResult, PypiUploadSignature,
-    PythonLocalRequirement, PythonVcsRequirement, Verdict,
+    read_pypi_available_versions, read_requirements_files, read_script_requirement_files,
+    remove_locked_packages, remove_manifest_dependency, remove_npm_dist_tag, remove_npm_org_user,
+    remove_npm_team_user, revoke_npm_access, revoke_npm_token, set_npm_access_mfa,
+    set_npm_access_status, set_npm_org_user, set_npm_profile_property, unpublish_npm_package,
+    upload_pypi_distribution, Behavior, Ecosystem, InstallReport, LinkOptions, LockedPackage,
+    LockedPythonVcsDependency, ManifestDependencyKind, NpmAccessMapResult, NpmAccessMutationResult,
+    NpmAccessStatusResult, NpmAccessToken, NpmDeprecateResult, NpmDistTagMutationResult,
+    NpmOrgListResult, NpmOrgMutationResult, NpmOwnerListResult, NpmOwnerMutationResult,
+    NpmPackageTarball, NpmPingResult, NpmProfileMutationResult, NpmProfileResult,
+    NpmProvenanceBundle, NpmPublishPackage, NpmPublishResult, NpmSearchPackage,
+    NpmStarMutationResult, NpmStarsResult, NpmTeamListResult, NpmTeamMutationResult,
+    NpmTokenCreateOptions, NpmTokenCreateResult, NpmTokenListResult, NpmTokenRevokeResult,
+    NpmUnpublishResult, NpmWhoamiResult, NpmWorkspacePackage, OmcLock, OmcRegistryError,
+    PackageSpec, ProjectRequirements, PypiBinaryMode, PypiCheckIssue, PypiUploadOptions,
+    PypiUploadResult, PypiUploadSignature, PythonLocalRequirement, PythonVcsRequirement, Verdict,
 };
 use sha2::{Digest, Sha256, Sha384, Sha512};
 
@@ -1139,6 +1139,7 @@ struct PipInstallAction {
     specs: Vec<String>,
     requirements: Vec<PathBuf>,
     constraints: Vec<PathBuf>,
+    script_requirements: Vec<PathBuf>,
     groups: Vec<String>,
     report: Option<PathBuf>,
     dry_run: bool,
@@ -3264,6 +3265,7 @@ fn run_pip_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
                 specs,
                 requirements,
                 constraints,
+                script_requirements,
                 groups,
                 report,
                 dry_run: _,
@@ -3284,7 +3286,7 @@ fn run_pip_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
                 allow_all_host,
             } = action;
             let allowed_capabilities = parse_grants(&allow, allow_all_host)?;
-            if specs.is_empty() && archive_references.is_empty() {
+            if specs.is_empty() && archive_references.is_empty() && script_requirements.is_empty() {
                 let mut options = LinkOptions::new(project_dir);
                 options.allowed_capabilities = allowed_capabilities;
                 options.requirement_files = absolutize_paths(project_dir, requirements);
@@ -3337,6 +3339,13 @@ fn run_pip_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
                     &archive_references,
                     &mut options,
                 )?);
+                if !script_requirements.is_empty() {
+                    let requirements = read_script_requirement_files(&absolutize_paths(
+                        project_dir,
+                        script_requirements,
+                    ))?;
+                    apply_pypi_install_requirements(&mut options, &mut specs, requirements);
+                }
                 let mut all_reports = Vec::new();
                 for spec in &specs {
                     all_reports.extend(add_package_graph(spec, &options)?);
@@ -4006,6 +4015,7 @@ fn run_pip_install_dry_run(
         specs,
         requirements,
         constraints,
+        script_requirements,
         groups,
         report,
         dry_run: _,
@@ -4061,6 +4071,11 @@ fn run_pip_install_dry_run(
     if !constraints.is_empty() {
         let constraints = read_constraint_files(&absolutize_paths(project_dir, constraints))?;
         apply_pypi_install_requirements(&mut options, &mut resolved_specs, constraints);
+    }
+    if !script_requirements.is_empty() {
+        let requirements =
+            read_script_requirement_files(&absolutize_paths(project_dir, script_requirements))?;
+        apply_pypi_install_requirements(&mut options, &mut resolved_specs, requirements);
     }
     let local_path_count =
         options.python_local_paths.len() + options.python_local_requirements.len();
@@ -4184,6 +4199,7 @@ fn run_pip_install_target(
         specs,
         requirements,
         constraints,
+        script_requirements,
         groups,
         report,
         dry_run: _,
@@ -4237,8 +4253,14 @@ fn run_pip_install_target(
         &archive_references,
         &mut options,
     )?);
+    if !script_requirements.is_empty() {
+        let requirements =
+            read_script_requirement_files(&absolutize_paths(project_dir, script_requirements))?;
+        apply_pypi_install_requirements(&mut options, &mut resolved_specs, requirements);
+    }
     let requested_count = resolved_specs.len()
         + options.requirement_files.len()
+        + options.python_local_paths.len()
         + options.python_local_requirements.len()
         + options.python_vcs_requirements.len()
         + options.project_extras.len();
@@ -4950,7 +4972,7 @@ fn pip_help_text(topic: Option<&str>) -> String {
             "pip install [<requirement>...]",
             &[
                 "Resolve, verify, lock, and install PyPI packages with OMC.",
-                "Supports requirements/constraints, indexes, find-links, no-index, hashes, no-deps, install reports, dry-runs, binary policy, target dirs, local archives, local directories, editable paths, and editable VCS requirements.",
+                "Supports requirements/constraints, inline script requirements, indexes, find-links, no-index, hashes, no-deps, install reports, dry-runs, binary policy, target dirs, local archives, local directories, editable paths, and editable VCS requirements.",
             ],
         ),
         Some("download") => pip_command_help(
@@ -21338,6 +21360,7 @@ fn parse_pip_freeze_args(args: &[String]) -> Result<PipFreezeAction, OmcRegistry
 fn parse_pip_install_args(args: &[String]) -> Result<PipCompatAction, OmcRegistryError> {
     let mut requirements = Vec::new();
     let mut constraints = Vec::new();
+    let mut script_requirements = Vec::new();
     let mut report = None;
     let mut dry_run = false;
     let mut index_url = None;
@@ -21378,6 +21401,16 @@ fn parse_pip_install_args(args: &[String]) -> Result<PipCompatAction, OmcRegistr
             constraints.push(PathBuf::from(path));
         } else if let Some(path) = arg.strip_prefix("--constraint=") {
             constraints.push(PathBuf::from(path));
+        } else if arg == "--requirements-from-script" {
+            index += 1;
+            let Some(path) = args.get(index) else {
+                return Err(OmcRegistryError::UnsupportedSpec(format!(
+                    "{arg} needs a path"
+                )));
+            };
+            script_requirements.push(PathBuf::from(path));
+        } else if let Some(path) = arg.strip_prefix("--requirements-from-script=") {
+            script_requirements.push(PathBuf::from(path));
         } else if arg == "--report" {
             index += 1;
             let Some(path) = args.get(index) else {
@@ -21556,6 +21589,7 @@ fn parse_pip_install_args(args: &[String]) -> Result<PipCompatAction, OmcRegistr
         specs: positionals.into_iter().filter(|spec| spec != ".").collect(),
         requirements,
         constraints,
+        script_requirements,
         groups,
         report,
         dry_run,
@@ -26892,6 +26926,8 @@ verdict = "accepted"
             "requirements.txt",
             "-c",
             "constraints.txt",
+            "--requirements-from-script",
+            "tool.py",
             "--index-url",
             "https://mirror.example/simple",
             "--extra-index-url=https://extra.example/simple",
@@ -26953,6 +26989,7 @@ verdict = "accepted"
                 specs: vec!["requests==2.32.3".to_owned()],
                 requirements: vec![PathBuf::from("requirements.txt")],
                 constraints: vec![PathBuf::from("constraints.txt")],
+                script_requirements: vec![PathBuf::from("tool.py")],
                 groups: vec!["dev".to_owned(), "test".to_owned()],
                 report: Some(PathBuf::from("install-report.json")),
                 dry_run: true,
@@ -27113,6 +27150,7 @@ verdict = "accepted"
                 specs: vec!["requests==2.32.3".to_owned()],
                 requirements: Vec::new(),
                 constraints: Vec::new(),
+                script_requirements: Vec::new(),
                 groups: Vec::new(),
                 report: None,
                 dry_run: false,
@@ -27153,6 +27191,7 @@ verdict = "accepted"
                 specs: Vec::new(),
                 requirements: Vec::new(),
                 constraints: Vec::new(),
+                script_requirements: Vec::new(),
                 groups: Vec::new(),
                 report: None,
                 dry_run: false,
@@ -27212,6 +27251,7 @@ version = "0.1.0"
                 specs: Vec::new(),
                 requirements: Vec::new(),
                 constraints: Vec::new(),
+                script_requirements: Vec::new(),
                 groups: Vec::new(),
                 report: None,
                 dry_run: true,
@@ -27287,6 +27327,52 @@ version = "0.1.0"
             fs::read_to_string(project.join(".omc").join("python").join("local-paths")).unwrap();
         assert!(local_paths.contains("groupdep/src"));
         assert!(local_paths.contains("src"));
+        fs::remove_dir_all(project).unwrap();
+    }
+
+    #[test]
+    fn pip_install_requirements_from_script_uses_inline_metadata() {
+        let project = test_dir("pip-install-script-req-project");
+        let local = project.join("vendor").join("scriptdep");
+        fs::create_dir_all(local.join("src").join("scriptdep")).unwrap();
+        fs::write(local.join("src").join("scriptdep").join("__init__.py"), "").unwrap();
+        fs::write(
+            local.join("pyproject.toml"),
+            r#"
+[project]
+name = "scriptdep"
+version = "0.1.0"
+"#,
+        )
+        .unwrap();
+        fs::write(
+            project.join("tool.py"),
+            r#"
+# /// script
+# dependencies = [
+#   "scriptdep @ ./vendor/scriptdep",
+# ]
+# ///
+print("ok")
+"#,
+        )
+        .unwrap();
+
+        let status = run_pip_compat(
+            &project,
+            &args(&[
+                "install",
+                "--requirements-from-script",
+                "tool.py",
+                "--no-index",
+            ]),
+        )
+        .unwrap();
+
+        assert_eq!(status, ExitCode::SUCCESS);
+        let local_paths =
+            fs::read_to_string(project.join(".omc").join("python").join("local-paths")).unwrap();
+        assert!(local_paths.contains("vendor/scriptdep/src"));
         fs::remove_dir_all(project).unwrap();
     }
 
@@ -27386,6 +27472,7 @@ version = "0.1.0"
                 specs: Vec::new(),
                 requirements: Vec::new(),
                 constraints: Vec::new(),
+                script_requirements: Vec::new(),
                 groups: Vec::new(),
                 report: None,
                 dry_run: false,
