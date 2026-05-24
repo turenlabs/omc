@@ -355,6 +355,9 @@ enum NpmCompatAction {
         specs: Vec<String>,
         allow: Vec<String>,
         allow_all_host: bool,
+        workspaces: Vec<String>,
+        all_workspaces: bool,
+        include_workspace_root: bool,
     },
     Maintenance {
         command: NpmMaintenanceCommand,
@@ -2576,6 +2579,54 @@ fn run_npm_install_workspace_compat(
     Ok(ExitCode::SUCCESS)
 }
 
+fn run_npm_remove_workspace_compat(
+    project_dir: &Path,
+    specs: &[String],
+    allow: &[String],
+    allow_all_host: bool,
+    workspaces: &[String],
+    all_workspaces: bool,
+    include_workspace_root: bool,
+) -> Result<ExitCode, OmcRegistryError> {
+    let targets = npm_script_target_dirs(
+        project_dir,
+        workspaces,
+        all_workspaces,
+        include_workspace_root,
+    )?;
+    if targets.is_empty() {
+        return Err(OmcRegistryError::UnsupportedSpec(
+            "npm remove workspace selection did not match any package".to_owned(),
+        ));
+    }
+
+    let specs = parse_package_specs(specs, Some(Ecosystem::Npm))?;
+    let mut removed = Vec::new();
+    for spec in &specs {
+        let removed_from_manifest = remove_manifest_dependency(project_dir, spec)?;
+        let mut removed_from_package_json = false;
+        for target in &targets {
+            removed_from_package_json |=
+                remove_npm_package_json_dependency_from_package_dir(target, &spec.name)?;
+        }
+        if !removed_from_manifest && !removed_from_package_json {
+            return Err(OmcRegistryError::UnsupportedSpec(format!(
+                "dependency `{}` is not in omc.toml or selected workspace package.json",
+                spec.package_key(),
+            )));
+        }
+        removed.push(spec.package_key());
+    }
+
+    let mut options = LinkOptions::new(project_dir);
+    options.allowed_capabilities = parse_grants(allow, allow_all_host)?;
+    options.discover_project_requirements = true;
+    let install = install_project(&options)?;
+    println!("removed {}", removed.join(", "));
+    print_install_report(&install);
+    Ok(ExitCode::SUCCESS)
+}
+
 fn run_npm_link_compat(
     project_dir: &Path,
     action: NpmLinkAction,
@@ -2996,7 +3047,21 @@ fn run_npm_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRe
             specs,
             allow,
             allow_all_host,
+            workspaces,
+            all_workspaces,
+            include_workspace_root,
         } => {
+            if !workspaces.is_empty() || all_workspaces || include_workspace_root {
+                return run_npm_remove_workspace_compat(
+                    project_dir,
+                    &specs,
+                    &allow,
+                    allow_all_host,
+                    &workspaces,
+                    all_workspaces,
+                    include_workspace_root,
+                );
+            }
             remove_specs(
                 project_dir,
                 &specs,
@@ -10395,7 +10460,14 @@ fn remove_root_npm_package_json_dependency(
     project_dir: &Path,
     name: &str,
 ) -> Result<bool, OmcRegistryError> {
-    let package_json = project_dir.join("package.json");
+    remove_npm_package_json_dependency_from_package_dir(project_dir, name)
+}
+
+fn remove_npm_package_json_dependency_from_package_dir(
+    package_dir: &Path,
+    name: &str,
+) -> Result<bool, OmcRegistryError> {
+    let package_json = package_dir.join("package.json");
     if !package_json.exists() {
         return Ok(false);
     }
@@ -13035,9 +13107,12 @@ fn parse_npm_compat_action(args: &[String]) -> Result<NpmCompatAction, OmcRegist
             let CommonCompatFlags {
                 allow,
                 allow_all_host,
+                workspaces,
+                all_workspaces,
+                include_workspace_root,
                 positionals,
                 ..
-            } = parse_common_compat_flags(&args[1..], false)?;
+            } = parse_common_compat_flags(&args[1..], true)?;
             if positionals.is_empty() {
                 return Err(OmcRegistryError::UnsupportedSpec(
                     "npm remove needs at least one package".to_owned(),
@@ -13047,6 +13122,9 @@ fn parse_npm_compat_action(args: &[String]) -> Result<NpmCompatAction, OmcRegist
                 specs: positionals,
                 allow,
                 allow_all_host,
+                workspaces,
+                all_workspaces,
+                include_workspace_root,
             })
         }
         "prune" => {
@@ -20947,6 +21025,39 @@ mod tests {
     }
 
     #[test]
+    fn npm_remove_updates_selected_workspace_package_json_dependencies() {
+        let project = test_dir("npm-remove-workspace-package-json-project");
+        fs::create_dir_all(project.join("packages/lib")).unwrap();
+        fs::write(
+            project.join("package.json"),
+            r#"{"name":"root","version":"1.0.0","workspaces":["packages/*"]}"#,
+        )
+        .unwrap();
+        fs::write(
+            project.join("packages/lib/package.json"),
+            r#"{"name":"@demo/lib","version":"1.0.0","dependencies":{"left-pad":"1.3.0"}}"#,
+        )
+        .unwrap();
+
+        let status = run_npm_compat(
+            &project,
+            &args(&["remove", "left-pad", "--workspace", "@demo/lib"]),
+        )
+        .unwrap();
+
+        assert_eq!(status, ExitCode::SUCCESS);
+        let package_json = read_npm_pkg_json(&project.join("packages/lib/package.json")).unwrap();
+        assert!(package_json
+            .get("dependencies")
+            .and_then(serde_json::Value::as_object)
+            .is_some_and(|dependencies| !dependencies.contains_key("left-pad")));
+        let lock = read_lockfile(project.join("omc.lock")).unwrap();
+        assert!(lock.packages.is_empty());
+
+        let _ = fs::remove_dir_all(project);
+    }
+
+    #[test]
     fn parses_direct_compat_project_dir_prefix() {
         assert_eq!(
             parse_direct_compat_invocation(
@@ -21554,6 +21665,25 @@ mod tests {
                 workspaces: vec!["@demo/lib".to_owned()],
                 all_workspaces: false,
                 include_workspace_root: true,
+            }
+        );
+
+        assert_eq!(
+            parse_npm_compat_action(&args(&[
+                "remove",
+                "left-pad",
+                "--workspace",
+                "@demo/lib",
+                "--include-workspace-root=false",
+            ]))
+            .unwrap(),
+            NpmCompatAction::Remove {
+                specs: vec!["left-pad".to_owned()],
+                allow: Vec::new(),
+                allow_all_host: false,
+                workspaces: vec!["@demo/lib".to_owned()],
+                all_workspaces: false,
+                include_workspace_root: false,
             }
         );
 
