@@ -8264,7 +8264,7 @@ fn npm_help_text(topic: Option<&str>) -> String {
             &[
                 "Resolve, verify, lock, and install npm packages with OMC.",
                 "Aliases: i, add, update, up, upgrade, udpate.",
-                "Common flags: --save, --no-save, --save-dev, --save-optional, --save-peer, --only=prod|dev, --also=dev, --no-optional, --omit=dev|optional|peer, --include=dev|optional|peer, --workspace, --workspaces, --include-workspace-root, --package-lock-only, --prefer-offline, --prefer-online, --dry-run, --json, --registry, --allow, --allow-all-host.",
+                "Common flags: --save, --no-save, --save-dev, --save-optional, --save-peer, --only=prod|dev, --also=dev, --no-optional, --omit=dev|optional|peer, --include=dev|optional|peer, --workspace, --workspaces, --include-workspace-root, --package-lock-only, --prefer-offline, --prefer-online, --dry-run, --json, --tag, --install-links, --registry, --allow, --allow-all-host.",
                 "Direct local inputs are supported for .tgz archives and local package directories.",
                 "Workspace installs save dependencies into selected workspace package.json files and install the root OMC graph.",
             ],
@@ -22380,12 +22380,60 @@ fn npm_global_arg_supported_by_command(command: &str, arg: &str) -> bool {
     if matches!(arg, "--scope") || arg.starts_with("--scope=") {
         return matches!(command, "login" | "adduser" | "add-user" | "logout");
     }
-    if matches!(arg, "--tag" | "--access" | "--provenance-file")
-        || arg.starts_with("--tag=")
+    if matches!(arg, "--tag") || arg.starts_with("--tag=") {
+        return matches!(
+            command,
+            "install"
+                | "i"
+                | "in"
+                | "ins"
+                | "inst"
+                | "insta"
+                | "instal"
+                | "isnt"
+                | "isnta"
+                | "isntal"
+                | "isntall"
+                | "add"
+                | "update"
+                | "up"
+                | "upgrade"
+                | "udpate"
+                | "publish"
+                | "dist-tag"
+                | "dist-tags"
+        );
+    }
+    if matches!(arg, "--access" | "--provenance-file")
         || arg.starts_with("--access=")
         || arg.starts_with("--provenance-file=")
     {
         return matches!(command, "publish" | "dist-tag" | "dist-tags");
+    }
+    if matches!(arg, "--install-links" | "--no-install-links")
+        || arg.starts_with("--install-links=")
+    {
+        return matches!(
+            command,
+            "install"
+                | "i"
+                | "in"
+                | "ins"
+                | "inst"
+                | "insta"
+                | "instal"
+                | "isnt"
+                | "isnta"
+                | "isntal"
+                | "isntall"
+                | "add"
+                | "update"
+                | "up"
+                | "upgrade"
+                | "udpate"
+                | "link"
+                | "ln"
+        );
     }
     if matches!(
         arg,
@@ -22795,6 +22843,8 @@ fn npm_global_preserved_bool_flag(arg: &str) -> bool {
             | "--workspaces"
             | "--include-workspace-root"
             | "--package-lock-only"
+            | "--install-links"
+            | "--no-install-links"
             | "--long"
             | "-l"
             | "--expect-results"
@@ -22885,6 +22935,7 @@ fn npm_global_preserved_equals_flag(arg: &str) -> bool {
         "-w=",
         "--workspaces=",
         "--include-workspace-root=",
+        "--install-links=",
         "--otp=",
         "--auth-type=",
         "--shell=",
@@ -23428,6 +23479,7 @@ fn parse_npm_install_args(
     let mut local_paths = Vec::new();
     let mut global = false;
     let mut dry_run = false;
+    let mut npm_tag = None;
     let mut filtered = Vec::new();
     let mut index = 0;
     while index < args.len() {
@@ -23436,6 +23488,16 @@ fn parse_npm_install_args(
             dry_run = value;
         } else if arg == "--no-dry-run" {
             dry_run = false;
+        } else if arg == "--tag" {
+            index += 1;
+            let Some(tag) = args.get(index) else {
+                return Err(OmcRegistryError::UnsupportedSpec(
+                    "--tag needs a value".to_owned(),
+                ));
+            };
+            npm_tag = Some(normalize_npm_install_tag(tag)?);
+        } else if let Some(tag) = arg.strip_prefix("--tag=") {
+            npm_tag = Some(normalize_npm_install_tag(tag)?);
         } else if let Some(value) = npm_global_location_flag_value(args, &mut index, arg)? {
             global = value;
         } else if is_npm_archive_arg(arg) {
@@ -23479,6 +23541,7 @@ fn parse_npm_install_args(
         include_workspace_root,
         positionals,
     } = parse_common_compat_flags(&filtered, true)?;
+    let specs = npm_install_specs_with_tag(positionals, npm_tag.as_deref())?;
 
     let explicit_no_save = save_explicit && !save;
     let save = if npm_update_defaults_to_no_save(command) && !save_explicit {
@@ -23489,7 +23552,7 @@ fn parse_npm_install_args(
     let package_lock = (package_lock || lock_only) && !explicit_no_save;
 
     Ok(NpmCompatAction::Install {
-        specs: positionals,
+        specs,
         archive_references,
         local_paths,
         global,
@@ -23516,6 +23579,42 @@ fn parse_npm_install_args(
 
 fn npm_update_defaults_to_no_save(command: &str) -> bool {
     matches!(command, "update" | "up" | "upgrade" | "udpate")
+}
+
+fn normalize_npm_install_tag(tag: &str) -> Result<String, OmcRegistryError> {
+    let tag = tag.trim();
+    if tag.is_empty() {
+        return Err(OmcRegistryError::UnsupportedSpec(
+            "npm install --tag cannot be empty".to_owned(),
+        ));
+    }
+    Ok(tag.to_owned())
+}
+
+fn npm_install_specs_with_tag(
+    specs: Vec<String>,
+    tag: Option<&str>,
+) -> Result<Vec<String>, OmcRegistryError> {
+    let Some(tag) = tag else {
+        return Ok(specs);
+    };
+    specs
+        .into_iter()
+        .map(|spec| npm_install_spec_with_tag(spec, tag))
+        .collect()
+}
+
+fn npm_install_spec_with_tag(spec: String, tag: &str) -> Result<String, OmcRegistryError> {
+    let parsed = parse_package_spec(&spec, Some(Ecosystem::Npm))?;
+    if parsed.ecosystem != Ecosystem::Npm || parsed.version.is_some() || parsed.direct_url.is_some()
+    {
+        return Ok(spec);
+    }
+    if package_spec_has_ecosystem_prefix(&spec) {
+        Ok(format!("npm:{}@{tag}", parsed.name))
+    } else {
+        Ok(format!("{spec}@{tag}"))
+    }
 }
 
 fn npm_bool_flag_value(arg: &str, flag: &str) -> Option<bool> {
@@ -30808,6 +30907,8 @@ fn ignored_compat_flag(npm_mode: bool, arg: &str) -> bool {
                 | "--engine-strict=false"
                 | "--prefer-offline"
                 | "--prefer-online"
+                | "--install-links"
+                | "--no-install-links"
         ) || ignored_npm_equals_flag(arg)
     } else {
         arg == "-y"
@@ -30828,6 +30929,7 @@ fn ignored_npm_equals_flag(arg: &str) -> bool {
         "--loglevel=",
         "--progress=",
         "--color=",
+        "--install-links=",
     ]
     .iter()
     .any(|prefix| arg.starts_with(prefix))
@@ -35406,6 +35508,36 @@ verdict = "accepted"
         assert_eq!(specs, vec!["left-pad".to_owned()]);
         assert!(dry_run);
         assert!(json);
+
+        let action =
+            parse_npm_compat_action(&args(&["install", "--tag", "beta", "left-pad"])).unwrap();
+        let NpmCompatAction::Install { specs, .. } = action else {
+            panic!("expected npm install action");
+        };
+        assert_eq!(specs, vec!["left-pad@beta".to_owned()]);
+
+        let action = parse_npm_compat_action(&args(&[
+            "--tag=beta",
+            "install",
+            "@scope/pkg",
+            "left-pad@1.3.0",
+        ]))
+        .unwrap();
+        let NpmCompatAction::Install { specs, .. } = action else {
+            panic!("expected npm install action");
+        };
+        assert_eq!(
+            specs,
+            vec!["@scope/pkg@beta".to_owned(), "left-pad@1.3.0".to_owned()]
+        );
+
+        let action =
+            parse_npm_compat_action(&args(&["install", "--install-links=false", "left-pad"]))
+                .unwrap();
+        let NpmCompatAction::Install { specs, .. } = action else {
+            panic!("expected npm install action");
+        };
+        assert_eq!(specs, vec!["left-pad".to_owned()]);
 
         let action =
             parse_npm_compat_action(&args(&["--json", "install", "--dry-run", "left-pad"]))

@@ -129,6 +129,8 @@ cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm install left-p
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm install --registry https://registry.npmjs.org left-pad@1.3.0
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm install --dry-run left-pad@1.3.0
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm install --dry-run --json left-pad@1.3.0
+cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm install --tag beta some-package
+cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm install --install-links=false ./local-package
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/local-util npm link
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm link local-util
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm link ../local-util --save-dev
@@ -652,9 +654,10 @@ Supported now:
   package specs and explicit `--package` specs are installed into a temporary
   verified OMC project before dispatching to the requested executable; `--no-save`,
   `--save-exact`, `--save-bundle`, `--save-prefix`, `--package-lock-only`,
-  `--package-lock=false`, `--dry-run`, `--json`, `--registry`, `--prefer-offline`,
+  `--package-lock=false`, `--dry-run`, `--json`, `--tag`, `--registry`, `--prefer-offline`,
   `--prefer-online`, `--silent`, `--loglevel=...`, `--no-progress`, `--color=false`,
-  `--only=...`, `--also=...`, `--no-optional`, `--optional=false`, `--omit=...`, `--include=...`, and common audit/fund/peer/install-strategy flags are
+  `--only=...`, `--also=...`, `--no-optional`, `--optional=false`, `--omit=...`,
+  `--include=...`, `--install-links`, and common audit/fund/peer/install-strategy flags are
   understood for install/ci compatibility, with npm-shaped `--json` summaries
   for install, lock-only, dry-run, and ci flows; `npm install <pkg>` saves into the
   root `package.json` when one exists, `npm update`/`npm up`/`npm upgrade`

@@ -13922,8 +13922,8 @@ fn is_python_sdist_filename(filename: &str) -> bool {
 }
 
 fn choose_npm_version(name: &str, requirement: &str, root: &NpmRoot) -> Result<String> {
-    if requirement == "latest" {
-        return Ok(root.dist_tags.latest.clone());
+    if let Some(version) = root.dist_tags.get(requirement) {
+        return Ok(version.to_owned());
     }
 
     root.versions
@@ -17117,6 +17117,18 @@ struct NpmRoot {
 #[derive(Debug, Deserialize)]
 struct NpmDistTags {
     latest: String,
+    #[serde(flatten)]
+    tags: BTreeMap<String, String>,
+}
+
+impl NpmDistTags {
+    fn get(&self, tag: &str) -> Option<&str> {
+        if tag == "latest" {
+            Some(&self.latest)
+        } else {
+            self.tags.get(tag).map(String::as_str)
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -17402,6 +17414,27 @@ mod tests {
         assert!(!npm_version_satisfies("1.3.0", "~1.2.0"));
         assert!(npm_version_satisfies("1.1.3", "^1.1.0,1.1.3"));
         assert!(!npm_version_satisfies("1.3.0", "^1.1.0,1.1.3"));
+    }
+
+    #[test]
+    fn resolves_npm_dist_tag_requirements() {
+        let root: NpmRoot = serde_json::from_value(serde_json::json!({
+            "dist-tags": {
+                "latest": "2.0.0",
+                "beta": "3.0.0-beta.1"
+            },
+            "versions": {}
+        }))
+        .unwrap();
+
+        assert_eq!(
+            choose_npm_version("demo", "latest", &root).unwrap(),
+            "2.0.0"
+        );
+        assert_eq!(
+            choose_npm_version("demo", "beta", &root).unwrap(),
+            "3.0.0-beta.1"
+        );
     }
 
     #[test]
