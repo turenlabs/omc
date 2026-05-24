@@ -15211,34 +15211,19 @@ impl SourceProfiler {
             }
         }
 
-        for pattern in [
-            "writefilesync",
-            "writefile(",
-            "createwritestream",
-            ".write(",
-        ] {
+        for pattern in ["writefilesync", "writefile(", "createwritestream"] {
             if lower.contains(pattern) {
                 self.add(CapabilityKind::FsWrite, "*", path, pattern);
             }
         }
+        if contains_python_file_write(content) {
+            self.add(CapabilityKind::FsWrite, "*", path, "open write mode");
+        }
 
         let http_hosts = extract_http_hosts(content);
         if http_hosts.is_empty() {
-            for pattern in [
-                "fetch(",
-                "require(\"http\")",
-                "require('http')",
-                "require(\"https\")",
-                "require('https')",
-                "axios",
-                "requests.",
-                "urllib.request",
-                "httpx.",
-                "socket.",
-            ] {
-                if lower.contains(pattern) {
-                    self.add(CapabilityKind::HttpRequest, "*", path, pattern);
-                }
+            if let Some(evidence) = http_client_usage_evidence(&lower) {
+                self.add(CapabilityKind::HttpRequest, "*", path, evidence);
             }
         } else {
             for host in http_hosts {
@@ -15394,6 +15379,171 @@ fn parse_quoted_literal(content: &str) -> Option<(String, usize)> {
     None
 }
 
+fn contains_python_file_write(content: &str) -> bool {
+    let lower = content.to_ascii_lowercase();
+    let mut offset = 0;
+    while let Some(index) = lower[offset..].find("open") {
+        let start = offset + index;
+        let after_name = start + "open".len();
+        if is_identifier_boundary(&lower, start)
+            && lower[after_name..]
+                .chars()
+                .next()
+                .is_none_or(|ch| !is_identifier_char(ch))
+        {
+            let rest = lower[after_name..].trim_start();
+            if let Some(args) = rest.strip_prefix('(').and_then(extract_call_arguments) {
+                if python_open_args_include_write_mode(args) {
+                    return true;
+                }
+            }
+        }
+        offset = after_name;
+    }
+    false
+}
+
+fn extract_call_arguments(content_after_open_paren: &str) -> Option<&str> {
+    let mut depth = 1usize;
+    let mut quote = None;
+    let mut escaped = false;
+    for (index, ch) in content_after_open_paren.char_indices() {
+        if let Some(current_quote) = quote {
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == current_quote {
+                quote = None;
+            }
+            continue;
+        }
+
+        match ch {
+            '\'' | '"' => quote = Some(ch),
+            '(' => depth += 1,
+            ')' => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    return Some(&content_after_open_paren[..index]);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn python_open_args_include_write_mode(args: &str) -> bool {
+    let lower = args.to_ascii_lowercase();
+    let Some(mode_index) = lower.find("mode") else {
+        let Some((_, mode_args)) = args.split_once(',') else {
+            return false;
+        };
+        return quoted_string_literals(mode_args)
+            .into_iter()
+            .any(|literal| python_open_mode_writes(&literal));
+    };
+    let after_mode = lower[mode_index + "mode".len()..].trim_start();
+    let Some(after_equals) = after_mode.strip_prefix('=').map(str::trim_start) else {
+        return false;
+    };
+    parse_quoted_literal(after_equals)
+        .map(|(literal, _)| python_open_mode_writes(&literal))
+        .unwrap_or(false)
+}
+
+fn python_open_mode_writes(mode: &str) -> bool {
+    mode.chars()
+        .any(|ch| matches!(ch.to_ascii_lowercase(), 'w' | 'a' | 'x' | '+'))
+}
+
+fn http_client_usage_evidence(lower: &str) -> Option<&'static str> {
+    if contains_standalone_call(lower, "fetch") {
+        return Some("fetch()");
+    }
+    for pattern in [
+        "require(\"http\")",
+        "require('http')",
+        "require(\"https\")",
+        "require('https')",
+    ] {
+        if lower.contains(pattern) {
+            return Some(pattern);
+        }
+    }
+    if contains_standalone_call(lower, "axios")
+        || contains_any_member_call(
+            lower,
+            "axios",
+            &[
+                "request", "get", "post", "put", "patch", "delete", "head", "options",
+            ],
+        )
+    {
+        return Some("axios request call");
+    }
+    if contains_any_member_call(
+        lower,
+        "requests",
+        &[
+            "request", "get", "post", "put", "patch", "delete", "head", "options",
+        ],
+    ) {
+        return Some("requests request call");
+    }
+    if contains_any_member_call(
+        lower,
+        "httpx",
+        &[
+            "request", "get", "post", "put", "patch", "delete", "head", "options",
+        ],
+    ) {
+        return Some("httpx request call");
+    }
+    if contains_any_member_call(
+        lower,
+        "urllib.request",
+        &["urlopen", "urlretrieve", "request", "build_opener"],
+    ) {
+        return Some("urllib.request call");
+    }
+    if contains_any_member_call(
+        lower,
+        "socket",
+        &["socket", "create_connection", "connect", "getaddrinfo"],
+    ) {
+        return Some("socket network call");
+    }
+    None
+}
+
+fn contains_any_member_call(lower: &str, receiver: &str, methods: &[&str]) -> bool {
+    methods
+        .iter()
+        .any(|method| contains_member_call(lower, receiver, method))
+}
+
+fn contains_member_call(lower: &str, receiver: &str, method: &str) -> bool {
+    let pattern = format!("{receiver}.{method}");
+    let mut offset = 0;
+    while let Some(index) = lower[offset..].find(&pattern) {
+        let start = offset + index;
+        let after_pattern = start + pattern.len();
+        if is_identifier_boundary(lower, start)
+            && lower[after_pattern..]
+                .chars()
+                .next()
+                .is_none_or(|ch| !is_identifier_char(ch))
+            && lower[after_pattern..].trim_start().starts_with('(')
+        {
+            return true;
+        }
+        offset = after_pattern;
+    }
+    false
+}
+
 fn contains_dynamic_eval(content: &str) -> bool {
     let lower = content.to_ascii_lowercase();
     contains_standalone_call(&lower, "eval")
@@ -15464,6 +15614,7 @@ fn is_identifier_char(ch: char) -> bool {
 }
 
 fn module_from_profile(package: &ResolvedPackage, capabilities: &[CapabilityFinding]) -> Module {
+    let capabilities = unique_capability_findings(capabilities);
     let behavior = if capabilities.is_empty() {
         BehaviorType::Pure
     } else {
@@ -15480,7 +15631,7 @@ fn module_from_profile(package: &ResolvedPackage, capabilities: &[CapabilityFind
         .collect::<Vec<_>>();
 
     if env_findings.is_empty() || http_findings.is_empty() {
-        for finding in capabilities {
+        for finding in &capabilities {
             code.push(Op::Cap(cap_op_from_finding(finding)));
         }
     } else {
@@ -15513,6 +15664,17 @@ fn module_from_profile(package: &ResolvedPackage, capabilities: &[CapabilityFind
         declared_behavior: behavior,
         functions: vec![Function::new(0, "package_init", 0, code)],
     }
+}
+
+fn unique_capability_findings(capabilities: &[CapabilityFinding]) -> Vec<CapabilityFinding> {
+    let mut seen = BTreeSet::new();
+    let mut unique = Vec::new();
+    for finding in capabilities {
+        if seen.insert((finding.kind, finding.target.clone())) {
+            unique.push(finding.clone());
+        }
+    }
+    unique
 }
 
 fn cap_op_from_finding(finding: &CapabilityFinding) -> CapOp {
@@ -21686,6 +21848,120 @@ wheels = [
         assert!(!dynamic_eval_findings
             .iter()
             .any(|finding| finding.source == "package/functions/coerce.js"));
+    }
+
+    #[test]
+    fn profiler_distinguishes_python_module_references_from_http_calls() {
+        let mut profiler = SourceProfiler::default();
+        profiler.scan_file(
+            "requests/__init__.py",
+            "from .sessions import Session\n__title__ = 'requests'\n",
+        );
+        profiler.scan_file(
+            "client.py",
+            "requests.get(url)\nurllib.request.urlopen(url)\nhttpx.post(url)\nsocket.create_connection(addr)\n",
+        );
+        let profile = profiler.finish();
+
+        assert!(!profile
+            .capabilities
+            .iter()
+            .any(|finding| finding.source == "requests/__init__.py"
+                && finding.kind == CapabilityKind::HttpRequest));
+        assert_eq!(
+            profile
+                .capabilities
+                .iter()
+                .filter(|finding| finding.kind == CapabilityKind::HttpRequest)
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn profiler_distinguishes_file_like_write_from_file_write() {
+        let mut profiler = SourceProfiler::default();
+        profiler.scan_file("package/models.py", "buffer.write(chunk)\n");
+        profiler.scan_file("package/cache.py", "open(cache_path, 'wb').write(data)\n");
+        let profile = profiler.finish();
+
+        assert!(!profile
+            .capabilities
+            .iter()
+            .any(|finding| finding.source == "package/models.py"
+                && finding.kind == CapabilityKind::FsWrite));
+        assert!(profile
+            .capabilities
+            .iter()
+            .any(|finding| finding.source == "package/cache.py"
+                && finding.kind == CapabilityKind::FsWrite));
+    }
+
+    #[test]
+    fn generated_profile_module_deduplicates_capability_ops() {
+        let package = ResolvedPackage {
+            ecosystem: Ecosystem::Npm,
+            name: "date-helper".to_owned(),
+            version: "1.2.4".to_owned(),
+            source_url: "https://example.invalid/date-helper.tgz".to_owned(),
+            download_url: None,
+            local_path: None,
+            filename: "date-helper.tgz".to_owned(),
+            expected_sha256: None,
+            expected_sha1: None,
+            expected_integrity: None,
+            npm_direct_tarball: false,
+            pypi_direct_wheel: false,
+            npm_scripts: BTreeMap::new(),
+            platform_compatible: true,
+            dependencies: Vec::new(),
+        };
+        let findings = vec![
+            CapabilityFinding {
+                kind: CapabilityKind::EnvRead,
+                target: "NPM_TOKEN".to_owned(),
+                source: "a.js".to_owned(),
+                evidence: "process.env".to_owned(),
+            },
+            CapabilityFinding {
+                kind: CapabilityKind::EnvRead,
+                target: "NPM_TOKEN".to_owned(),
+                source: "b.js".to_owned(),
+                evidence: "process.env".to_owned(),
+            },
+            CapabilityFinding {
+                kind: CapabilityKind::HttpRequest,
+                target: "evil.example".to_owned(),
+                source: "a.js".to_owned(),
+                evidence: "fetch()".to_owned(),
+            },
+            CapabilityFinding {
+                kind: CapabilityKind::HttpRequest,
+                target: "evil.example".to_owned(),
+                source: "b.js".to_owned(),
+                evidence: "fetch()".to_owned(),
+            },
+            CapabilityFinding {
+                kind: CapabilityKind::FsRead,
+                target: "*".to_owned(),
+                source: "a.js".to_owned(),
+                evidence: "readFile(".to_owned(),
+            },
+            CapabilityFinding {
+                kind: CapabilityKind::FsRead,
+                target: "*".to_owned(),
+                source: "b.js".to_owned(),
+                evidence: "readFile(".to_owned(),
+            },
+        ];
+        let module = module_from_profile(&package, &findings);
+        let cap_ops = module.functions[0]
+            .code
+            .iter()
+            .filter(|op| matches!(op, Op::Cap(_)))
+            .count();
+
+        assert_eq!(cap_ops, 3);
     }
 
     #[test]
