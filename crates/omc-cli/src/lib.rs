@@ -31656,6 +31656,10 @@ fn pip_local_path_arg(value: &str) -> Result<PythonLocalRequirement, OmcRegistry
         )));
     }
     let (path, extras) = pip_local_path_and_extras(value);
+    let path = path
+        .strip_prefix("file:")
+        .or_else(|| path.strip_prefix("link:"))
+        .unwrap_or(path);
     if path.trim().is_empty() {
         return Err(OmcRegistryError::UnsupportedSpec(
             "pip editable path cannot be empty".to_owned(),
@@ -31669,6 +31673,10 @@ fn is_pip_local_directory_arg(value: &str) -> bool {
         return false;
     }
     let (path, _) = pip_local_path_and_extras(value);
+    let path = path
+        .strip_prefix("file:")
+        .or_else(|| path.strip_prefix("link:"))
+        .unwrap_or(path);
     path == "."
         || path.starts_with("./")
         || path.starts_with("../")
@@ -43076,6 +43084,69 @@ dev = ["deppkg @ file:./dep"]
         assert!(site_packages.join("rootpkg-0.1.0.dist-info").exists());
         assert!(!site_packages.join("deppkg").exists());
         assert!(!site_packages.join("deppkg-0.1.0.dist-info").exists());
+
+        let _ = fs::remove_dir_all(project);
+    }
+
+    #[test]
+    fn pip_install_editable_file_extra_dependency_adds_local_path() {
+        let project = test_dir("pip-install-editable-file-extra-project");
+        fs::create_dir_all(project.join("src").join("rootpkg")).unwrap();
+        fs::create_dir_all(project.join("dep").join("src").join("deppkg")).unwrap();
+        fs::write(
+            project.join("src").join("rootpkg").join("__init__.py"),
+            "VALUE = 'root'\n",
+        )
+        .unwrap();
+        fs::write(
+            project
+                .join("dep")
+                .join("src")
+                .join("deppkg")
+                .join("__init__.py"),
+            "VALUE = 'dep'\n",
+        )
+        .unwrap();
+        fs::write(
+            project.join("dep").join("pyproject.toml"),
+            r#"
+[project]
+name = "deppkg"
+version = "0.1.0"
+"#,
+        )
+        .unwrap();
+        fs::write(
+            project.join("pyproject.toml"),
+            r#"
+[project]
+name = "rootpkg"
+version = "0.1.0"
+
+[project.optional-dependencies]
+dev = ["deppkg @ file:./dep"]
+"#,
+        )
+        .unwrap();
+
+        let status =
+            with_clean_pip_env(|| run_pip_compat(&project, &args(&["install", "-e", ".[dev]"])))
+                .unwrap();
+
+        assert_eq!(status, ExitCode::SUCCESS);
+        let root_src = fs::canonicalize(project.join("src")).unwrap();
+        let dep_src = fs::canonicalize(project.join("dep").join("src")).unwrap();
+        assert_eq!(
+            pip_freeze_local_path_requirements(&project).unwrap(),
+            vec![
+                format!("-e {}", dep_src.display()),
+                format!("-e {}", root_src.display())
+            ]
+        );
+        assert_eq!(
+            run_python(&project, &args(&["-c", "import rootpkg, deppkg"])).unwrap(),
+            ExitCode::SUCCESS
+        );
 
         let _ = fs::remove_dir_all(project);
     }

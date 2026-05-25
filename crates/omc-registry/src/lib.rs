@@ -6327,6 +6327,15 @@ fn resolved_local_path(path: &str, base_dir: &Path) -> PathBuf {
     }
 }
 
+fn strip_relative_local_path_scheme(path: &str) -> &str {
+    if path.contains("://") {
+        return path;
+    }
+    path.strip_prefix("file:")
+        .or_else(|| path.strip_prefix("link:"))
+        .unwrap_or(path)
+}
+
 fn poetry_local_archive_dependency_spec(
     name: &str,
     path: &str,
@@ -15334,6 +15343,7 @@ fn parse_pypi_local_direct_path_requirement(
     if path.contains("://") || is_pypi_archive_reference(&path) {
         return Ok(None);
     }
+    let path = strip_relative_local_path_scheme(&path);
     let path = resolved_local_path(&path, base_dir);
     Ok(path
         .is_dir()
@@ -15453,6 +15463,7 @@ fn local_pypi_archive_url_and_hashes(
         return Ok(None);
     }
 
+    let path = strip_relative_local_path_scheme(&path);
     let path = Path::new(&path);
     let path = if path.is_absolute() {
         path.to_path_buf()
@@ -15679,6 +15690,7 @@ fn normalize_requirements_editable_path(
             "editable requirement `{value}` must be a local path"
         )));
     }
+    let path = strip_relative_local_path_scheme(path);
     let path = PathBuf::from(path);
     let path = if path.is_absolute() {
         path
@@ -20576,7 +20588,7 @@ print("hi")
         fs::write(
             &requirements,
             format!(
-                "local-pkg @ ./vendor/local-pkg\nfile-url-pkg @ {file_url}\n./vendor/bare-pkg[dev]\n./missing-bare; sys_platform == 'win32'\nskipped-local @ ./missing; sys_platform == 'win32'\n"
+                "local-pkg @ file:./vendor/local-pkg\nfile-url-pkg @ {file_url}\nlink:./vendor/bare-pkg[dev]\n./missing-bare; sys_platform == 'win32'\nskipped-local @ ./missing; sys_platform == 'win32'\n"
             ),
         )
         .unwrap();
@@ -22177,7 +22189,7 @@ wheels = [
         let requirements = dir.path().join("requirements.txt");
         fs::write(
             &requirements,
-            "idna @ ./wheels/idna-3.7-py3-none-any.whl#sha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa --hash=sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\nsource-pkg @ ./wheels/source_pkg-1.0.0.tar.gz#sha256=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\n./wheels/typing_extensions-4.12.2-py3-none-any.whl\n./wheels/bare_pkg-2.0.0.tgz\n./wheels/zip_pkg-3.0.0.zip\n",
+            "idna @ file:./wheels/idna-3.7-py3-none-any.whl#sha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa --hash=sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\nsource-pkg @ ./wheels/source_pkg-1.0.0.tar.gz#sha256=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\nfile:./wheels/typing_extensions-4.12.2-py3-none-any.whl\n./wheels/bare_pkg-2.0.0.tgz\n./wheels/zip_pkg-3.0.0.zip\n",
         )
         .unwrap();
 
