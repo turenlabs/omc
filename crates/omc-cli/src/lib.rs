@@ -496,6 +496,7 @@ enum NpmCompatAction {
     },
     Cache {
         action: NpmCacheAction,
+        cache_dir: Option<PathBuf>,
     },
     Pkg {
         action: NpmPkgAction,
@@ -1200,6 +1201,7 @@ enum PipCompatAction {
     },
     Cache {
         action: PipCacheAction,
+        cache_dir: Option<PathBuf>,
     },
     Check {
         user: bool,
@@ -4826,7 +4828,10 @@ fn run_npm_compat_with_cwd(
         NpmCompatAction::Doctor { action } => print_npm_doctor(project_dir, action)?,
         NpmCompatAction::Audit { json } => return print_audit_report(project_dir, json),
         NpmCompatAction::Fund { action } => print_npm_fund(project_dir, action)?,
-        NpmCompatAction::Cache { action } => print_npm_cache(project_dir, action)?,
+        NpmCompatAction::Cache { action, cache_dir } => {
+            let cache_dir = cache_dir.map(|path| absolutize_path(invocation_cwd, path));
+            print_npm_cache(project_dir, action, cache_dir.as_deref())?
+        }
         NpmCompatAction::Pkg { action } => print_npm_pkg(project_dir, action)?,
         NpmCompatAction::Shrinkwrap => write_npm_shrinkwrap(project_dir)?,
         NpmCompatAction::Pack { mut action } => {
@@ -6312,7 +6317,10 @@ fn run_pip_compat_with_cwd(
         PipCompatAction::Hash { algorithm, paths } => {
             print_pip_hash(invocation_cwd, algorithm, paths)?
         }
-        PipCompatAction::Cache { action } => return print_pip_cache(project_dir, action),
+        PipCompatAction::Cache { action, cache_dir } => {
+            let cache_dir = cache_dir.map(|path| absolutize_path(invocation_cwd, path));
+            return print_pip_cache(project_dir, action, cache_dir.as_deref());
+        }
         PipCompatAction::Check { user } => {
             if user {
                 let paths = pip_effective_scope_paths(invocation_cwd, &[], true)?;
@@ -15370,13 +15378,21 @@ fn hex_bytes(hex: &str) -> Option<Vec<u8>> {
     Some(bytes)
 }
 
-fn print_npm_cache(project_dir: &Path, action: NpmCacheAction) -> Result<(), OmcRegistryError> {
-    let cache_dir = npm_cache_dir(project_dir);
+fn print_npm_cache(
+    project_dir: &Path,
+    action: NpmCacheAction,
+    cache_dir: Option<&Path>,
+) -> Result<(), OmcRegistryError> {
+    let cache_dir = npm_compat_cache_dir(project_dir, cache_dir);
     match action {
         NpmCacheAction::Verify => {
             let files = compat_cache_files(&cache_dir)?;
             let bytes = cache_files_size(&files)?;
-            let locked_verified = verify_npm_locked_cache(project_dir)?;
+            let locked_verified = if cache_dir == npm_cache_dir(project_dir) {
+                verify_npm_locked_cache(project_dir)?
+            } else {
+                0
+            };
             println!("Cache verified and compressed ({})", cache_dir.display());
             println!("Content verified: {} ({bytes} bytes)", files.len());
             println!("Index entries: {}", files.len());
@@ -15411,6 +15427,12 @@ fn print_npm_cache(project_dir: &Path, action: NpmCacheAction) -> Result<(), Omc
         }
     }
     Ok(())
+}
+
+fn npm_compat_cache_dir(project_dir: &Path, cache_dir: Option<&Path>) -> PathBuf {
+    cache_dir
+        .map(|path| path.join("_cacache"))
+        .unwrap_or_else(|| npm_cache_dir(project_dir))
 }
 
 fn remove_npm_cache_entries(cache_dir: &Path, pattern: &str) -> Result<usize, OmcRegistryError> {
@@ -17731,8 +17753,11 @@ fn verify_npm_locked_cache(project_dir: &Path) -> Result<usize, OmcRegistryError
 fn print_pip_cache(
     project_dir: &Path,
     action: PipCacheAction,
+    cache_dir: Option<&Path>,
 ) -> Result<ExitCode, OmcRegistryError> {
-    let cache_dir = pip_cache_dir(project_dir);
+    let cache_dir = cache_dir
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| pip_cache_dir(project_dir));
     match action {
         PipCacheAction::Dir => println!("{}", cache_dir.display()),
         PipCacheAction::Info => {
@@ -24081,6 +24106,9 @@ fn npm_global_arg_supported_by_command(command: &str, arg: &str) -> bool {
     if matches!(arg, "--force" | "-f") || arg.starts_with("--force=") {
         return matches!(command, "cache" | "unpublish");
     }
+    if matches!(arg, "--cache") || arg.starts_with("--cache=") {
+        return command == "cache";
+    }
     if matches!(arg, "--long" | "-l") || arg.starts_with("--long=") {
         return matches!(command, "help-search" | "search" | "s" | "se" | "find");
     }
@@ -24488,6 +24516,7 @@ fn npm_global_preserved_value_flag(arg: &str) -> bool {
             | "--sbom-type"
             | "--location"
             | "--expect-result-count"
+            | "--cache"
             | "--diff"
             | "--diff-unified"
             | "--diff-src-prefix"
@@ -24573,6 +24602,7 @@ fn npm_global_preserved_equals_flag(arg: &str) -> bool {
         "--sbom-format=",
         "--sbom-type=",
         "--location=",
+        "--cache=",
         "--package-lock-only=",
         "--global=",
         "--expect-results=",
@@ -25783,6 +25813,7 @@ fn npm_fund_equals_value_flag(arg: &str) -> bool {
 
 fn parse_npm_cache_args(args: &[String]) -> Result<NpmCompatAction, OmcRegistryError> {
     let mut force = false;
+    let mut cache_dir = None;
     let mut filtered = Vec::new();
     let mut index = 0;
     while index < args.len() {
@@ -25801,7 +25832,17 @@ fn parse_npm_cache_args(args: &[String]) -> Result<NpmCompatAction, OmcRegistryE
                 | "--prefer-online"
                 | "--offline"
         ) {
-        } else if matches!(arg.as_str(), "--cache" | "--loglevel") {
+        } else if arg == "--cache" {
+            index += 1;
+            let Some(value) = args.get(index) else {
+                return Err(OmcRegistryError::UnsupportedSpec(
+                    "--cache needs a path".to_owned(),
+                ));
+            };
+            cache_dir = Some(PathBuf::from(value));
+        } else if let Some(value) = arg.strip_prefix("--cache=") {
+            cache_dir = Some(PathBuf::from(value));
+        } else if arg == "--loglevel" {
             index += 1;
             if args.get(index).is_none() {
                 return Err(OmcRegistryError::UnsupportedSpec(format!(
@@ -25865,13 +25906,11 @@ fn parse_npm_cache_args(args: &[String]) -> Result<NpmCompatAction, OmcRegistryE
             )))
         }
     };
-    Ok(NpmCompatAction::Cache { action })
+    Ok(NpmCompatAction::Cache { action, cache_dir })
 }
 
 fn npm_cache_equals_value_flag(arg: &str) -> bool {
-    ["--cache=", "--loglevel="]
-        .iter()
-        .any(|prefix| arg.starts_with(prefix))
+    ["--loglevel="].iter().any(|prefix| arg.starts_with(prefix))
 }
 
 fn parse_npm_pkg_args(args: &[String]) -> Result<NpmCompatAction, OmcRegistryError> {
@@ -30343,11 +30382,23 @@ fn pip_completion_ignored_equals_flag(arg: &str) -> bool {
 }
 
 fn normalize_pip_global_args(args: &[String]) -> Result<Vec<String>, OmcRegistryError> {
+    let mut cache_dir_args = Vec::new();
     let mut index = 0;
     while index < args.len() {
         let arg = &args[index];
         if matches!(arg.as_str(), "--version" | "-V") {
             return Ok(vec![arg.clone()]);
+        } else if arg == "--cache-dir" {
+            index += 1;
+            let Some(value) = args.get(index) else {
+                return Err(OmcRegistryError::UnsupportedSpec(
+                    "--cache-dir needs a path".to_owned(),
+                ));
+            };
+            cache_dir_args.push(arg.clone());
+            cache_dir_args.push(value.clone());
+        } else if arg.starts_with("--cache-dir=") {
+            cache_dir_args.push(arg.clone());
         } else if pip_global_ignored_bool_flag(arg) || pip_global_ignored_equals_flag(arg) {
         } else if pip_global_ignored_value_flag(arg) {
             index += 1;
@@ -30360,6 +30411,12 @@ fn normalize_pip_global_args(args: &[String]) -> Result<Vec<String>, OmcRegistry
             return Ok(args[index..].to_vec());
         } else if index == 0 {
             return Ok(args.to_vec());
+        } else if arg == "cache" && !cache_dir_args.is_empty() {
+            let mut normalized = Vec::with_capacity(args.len());
+            normalized.push(arg.clone());
+            normalized.extend(cache_dir_args);
+            normalized.extend(args[index + 1..].iter().cloned());
+            return Ok(normalized);
         } else {
             return Ok(args[index..].to_vec());
         }
@@ -31036,10 +31093,21 @@ fn parse_pip_hash_algorithm(value: &str) -> Result<PipHashAlgorithm, OmcRegistry
 fn parse_pip_cache_args(args: &[String]) -> Result<PipCompatAction, OmcRegistryError> {
     let mut filtered = Vec::new();
     let mut format = PipCacheListFormat::Human;
+    let mut cache_dir = None;
     let mut index = 0;
     while index < args.len() {
         let arg = &args[index];
         if arg == "--disable-pip-version-check" || pip_ignored_verbosity_flag(arg) {
+        } else if arg == "--cache-dir" {
+            index += 1;
+            let Some(value) = args.get(index) else {
+                return Err(OmcRegistryError::UnsupportedSpec(
+                    "--cache-dir needs a path".to_owned(),
+                ));
+            };
+            cache_dir = Some(PathBuf::from(value));
+        } else if let Some(value) = arg.strip_prefix("--cache-dir=") {
+            cache_dir = Some(PathBuf::from(value));
         } else if arg == "--format" {
             index += 1;
             let Some(value) = args.get(index) else {
@@ -31115,7 +31183,7 @@ fn parse_pip_cache_args(args: &[String]) -> Result<PipCompatAction, OmcRegistryE
             )))
         }
     };
-    Ok(PipCompatAction::Cache { action })
+    Ok(PipCompatAction::Cache { action, cache_dir })
 }
 
 fn parse_pip_cache_list_format(value: &str) -> Result<PipCacheListFormat, OmcRegistryError> {
@@ -39306,6 +39374,14 @@ verdict = "accepted"
             parse_npm_compat_action(&args(&["cache", "verify", "--cache=/tmp/npm-cache"])).unwrap(),
             NpmCompatAction::Cache {
                 action: NpmCacheAction::Verify,
+                cache_dir: Some(PathBuf::from("/tmp/npm-cache")),
+            }
+        );
+        assert_eq!(
+            parse_npm_compat_action(&args(&["--cache", ".npm-cache", "cache", "verify"])).unwrap(),
+            NpmCompatAction::Cache {
+                action: NpmCacheAction::Verify,
+                cache_dir: Some(PathBuf::from(".npm-cache")),
             }
         );
         assert_eq!(
@@ -39314,6 +39390,7 @@ verdict = "accepted"
                 action: NpmCacheAction::List {
                     pattern: Some("left-pad".to_owned()),
                 },
+                cache_dir: None,
             }
         );
         assert_eq!(
@@ -39322,12 +39399,14 @@ verdict = "accepted"
                 action: NpmCacheAction::Remove {
                     pattern: "left-pad".to_owned(),
                 },
+                cache_dir: None,
             }
         );
         assert_eq!(
             parse_npm_compat_action(&args(&["cache", "clean", "--force"])).unwrap(),
             NpmCompatAction::Cache {
                 action: NpmCacheAction::Clean,
+                cache_dir: None,
             }
         );
         assert!(parse_npm_compat_action(&args(&["cache", "clean"])).is_err());
@@ -47263,6 +47342,14 @@ version = "0.2.0"
             parse_pip_compat_action(&args(&["cache", "dir"])).unwrap(),
             PipCompatAction::Cache {
                 action: PipCacheAction::Dir,
+                cache_dir: None,
+            }
+        );
+        assert_eq!(
+            parse_pip_compat_action(&args(&["--cache-dir", ".pip-cache", "cache", "dir"])).unwrap(),
+            PipCompatAction::Cache {
+                action: PipCacheAction::Dir,
+                cache_dir: Some(PathBuf::from(".pip-cache")),
             }
         );
         assert_eq!(
@@ -47272,6 +47359,7 @@ version = "0.2.0"
                     pattern: Some("idna".to_owned()),
                     format: PipCacheListFormat::Human,
                 },
+                cache_dir: None,
             }
         );
         assert_eq!(
@@ -47281,6 +47369,7 @@ version = "0.2.0"
                     pattern: Some("idna".to_owned()),
                     format: PipCacheListFormat::Abspath,
                 },
+                cache_dir: None,
             }
         );
         assert_eq!(
@@ -47290,6 +47379,7 @@ version = "0.2.0"
                     pattern: None,
                     format: PipCacheListFormat::Human,
                 },
+                cache_dir: None,
             }
         );
         assert_eq!(
@@ -47300,6 +47390,7 @@ version = "0.2.0"
                     pattern: None,
                     format: PipCacheListFormat::Human,
                 },
+                cache_dir: Some(PathBuf::from(".pip-cache")),
             }
         );
         assert_eq!(
@@ -47309,6 +47400,7 @@ version = "0.2.0"
                     pattern: None,
                     format: PipCacheListFormat::Human,
                 },
+                cache_dir: Some(PathBuf::from(".pip-cache")),
             }
         );
         assert!(parse_pip_compat_action(&args(&["cache", "dir", "--format=bad"])).is_err());
@@ -47318,6 +47410,7 @@ version = "0.2.0"
                 action: PipCacheAction::Remove {
                     pattern: "idna".to_owned(),
                 },
+                cache_dir: None,
             }
         );
         assert_eq!(
@@ -47325,6 +47418,7 @@ version = "0.2.0"
                 .unwrap(),
             PipCompatAction::Cache {
                 action: PipCacheAction::Purge,
+                cache_dir: None,
             }
         );
     }
@@ -47389,6 +47483,7 @@ version = "0.2.0"
                 PipCacheAction::Remove {
                     pattern: "definitely-not-a-cache-hit".to_owned(),
                 },
+                None,
             )
             .unwrap(),
             ExitCode::FAILURE
@@ -47401,6 +47496,7 @@ version = "0.2.0"
                 PipCacheAction::Remove {
                     pattern: "idna".to_owned(),
                 },
+                None,
             )
             .unwrap(),
             ExitCode::SUCCESS
