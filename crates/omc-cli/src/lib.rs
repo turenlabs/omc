@@ -20706,19 +20706,25 @@ fn print_pip_installed_list(
             }
         }
         PipListFormat::Json => {
-            let packages = packages
-                .iter()
-                .map(|package| {
-                    serde_json::json!({
-                        "name": package.name,
-                        "version": package.version,
-                    })
-                })
-                .collect::<Vec<_>>();
-            println!("{}", serde_json::to_string_pretty(&packages)?);
+            println!("{}", pip_installed_list_json_output(packages)?);
         }
     }
     Ok(())
+}
+
+fn pip_installed_list_json_output(
+    packages: &[InstalledPythonPackage],
+) -> Result<String, OmcRegistryError> {
+    let packages = packages
+        .iter()
+        .map(|package| {
+            serde_json::json!({
+                "name": package.name,
+                "version": package.version,
+            })
+        })
+        .collect::<Vec<_>>();
+    Ok(serde_json::to_string(&packages)?)
 }
 
 fn pip_columns_list_output(packages: &[InstalledPythonPackage]) -> Option<String> {
@@ -21688,18 +21694,7 @@ fn print_pip_outdated_rows(
             }
         }
         PipListFormat::Json => {
-            let packages = rows
-                .into_iter()
-                .map(|row| {
-                    serde_json::json!({
-                        "name": row.name,
-                        "version": row.version,
-                        "latest_version": row.latest_version,
-                        "latest_filetype": row.latest_filetype,
-                    })
-                })
-                .collect::<Vec<_>>();
-            println!("{}", serde_json::to_string_pretty(&packages)?);
+            println!("{}", pip_outdated_rows_json_output(&rows)?);
         }
         PipListFormat::Freeze => {
             for row in rows {
@@ -21708,6 +21703,21 @@ fn print_pip_outdated_rows(
         }
     }
     Ok(())
+}
+
+fn pip_outdated_rows_json_output(rows: &[PipOutdatedPackage]) -> Result<String, OmcRegistryError> {
+    let packages = rows
+        .iter()
+        .map(|row| {
+            serde_json::json!({
+                "name": row.name,
+                "version": row.version,
+                "latest_version": row.latest_version,
+                "latest_filetype": row.latest_filetype,
+            })
+        })
+        .collect::<Vec<_>>();
+    Ok(serde_json::to_string(&packages)?)
 }
 
 fn locked_pip_installed_packages(
@@ -46609,6 +46619,10 @@ version = "0.2.0"
             pip_columns_list_output(&packages).unwrap(),
             "Package    Version\n---------- -------\nidna       3.4\nsetuptools 58.0.4\n"
         );
+        assert_eq!(
+            pip_installed_list_json_output(&packages).unwrap(),
+            r#"[{"name":"idna","version":"3.4"},{"name":"setuptools","version":"58.0.4"}]"#
+        );
 
         let editable = vec![InstalledPythonPackage {
             name: "demoedit".to_owned(),
@@ -46622,6 +46636,17 @@ version = "0.2.0"
             "Package  Version Location\n-------- ------- -------------\ndemoedit 0.1.0   /tmp/demoedit\n"
         );
         assert!(pip_columns_list_output(&[]).is_none());
+
+        let outdated = vec![PipOutdatedPackage {
+            name: "idna".to_owned(),
+            version: "3.4".to_owned(),
+            latest_version: "3.14".to_owned(),
+            latest_filetype: "wheel".to_owned(),
+        }];
+        assert_eq!(
+            pip_outdated_rows_json_output(&outdated).unwrap(),
+            r#"[{"latest_filetype":"wheel","latest_version":"3.14","name":"idna","version":"3.4"}]"#
+        );
     }
 
     #[test]

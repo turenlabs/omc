@@ -715,7 +715,7 @@ Supported now:
   `wheel`, `index versions`, `config get/set/unset/list`, and
   `list --format=columns|freeze|json` flows, including `pip list --outdated`
   and `pip list --uptodate`
-  with pip-style aligned columns, JSON, and freeze output,
+  with pip-style aligned columns, compact JSON, and freeze output,
   `-r`, index URL,
   constraints, extra-index, find-links, no-index,
   require-hashes, no-deps, prerelease opt-in, per-package final/prerelease
