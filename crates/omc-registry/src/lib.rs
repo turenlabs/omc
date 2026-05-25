@@ -15611,40 +15611,38 @@ fn normalize_pypi_extra(extra: &str) -> String {
 }
 
 fn parse_requirements_include(line: &str) -> Option<RequirementsInclude> {
-    for (prefix, mode) in [
-        ("--requirement=", RequirementsMode::Install),
-        ("--constraint=", RequirementsMode::Constraint),
+    for (prefixes, mode) in [
+        (
+            &["--requirement=", "--requirement", "-r"][..],
+            RequirementsMode::Install,
+        ),
+        (
+            &["--constraint=", "--constraint", "-c"][..],
+            RequirementsMode::Constraint,
+        ),
     ] {
-        if let Some(rest) = line.strip_prefix(prefix) {
-            let rest = rest.trim();
-            if !rest.is_empty() {
-                return Some(RequirementsInclude {
-                    path: rest.to_owned(),
-                    mode,
-                });
+        if let Some(path) = parse_requirements_option_value(line, prefixes)
+            .or_else(|| parse_attached_short_requirements_option(line, mode))
+        {
+            if !path.is_empty() {
+                return Some(RequirementsInclude { path, mode });
             }
-        }
-    }
-
-    for (prefix, mode) in [
-        ("-r", RequirementsMode::Install),
-        ("--requirement", RequirementsMode::Install),
-        ("-c", RequirementsMode::Constraint),
-        ("--constraint", RequirementsMode::Constraint),
-    ] {
-        if let Some(rest) = line.strip_prefix(prefix) {
-            let rest = rest.trim_start();
-            if rest.is_empty() {
-                continue;
-            }
-            return Some(RequirementsInclude {
-                path: rest.to_owned(),
-                mode,
-            });
         }
     }
 
     None
+}
+
+fn parse_attached_short_requirements_option(line: &str, mode: RequirementsMode) -> Option<String> {
+    let prefix = match mode {
+        RequirementsMode::Install => "-r",
+        RequirementsMode::Constraint => "-c",
+    };
+    let rest = line.strip_prefix(prefix)?;
+    if rest.is_empty() || rest.starts_with(char::is_whitespace) {
+        return None;
+    }
+    first_shell_like_token(rest)
 }
 
 fn parse_requirements_index_url(line: &str) -> Option<String> {
@@ -15755,10 +15753,7 @@ fn parse_requirements_option_value(line: &str, prefixes: &[&str]) -> Option<Stri
             let Some(value) = line.strip_prefix(prefix) else {
                 continue;
             };
-            let value = value.trim();
-            if !value.is_empty() {
-                return Some(value.to_owned());
-            }
+            return first_shell_like_token(value);
         } else if line == *prefix || line.starts_with(&format!("{prefix} ")) {
             return shell_like_tokens(line)
                 .get(1)
@@ -15767,6 +15762,12 @@ fn parse_requirements_option_value(line: &str, prefixes: &[&str]) -> Option<Stri
         }
     }
     None
+}
+
+fn first_shell_like_token(value: &str) -> Option<String> {
+    shell_like_tokens(value)
+        .into_iter()
+        .find(|value| !value.is_empty())
 }
 
 fn normalize_pypi_find_links_source(value: &str, base_dir: &Path) -> Option<String> {
@@ -20073,6 +20074,59 @@ packages:
                 .and_then(|hashes| hashes.iter().next())
                 .map(String::as_str),
             Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+        );
+    }
+
+    #[test]
+    fn reads_requirements_quoted_option_values() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir_all(dir.path().join("requirements")).unwrap();
+        fs::create_dir_all(dir.path().join("constraints")).unwrap();
+        fs::create_dir_all(dir.path().join("wheel house")).unwrap();
+        let requirements = dir.path().join("requirements.txt");
+        fs::write(
+            dir.path().join("requirements").join("dev requirements.txt"),
+            "certifi==2024.2.2\n",
+        )
+        .unwrap();
+        fs::write(
+            dir.path()
+                .join("requirements")
+                .join("more requirements.txt"),
+            "charset-normalizer==3.4.0\n",
+        )
+        .unwrap();
+        fs::write(
+            dir.path().join("constraints").join("prod constraints.txt"),
+            "idna==3.7\n",
+        )
+        .unwrap();
+        fs::write(
+            &requirements,
+            "--requirement='requirements/dev requirements.txt'\n-r \"requirements/more requirements.txt\"\n--constraint='constraints/prod constraints.txt'\n--find-links=\"./wheel house\"\n--index-url=\"https://index.example.invalid/simple\"\nidna>=2\n",
+        )
+        .unwrap();
+
+        let discovered = read_requirements_file(&requirements).unwrap();
+        assert!(has_spec(&discovered.specs, "certifi", "==2024.2.2"));
+        assert!(has_spec(&discovered.specs, "charset-normalizer", "==3.4.0"));
+        assert!(has_spec(&discovered.specs, "idna", ">=2"));
+        assert_eq!(
+            discovered.constraints.get("pypi:idna").map(String::as_str),
+            Some("==3.7")
+        );
+        assert_eq!(
+            discovered.pypi_find_links,
+            vec![dir
+                .path()
+                .join(".")
+                .join("wheel house")
+                .to_string_lossy()
+                .into_owned()]
+        );
+        assert_eq!(
+            discovered.pypi_index_url.as_deref(),
+            Some("https://index.example.invalid/simple/")
         );
     }
 
