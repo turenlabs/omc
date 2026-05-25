@@ -1912,8 +1912,14 @@ fn run() -> Result<ExitCode, OmcRegistryError> {
         Command::List { json } => {
             let lock = read_lockfile(cli.project_dir.join("omc.lock"))?;
             if json {
-                println!("{}", serde_json::to_string_pretty(&lock.packages)?);
-            } else if lock.packages.is_empty() {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "packages": lock.packages,
+                        "local_sources": lock.local_sources,
+                    }))?
+                );
+            } else if lock.packages.is_empty() && lock.local_sources.is_empty() {
                 println!("packages: 0");
             } else {
                 for package in lock.packages {
@@ -1924,6 +1930,17 @@ fn run() -> Result<ExitCode, OmcRegistryError> {
                         package.version,
                         verdict_label(package.verdict),
                         behavior_label(package.behavior)
+                    );
+                }
+                for source in lock.local_sources {
+                    println!(
+                        "local-source {}:{}@{} {} {} {}",
+                        source.ecosystem,
+                        source.name,
+                        source.version,
+                        verdict_label(source.verdict),
+                        behavior_label(source.behavior),
+                        source.source_path
                     );
                 }
             }
@@ -9966,20 +9983,30 @@ fn twine_help_topic(topic: &str) -> Option<&'static str> {
 
 fn print_audit_report(project_dir: &Path, json: bool) -> Result<ExitCode, OmcRegistryError> {
     let lock = read_lockfile(project_dir.join("omc.lock"))?;
-    let blocked = lock
+    let blocked_packages = lock
         .packages
         .iter()
         .filter(|package| package.verdict == Verdict::Blocked)
         .count();
+    let blocked_local_sources = lock
+        .local_sources
+        .iter()
+        .filter(|source| source.verdict == Verdict::Blocked)
+        .count();
+    let blocked = blocked_packages + blocked_local_sources;
     if json {
         let audit = serde_json::json!({
             "packages": lock.packages.len(),
+            "local_sources": lock.local_sources.len(),
             "blocked": blocked,
+            "blocked_packages": blocked_packages,
+            "blocked_local_sources": blocked_local_sources,
             "lock": lock,
         });
         println!("{}", serde_json::to_string_pretty(&audit)?);
     } else {
         println!("packages: {}", lock.packages.len());
+        println!("local_sources: {}", lock.local_sources.len());
         println!("blocked: {blocked}");
         for package in lock.packages {
             println!(
@@ -9988,6 +10015,16 @@ fn print_audit_report(project_dir: &Path, json: bool) -> Result<ExitCode, OmcReg
                 package.ecosystem,
                 package.name,
                 package.version
+            );
+        }
+        for source in lock.local_sources {
+            println!(
+                "{} local-source {}:{}@{} {}",
+                verdict_label(source.verdict),
+                source.ecosystem,
+                source.name,
+                source.version,
+                source.source_path
             );
         }
     }
@@ -15339,6 +15376,7 @@ fn write_npm_shrinkwrap(project_dir: &Path) -> Result<(), OmcRegistryError> {
         OmcLock {
             version: 1,
             packages: Vec::new(),
+            local_sources: Vec::new(),
             python_vcs: Vec::new(),
         }
     };
@@ -42239,6 +42277,7 @@ version = "0.1.0"
                     locked_npm_package("left-pad", "1.1.0", vec!["npm:dep@1.0.0".to_owned()]),
                     locked_npm_package("dep", "1.0.0", Vec::new()),
                 ],
+                local_sources: Vec::new(),
                 python_vcs: Vec::new(),
             })
             .unwrap(),
@@ -47223,6 +47262,7 @@ version = "0.2.0"
         let lock = OmcLock {
             version: 1,
             packages: vec![root, bad],
+            local_sources: Vec::new(),
             python_vcs: Vec::new(),
         };
 
@@ -48845,6 +48885,7 @@ resolved_commit = "0123456789abcdef0123456789abcdef01234567"
                 sdist,
                 wheel,
             ],
+            local_sources: Vec::new(),
             python_vcs: Vec::new(),
         };
 
@@ -48889,6 +48930,7 @@ resolved_commit = "0123456789abcdef0123456789abcdef01234567"
                 is_odd,
                 scoped,
             ],
+            local_sources: Vec::new(),
             python_vcs: Vec::new(),
         };
         fs::write(project.join("omc.lock"), toml::to_string(&lock).unwrap()).unwrap();
@@ -48968,6 +49010,7 @@ resolved_commit = "0123456789abcdef0123456789abcdef01234567"
         let lock = OmcLock {
             version: 1,
             packages: vec![locked_npm_package("left-pad", "1.3.0", Vec::new())],
+            local_sources: Vec::new(),
             python_vcs: Vec::new(),
         };
         fs::write(project.join("omc.lock"), toml::to_string(&lock).unwrap()).unwrap();

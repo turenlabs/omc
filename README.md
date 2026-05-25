@@ -482,6 +482,8 @@ Supported now:
 - install/ci-time source artifact compilation for npm workspace/local directory
   dependencies and Python editable/local directory dependencies before they are
   linked into `node_modules` or OMC-managed Python import paths
+- `omc.lock` records install-compiled local source artifacts and `omc ci`
+  rejects local source changes until the lock is refreshed
 - npm semver range resolution for common dependency ranges
 - global, project, and user `.npmrc` support for `registry`, `@scope:registry`,
   and host-scoped `_authToken` npm registry access, plus `NPM_CONFIG_REGISTRY` /
@@ -640,6 +642,8 @@ Supported now:
 - `omc ci` as a lockfile-only install command for clean/CI workflows
 - install-time sha256 verification for cached archives before package extraction
 - text and JSON `omc list` output for locked packages
+- text and JSON `omc list` / `omc audit` visibility for install-compiled
+  local source artifacts
 - text and JSON audit output for locked package verdicts
 - `node_modules` installation for npm tarballs
 - nested `node_modules` installation for conflicting npm dependency versions
