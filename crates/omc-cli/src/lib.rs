@@ -15395,11 +15395,12 @@ fn print_npm_cache(project_dir: &Path, action: NpmCacheAction) -> Result<(), Omc
             }
         }
         NpmCacheAction::Remove { pattern } => {
-            let mut files = compat_cache_files(&cache_dir)?;
-            files.retain(|path| compat_cache_pattern_matches(path, &cache_dir, &pattern));
-            let count = remove_cache_files(&files)?;
-            prune_empty_cache_dirs(&cache_dir)?;
-            println!("Files removed: {count}");
+            let count = remove_npm_cache_entries(&cache_dir, &pattern)?;
+            if count == 0 {
+                eprintln!("npm warn cache Not Found: {pattern}");
+            } else {
+                println!("Files removed: {count}");
+            }
         }
         NpmCacheAction::Clean => {
             let count = compat_cache_files(&cache_dir)?.len();
@@ -15410,6 +15411,14 @@ fn print_npm_cache(project_dir: &Path, action: NpmCacheAction) -> Result<(), Omc
         }
     }
     Ok(())
+}
+
+fn remove_npm_cache_entries(cache_dir: &Path, pattern: &str) -> Result<usize, OmcRegistryError> {
+    let mut files = compat_cache_files(cache_dir)?;
+    files.retain(|path| compat_cache_pattern_matches(path, cache_dir, pattern));
+    let count = remove_cache_files(&files)?;
+    prune_empty_cache_dirs(cache_dir)?;
+    Ok(count)
 }
 
 fn print_npm_doctor(project_dir: &Path, action: NpmDoctorAction) -> Result<(), OmcRegistryError> {
@@ -40577,6 +40586,28 @@ verdict = "accepted"
                 globalconfig: None,
             }
         );
+    }
+
+    #[test]
+    fn npm_cache_remove_missing_pattern_preserves_cache_like_npm() {
+        let project = test_dir("npm-cache-remove-missing");
+        let cache_file = npm_cache_dir(&project)
+            .join("content")
+            .join("left-pad-1.3.0.tgz");
+        fs::create_dir_all(cache_file.parent().unwrap()).unwrap();
+        fs::write(&cache_file, b"tarball").unwrap();
+
+        assert_eq!(
+            remove_npm_cache_entries(&npm_cache_dir(&project), "definitely-not-a-cache-hit")
+                .unwrap(),
+            0
+        );
+        assert!(cache_file.exists());
+        assert_eq!(
+            remove_npm_cache_entries(&npm_cache_dir(&project), "left-pad").unwrap(),
+            1
+        );
+        assert!(!cache_file.exists());
     }
 
     #[test]
