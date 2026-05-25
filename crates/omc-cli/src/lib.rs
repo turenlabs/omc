@@ -18187,22 +18187,13 @@ fn pip_config_debug_report(
     values: &BTreeMap<String, String>,
 ) -> Result<String, OmcRegistryError> {
     let mut output = String::from("env_var:\n");
-    let mut printed_env = false;
-    for key in [
-        "PIP_CONFIG_FILE",
-        "PIP_INDEX_URL",
-        "PIP_EXTRA_INDEX_URL",
-        "PIP_FIND_LINKS",
-        "PIP_NO_INDEX",
-        "PIP_CACHE_DIR",
-    ] {
-        if let Some(value) = env::var_os(key) {
-            output.push_str(&format!("  {key}={}\n", value.to_string_lossy()));
-            printed_env = true;
-        }
-    }
-    if !printed_env {
+    let mut env_values = pip_env_values();
+    if env_values.is_empty() {
         output.push_str("  <none>\n");
+    } else {
+        for (key, value) in env_values.drain(..) {
+            output.push_str(&format!("  {key}={value}\n"));
+        }
     }
 
     output.push_str("config_file:\n");
@@ -18303,13 +18294,38 @@ fn pip_config_values(project_dir: &Path) -> Result<BTreeMap<String, String>, Omc
                 .or_insert(package),
         };
     }
-    if let Some(cache_dir) = pip_cache_dir_env() {
-        values.insert(
-            ":env:.cache-dir".to_owned(),
-            cache_dir.to_string_lossy().to_string(),
-        );
-    }
+    insert_pip_env_config_values(&mut values);
     Ok(values)
+}
+
+fn insert_pip_env_config_values(values: &mut BTreeMap<String, String>) {
+    for (env_key, value) in pip_env_values() {
+        if let Some(config_key) = pip_env_config_key(&env_key) {
+            values.insert(config_key, value);
+        }
+    }
+}
+
+fn pip_env_values() -> Vec<(String, String)> {
+    let mut values = Vec::new();
+    for (key, value) in env::vars_os() {
+        let Some(key) = key.to_str() else {
+            continue;
+        };
+        if !key.starts_with("PIP_") || value.is_empty() {
+            continue;
+        }
+        values.push((key.to_owned(), value.to_string_lossy().to_string()));
+    }
+    values.sort_by(|(left, _), (right, _)| left.cmp(right));
+    values
+}
+
+fn pip_env_config_key(env_key: &str) -> Option<String> {
+    env_key
+        .strip_prefix("PIP_")
+        .filter(|suffix| !suffix.is_empty())
+        .map(|suffix| format!(":env:.{}", suffix.to_ascii_lowercase().replace('_', "-")))
 }
 
 fn pip_config_list_value(key: &str, value: &str) -> String {
@@ -33727,46 +33743,43 @@ mod tests {
         })
     }
 
+    fn with_pip_env_values<T>(values: &[(&str, Option<&str>)], f: impl FnOnce() -> T) -> T {
+        with_env_lock(|| {
+            let mut keys = env::vars_os()
+                .filter_map(|(key, _)| {
+                    let key = key.to_str()?;
+                    key.starts_with("PIP_").then(|| key.to_owned())
+                })
+                .collect::<BTreeSet<_>>();
+            keys.extend(values.iter().map(|(key, _)| (*key).to_owned()));
+
+            let old_values = keys
+                .iter()
+                .map(|key| (key.clone(), env::var_os(key)))
+                .collect::<Vec<_>>();
+            for key in &keys {
+                env::remove_var(key);
+            }
+            for (key, value) in values {
+                if let Some(value) = value {
+                    env::set_var(key, value);
+                }
+            }
+
+            let result = f();
+            for (key, old) in old_values {
+                if let Some(old) = old {
+                    env::set_var(key, old);
+                } else {
+                    env::remove_var(key);
+                }
+            }
+            result
+        })
+    }
+
     fn with_clean_pip_env<T>(f: impl FnOnce() -> T) -> T {
-        with_env_values(
-            &[
-                ("PIP_CONFIG_FILE", None),
-                ("PIP_INDEX_URL", None),
-                ("PIP_EXTRA_INDEX_URL", None),
-                ("PIP_FIND_LINKS", None),
-                ("PIP_REQUIREMENT", None),
-                ("PIP_CONSTRAINT", None),
-                ("PIP_BUILD_CONSTRAINT", None),
-                ("PIP_NO_INDEX", None),
-                ("PIP_TARGET", None),
-                ("PIP_PREFIX", None),
-                ("PIP_ROOT", None),
-                ("PIP_USER", None),
-                ("PIP_DRY_RUN", None),
-                ("PIP_UPGRADE", None),
-                ("PIP_REPORT", None),
-                ("PIP_REQUIREMENT", None),
-                ("PIP_CONSTRAINT", None),
-                ("PIP_BUILD_CONSTRAINT", None),
-                ("PIP_NO_DEPS", None),
-                ("PIP_REQUIRE_HASHES", None),
-                ("PIP_NO_BINARY", None),
-                ("PIP_ONLY_BINARY", None),
-                ("PIP_PRE", None),
-                ("PIP_ALL_RELEASES", None),
-                ("PIP_ONLY_FINAL", None),
-                ("PIP_UPLOADED_PRIOR_TO", None),
-                ("PIP_PLATFORM", None),
-                ("PIP_PYTHON_VERSION", None),
-                ("PIP_IMPLEMENTATION", None),
-                ("PIP_ABI", None),
-                ("PIP_DEST", None),
-                ("PIP_DESTINATION_DIR", None),
-                ("PIP_WHEEL_DIR", None),
-                ("PIP_CACHE_DIR", None),
-            ],
-            f,
-        )
+        with_pip_env_values(&[], f)
     }
 
     #[test]
@@ -48250,50 +48263,87 @@ resolved_commit = "0123456789abcdef0123456789abcdef01234567"
 
     #[test]
     fn reports_pip_config_debug() {
-        with_env_values(
-            &[("PIP_CONFIG_FILE", None), ("PIP_CACHE_DIR", None)],
-            || {
-                let dir = test_dir("pip-config-debug");
-                fs::write(
-                    dir.join("pip.conf"),
-                    "[global]\nindex-url = https://debug.example.invalid/simple\n",
-                )
-                .unwrap();
+        with_clean_pip_env(|| {
+            let dir = test_dir("pip-config-debug");
+            fs::write(
+                dir.join("pip.conf"),
+                "[global]\nindex-url = https://debug.example.invalid/simple\n",
+            )
+            .unwrap();
 
-                let values = pip_config_values(&dir).unwrap();
-                let output = pip_config_debug_report(&dir, &values).unwrap();
+            let values = pip_config_values(&dir).unwrap();
+            let output = pip_config_debug_report(&dir, &values).unwrap();
 
-                assert!(output.contains("env_var:"));
-                assert!(output.contains("config_file:"));
-                assert!(output.contains("site:"));
-                assert!(output.contains("config_value:"));
-                assert!(output.contains("global.index-url=https://debug.example.invalid/simple/"));
-            },
-        );
+            assert!(output.contains("env_var:"));
+            assert!(output.contains("config_file:"));
+            assert!(output.contains("site:"));
+            assert!(output.contains("config_value:"));
+            assert!(output.contains("global.index-url=https://debug.example.invalid/simple/"));
+        });
     }
 
     #[test]
-    fn reports_pip_env_cache_dir_like_pip_config() {
-        let dir = test_dir("pip-config-cache-env");
-        with_env_values(&[("PIP_CACHE_DIR", Some("rel-cache"))], || {
-            let values = pip_config_values(&dir).unwrap();
-            assert_eq!(
-                values.get(":env:.cache-dir").map(String::as_str),
-                Some("rel-cache")
-            );
-            assert_eq!(
-                pip_config_value_for_key(&values, ":env:.cache-dir").unwrap(),
-                "rel-cache"
-            );
-            assert_eq!(
-                pip_config_list_value(":env:.cache-dir", "rel-cache"),
-                "'rel-cache'"
-            );
+    fn reports_pip_env_config_values_like_pip_config() {
+        let dir = test_dir("pip-config-env-values");
+        with_pip_env_values(
+            &[
+                ("PIP_CACHE_DIR", Some("rel-cache")),
+                ("PIP_INDEX_URL", Some("https://mirror.example/simple")),
+                (
+                    "PIP_EXTRA_INDEX_URL",
+                    Some("https://extra1.example/simple https://extra2.example/simple"),
+                ),
+                ("PIP_NO_INDEX", Some("1")),
+                ("PIP_FIND_LINKS", Some("wheelhouse")),
+                ("PIP_UNKNOWN_OPT", Some("kept")),
+            ],
+            || {
+                let values = pip_config_values(&dir).unwrap();
+                assert_eq!(
+                    values.get(":env:.cache-dir").map(String::as_str),
+                    Some("rel-cache")
+                );
+                assert_eq!(
+                    values.get(":env:.index-url").map(String::as_str),
+                    Some("https://mirror.example/simple")
+                );
+                assert_eq!(
+                    values.get(":env:.extra-index-url").map(String::as_str),
+                    Some("https://extra1.example/simple https://extra2.example/simple")
+                );
+                assert_eq!(values.get(":env:.no-index").map(String::as_str), Some("1"));
+                assert_eq!(
+                    values.get(":env:.find-links").map(String::as_str),
+                    Some("wheelhouse")
+                );
+                assert_eq!(
+                    values.get(":env:.unknown-opt").map(String::as_str),
+                    Some("kept")
+                );
+                assert_eq!(
+                    pip_config_value_for_key(&values, ":env:.cache-dir").unwrap(),
+                    "rel-cache"
+                );
+                assert_eq!(
+                    pip_config_value_for_key(&values, ":env:.index-url").unwrap(),
+                    "https://mirror.example/simple"
+                );
+                assert_eq!(
+                    pip_config_list_value(":env:.cache-dir", "rel-cache"),
+                    "'rel-cache'"
+                );
+                assert_eq!(
+                    pip_config_list_value(":env:.index-url", "https://mirror.example/simple"),
+                    "'https://mirror.example/simple'"
+                );
 
-            let output = pip_config_debug_report(&dir, &values).unwrap();
-            assert!(output.contains("PIP_CACHE_DIR=rel-cache"));
-            assert!(output.contains(":env:.cache-dir=rel-cache"));
-        });
+                let output = pip_config_debug_report(&dir, &values).unwrap();
+                assert!(output.contains("PIP_CACHE_DIR=rel-cache"));
+                assert!(output.contains("PIP_INDEX_URL=https://mirror.example/simple"));
+                assert!(output.contains(":env:.cache-dir=rel-cache"));
+                assert!(output.contains(":env:.index-url=https://mirror.example/simple"));
+            },
+        );
     }
 
     #[test]
