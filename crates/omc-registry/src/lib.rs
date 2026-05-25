@@ -706,6 +706,7 @@ pub struct LinkOptions {
     pub python_bin_dir: Option<PathBuf>,
     pub python_target_overwrite_existing: bool,
     pub npm_local_paths: Vec<PathBuf>,
+    pub npm_discovered_local_paths: Vec<PathBuf>,
     pub python_local_paths: Vec<PathBuf>,
     pub python_local_requirements: Vec<PythonLocalRequirement>,
     pub python_vcs_requirements: Vec<PythonVcsRequirement>,
@@ -758,6 +759,7 @@ impl LinkOptions {
             python_bin_dir: None,
             python_target_overwrite_existing: true,
             npm_local_paths: Vec::new(),
+            npm_discovered_local_paths: Vec::new(),
             python_local_paths: Vec::new(),
             python_local_requirements: Vec::new(),
             python_vcs_requirements: Vec::new(),
@@ -878,6 +880,7 @@ pub struct ProjectRequirements {
     pub hashes: BTreeMap<String, BTreeSet<String>>,
     pub npm_integrities: BTreeMap<String, BTreeSet<String>>,
     pub npm_resolved: BTreeMap<String, String>,
+    pub npm_local_paths: Vec<PathBuf>,
     pub pypi_binary_all: Option<PypiBinaryMode>,
     pub pypi_binary_packages: BTreeMap<String, PypiBinaryMode>,
     pub pypi_index_url: Option<String>,
@@ -932,6 +935,7 @@ fn extend_project_requirements(
     target.hashes.extend(requirements.hashes);
     target.npm_integrities.extend(requirements.npm_integrities);
     target.npm_resolved.extend(requirements.npm_resolved);
+    target.npm_local_paths.extend(requirements.npm_local_paths);
     if requirements.pypi_binary_all.is_some() {
         target.pypi_binary_all = requirements.pypi_binary_all;
     }
@@ -981,6 +985,9 @@ fn apply_project_requirements_to_options(
     options.hashes.extend(requirements.hashes);
     options.npm_integrities.extend(requirements.npm_integrities);
     options.npm_resolved.extend(requirements.npm_resolved);
+    options
+        .npm_discovered_local_paths
+        .extend(requirements.npm_local_paths);
     if requirements.pypi_binary_all.is_some() {
         options.pypi_binary_all = requirements.pypi_binary_all;
     }
@@ -1417,6 +1424,11 @@ pub fn install_project(options: &LinkOptions) -> Result<InstallReport> {
         DependencySelection::from_options(&options),
     )?;
     report.npm_bins += install_npm_direct_local_links(
+        &options.npm_discovered_local_paths,
+        &report.node_modules,
+        &report.npm_bin_dir,
+    )?;
+    report.npm_bins += install_npm_direct_local_links(
         &options.npm_local_paths,
         &report.node_modules,
         &report.npm_bin_dir,
@@ -1486,6 +1498,11 @@ pub fn install_locked_project(options: &LinkOptions) -> Result<InstallReport> {
         DependencySelection::from_options(&options),
     )?;
     report.npm_bins += install_npm_direct_local_links(
+        &options.npm_discovered_local_paths,
+        &report.node_modules,
+        &report.npm_bin_dir,
+    )?;
+    report.npm_bins += install_npm_direct_local_links(
         &options.npm_local_paths,
         &report.node_modules,
         &report.npm_bin_dir,
@@ -1520,7 +1537,7 @@ struct LocalSourceCompileInput {
 fn compile_local_source_artifacts(options: &LinkOptions, locked: bool) -> Result<usize> {
     let mut inputs = npm_local_source_compile_inputs(
         &options.project_dir,
-        &options.npm_local_paths,
+        &npm_source_compile_paths(options),
         DependencySelection::from_options(options),
     )?;
     inputs.extend(python_local_source_compile_inputs(
@@ -1604,6 +1621,12 @@ fn compile_local_source_artifacts(options: &LinkOptions, locked: bool) -> Result
     sync_local_source_lockfile(&options.project_dir, locked_sources, locked)?;
 
     Ok(count)
+}
+
+fn npm_source_compile_paths(options: &LinkOptions) -> Vec<PathBuf> {
+    let mut paths = options.npm_local_paths.clone();
+    paths.extend(options.npm_discovered_local_paths.clone());
+    paths
 }
 
 fn sync_local_source_lockfile(
@@ -1940,6 +1963,9 @@ fn project_requested_specs(options: &mut LinkOptions, locked: bool) -> Result<Ve
         )?;
         apply_project_requirements_to_options(options, &mut specs, discovered);
     }
+    if !options.npm_discovered_local_paths.is_empty() {
+        specs.extend(resolve_npm_discovered_local_path_requirements(options)?);
+    }
     if !options.npm_local_paths.is_empty() {
         specs.extend(resolve_npm_local_path_requirements(options)?);
     }
@@ -1986,13 +2012,42 @@ fn project_requested_specs(options: &mut LinkOptions, locked: bool) -> Result<Ve
 }
 
 fn resolve_npm_local_path_requirements(options: &mut LinkOptions) -> Result<Vec<PackageSpec>> {
-    let selection = DependencySelection {
-        dev: false,
-        optional: options.include_optional_dependencies,
-        peer: options.include_peer_dependencies,
-    };
+    let (specs, paths) = resolve_npm_local_path_requirements_inner(
+        &options.npm_local_paths.clone(),
+        DependencySelection {
+            dev: false,
+            optional: options.include_optional_dependencies,
+            peer: options.include_peer_dependencies,
+        },
+        options,
+    )?;
+    options.npm_local_paths = paths;
+    Ok(specs)
+}
+
+fn resolve_npm_discovered_local_path_requirements(
+    options: &mut LinkOptions,
+) -> Result<Vec<PackageSpec>> {
+    let (specs, paths) = resolve_npm_local_path_requirements_inner(
+        &options.npm_discovered_local_paths.clone(),
+        DependencySelection {
+            dev: false,
+            optional: options.include_optional_dependencies,
+            peer: options.include_peer_dependencies,
+        },
+        options,
+    )?;
+    options.npm_discovered_local_paths = paths;
+    Ok(specs)
+}
+
+fn resolve_npm_local_path_requirements_inner(
+    local_paths: &[PathBuf],
+    selection: DependencySelection,
+    options: &mut LinkOptions,
+) -> Result<(Vec<PackageSpec>, Vec<PathBuf>)> {
     let mut specs = Vec::new();
-    let mut queue = options.npm_local_paths.clone();
+    let mut queue = local_paths.to_vec();
     let mut seen = BTreeSet::new();
     let mut resolved_paths = Vec::new();
 
@@ -2035,8 +2090,7 @@ fn resolve_npm_local_path_requirements(options: &mut LinkOptions) -> Result<Vec<
         resolved_paths.push(path);
     }
 
-    options.npm_local_paths = resolved_paths;
-    Ok(specs)
+    Ok((specs, resolved_paths))
 }
 
 fn resolve_python_local_requirements(
@@ -4080,9 +4134,17 @@ fn read_package_json_requirements(
     let workspaces = package.workspaces.clone();
     let mut requirements = ProjectRequirements::default();
     collect_package_json_overrides(&package, &mut requirements.npm_overrides);
-    requirements
-        .specs
-        .extend(package_json_dependency_specs(package, selection, base_dir)?);
+    requirements.specs.extend(package_json_dependency_specs(
+        package.clone(),
+        selection,
+        base_dir,
+    )?);
+    collect_package_json_local_dependency_paths(
+        &package,
+        selection,
+        base_dir,
+        &mut requirements.npm_local_paths,
+    )?;
 
     if let Some(workspaces) = workspaces {
         for package_json in workspace_package_json_paths(base_dir, &workspaces) {
@@ -4091,14 +4153,36 @@ fn read_package_json_requirements(
                 serde_json::from_str::<ProjectPackageJson>(&fs::read_to_string(&package_json)?)?;
             collect_package_json_overrides(&package, &mut requirements.npm_overrides);
             requirements.specs.extend(package_json_dependency_specs(
-                package,
+                package.clone(),
                 selection,
                 workspace_base_dir,
             )?);
+            collect_package_json_local_dependency_paths(
+                &package,
+                selection,
+                workspace_base_dir,
+                &mut requirements.npm_local_paths,
+            )?;
         }
     }
 
     Ok(requirements)
+}
+
+fn collect_package_json_local_dependency_paths(
+    package: &ProjectPackageJson,
+    selection: DependencySelection,
+    base_dir: &Path,
+    paths: &mut Vec<PathBuf>,
+) -> Result<()> {
+    let mut links = Vec::new();
+    collect_npm_local_dependency_links(package, selection, base_dir, &mut links)?;
+    for link in links {
+        if !paths.contains(&link.path) {
+            paths.push(link.path);
+        }
+    }
+    Ok(())
 }
 
 fn package_json_dependency_specs(
@@ -4952,6 +5036,7 @@ fn npm_requirements_from_lock_maps(
         hashes: BTreeMap::new(),
         npm_integrities,
         npm_resolved,
+        npm_local_paths: Vec::new(),
         pypi_binary_all: None,
         pypi_binary_packages: BTreeMap::new(),
         pypi_index_url: None,
@@ -7852,20 +7937,26 @@ fn install_npm_direct_local_links(
     let mut count = 0;
     let mut seen = BTreeSet::new();
     for path in paths {
-        if !seen.insert(path.to_string_lossy().into_owned()) {
+        let source_path = fs::canonicalize(path).map_err(|error| {
+            OmcRegistryError::UnsupportedRequirement(format!(
+                "local npm path `{}` could not be resolved: {error}",
+                path.display()
+            ))
+        })?;
+        if !seen.insert(source_path.clone()) {
             continue;
         }
-        if !path.is_dir() {
+        if !source_path.is_dir() {
             return Err(OmcRegistryError::UnsupportedSpec(format!(
                 "local npm path `{}` must point to an existing directory",
-                path.display()
+                source_path.display()
             )));
         }
-        let package_json = path.join("package.json");
+        let package_json = source_path.join("package.json");
         if !package_json.exists() {
             return Err(OmcRegistryError::UnsupportedSpec(format!(
                 "local npm path `{}` must contain package.json",
-                path.display()
+                source_path.display()
             )));
         }
         let package =
@@ -7873,18 +7964,30 @@ fn install_npm_direct_local_links(
         let Some(name) = package.name.as_deref().filter(|name| !name.is_empty()) else {
             return Err(OmcRegistryError::UnsupportedSpec(format!(
                 "local npm path `{}` package.json must declare name",
-                path.display()
+                source_path.display()
             )));
         };
         let target = npm_install_target(node_modules, name);
+        if target_already_links_to_source(&target, &source_path) {
+            continue;
+        }
         remove_path_if_exists(&target)?;
         if let Some(parent) = target.parent() {
             fs::create_dir_all(parent)?;
         }
-        create_directory_link(path, &target)?;
+        create_directory_link(&source_path, &target)?;
         count += install_npm_bins(&target, name, bin_dir)?;
     }
     Ok(count)
+}
+
+fn target_already_links_to_source(target: &Path, source: &Path) -> bool {
+    target
+        .exists()
+        .then(|| fs::canonicalize(target).ok())
+        .flatten()
+        .as_deref()
+        == Some(source)
 }
 
 fn install_npm_root_bins(project_dir: &Path, bin_dir: &Path) -> Result<usize> {
@@ -19340,6 +19443,72 @@ mod tests {
             .unwrap();
         assert!(output.status.success());
         assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "44");
+    }
+
+    #[test]
+    fn installs_package_json_local_directory_dependencies_recursively() {
+        let dir = tempfile::tempdir().unwrap();
+        let parent = dir.path().join("vendor/parent-pkg");
+        let child = parent.join("child-pkg");
+        fs::create_dir_all(&child).unwrap();
+        fs::write(
+            dir.path().join("package.json"),
+            r#"{
+                "name": "local-dep-root",
+                "dependencies": { "parent-pkg": "file:vendor/parent-pkg" }
+            }"#,
+        )
+        .unwrap();
+        fs::write(
+            parent.join("package.json"),
+            r#"{
+                "name": "parent-pkg",
+                "version": "1.0.0",
+                "dependencies": {
+                    "child-pkg": "file:./child-pkg",
+                    "tar-dep": "file:./tar-dep-1.0.0.tgz"
+                }
+            }"#,
+        )
+        .unwrap();
+        fs::write(
+            parent.join("index.js"),
+            "module.exports = require('child-pkg') + require('tar-dep');\n",
+        )
+        .unwrap();
+        fs::write(
+            child.join("package.json"),
+            r#"{ "name": "child-pkg", "version": "1.0.0" }"#,
+        )
+        .unwrap();
+        fs::write(child.join("index.js"), "module.exports = 20;\n").unwrap();
+        fs::write(
+            parent.join("tar-dep-1.0.0.tgz"),
+            npm_tgz_for_test(r#"{ "name": "tar-dep", "version": "1.0.0" }"#),
+        )
+        .unwrap();
+
+        install_project(&LinkOptions::new(dir.path())).unwrap();
+
+        assert!(dir.path().join("node_modules/parent-pkg").exists());
+        assert!(dir.path().join("node_modules/child-pkg").exists());
+        assert!(dir
+            .path()
+            .join("node_modules/tar-dep/package.json")
+            .exists());
+        let lock = read_lockfile(dir.path().join("omc.lock")).unwrap();
+        assert!(lock
+            .packages
+            .iter()
+            .any(|package| package.name == "tar-dep"));
+        assert!(lock
+            .local_sources
+            .iter()
+            .any(|source| source.name == "parent-pkg"));
+        assert!(lock
+            .local_sources
+            .iter()
+            .any(|source| source.name == "child-pkg"));
     }
 
     #[test]
