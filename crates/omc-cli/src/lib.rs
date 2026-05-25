@@ -2192,7 +2192,7 @@ fn run_pip_lock(project_dir: &Path, action: PipLockAction) -> Result<ExitCode, O
     )?);
     resolved_specs.extend(prepare_pip_local_directory_archive_specs(
         project_dir,
-        temp_project.path(),
+        project_dir,
         local_directories,
         &mut options,
     )?);
@@ -2200,7 +2200,7 @@ fn run_pip_lock(project_dir: &Path, action: PipLockAction) -> Result<ExitCode, O
         &mut options,
         &mut resolved_specs,
         project_dir,
-        temp_project.path(),
+        project_dir,
     )?;
     if !script_requirements.is_empty() {
         let requirements =
@@ -2210,7 +2210,7 @@ fn run_pip_lock(project_dir: &Path, action: PipLockAction) -> Result<ExitCode, O
             &mut resolved_specs,
             requirements,
             project_dir,
-            temp_project.path(),
+            project_dir,
         )?;
     }
 
@@ -43123,6 +43123,80 @@ version = "0.1.0"
             .join("python")
             .join("site-packages")
             .exists());
+        fs::remove_dir_all(project).unwrap();
+    }
+
+    #[test]
+    fn pip_lock_requirements_local_directory_writes_live_wheel_url() {
+        let project = test_dir("pip-lock-requirements-local-project");
+        let local = project.join("localpkg");
+        fs::create_dir_all(local.join("src").join("localpkg")).unwrap();
+        fs::write(local.join("src").join("localpkg").join("__init__.py"), "").unwrap();
+        fs::write(
+            local.join("pyproject.toml"),
+            r#"
+[project]
+name = "localpkg"
+version = "0.1.0"
+"#,
+        )
+        .unwrap();
+        fs::write(project.join("requirements.txt"), "./localpkg\n").unwrap();
+
+        let status = with_clean_pip_env(|| {
+            run_pip_compat(
+                &project,
+                &args(&[
+                    "lock",
+                    "-r",
+                    "requirements.txt",
+                    "-o",
+                    "locks/pylock.toml",
+                    "--no-deps",
+                ]),
+            )
+        })
+        .unwrap();
+
+        assert_eq!(status, ExitCode::SUCCESS);
+        let pylock = fs::read_to_string(project.join("locks").join("pylock.toml")).unwrap();
+        let wheel_url = pylock
+            .lines()
+            .find_map(|line| {
+                line.split_once("url = ")
+                    .and_then(|(_, value)| value.split('"').nth(1))
+            })
+            .expect("pylock should contain a wheel URL");
+        let wheel_path = reqwest::Url::parse(wheel_url)
+            .unwrap()
+            .to_file_path()
+            .unwrap();
+
+        assert!(wheel_path.exists());
+        assert!(wheel_path.starts_with(project.join(".omc").join("python").join("local-wheels")));
+        assert!(!project.join("omc.lock").exists());
+        assert!(!project
+            .join(".omc")
+            .join("python")
+            .join("site-packages")
+            .exists());
+
+        let status = with_clean_pip_env(|| {
+            run_pip_compat(
+                &project,
+                &args(&["install", "-r", "locks/pylock.toml", "--no-deps"]),
+            )
+        })
+        .unwrap();
+
+        assert_eq!(status, ExitCode::SUCCESS);
+        let site_packages = project.join(".omc").join("python").join("site-packages");
+        assert!(site_packages.join("localpkg").join("__init__.py").exists());
+        assert!(site_packages
+            .join("localpkg-0.1.0.dist-info")
+            .join("METADATA")
+            .exists());
+
         fs::remove_dir_all(project).unwrap();
     }
 
