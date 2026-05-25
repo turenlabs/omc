@@ -484,6 +484,8 @@ Supported now:
   linked into `node_modules` or OMC-managed Python import paths
 - `omc.lock` records install-compiled local source artifacts and `omc ci`
   rejects local source changes until the lock is refreshed
+- locked local source installs verify the existing signed artifact without
+  rewriting it on source drift
 - npm semver range resolution for common dependency ranges
 - global, project, and user `.npmrc` support for `registry`, `@scope:registry`,
   and host-scoped `_authToken` npm registry access, plus `NPM_CONFIG_REGISTRY` /
