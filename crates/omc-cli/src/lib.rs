@@ -2885,7 +2885,13 @@ fn run_npm_exec(
     }
 
     let temp_project = TempOmcProject::empty("npm-exec")?;
-    let specs = parse_package_specs(&action.packages, Some(Ecosystem::Npm))?;
+    let (package_specs, archive_references, local_paths) =
+        npm_exec_package_inputs(cwd, &action.packages)?;
+    let mut specs = parse_package_specs(&package_specs, Some(Ecosystem::Npm))?;
+    specs.extend(parse_npm_archive_references(
+        temp_project.path(),
+        &archive_references,
+    )?);
 
     let mut options = LinkOptions::new(temp_project.path());
     apply_cli_policy_options(
@@ -2897,6 +2903,7 @@ fn run_npm_exec(
     options.npm_registry_url = action.npm_registry;
     options.discover_project_requirements = false;
     options.save_manifest_dependency = true;
+    options.npm_local_paths = local_paths;
 
     for spec in specs {
         add_package_graph(&spec, &options)?;
@@ -2929,6 +2936,25 @@ fn run_npm_exec(
         }
     }
     Ok(ExitCode::SUCCESS)
+}
+
+fn npm_exec_package_inputs(
+    cwd: &Path,
+    packages: &[String],
+) -> Result<(Vec<String>, Vec<String>, Vec<PathBuf>), OmcRegistryError> {
+    let mut specs = Vec::new();
+    let mut archive_references = Vec::new();
+    let mut local_paths = Vec::new();
+    for package in packages {
+        if is_npm_archive_arg(package) {
+            archive_references.push(absolutize_npm_archive_reference(cwd, package));
+        } else if is_npm_local_directory_arg(package) {
+            local_paths.push(absolutize_path(cwd, npm_local_path_arg(package)?));
+        } else {
+            specs.push(package.clone());
+        }
+    }
+    Ok((specs, archive_references, local_paths))
 }
 
 fn npm_exec_target_cwds(
@@ -34336,6 +34362,47 @@ mod tests {
             .to_string_lossy()
             .into_owned();
         assert_eq!(manifest.npm_local_paths, vec![saved_local_path]);
+
+        let _ = fs::remove_dir_all(project);
+    }
+
+    #[test]
+    fn direct_npm_exec_package_resolves_local_paths_from_invocation_cwd() {
+        let project = test_dir("direct-npm-exec-local-path-project");
+        let invocation_cwd = project.join("packages/app/src");
+        let local_package = invocation_cwd.join("vendor/local-tool");
+        fs::create_dir_all(&local_package).unwrap();
+        fs::write(
+            local_package.join("package.json"),
+            r#"{"name":"local-tool-pkg","version":"1.0.0","bin":{"local-tool":"cli.js"}}"#,
+        )
+        .unwrap();
+        fs::write(
+            local_package.join("cli.js"),
+            "#!/usr/bin/env node\nconst fs = require('fs'); fs.writeFileSync(process.argv[2], 'local-tool-ok\\n');\n",
+        )
+        .unwrap();
+
+        let status = run_npm_compat_with_cwd(
+            &project,
+            &args(&[
+                "npx",
+                "--package",
+                "./vendor/local-tool",
+                "local-tool",
+                "marker.txt",
+            ]),
+            &invocation_cwd,
+        )
+        .unwrap();
+
+        assert_eq!(status, ExitCode::SUCCESS);
+        assert_eq!(
+            fs::read_to_string(invocation_cwd.join("marker.txt")).unwrap(),
+            "local-tool-ok\n"
+        );
+        assert!(!project.join("omc.toml").exists());
+        assert!(!project.join("node_modules").exists());
 
         let _ = fs::remove_dir_all(project);
     }
