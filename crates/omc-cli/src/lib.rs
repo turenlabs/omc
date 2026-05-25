@@ -482,6 +482,7 @@ enum NpmCompatAction {
     Outdated {
         json: bool,
         parseable: bool,
+        packages: Vec<String>,
         npm_registry: Option<String>,
     },
     Doctor {
@@ -4803,8 +4804,17 @@ fn run_npm_compat_with_cwd(
         NpmCompatAction::Outdated {
             json,
             parseable,
+            packages,
             npm_registry,
-        } => return print_npm_outdated(project_dir, json, parseable, npm_registry.as_deref()),
+        } => {
+            return print_npm_outdated(
+                project_dir,
+                json,
+                parseable,
+                &packages,
+                npm_registry.as_deref(),
+            )
+        }
         NpmCompatAction::Doctor { action } => print_npm_doctor(project_dir, action)?,
         NpmCompatAction::Audit { json } => return print_audit_report(project_dir, json),
         NpmCompatAction::Fund { action } => print_npm_fund(project_dir, action)?,
@@ -13107,8 +13117,10 @@ fn print_npm_outdated(
     project_dir: &Path,
     json: bool,
     parseable: bool,
+    packages: &[String],
     npm_registry: Option<&str>,
 ) -> Result<ExitCode, OmcRegistryError> {
+    let filter_names = package_list_filter_names(packages, Some(Ecosystem::Npm))?;
     let lock = read_lockfile(project_dir.join("omc.lock"))?;
     let dependent = npm_outdated_dependent(project_dir);
     let mut rows = Vec::new();
@@ -13116,6 +13128,7 @@ fn print_npm_outdated(
         .packages
         .into_iter()
         .filter(|package| package.ecosystem == Ecosystem::Npm)
+        .filter(|package| filter_names.is_empty() || filter_names.contains(&package.name))
     {
         let spec = parse_package_spec(&package.name, Some(Ecosystem::Npm))?;
         let metadata = read_npm_package_metadata(project_dir, &spec, npm_registry)?;
@@ -28713,13 +28726,11 @@ fn parse_npm_outdated_args(args: &[String]) -> Result<NpmCompatAction, OmcRegist
         positionals,
         ..
     } = parse_common_compat_flags(&filtered, true)?;
-    if !positionals.is_empty() {
-        return Err(unsupported_compat_arg("npm outdated", &positionals[0]));
-    }
 
     Ok(NpmCompatAction::Outdated {
         json,
         parseable,
+        packages: positionals,
         npm_registry,
     })
 }
@@ -38790,7 +38801,23 @@ verdict = "accepted"
             NpmCompatAction::Outdated {
                 json: true,
                 parseable: true,
+                packages: Vec::new(),
                 npm_registry: Some("https://registry.example.invalid/npm".to_owned()),
+            }
+        );
+        assert_eq!(
+            parse_npm_compat_action(&args(&[
+                "outdated",
+                "left-pad@1.1.0",
+                "@demo/pkg",
+                "--json",
+            ]))
+            .unwrap(),
+            NpmCompatAction::Outdated {
+                json: true,
+                parseable: false,
+                packages: vec!["left-pad@1.1.0".to_owned(), "@demo/pkg".to_owned()],
+                npm_registry: None,
             }
         );
         assert_eq!(

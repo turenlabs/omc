@@ -150,6 +150,7 @@ cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm run build --wo
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm explore left-pad -- pwd
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm audit --json
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm outdated --json
+cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm outdated left-pad --json
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm explain left-pad --json
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm query ':root > *'
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm ls --depth 0 left-pad --json
