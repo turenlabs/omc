@@ -20696,26 +20696,8 @@ fn print_pip_installed_list(
 ) -> Result<(), OmcRegistryError> {
     match format {
         PipListFormat::Columns => {
-            if !packages.is_empty() {
-                let has_editable_locations = packages
-                    .iter()
-                    .any(|package| package.editable_project_location.is_some());
-                if has_editable_locations {
-                    println!("Package Version Location");
-                    for package in packages {
-                        let location = package
-                            .editable_project_location
-                            .as_ref()
-                            .map(|path| path.display().to_string())
-                            .unwrap_or_default();
-                        println!("{} {} {}", package.name, package.version, location);
-                    }
-                } else {
-                    println!("Package Version");
-                    for package in packages {
-                        println!("{} {}", package.name, package.version);
-                    }
-                }
+            if let Some(output) = pip_columns_list_output(packages) {
+                print!("{output}");
             }
         }
         PipListFormat::Freeze => {
@@ -20737,6 +20719,85 @@ fn print_pip_installed_list(
         }
     }
     Ok(())
+}
+
+fn pip_columns_list_output(packages: &[InstalledPythonPackage]) -> Option<String> {
+    if packages.is_empty() {
+        return None;
+    }
+
+    let has_editable_locations = packages
+        .iter()
+        .any(|package| package.editable_project_location.is_some());
+    let headers = if has_editable_locations {
+        vec!["Package", "Version", "Location"]
+    } else {
+        vec!["Package", "Version"]
+    };
+    let rows = packages
+        .iter()
+        .map(|package| {
+            let mut row = vec![package.name.clone(), package.version.clone()];
+            if has_editable_locations {
+                row.push(
+                    package
+                        .editable_project_location
+                        .as_ref()
+                        .map(|path| path.display().to_string())
+                        .unwrap_or_default(),
+                );
+            }
+            row
+        })
+        .collect::<Vec<_>>();
+    let widths = headers
+        .iter()
+        .enumerate()
+        .map(|(index, header)| {
+            rows.iter()
+                .map(|row| row[index].len())
+                .chain(std::iter::once(header.len()))
+                .max()
+                .unwrap_or(header.len())
+        })
+        .collect::<Vec<_>>();
+
+    let mut output = String::new();
+    output.push_str(&pip_columns_join_row(
+        &headers
+            .iter()
+            .map(|value| value.to_string())
+            .collect::<Vec<_>>(),
+        &widths,
+    ));
+    output.push('\n');
+    output.push_str(&pip_columns_join_row(
+        &widths
+            .iter()
+            .map(|width| "-".repeat(*width))
+            .collect::<Vec<_>>(),
+        &widths,
+    ));
+    output.push('\n');
+    for row in rows {
+        output.push_str(&pip_columns_join_row(&row, &widths));
+        output.push('\n');
+    }
+    Some(output)
+}
+
+fn pip_columns_join_row(row: &[String], widths: &[usize]) -> String {
+    row.iter()
+        .enumerate()
+        .map(|(index, value)| {
+            if index + 1 == row.len() {
+                value.clone()
+            } else {
+                format!("{value:<width$}", width = widths[index])
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn read_pip_path_packages(
@@ -46524,6 +46585,43 @@ version = "0.2.0"
                 .collect::<Vec<_>>(),
             vec!["requests", "pytest"]
         );
+    }
+
+    #[test]
+    fn formats_pip_list_columns_like_pip() {
+        let packages = vec![
+            InstalledPythonPackage {
+                name: "idna".to_owned(),
+                version: "3.4".to_owned(),
+                dependencies: Vec::new(),
+                metadata_location: None,
+                editable_project_location: None,
+            },
+            InstalledPythonPackage {
+                name: "setuptools".to_owned(),
+                version: "58.0.4".to_owned(),
+                dependencies: Vec::new(),
+                metadata_location: None,
+                editable_project_location: None,
+            },
+        ];
+        assert_eq!(
+            pip_columns_list_output(&packages).unwrap(),
+            "Package    Version\n---------- -------\nidna       3.4\nsetuptools 58.0.4\n"
+        );
+
+        let editable = vec![InstalledPythonPackage {
+            name: "demoedit".to_owned(),
+            version: "0.1.0".to_owned(),
+            dependencies: Vec::new(),
+            metadata_location: None,
+            editable_project_location: Some(PathBuf::from("/tmp/demoedit")),
+        }];
+        assert_eq!(
+            pip_columns_list_output(&editable).unwrap(),
+            "Package  Version Location\n-------- ------- -------------\ndemoedit 0.1.0   /tmp/demoedit\n"
+        );
+        assert!(pip_columns_list_output(&[]).is_none());
     }
 
     #[test]
