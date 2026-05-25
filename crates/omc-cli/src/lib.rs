@@ -20718,10 +20718,22 @@ fn pip_installed_list_json_output(
     let packages = packages
         .iter()
         .map(|package| {
-            serde_json::json!({
-                "name": package.name,
-                "version": package.version,
-            })
+            let mut item = serde_json::Map::new();
+            item.insert(
+                "name".to_owned(),
+                serde_json::Value::String(package.name.clone()),
+            );
+            item.insert(
+                "version".to_owned(),
+                serde_json::Value::String(package.version.clone()),
+            );
+            if let Some(location) = &package.editable_project_location {
+                item.insert(
+                    "editable_project_location".to_owned(),
+                    serde_json::Value::String(location.display().to_string()),
+                );
+            }
+            serde_json::Value::Object(item)
         })
         .collect::<Vec<_>>();
     Ok(serde_json::to_string(&packages)?)
@@ -46634,6 +46646,10 @@ version = "0.2.0"
         assert_eq!(
             pip_columns_list_output(&editable).unwrap(),
             "Package  Version Location\n-------- ------- -------------\ndemoedit 0.1.0   /tmp/demoedit\n"
+        );
+        assert_eq!(
+            pip_installed_list_json_output(&editable).unwrap(),
+            r#"[{"editable_project_location":"/tmp/demoedit","name":"demoedit","version":"0.1.0"}]"#
         );
         assert!(pip_columns_list_output(&[]).is_none());
 
