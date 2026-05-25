@@ -13738,7 +13738,12 @@ fn download_pip_packages(
         copy_downloaded_pypi_archives(project_dir, &destination, &reports)?;
     }
     if !local_paths.is_empty() {
-        build_pip_local_wheels(project_dir, &destination, &local_paths)?;
+        build_pip_local_wheels(
+            project_dir,
+            &destination,
+            &local_paths,
+            options.pypi_include_dependencies,
+        )?;
     }
     Ok(())
 }
@@ -13911,7 +13916,12 @@ fn prepare_pip_local_directory_archive_specs(
     if options.pypi_include_dependencies {
         let _ = collect_pip_local_wheel_dependencies(source_project_dir, &mut requirements)?;
     }
-    build_pip_local_wheels(source_project_dir, &wheelhouse, &requirements)?;
+    build_pip_local_wheels(
+        source_project_dir,
+        &wheelhouse,
+        &requirements,
+        options.pypi_include_dependencies,
+    )?;
 
     let wheelhouse_value = wheelhouse.to_string_lossy().into_owned();
     if !options.pypi_find_links.contains(&wheelhouse_value) {
@@ -14070,6 +14080,7 @@ fn build_pip_local_wheels(
     project_dir: &Path,
     destination: &Path,
     requirements: &[PythonLocalRequirement],
+    include_dependencies: bool,
 ) -> Result<(), OmcRegistryError> {
     let mut built = 0usize;
     let mut seen = BTreeSet::new();
@@ -14079,7 +14090,10 @@ fn build_pip_local_wheels(
             continue;
         }
 
-        let metadata = read_pip_local_wheel_metadata(&package_dir, &requirement.extras)?;
+        let mut metadata = read_pip_local_wheel_metadata(&package_dir, &requirement.extras)?;
+        if !include_dependencies {
+            metadata.requires_dist.clear();
+        }
         let filename = pip_local_wheel_filename(&metadata);
         let target = destination.join(filename);
         write_pip_local_wheel(&package_dir, &metadata, &target)?;
@@ -43001,6 +43015,62 @@ version = "0.1.0"
             .packages
             .iter()
             .any(|package| package.name == "requirements-local" && package.version == "0.1.0"));
+
+        let _ = fs::remove_dir_all(project);
+    }
+
+    #[test]
+    fn pip_install_local_directory_extra_no_deps_skips_extra_dependencies() {
+        let project = test_dir("pip-install-local-extra-no-deps-project");
+        fs::create_dir_all(project.join("src").join("rootpkg")).unwrap();
+        fs::create_dir_all(project.join("dep").join("src").join("deppkg")).unwrap();
+        fs::write(
+            project.join("src").join("rootpkg").join("__init__.py"),
+            "VALUE = 'root'\n",
+        )
+        .unwrap();
+        fs::write(
+            project
+                .join("dep")
+                .join("src")
+                .join("deppkg")
+                .join("__init__.py"),
+            "VALUE = 'dep'\n",
+        )
+        .unwrap();
+        fs::write(
+            project.join("dep").join("pyproject.toml"),
+            r#"
+[project]
+name = "deppkg"
+version = "0.1.0"
+"#,
+        )
+        .unwrap();
+        fs::write(
+            project.join("pyproject.toml"),
+            r#"
+[project]
+name = "rootpkg"
+version = "0.1.0"
+
+[project.optional-dependencies]
+dev = ["deppkg @ file:./dep"]
+"#,
+        )
+        .unwrap();
+
+        let status = with_clean_pip_env(|| {
+            run_pip_compat(&project, &args(&["install", ".[dev]", "--no-deps"]))
+        })
+        .unwrap();
+
+        assert_eq!(status, ExitCode::SUCCESS);
+        let site_packages = project.join(".omc").join("python").join("site-packages");
+        assert!(site_packages.join("rootpkg").join("__init__.py").exists());
+        assert!(site_packages.join("rootpkg-0.1.0.dist-info").exists());
+        assert!(!site_packages.join("deppkg").exists());
+        assert!(!site_packages.join("deppkg-0.1.0.dist-info").exists());
 
         let _ = fs::remove_dir_all(project);
     }
