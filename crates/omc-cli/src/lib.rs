@@ -1617,6 +1617,12 @@ fn direct_compat_mode(program: Option<&std::ffi::OsStr>) -> Option<DirectCompatM
 }
 
 fn npx_compat_args(args: Vec<String>) -> Vec<String> {
+    if args
+        .first()
+        .is_some_and(|arg| matches!(arg.as_str(), "--version" | "-v"))
+    {
+        return vec![args[0].clone()];
+    }
     let mut compat_args = Vec::with_capacity(args.len() + 1);
     compat_args.push("npx".to_owned());
     compat_args.extend(args);
@@ -37549,6 +37555,8 @@ verdict = "accepted"
             npx_compat_args(args(&["eslint", "--", "."])),
             args(&["npx", "eslint", "--", "."])
         );
+        assert_eq!(npx_compat_args(args(&["--version"])), args(&["--version"]));
+        assert_eq!(npx_compat_args(args(&["-v"])), args(&["-v"]));
         assert_eq!(
             npm_project_dir_from_prefix_args(
                 Path::new("/tmp/root"),
