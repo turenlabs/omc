@@ -601,6 +601,7 @@ enum NpmMaintenanceCommand {
 #[derive(Debug, PartialEq, Eq)]
 struct NpmListAction {
     json: bool,
+    depth: usize,
     packages: Vec<String>,
 }
 
@@ -19223,7 +19224,11 @@ fn print_npm_list(project_dir: &Path, action: &NpmListAction) -> Result<(), OmcR
     if action.json {
         println!(
             "{}",
-            serde_json::to_string_pretty(&npm_list_json_tree(project_dir, &action.packages)?)?
+            serde_json::to_string_pretty(&npm_list_json_tree(
+                project_dir,
+                &action.packages,
+                action.depth,
+            )?)?
         );
         return Ok(());
     }
@@ -19234,6 +19239,7 @@ fn print_npm_list(project_dir: &Path, action: &NpmListAction) -> Result<(), OmcR
 fn npm_list_json_tree(
     project_dir: &Path,
     filters: &[String],
+    depth: usize,
 ) -> Result<serde_json::Value, OmcRegistryError> {
     let packages = listed_locked_packages(project_dir, Some(Ecosystem::Npm), &[])?;
     let mut packages_by_name = BTreeMap::new();
@@ -19264,7 +19270,7 @@ fn npm_list_json_tree(
             let mut visiting = BTreeSet::new();
             dependencies.insert(
                 dependency,
-                npm_list_package_json(package, &packages_by_name, &mut visiting),
+                npm_list_package_json(package, &packages_by_name, &mut visiting, depth),
             );
         }
     }
@@ -19309,6 +19315,7 @@ fn npm_list_package_json(
     package: &LockedPackage,
     packages_by_name: &BTreeMap<String, &LockedPackage>,
     visiting: &mut BTreeSet<(String, String)>,
+    remaining_depth: usize,
 ) -> serde_json::Value {
     let mut item = serde_json::Map::new();
     item.insert(
@@ -19324,7 +19331,7 @@ fn npm_list_package_json(
     item.insert("overridden".to_owned(), serde_json::Value::Bool(false));
 
     let visit_key = (package.name.clone(), package.version.clone());
-    if visiting.insert(visit_key.clone()) {
+    if remaining_depth > 0 && visiting.insert(visit_key.clone()) {
         let mut dependencies = serde_json::Map::new();
         for dependency in package
             .dependencies
@@ -19336,7 +19343,12 @@ fn npm_list_package_json(
             if let Some(dependency_package) = packages_by_name.get(&dependency) {
                 dependencies.insert(
                     dependency,
-                    npm_list_package_json(dependency_package, packages_by_name, visiting),
+                    npm_list_package_json(
+                        dependency_package,
+                        packages_by_name,
+                        visiting,
+                        remaining_depth.saturating_sub(1),
+                    ),
                 );
             }
         }
@@ -32580,16 +32592,36 @@ fn ignored_npm_install_preference_equals_flag(arg: &str) -> bool {
 
 fn parse_npm_list_args(args: &[String]) -> Result<NpmCompatAction, OmcRegistryError> {
     let mut json = false;
+    let mut depth = 0usize;
     let mut packages = Vec::new();
     let mut index = 0;
     while index < args.len() {
         let arg = &args[index];
         if let Some(value) = npm_json_flag_value(arg) {
             json = value;
+        } else if let Some(value) = npm_list_all_flag_value(arg) {
+            if value {
+                depth = usize::MAX;
+            } else {
+                depth = 0;
+            }
+        } else if let Some(value) = npm_list_short_all_flag_value(arg) {
+            if value {
+                depth = usize::MAX;
+            }
+        } else if arg == "--depth" {
+            index += 1;
+            let Some(value) = args.get(index) else {
+                return Err(OmcRegistryError::UnsupportedSpec(
+                    "--depth needs a value".to_owned(),
+                ));
+            };
+            depth = parse_npm_list_depth(value)?;
+        } else if let Some(value) = arg.strip_prefix("--depth=") {
+            depth = parse_npm_list_depth(value)?;
         } else if matches!(
             arg.as_str(),
-            "--all"
-                | "--long"
+            "--long"
                 | "--parseable"
                 | "-p"
                 | "--production"
@@ -32602,11 +32634,10 @@ fn parse_npm_list_args(args: &[String]) -> Result<NpmCompatAction, OmcRegistryEr
                 | "--color=false"
                 | "--no-color"
         ) || npm_workspace_scope_ignored_flag(arg)
-            || npm_all_long_short_flag(arg)
         {
         } else if matches!(
             arg.as_str(),
-            "--depth" | "--omit" | "--include" | "--loglevel" | "--workspace" | "-w"
+            "--omit" | "--include" | "--loglevel" | "--workspace" | "-w"
         ) {
             index += 1;
             if args.get(index).is_none() {
@@ -32623,7 +32654,38 @@ fn parse_npm_list_args(args: &[String]) -> Result<NpmCompatAction, OmcRegistryEr
         index += 1;
     }
     Ok(NpmCompatAction::List {
-        action: NpmListAction { json, packages },
+        action: NpmListAction {
+            json,
+            depth,
+            packages,
+        },
+    })
+}
+
+fn npm_list_all_flag_value(arg: &str) -> Option<bool> {
+    match arg {
+        "--all" | "--all=true" => Some(true),
+        "--all=false" | "--no-all" => Some(false),
+        _ => None,
+    }
+}
+
+fn npm_list_short_all_flag_value(arg: &str) -> Option<bool> {
+    let rest = arg.strip_prefix('-')?;
+    if rest.is_empty() || rest.starts_with('-') {
+        return None;
+    }
+    rest.chars()
+        .all(|ch| matches!(ch, 'a' | 'l'))
+        .then(|| rest.contains('a'))
+}
+
+fn parse_npm_list_depth(value: &str) -> Result<usize, OmcRegistryError> {
+    if value.eq_ignore_ascii_case("infinity") {
+        return Ok(usize::MAX);
+    }
+    value.parse::<usize>().map_err(|_| {
+        OmcRegistryError::UnsupportedSpec(format!("unsupported npm list depth `{value}`"))
     })
 }
 
@@ -41366,7 +41428,7 @@ version = "0.1.0"
         )
         .unwrap();
 
-        let tree = npm_list_json_tree(&project, &[]).unwrap();
+        let tree = npm_list_json_tree(&project, &[], 0).unwrap();
         assert_eq!(tree["name"], "root");
         assert_eq!(tree["version"], "1.0.0");
         assert_eq!(tree["dependencies"]["left-pad"]["version"], "1.1.0");
@@ -41374,13 +41436,18 @@ version = "0.1.0"
             tree["dependencies"]["left-pad"]["resolved"],
             "https://registry.example/left-pad/-/left-pad-1.1.0.tgz"
         );
+        assert!(tree["dependencies"]["left-pad"]
+            .get("dependencies")
+            .is_none());
+
+        let deep_tree = npm_list_json_tree(&project, &[], 1).unwrap();
         assert_eq!(
-            tree["dependencies"]["left-pad"]["dependencies"]["dep"]["version"],
+            deep_tree["dependencies"]["left-pad"]["dependencies"]["dep"]["version"],
             "1.0.0"
         );
         assert!(tree.as_array().is_none());
 
-        let filtered = npm_list_json_tree(&project, &["dep".to_owned()]).unwrap();
+        let filtered = npm_list_json_tree(&project, &["dep".to_owned()], 0).unwrap();
         assert!(filtered["dependencies"].get("left-pad").is_none());
         assert_eq!(filtered["dependencies"]["dep"]["version"], "1.0.0");
 
@@ -46874,6 +46941,7 @@ resolved_commit = "0123456789abcdef0123456789abcdef01234567"
             NpmCompatAction::List {
                 action: NpmListAction {
                     json: true,
+                    depth: 0,
                     packages: Vec::new(),
                 },
             }
@@ -46883,6 +46951,7 @@ resolved_commit = "0123456789abcdef0123456789abcdef01234567"
             NpmCompatAction::List {
                 action: NpmListAction {
                     json: true,
+                    depth: usize::MAX,
                     packages: Vec::new(),
                 },
             }
@@ -46892,6 +46961,17 @@ resolved_commit = "0123456789abcdef0123456789abcdef01234567"
             NpmCompatAction::List {
                 action: NpmListAction {
                     json: true,
+                    depth: 0,
+                    packages: Vec::new(),
+                },
+            }
+        );
+        assert_eq!(
+            parse_npm_compat_action(&args(&["ls", "--depth", "1", "--json"])).unwrap(),
+            NpmCompatAction::List {
+                action: NpmListAction {
+                    json: true,
+                    depth: 1,
                     packages: Vec::new(),
                 },
             }
@@ -46912,6 +46992,7 @@ resolved_commit = "0123456789abcdef0123456789abcdef01234567"
             NpmCompatAction::List {
                 action: NpmListAction {
                     json: true,
+                    depth: 0,
                     packages: vec!["left-pad@1.3.0".to_owned(), "@scope/pkg".to_owned()],
                 },
             }
