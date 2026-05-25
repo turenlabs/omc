@@ -24832,6 +24832,14 @@ fn npm_bool_flag_value(arg: &str, flag: &str) -> Option<bool> {
     }
 }
 
+fn npm_json_flag_value(arg: &str) -> Option<bool> {
+    match arg {
+        "-j" => Some(true),
+        "--no-json" => Some(false),
+        _ => npm_bool_flag_value(arg, "--json"),
+    }
+}
+
 fn npm_all_workspaces_flag_value(arg: &str) -> Option<bool> {
     match arg {
         "--workspaces" | "--workspaces=true" | "--ws" | "--ws=true" | "-ws" => Some(true),
@@ -25148,8 +25156,8 @@ fn parse_npm_audit_args(args: &[String]) -> Result<NpmCompatAction, OmcRegistryE
     let mut index = 0;
     while index < args.len() {
         let arg = &args[index];
-        if arg == "--json" {
-            json = true;
+        if let Some(value) = npm_json_flag_value(arg) {
+            json = value;
         } else if matches!(arg.as_str(), "--audit-level" | "--audit-levels") {
             index += 1;
             if args.get(index).is_none() {
@@ -28648,8 +28656,8 @@ fn parse_npm_explain_args(args: &[String]) -> Result<NpmCompatAction, OmcRegistr
     let mut index = 0;
     while index < args.len() {
         let arg = &args[index];
-        if arg == "--json" {
-            json = true;
+        if let Some(value) = npm_json_flag_value(arg) {
+            json = value;
         } else if matches!(arg.as_str(), "--silent" | "-s" | "--long" | "--parseable") {
         } else if matches!(arg.as_str(), "--workspace" | "-w" | "--loglevel") {
             index += 1;
@@ -28687,8 +28695,8 @@ fn parse_npm_outdated_args(args: &[String]) -> Result<NpmCompatAction, OmcRegist
     let mut index = 0;
     while index < args.len() {
         let arg = &args[index];
-        if arg == "--json" {
-            json = true;
+        if let Some(value) = npm_json_flag_value(arg) {
+            json = value;
         } else if matches!(arg.as_str(), "--parseable" | "-p") {
             parseable = true;
         } else if matches!(
@@ -28850,8 +28858,8 @@ fn parse_npm_view_args(args: &[String]) -> Result<NpmCompatAction, OmcRegistryEr
     let mut index = 0;
     while index < args.len() {
         let arg = &args[index];
-        if arg == "--json" {
-            json = true;
+        if let Some(value) = npm_json_flag_value(arg) {
+            json = value;
         } else if matches!(arg.as_str(), "--userconfig" | "--loglevel") {
             index += 1;
             if args.get(index).is_none() {
@@ -32029,10 +32037,8 @@ fn parse_common_compat_flags(
             parsed.dry_run = npm_bool_flag_value(arg, "--dry-run").unwrap_or(false);
         } else if npm_mode && arg == "--no-dry-run" {
             parsed.dry_run = false;
-        } else if npm_mode && npm_bool_flag_value(arg, "--json").is_some() {
-            parsed.json = npm_bool_flag_value(arg, "--json").unwrap_or(false);
-        } else if npm_mode && arg == "--no-json" {
-            parsed.json = false;
+        } else if npm_mode && npm_json_flag_value(arg).is_some() {
+            parsed.json = npm_json_flag_value(arg).unwrap_or(false);
         } else if npm_mode
             && matches!(
                 arg.as_str(),
@@ -32449,10 +32455,8 @@ fn parse_npm_list_args(args: &[String]) -> Result<NpmCompatAction, OmcRegistryEr
     let mut index = 0;
     while index < args.len() {
         let arg = &args[index];
-        if arg == "--json" || arg == "--json=true" {
-            json = true;
-        } else if arg == "--json=false" {
-            json = false;
+        if let Some(value) = npm_json_flag_value(arg) {
+            json = value;
         } else if matches!(
             arg.as_str(),
             "--all"
@@ -36682,7 +36686,16 @@ verdict = "accepted"
             }
         );
         assert_eq!(
-            parse_npm_compat_action(&args(&["--json", "why", "left-pad"])).unwrap(),
+            parse_npm_compat_action(&args(&["view", "left-pad", "version", "-j"])).unwrap(),
+            NpmCompatAction::View {
+                spec: "left-pad".to_owned(),
+                fields: vec!["version".to_owned()],
+                json: true,
+                npm_registry: None,
+            }
+        );
+        assert_eq!(
+            parse_npm_compat_action(&args(&["why", "left-pad", "-j"])).unwrap(),
             NpmCompatAction::Explain {
                 specs: vec!["left-pad".to_owned()],
                 json: true,
@@ -38683,6 +38696,10 @@ verdict = "accepted"
             .unwrap(),
             NpmCompatAction::Audit { json: true }
         );
+        assert_eq!(
+            parse_npm_compat_action(&args(&["audit", "-j"])).unwrap(),
+            NpmCompatAction::Audit { json: true }
+        );
         assert!(parse_npm_compat_action(&args(&["audit", "fix"])).is_err());
         assert_eq!(
             parse_npm_compat_action(&args(&[
@@ -38831,6 +38848,15 @@ verdict = "accepted"
         );
         assert_eq!(
             parse_npm_compat_action(&args(&["outdated", "-al", "--json"])).unwrap(),
+            NpmCompatAction::Outdated {
+                json: true,
+                parseable: false,
+                packages: Vec::new(),
+                npm_registry: None,
+            }
+        );
+        assert_eq!(
+            parse_npm_compat_action(&args(&["outdated", "-j"])).unwrap(),
             NpmCompatAction::Outdated {
                 json: true,
                 parseable: false,
@@ -46669,6 +46695,15 @@ resolved_commit = "0123456789abcdef0123456789abcdef01234567"
         );
         assert_eq!(
             parse_npm_compat_action(&args(&["ls", "-al", "--json"])).unwrap(),
+            NpmCompatAction::List {
+                action: NpmListAction {
+                    json: true,
+                    packages: Vec::new(),
+                },
+            }
+        );
+        assert_eq!(
+            parse_npm_compat_action(&args(&["ls", "-j"])).unwrap(),
             NpmCompatAction::List {
                 action: NpmListAction {
                     json: true,
