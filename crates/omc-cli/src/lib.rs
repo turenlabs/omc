@@ -36,18 +36,18 @@ use omc_registry::{
     remove_npm_team_user, revoke_npm_access, revoke_npm_token, revoke_npm_trust,
     set_npm_access_mfa, set_npm_access_status, set_npm_org_user, set_npm_profile_property,
     unpublish_npm_package, upload_pypi_distribution, Behavior, CompileSourceOptions, Ecosystem,
-    InstallReport, LinkOptions, LinkReport, LockedPackage, LockedPythonVcsDependency,
-    ManifestDependencyKind, NpmAccessMapResult, NpmAccessMutationResult, NpmAccessStatusResult,
-    NpmAccessToken, NpmDeprecateResult, NpmDistTagMutationResult, NpmOrgListResult,
-    NpmOrgMutationResult, NpmOwnerListResult, NpmOwnerMutationResult, NpmPackageTarball,
-    NpmPingResult, NpmProfileMutationResult, NpmProfileResult, NpmProvenanceBundle,
-    NpmPublishPackage, NpmPublishResult, NpmSearchPackage, NpmStarMutationResult, NpmStarsResult,
-    NpmTeamListResult, NpmTeamMutationResult, NpmTokenCreateOptions, NpmTokenCreateResult,
-    NpmTokenListResult, NpmTokenRevokeResult, NpmUnpublishResult, NpmWhoamiResult,
-    NpmWorkspacePackage, OmcLock, OmcRegistryError, PackageSpec, ProjectRequirements,
-    PypiAvailableVersionsOptions, PypiBinaryMode, PypiCheckIssue, PypiReleaseControl,
-    PypiReleaseControls, PypiUploadOptions, PypiUploadResult, PypiUploadSignature,
-    PythonLocalRequirement, PythonVcsRequirement, Verdict,
+    InstallReport, LinkOptions, LinkReport, LockedLocalSource, LockedPackage,
+    LockedPythonVcsDependency, ManifestDependencyKind, NpmAccessMapResult, NpmAccessMutationResult,
+    NpmAccessStatusResult, NpmAccessToken, NpmDeprecateResult, NpmDistTagMutationResult,
+    NpmOrgListResult, NpmOrgMutationResult, NpmOwnerListResult, NpmOwnerMutationResult,
+    NpmPackageTarball, NpmPingResult, NpmProfileMutationResult, NpmProfileResult,
+    NpmProvenanceBundle, NpmPublishPackage, NpmPublishResult, NpmSearchPackage,
+    NpmStarMutationResult, NpmStarsResult, NpmTeamListResult, NpmTeamMutationResult,
+    NpmTokenCreateOptions, NpmTokenCreateResult, NpmTokenListResult, NpmTokenRevokeResult,
+    NpmUnpublishResult, NpmWhoamiResult, NpmWorkspacePackage, OmcLock, OmcRegistryError,
+    PackageSpec, ProjectRequirements, PypiAvailableVersionsOptions, PypiBinaryMode, PypiCheckIssue,
+    PypiReleaseControl, PypiReleaseControls, PypiUploadOptions, PypiUploadResult,
+    PypiUploadSignature, PythonLocalRequirement, PythonVcsRequirement, Verdict,
 };
 use sha2::{Digest, Sha256, Sha384, Sha512};
 
@@ -2547,11 +2547,25 @@ fn pip_install_report_json(
     install: &InstallReport,
 ) -> Result<serde_json::Value, OmcRegistryError> {
     let lock = read_lockfile(project_dir.join("omc.lock"))?;
-    let install_entries = lock
+    let mut install_entries = lock
         .packages
-        .into_iter()
+        .iter()
         .filter(|package| package.ecosystem == Ecosystem::Pypi)
         .map(pip_install_report_entry)
+        .collect::<Vec<_>>();
+    install_entries.extend(
+        lock.local_sources
+            .iter()
+            .filter(|source| {
+                source.ecosystem == Ecosystem::Pypi && source.verdict == Verdict::Accepted
+            })
+            .map(pip_install_report_local_source_entry),
+    );
+    let local_sources = lock
+        .local_sources
+        .iter()
+        .filter(|source| source.ecosystem == Ecosystem::Pypi)
+        .map(pip_install_report_local_source_omc_entry)
         .collect::<Vec<_>>();
     Ok(serde_json::json!({
         "version": "1",
@@ -2570,17 +2584,18 @@ fn pip_install_report_json(
             "python_scripts": install.python_scripts,
             "local_source_artifacts": install.local_source_artifacts,
             "pypi_packages": install.pypi_packages,
+            "local_sources": local_sources,
         },
     }))
 }
 
-fn pip_install_report_entry(package: LockedPackage) -> serde_json::Value {
+fn pip_install_report_entry(package: &LockedPackage) -> serde_json::Value {
     serde_json::json!({
         "download_info": {
-            "url": package.source_url,
+            "url": &package.source_url,
             "archive_info": {
                 "hashes": {
-                    "sha256": package.sha256,
+                    "sha256": &package.sha256,
                 },
             },
         },
@@ -2589,9 +2604,43 @@ fn pip_install_report_entry(package: LockedPackage) -> serde_json::Value {
         "requested": true,
         "metadata": {
             "metadata_version": "2.1",
-            "name": package.name,
-            "version": package.version,
+            "name": &package.name,
+            "version": &package.version,
         },
+    })
+}
+
+fn pip_install_report_local_source_entry(source: &LockedLocalSource) -> serde_json::Value {
+    serde_json::json!({
+        "download_info": {
+            "url": &source.source_url,
+            "dir_info": {
+                "editable": true,
+            },
+        },
+        "is_direct": true,
+        "is_yanked": false,
+        "requested": true,
+        "metadata": {
+            "metadata_version": "2.1",
+            "name": &source.name,
+            "version": &source.version,
+        },
+        "omc": pip_install_report_local_source_omc_entry(source),
+    })
+}
+
+fn pip_install_report_local_source_omc_entry(source: &LockedLocalSource) -> serde_json::Value {
+    serde_json::json!({
+        "name": &source.name,
+        "version": &source.version,
+        "source_path": &source.source_path,
+        "artifact": &source.artifact,
+        "sha256": &source.sha256,
+        "behavior": source.behavior,
+        "verdict": source.verdict,
+        "capabilities": &source.capabilities,
+        "verifier_findings": &source.verifier_findings,
     })
 }
 
@@ -15403,6 +15452,17 @@ fn npm_package_lock_json(package: &serde_json::Value, lock: &OmcLock) -> serde_j
             npm_package_lock_package_entry(locked, kinds),
         );
     }
+    for source in lock
+        .local_sources
+        .iter()
+        .filter(|source| source.ecosystem == Ecosystem::Npm && source.verdict == Verdict::Accepted)
+    {
+        let kinds = package_kinds.get(&source.name).copied().unwrap_or_default();
+        packages.insert(
+            npm_package_lock_path(&source.name),
+            npm_package_lock_local_source_entry(source, kinds),
+        );
+    }
 
     let mut root = serde_json::Map::new();
     if let Some(name) = package.get("name").and_then(serde_json::Value::as_str) {
@@ -15557,6 +15617,33 @@ fn npm_package_lock_package_entry(
         "peerDependencies",
         &package.peer_dependencies,
     );
+    serde_json::Value::Object(entry)
+}
+
+fn npm_package_lock_local_source_entry(
+    source: &LockedLocalSource,
+    kinds: NpmPackageLockKinds,
+) -> serde_json::Value {
+    let mut entry = serde_json::Map::new();
+    entry.insert(
+        "version".to_owned(),
+        serde_json::Value::String(source.version.clone()),
+    );
+    if kinds.dev {
+        entry.insert("dev".to_owned(), serde_json::Value::Bool(true));
+    }
+    if kinds.optional {
+        entry.insert("optional".to_owned(), serde_json::Value::Bool(true));
+    }
+    if kinds.peer {
+        entry.insert("peer".to_owned(), serde_json::Value::Bool(true));
+    }
+    if !source.source_path.is_empty() {
+        entry.insert(
+            "resolved".to_owned(),
+            serde_json::Value::String(format!("file:{}", source.source_path)),
+        );
+    }
     serde_json::Value::Object(entry)
 }
 
@@ -48965,6 +49052,101 @@ resolved_commit = "0123456789abcdef0123456789abcdef01234567"
     }
 
     #[test]
+    fn syncs_npm_package_lock_from_local_source_artifacts() {
+        let project = test_dir("npm-package-lock-local-sources");
+        fs::write(
+            project.join("package.json"),
+            r#"{
+                "name": "demo",
+                "version": "1.0.0",
+                "dependencies": { "local-pkg": "file:vendor/local-pkg" },
+                "devDependencies": { "dev-pkg": "file:vendor/dev-pkg" }
+            }"#,
+        )
+        .unwrap();
+        let lock = OmcLock {
+            version: 1,
+            packages: vec![locked_pypi_package("idna", "3.7", Vec::new())],
+            local_sources: vec![
+                locked_local_source(Ecosystem::Npm, "local-pkg", "1.2.3", "vendor/local-pkg"),
+                locked_local_source(Ecosystem::Npm, "dev-pkg", "0.4.0", "vendor/dev-pkg"),
+                locked_local_source(Ecosystem::Pypi, "local-py", "0.2.0", "vendor/local-py"),
+            ],
+            python_vcs: Vec::new(),
+        };
+        fs::write(project.join("omc.lock"), toml::to_string(&lock).unwrap()).unwrap();
+
+        sync_npm_package_lock(&project).unwrap();
+
+        let package_lock: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(project.join("package-lock.json")).unwrap())
+                .unwrap();
+        assert_eq!(
+            package_lock["packages"]["node_modules/local-pkg"]["version"],
+            "1.2.3"
+        );
+        assert_eq!(
+            package_lock["packages"]["node_modules/local-pkg"]["resolved"],
+            "file:vendor/local-pkg"
+        );
+        assert_eq!(
+            package_lock["packages"]["node_modules/dev-pkg"]["version"],
+            "0.4.0"
+        );
+        assert_eq!(
+            package_lock["packages"]["node_modules/dev-pkg"]["resolved"],
+            "file:vendor/dev-pkg"
+        );
+        assert_eq!(
+            package_lock["packages"]["node_modules/dev-pkg"]["dev"],
+            true
+        );
+        assert!(package_lock["packages"]["node_modules/local-py"].is_null());
+    }
+
+    #[test]
+    fn pip_install_report_includes_locked_local_sources() {
+        let project = test_dir("pip-install-report-local-sources");
+        let lock = OmcLock {
+            version: 1,
+            packages: vec![locked_pypi_package("idna", "3.7", Vec::new())],
+            local_sources: vec![
+                locked_local_source(Ecosystem::Pypi, "local-py", "0.2.0", "vendor/local-py"),
+                locked_local_source(Ecosystem::Npm, "local-npm", "1.0.0", "vendor/local-npm"),
+            ],
+            python_vcs: Vec::new(),
+        };
+        fs::write(project.join("omc.lock"), toml::to_string(&lock).unwrap()).unwrap();
+        let install = InstallReport {
+            python_site_packages: project.join(".omc/python/site-packages"),
+            python_bin_dir: project.join(".omc/python/bin"),
+            pypi_packages: 1,
+            local_source_artifacts: 1,
+            ..InstallReport::default()
+        };
+
+        let report = pip_install_report_json(&project, &install).unwrap();
+
+        let install_entries = report["install"].as_array().unwrap();
+        assert_eq!(install_entries.len(), 2);
+        let local = install_entries
+            .iter()
+            .find(|entry| entry["metadata"]["name"] == "local-py")
+            .unwrap();
+        assert_eq!(local["is_direct"], true);
+        assert_eq!(local["download_info"]["url"], "file:///vendor/local-py");
+        assert_eq!(local["download_info"]["dir_info"]["editable"], true);
+        assert_eq!(local["omc"]["source_path"], "vendor/local-py");
+        assert_eq!(
+            local["omc"]["artifact"],
+            ".omc/artifacts/pypi/local-py/0.2.0/omc.json"
+        );
+        assert_eq!(report["omc"]["local_source_artifacts"], 1);
+        assert_eq!(report["omc"]["local_sources"].as_array().unwrap().len(), 1);
+        assert_eq!(report["omc"]["local_sources"][0]["name"], "local-py");
+    }
+
+    #[test]
     fn npm_shrinkwrap_renames_package_lock() {
         let project = test_dir("npm-shrinkwrap-rename");
         fs::write(
@@ -49067,6 +49249,28 @@ resolved_commit = "0123456789abcdef0123456789abcdef01234567"
             dependencies,
             optional_dependencies: Vec::new(),
             peer_dependencies: Vec::new(),
+            grants: Vec::new(),
+            capabilities: Vec::new(),
+            verifier_findings: Vec::new(),
+        }
+    }
+
+    fn locked_local_source(
+        ecosystem: Ecosystem,
+        name: &str,
+        version: &str,
+        source_path: &str,
+    ) -> LockedLocalSource {
+        LockedLocalSource {
+            ecosystem,
+            name: name.to_owned(),
+            version: version.to_owned(),
+            source_url: format!("file:///{source_path}"),
+            source_path: source_path.to_owned(),
+            artifact: format!(".omc/artifacts/{}/{}/{}/omc.json", ecosystem, name, version),
+            sha256: "b".repeat(64),
+            behavior: Behavior::Pure,
+            verdict: Verdict::Accepted,
             grants: Vec::new(),
             capabilities: Vec::new(),
             verifier_findings: Vec::new(),

@@ -316,8 +316,8 @@ For existing projects, `install` reads normal project files:
 ```text
 package.json       root/workspace dependencies, devDependencies, optionalDependencies, peers, bundleDependencies/bundledDependencies, overrides/resolutions, HTTPS/file tarball deps, local file/link dirs; use --omit-dev for production installs
 .npmrc             global/project/user npm registry, scoped registry, and host-scoped auth token configuration; NPM_CONFIG_GLOBALCONFIG selects a custom global file, NPM_CONFIG_USERCONFIG selects a custom user file, and NPM_CONFIG_REGISTRY / npm_config_registry override the default registry
-package-lock.json  exact versions, resolved tarball URLs, and integrity hashes for uniquely locked npm packages
-npm-shrinkwrap.json exact versions, resolved tarball URLs, and integrity hashes for uniquely locked npm packages
+package-lock.json  exact versions, resolved tarball URLs, integrity hashes, and verified local-source file entries for uniquely locked npm packages
+npm-shrinkwrap.json exact versions, resolved tarball URLs, integrity hashes, and verified local-source file entries for uniquely locked npm packages
 yarn.lock          Yarn Classic exact versions, resolved tarball URLs, and integrity hashes for uniquely locked npm packages
 pnpm-lock.yaml     pnpm importer dependencies, exact versions, resolved tarball URLs, and integrity hashes
 pip.conf           PyPI index-url, extra-index-url, find-links, no-index, no-binary, and only-binary configuration
@@ -486,6 +486,9 @@ Supported now:
   rejects local source changes until the lock is refreshed
 - locked local source installs verify the existing signed artifact without
   rewriting it on source drift
+- npm `package-lock.json`/`npm-shrinkwrap.json` generation and pip
+  `--report` JSON include locked local source artifacts instead of dropping
+  them from compatibility output
 - npm semver range resolution for common dependency ranges
 - global, project, and user `.npmrc` support for `registry`, `@scope:registry`,
   and host-scoped `_authToken` npm registry access, plus `NPM_CONFIG_REGISTRY` /
@@ -755,7 +758,8 @@ Supported now:
   without writing the current project; `pip check` validates
   both locked PyPI packages and OMC-recorded editable local paths, and
   `pip check --user` validates OMC-managed Python user site-packages; common
-  `pip install --report path` JSON reports, including stdout reports with `--report -`, and registry/archive
+  `pip install --report path` JSON reports, including stdout reports with `--report -`
+  and OMC-verified local source artifact entries, and registry/archive
   `pip install --dry-run` resolution, including local editable paths and VCS
   requirements, without writing the current OMC manifest, lockfile, or
   site-packages; real `pip install --target DIR` installs into the requested
