@@ -5953,6 +5953,7 @@ fn run_pip_compat_with_cwd(
             }
             if specs.is_empty() && archive_references.is_empty() && script_requirements.is_empty() {
                 let mut options = LinkOptions::new(project_dir);
+                options.discover_project_requirements = !groups.is_empty();
                 apply_cli_policy_options(&mut options, &allow, &allow_flow, allow_all_host)?;
                 options.requirement_files = absolutize_paths(project_dir, requirements);
                 options.constraint_files = absolutize_paths(project_dir, constraints);
@@ -5984,6 +5985,7 @@ fn run_pip_compat_with_cwd(
                 write_pip_install_report(project_dir, report.as_deref(), &install)?;
             } else {
                 let mut options = LinkOptions::new(project_dir);
+                options.discover_project_requirements = !groups.is_empty();
                 apply_cli_policy_options(&mut options, &allow, &allow_flow, allow_all_host)?;
                 options.requirement_files = absolutize_paths(project_dir, requirements);
                 options.constraint_files = absolutize_paths(project_dir, constraints);
@@ -43985,6 +43987,42 @@ verdict = "accepted"
         fs::remove_dir_all(project).unwrap();
         fs::remove_dir_all(local_a).unwrap();
         fs::remove_dir_all(local_b).unwrap();
+    }
+
+    #[test]
+    fn pip_install_editable_local_path_does_not_install_project_root() {
+        let project = test_dir("pip-install-editable-no-root-project");
+        let local = project.join("localpkg");
+        fs::create_dir_all(local.join("src").join("localpkg")).unwrap();
+        fs::write(
+            project.join("pyproject.toml"),
+            "[project]\nname = \"rootpkg\"\nversion = \"1.0.0\"\n",
+        )
+        .unwrap();
+        fs::write(
+            local.join("pyproject.toml"),
+            "[project]\nname = \"localpkg\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+        fs::write(
+            local.join("src").join("localpkg").join("__init__.py"),
+            "VALUE = 'local'\n",
+        )
+        .unwrap();
+
+        let status = with_clean_pip_env(|| {
+            run_pip_compat(&project, &args(&["install", "-e", "localpkg", "--no-deps"]))
+        })
+        .unwrap();
+        assert_eq!(status, ExitCode::SUCCESS);
+
+        let local_src = fs::canonicalize(local.join("src")).unwrap();
+        assert_eq!(
+            pip_freeze_local_path_requirements(&project).unwrap(),
+            vec![format!("-e {}", local_src.display())]
+        );
+
+        fs::remove_dir_all(project).unwrap();
     }
 
     #[test]
