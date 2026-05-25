@@ -2872,9 +2872,10 @@ fn command_has_path_separator(command: &str) -> bool {
 fn run_npm_exec(
     project_dir: &Path,
     cwd: &Path,
-    action: NpmExecAction,
+    mut action: NpmExecAction,
 ) -> Result<ExitCode, OmcRegistryError> {
     let target_cwds = npm_exec_target_cwds(project_dir, cwd, &action)?;
+    infer_npm_exec_direct_package_command(cwd, &mut action)?;
     if action.packages.is_empty() || action.no_install {
         return run_npm_exec_in_project_cwds(project_dir, &target_cwds, &action);
     }
@@ -2936,6 +2937,94 @@ fn run_npm_exec(
         }
     }
     Ok(ExitCode::SUCCESS)
+}
+
+fn infer_npm_exec_direct_package_command(
+    cwd: &Path,
+    action: &mut NpmExecAction,
+) -> Result<(), OmcRegistryError> {
+    if !action.prefer_project_bin
+        || action.packages.len() != 1
+        || action.command != action.packages[0]
+        || !npm_exec_direct_package_arg(&action.command)
+    {
+        return Ok(());
+    }
+    action.command = npm_exec_direct_package_bin_name(cwd, &action.packages[0])?;
+    Ok(())
+}
+
+fn npm_exec_direct_package_arg(value: &str) -> bool {
+    is_npm_local_directory_arg(value) || is_npm_archive_arg(value)
+}
+
+fn npm_exec_direct_package_bin_name(cwd: &Path, package: &str) -> Result<String, OmcRegistryError> {
+    let package_json = if is_npm_archive_arg(package) {
+        npm_exec_archive_package_json(cwd, package)?
+    } else {
+        let path = absolutize_path(cwd, npm_local_path_arg(package)?);
+        read_npm_pkg_json(&path.join("package.json"))?
+    };
+    npm_exec_bin_name_from_package_json(&package_json, package)
+}
+
+fn npm_exec_archive_package_json(
+    cwd: &Path,
+    package: &str,
+) -> Result<serde_json::Value, OmcRegistryError> {
+    let reference = absolutize_npm_archive_reference(cwd, package);
+    if reference.starts_with("http://") || reference.starts_with("https://") {
+        return Err(OmcRegistryError::UnsupportedSpec(format!(
+            "npm exec cannot infer a bin name from remote archive `{package}`; use --package with an explicit command"
+        )));
+    }
+    let reference = reference.strip_prefix("file:").unwrap_or(&reference);
+    let (path, _) = split_npm_archive_suffix(reference);
+    let bytes = fs::read(path)?;
+    npm_exec_package_json_from_tgz(&bytes)
+}
+
+fn npm_exec_package_json_from_tgz(bytes: &[u8]) -> Result<serde_json::Value, OmcRegistryError> {
+    let decoder = flate2::read::GzDecoder::new(std::io::Cursor::new(bytes));
+    let mut archive = tar::Archive::new(decoder);
+    for entry in archive.entries()? {
+        let mut entry = entry?;
+        let path = entry.path()?.to_string_lossy().replace('\\', "/");
+        if path == "package/package.json" {
+            let mut content = String::new();
+            entry.read_to_string(&mut content)?;
+            return Ok(serde_json::from_str(&content)?);
+        }
+    }
+    Err(OmcRegistryError::UnsupportedSpec(
+        "npm exec archive package is missing package.json".to_owned(),
+    ))
+}
+
+fn npm_exec_bin_name_from_package_json(
+    package: &serde_json::Value,
+    label: &str,
+) -> Result<String, OmcRegistryError> {
+    let package_name = package
+        .get("name")
+        .and_then(serde_json::Value::as_str)
+        .filter(|name| !name.is_empty())
+        .unwrap_or(label);
+    let default = npm_package_bin_name(package_name);
+    let bins = npm_package_bin_names(package, package_name);
+    if bins.iter().any(|bin| bin == default) {
+        return Ok(default.to_owned());
+    }
+    match bins.as_slice() {
+        [bin] => Ok(bin.clone()),
+        [] => Err(OmcRegistryError::UnsupportedSpec(format!(
+            "npm exec package `{label}` did not declare an executable bin"
+        ))),
+        _ => Err(OmcRegistryError::UnsupportedSpec(format!(
+            "npm exec package `{label}` declares multiple bins: {}",
+            bins.join(", ")
+        ))),
+    }
 }
 
 fn npm_exec_package_inputs(
@@ -29230,11 +29319,16 @@ fn parse_npm_exec_args(
         (command, args, false)
     } else {
         let (mut command, args) = split_first_position("npm exec", &filtered)?;
-        let prefer_project_bin = command_name == "npx"
-            && packages.is_empty()
-            && !no_install
-            && npm_exec_should_infer_package(&command);
-        if prefer_project_bin {
+        let direct_package_command =
+            packages.is_empty() && !no_install && npm_exec_direct_package_arg(&command);
+        let prefer_project_bin = direct_package_command
+            || (command_name == "npx"
+                && packages.is_empty()
+                && !no_install
+                && npm_exec_should_infer_package(&command));
+        if direct_package_command {
+            packages.push(command.clone());
+        } else if prefer_project_bin {
             let package = command.clone();
             command = npm_exec_inferred_bin_name(&package)?;
             packages.push(package);
@@ -34401,6 +34495,75 @@ mod tests {
             fs::read_to_string(invocation_cwd.join("marker.txt")).unwrap(),
             "local-tool-ok\n"
         );
+        assert!(!project.join("omc.toml").exists());
+        assert!(!project.join("node_modules").exists());
+
+        let _ = fs::remove_dir_all(project);
+    }
+
+    #[test]
+    fn direct_npm_exec_runs_local_directory_package_arg() {
+        let project = test_dir("direct-npm-exec-local-directory-package-project");
+        let invocation_cwd = project.join("packages/app/src");
+        let local_package = invocation_cwd.join("vendor/direct-tool");
+        fs::create_dir_all(&local_package).unwrap();
+        fs::write(
+            local_package.join("package.json"),
+            r#"{"name":"direct-tool-pkg","version":"1.0.0","bin":{"direct-tool":"cli.js"}}"#,
+        )
+        .unwrap();
+        fs::write(
+            local_package.join("cli.js"),
+            "#!/usr/bin/env node\nconst fs = require('fs'); fs.writeFileSync(process.argv[2], 'direct-tool-ok\\n');\n",
+        )
+        .unwrap();
+
+        let status = run_npm_compat_with_cwd(
+            &project,
+            &args(&["exec", "./vendor/direct-tool", "marker.txt"]),
+            &invocation_cwd,
+        )
+        .unwrap();
+
+        assert_eq!(status, ExitCode::SUCCESS);
+        assert_eq!(
+            fs::read_to_string(invocation_cwd.join("marker.txt")).unwrap(),
+            "direct-tool-ok\n"
+        );
+        assert!(!project.join("omc.toml").exists());
+        assert!(!project.join("node_modules").exists());
+
+        let _ = fs::remove_dir_all(project);
+    }
+
+    #[test]
+    fn direct_npm_exec_runs_local_tarball_package_arg() {
+        let project = test_dir("direct-npm-exec-local-tarball-package-project");
+        let invocation_cwd = project.join("packages/app/src");
+        let local_package = invocation_cwd.join("tar-tool");
+        fs::create_dir_all(&local_package).unwrap();
+        fs::write(
+            local_package.join("package.json"),
+            r#"{"name":"tar-tool-pkg","version":"1.0.0","bin":{"tar-tool":"cli.js"}}"#,
+        )
+        .unwrap();
+        fs::write(
+            local_package.join("cli.js"),
+            "#!/usr/bin/env node\nprocess.exit(0);\n",
+        )
+        .unwrap();
+        let tarball = invocation_cwd.join("tar-tool-pkg-1.0.0.tgz");
+        let files = collect_npm_pack_files(&local_package).unwrap();
+        write_npm_pack_tarball(&tarball, &files).unwrap();
+
+        let status = run_npm_compat_with_cwd(
+            &project,
+            &args(&["npx", "./tar-tool-pkg-1.0.0.tgz"]),
+            &invocation_cwd,
+        )
+        .unwrap();
+
+        assert_eq!(status, ExitCode::SUCCESS);
         assert!(!project.join("omc.toml").exists());
         assert!(!project.join("node_modules").exists());
 
