@@ -6328,7 +6328,7 @@ fn run_pip_compat_with_cwd(
             }
             return print_locked_pip_check(project_dir);
         }
-        PipCompatAction::Debug { action } => print_pip_debug(project_dir, action)?,
+        PipCompatAction::Debug { action } => print_pip_debug(project_dir, invocation_cwd, action)?,
         PipCompatAction::Inspect { paths, user } => {
             let paths = pip_effective_scope_paths(invocation_cwd, &paths, user)?;
             if paths.is_empty() {
@@ -17802,13 +17802,21 @@ fn print_pip_cache(
     Ok(ExitCode::SUCCESS)
 }
 
-fn print_pip_debug(project_dir: &Path, action: PipDebugAction) -> Result<(), OmcRegistryError> {
-    print!("{}", pip_debug_report(project_dir, &action)?);
+fn print_pip_debug(
+    project_dir: &Path,
+    invocation_cwd: &Path,
+    action: PipDebugAction,
+) -> Result<(), OmcRegistryError> {
+    print!(
+        "{}",
+        pip_debug_report(project_dir, invocation_cwd, &action)?
+    );
     Ok(())
 }
 
 fn pip_debug_report(
     project_dir: &Path,
+    invocation_cwd: &Path,
     action: &PipDebugAction,
 ) -> Result<String, OmcRegistryError> {
     let project_dir = absolute_project_dir(project_dir);
@@ -17816,7 +17824,8 @@ fn pip_debug_report(
         .join(".omc")
         .join("python")
         .join("site-packages");
-    let cache_dir = pip_cache_dir(&project_dir);
+    let cache_dir =
+        pip_cache_arg_or_env(invocation_cwd, None).unwrap_or_else(|| pip_cache_dir(&project_dir));
     let executable = env::current_exe()?;
     let values = pip_config_values(&project_dir)?;
     let lockfile = project_dir.join("omc.lock");
@@ -18155,7 +18164,7 @@ fn print_pip_config(project_dir: &Path, action: PipConfigAction) -> Result<(), O
                 println!("{}", serde_json::to_string_pretty(&values)?);
             } else {
                 for (key, value) in values {
-                    println!("{key}={value}");
+                    println!("{key}={}", pip_config_list_value(&key, &value));
                 }
             }
         }
@@ -18185,6 +18194,7 @@ fn pip_config_debug_report(
         "PIP_EXTRA_INDEX_URL",
         "PIP_FIND_LINKS",
         "PIP_NO_INDEX",
+        "PIP_CACHE_DIR",
     ] {
         if let Some(value) = env::var_os(key) {
             output.push_str(&format!("  {key}={}\n", value.to_string_lossy()));
@@ -18293,7 +18303,21 @@ fn pip_config_values(project_dir: &Path) -> Result<BTreeMap<String, String>, Omc
                 .or_insert(package),
         };
     }
+    if let Some(cache_dir) = pip_cache_dir_env() {
+        values.insert(
+            ":env:.cache-dir".to_owned(),
+            cache_dir.to_string_lossy().to_string(),
+        );
+    }
     Ok(values)
+}
+
+fn pip_config_list_value(key: &str, value: &str) -> String {
+    if key.starts_with(":env:") {
+        format!("'{value}'")
+    } else {
+        value.to_owned()
+    }
 }
 
 fn pypi_release_control_config_value(control: &PypiReleaseControl) -> Option<String> {
@@ -48226,22 +48250,49 @@ resolved_commit = "0123456789abcdef0123456789abcdef01234567"
 
     #[test]
     fn reports_pip_config_debug() {
-        without_env_var("PIP_CONFIG_FILE", || {
-            let dir = test_dir("pip-config-debug");
-            fs::write(
-                dir.join("pip.conf"),
-                "[global]\nindex-url = https://debug.example.invalid/simple\n",
-            )
-            .unwrap();
+        with_env_values(
+            &[("PIP_CONFIG_FILE", None), ("PIP_CACHE_DIR", None)],
+            || {
+                let dir = test_dir("pip-config-debug");
+                fs::write(
+                    dir.join("pip.conf"),
+                    "[global]\nindex-url = https://debug.example.invalid/simple\n",
+                )
+                .unwrap();
 
+                let values = pip_config_values(&dir).unwrap();
+                let output = pip_config_debug_report(&dir, &values).unwrap();
+
+                assert!(output.contains("env_var:"));
+                assert!(output.contains("config_file:"));
+                assert!(output.contains("site:"));
+                assert!(output.contains("config_value:"));
+                assert!(output.contains("global.index-url=https://debug.example.invalid/simple/"));
+            },
+        );
+    }
+
+    #[test]
+    fn reports_pip_env_cache_dir_like_pip_config() {
+        let dir = test_dir("pip-config-cache-env");
+        with_env_values(&[("PIP_CACHE_DIR", Some("rel-cache"))], || {
             let values = pip_config_values(&dir).unwrap();
-            let output = pip_config_debug_report(&dir, &values).unwrap();
+            assert_eq!(
+                values.get(":env:.cache-dir").map(String::as_str),
+                Some("rel-cache")
+            );
+            assert_eq!(
+                pip_config_value_for_key(&values, ":env:.cache-dir").unwrap(),
+                "rel-cache"
+            );
+            assert_eq!(
+                pip_config_list_value(":env:.cache-dir", "rel-cache"),
+                "'rel-cache'"
+            );
 
-            assert!(output.contains("env_var:"));
-            assert!(output.contains("config_file:"));
-            assert!(output.contains("site:"));
-            assert!(output.contains("config_value:"));
-            assert!(output.contains("global.index-url=https://debug.example.invalid/simple/"));
+            let output = pip_config_debug_report(&dir, &values).unwrap();
+            assert!(output.contains("PIP_CACHE_DIR=rel-cache"));
+            assert!(output.contains(":env:.cache-dir=rel-cache"));
         });
     }
 
@@ -48350,32 +48401,58 @@ resolved_commit = "0123456789abcdef0123456789abcdef01234567"
         )
         .unwrap();
 
-        let report = pip_debug_report(
-            &dir,
-            &PipDebugAction {
-                verbose: true,
-                platform: Some("macosx_14_0_arm64".to_owned()),
-                python_version: Some("3.12".to_owned()),
-                implementation: Some("cp".to_owned()),
-                abis: vec!["cp312".to_owned()],
-            },
-        )
-        .unwrap();
+        with_env_values(&[("PIP_CACHE_DIR", None)], || {
+            let report = pip_debug_report(
+                &dir,
+                &dir,
+                &PipDebugAction {
+                    verbose: true,
+                    platform: Some("macosx_14_0_arm64".to_owned()),
+                    python_version: Some("3.12".to_owned()),
+                    implementation: Some("cp".to_owned()),
+                    abis: vec!["cp312".to_owned()],
+                },
+            )
+            .unwrap();
 
-        assert!(report.contains("pip version: omc-pip "));
-        assert!(report.contains(&format!(
-            "omc project: {}",
-            absolute_project_dir(&dir).display()
-        )));
-        assert!(report.contains(".omc/python/site-packages"));
-        assert!(report.contains(".omc/cache/pypi"));
-        assert!(report.contains("lockfile: "));
-        assert!(report.contains("(missing)"));
-        assert!(report.contains("global.index-url: https://mirror.example.invalid/simple/"));
-        assert!(report.contains("requested compatibility target:"));
-        assert!(report.contains("  platform: macosx_14_0_arm64"));
-        assert!(report.contains("  abi: cp312"));
-        assert!(report.contains("locked pypi packages:\n  (none)"));
+            assert!(report.contains("pip version: omc-pip "));
+            assert!(report.contains(&format!(
+                "omc project: {}",
+                absolute_project_dir(&dir).display()
+            )));
+            assert!(report.contains(".omc/python/site-packages"));
+            assert!(report.contains(".omc/cache/pypi"));
+            assert!(report.contains("lockfile: "));
+            assert!(report.contains("(missing)"));
+            assert!(report.contains("global.index-url: https://mirror.example.invalid/simple/"));
+            assert!(report.contains("requested compatibility target:"));
+            assert!(report.contains("  platform: macosx_14_0_arm64"));
+            assert!(report.contains("  abi: cp312"));
+            assert!(report.contains("locked pypi packages:\n  (none)"));
+        });
+    }
+
+    #[test]
+    fn reports_pip_debug_effective_env_cache_dir() {
+        let dir = test_dir("pip-debug-cache-env");
+        with_env_values(&[("PIP_CACHE_DIR", Some("debug-cache"))], || {
+            let report = pip_debug_report(
+                &dir,
+                &dir,
+                &PipDebugAction {
+                    verbose: false,
+                    platform: None,
+                    python_version: None,
+                    implementation: None,
+                    abis: Vec::new(),
+                },
+            )
+            .unwrap();
+            assert!(report.contains(&format!(
+                "pip cache dir: {}",
+                dir.join("debug-cache").display()
+            )));
+        });
     }
 
     #[test]
