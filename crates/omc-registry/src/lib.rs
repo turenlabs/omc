@@ -838,6 +838,7 @@ pub struct ProjectRequirements {
     pub pypi_uploaded_prior_to: Option<String>,
     pub python_local_paths: Vec<PathBuf>,
     pub python_local_requirements: Vec<PythonLocalRequirement>,
+    pub python_local_directory_requirements: Vec<PythonLocalRequirement>,
     pub python_vcs_requirements: Vec<PythonVcsRequirement>,
 }
 
@@ -909,6 +910,9 @@ fn extend_project_requirements(
         .python_local_requirements
         .extend(requirements.python_local_requirements);
     target
+        .python_local_directory_requirements
+        .extend(requirements.python_local_directory_requirements);
+    target
         .python_vcs_requirements
         .extend(requirements.python_vcs_requirements);
 }
@@ -956,6 +960,12 @@ fn apply_project_requirements_to_options(
     options
         .python_local_requirements
         .extend(requirements.python_local_requirements);
+    for requirement in requirements.python_local_directory_requirements {
+        if !options.python_local_paths.contains(&requirement.path) {
+            options.python_local_paths.push(requirement.path.clone());
+        }
+        options.python_local_requirements.push(requirement);
+    }
     options
         .python_vcs_requirements
         .extend(requirements.python_vcs_requirements);
@@ -4497,6 +4507,7 @@ fn npm_requirements_from_lock_maps(
         pypi_uploaded_prior_to: None,
         python_local_paths: Vec::new(),
         python_local_requirements: Vec::new(),
+        python_local_directory_requirements: Vec::new(),
         python_vcs_requirements: Vec::new(),
     }
 }
@@ -5139,6 +5150,20 @@ fn push_python_local_requirement(
         .contains(&requirement)
     {
         requirements.python_local_requirements.push(requirement);
+    }
+}
+
+fn push_python_local_directory_requirement(
+    requirements: &mut ProjectRequirements,
+    requirement: PythonLocalRequirement,
+) {
+    if !requirements
+        .python_local_directory_requirements
+        .contains(&requirement)
+    {
+        requirements
+            .python_local_directory_requirements
+            .push(requirement);
     }
 }
 
@@ -6602,7 +6627,7 @@ fn read_requirements_file_inner(
                 if !parsed.hashes.is_empty() || !hashes.is_empty() {
                     return Err(OmcRegistryError::UnsupportedRequirement(line.to_owned()));
                 }
-                push_python_local_requirement(
+                push_python_local_directory_requirement(
                     discovered,
                     PythonLocalRequirement::new(path, spec.extras),
                 );
@@ -6630,7 +6655,7 @@ fn read_requirements_file_inner(
             if !parsed.hashes.is_empty() {
                 return Err(OmcRegistryError::UnsupportedRequirement(line.to_owned()));
             }
-            push_python_local_requirement(discovered, requirement);
+            push_python_local_directory_requirement(discovered, requirement);
             continue;
         }
 
@@ -6643,7 +6668,7 @@ fn read_requirements_file_inner(
             if !parsed.hashes.is_empty() {
                 return Err(OmcRegistryError::UnsupportedRequirement(line.to_owned()));
             }
-            push_python_local_requirement(discovered, requirement);
+            push_python_local_directory_requirement(discovered, requirement);
             continue;
         }
 
@@ -20557,8 +20582,9 @@ print("hi")
         .unwrap();
 
         let discovered = read_requirements_file(&requirements).unwrap();
+        assert!(discovered.python_local_requirements.is_empty());
         assert_eq!(
-            discovered.python_local_requirements,
+            discovered.python_local_directory_requirements,
             vec![
                 PythonLocalRequirement::new(local_pkg, BTreeSet::new()),
                 PythonLocalRequirement::new(file_url_pkg, BTreeSet::new()),
@@ -20568,8 +20594,8 @@ print("hi")
 
         let project = discover_project_requirements(dir.path()).unwrap();
         assert_eq!(
-            project.python_local_requirements,
-            discovered.python_local_requirements
+            project.python_local_directory_requirements,
+            discovered.python_local_directory_requirements
         );
     }
 

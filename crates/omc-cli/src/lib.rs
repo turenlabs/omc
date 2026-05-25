@@ -2196,10 +2196,22 @@ fn run_pip_lock(project_dir: &Path, action: PipLockAction) -> Result<ExitCode, O
         local_directories,
         &mut options,
     )?);
+    apply_pypi_requirement_files_with_local_directories(
+        &mut options,
+        &mut resolved_specs,
+        project_dir,
+        temp_project.path(),
+    )?;
     if !script_requirements.is_empty() {
         let requirements =
             read_script_requirement_files(&absolutize_paths(project_dir, script_requirements))?;
-        apply_pypi_install_requirements(&mut options, &mut resolved_specs, requirements);
+        apply_pypi_install_requirements(
+            &mut options,
+            &mut resolved_specs,
+            requirements,
+            project_dir,
+            temp_project.path(),
+        )?;
     }
 
     let has_project_inputs = !options.requirement_files.is_empty()
@@ -5993,6 +6005,25 @@ fn run_pip_compat_with_cwd(
                 apply_pip_compatibility_target(&mut options, compatibility);
                 options.python_target_dir = target.map(|path| absolutize_path(project_dir, path));
                 options.python_vcs_requirements = vcs_requirements;
+                let mut specs = Vec::new();
+                if apply_pypi_requirement_files_with_local_directories(
+                    &mut options,
+                    &mut specs,
+                    project_dir,
+                    project_dir,
+                )? {
+                    let mut all_reports = Vec::new();
+                    for spec in &specs {
+                        all_reports.extend(add_package_graph(spec, &options)?);
+                    }
+                    prune_locked_package_versions(
+                        project_dir,
+                        &locked_packages_from_reports(&all_reports),
+                    )?;
+                    if !report_stdout {
+                        print_link_reports(&all_reports);
+                    }
+                }
                 let install = install_project(&options)?;
                 if !report_stdout {
                     print_install_report(&install);
@@ -6041,12 +6072,24 @@ fn run_pip_compat_with_cwd(
                     local_directories,
                     &mut options,
                 )?);
+                apply_pypi_requirement_files_with_local_directories(
+                    &mut options,
+                    &mut specs,
+                    project_dir,
+                    project_dir,
+                )?;
                 if !script_requirements.is_empty() {
                     let requirements = read_script_requirement_files(&absolutize_paths(
                         project_dir,
                         script_requirements,
                     ))?;
-                    apply_pypi_install_requirements(&mut options, &mut specs, requirements);
+                    apply_pypi_install_requirements(
+                        &mut options,
+                        &mut specs,
+                        requirements,
+                        project_dir,
+                        project_dir,
+                    )?;
                 }
                 let mut all_reports = Vec::new();
                 for spec in &specs {
@@ -7199,17 +7242,36 @@ fn run_pip_install_dry_run(
         &mut options,
     )?);
     if !options.requirement_files.is_empty() {
-        let requirements = read_requirements_files(&options.requirement_files)?;
-        apply_pypi_install_requirements(&mut options, &mut resolved_specs, requirements);
+        let requirement_files = std::mem::take(&mut options.requirement_files);
+        let requirements = read_requirements_files(&requirement_files)?;
+        apply_pypi_install_requirements(
+            &mut options,
+            &mut resolved_specs,
+            requirements,
+            project_dir,
+            dry_run_project.path(),
+        )?;
     }
     if !options.constraint_files.is_empty() {
         let constraints = read_constraint_files(&options.constraint_files)?;
-        apply_pypi_install_requirements(&mut options, &mut resolved_specs, constraints);
+        apply_pypi_install_requirements(
+            &mut options,
+            &mut resolved_specs,
+            constraints,
+            project_dir,
+            dry_run_project.path(),
+        )?;
     }
     if !script_requirements.is_empty() {
         let requirements =
             read_script_requirement_files(&absolutize_paths(project_dir, script_requirements))?;
-        apply_pypi_install_requirements(&mut options, &mut resolved_specs, requirements);
+        apply_pypi_install_requirements(
+            &mut options,
+            &mut resolved_specs,
+            requirements,
+            project_dir,
+            dry_run_project.path(),
+        )?;
     }
     let local_path_count =
         options.python_local_paths.len() + options.python_local_requirements.len();
@@ -7468,10 +7530,22 @@ fn run_pip_install_target(
         local_directories,
         &mut options,
     )?);
+    apply_pypi_requirement_files_with_local_directories(
+        &mut options,
+        &mut resolved_specs,
+        project_dir,
+        target_project.path(),
+    )?;
     if !script_requirements.is_empty() {
         let requirements =
             read_script_requirement_files(&absolutize_paths(project_dir, script_requirements))?;
-        apply_pypi_install_requirements(&mut options, &mut resolved_specs, requirements);
+        apply_pypi_install_requirements(
+            &mut options,
+            &mut resolved_specs,
+            requirements,
+            project_dir,
+            target_project.path(),
+        )?;
     }
     let requested_count = resolved_specs.len()
         + options.requirement_files.len()
@@ -7598,10 +7672,22 @@ fn run_pip_install_prefix(
         local_directories,
         &mut options,
     )?);
+    apply_pypi_requirement_files_with_local_directories(
+        &mut options,
+        &mut resolved_specs,
+        project_dir,
+        prefix_project.path(),
+    )?;
     if !script_requirements.is_empty() {
         let requirements =
             read_script_requirement_files(&absolutize_paths(project_dir, script_requirements))?;
-        apply_pypi_install_requirements(&mut options, &mut resolved_specs, requirements);
+        apply_pypi_install_requirements(
+            &mut options,
+            &mut resolved_specs,
+            requirements,
+            project_dir,
+            prefix_project.path(),
+        )?;
     }
     let requested_count = resolved_specs.len()
         + options.requirement_files.len()
@@ -7726,10 +7812,22 @@ fn run_pip_install_root(
         local_directories,
         &mut options,
     )?);
+    apply_pypi_requirement_files_with_local_directories(
+        &mut options,
+        &mut resolved_specs,
+        project_dir,
+        root_project.path(),
+    )?;
     if !script_requirements.is_empty() {
         let requirements =
             read_script_requirement_files(&absolutize_paths(project_dir, script_requirements))?;
-        apply_pypi_install_requirements(&mut options, &mut resolved_specs, requirements);
+        apply_pypi_install_requirements(
+            &mut options,
+            &mut resolved_specs,
+            requirements,
+            project_dir,
+            root_project.path(),
+        )?;
     }
     let requested_count = resolved_specs.len()
         + options.requirement_files.len()
@@ -7870,10 +7968,22 @@ fn run_pip_install_user(
         local_directories,
         &mut options,
     )?);
+    apply_pypi_requirement_files_with_local_directories(
+        &mut options,
+        &mut resolved_specs,
+        project_dir,
+        &state_project,
+    )?;
     if !script_requirements.is_empty() {
         let requirements =
             read_script_requirement_files(&absolutize_paths(project_dir, script_requirements))?;
-        apply_pypi_install_requirements(&mut options, &mut resolved_specs, requirements);
+        apply_pypi_install_requirements(
+            &mut options,
+            &mut resolved_specs,
+            requirements,
+            project_dir,
+            &state_project,
+        )?;
     }
     let requested_count = resolved_specs.len()
         + options.requirement_files.len()
@@ -13533,6 +13643,7 @@ fn apply_pypi_download_requirements(
     }
     if !requirements.python_local_paths.is_empty()
         || !requirements.python_local_requirements.is_empty()
+        || !requirements.python_local_directory_requirements.is_empty()
     {
         if !allow_local_paths {
             return Err(OmcRegistryError::UnsupportedSpec(
@@ -13547,6 +13658,7 @@ fn apply_pypi_download_requirements(
                 .map(|path| PythonLocalRequirement::new(path, BTreeSet::new())),
         );
         local_paths.extend(requirements.python_local_requirements);
+        local_paths.extend(requirements.python_local_directory_requirements);
     }
 
     specs.extend(requirements.specs);
@@ -13584,8 +13696,11 @@ fn apply_pypi_download_requirements(
 fn apply_pypi_install_requirements(
     options: &mut LinkOptions,
     specs: &mut Vec<PackageSpec>,
-    requirements: ProjectRequirements,
-) {
+    mut requirements: ProjectRequirements,
+    source_project_dir: &Path,
+    wheel_project_dir: &Path,
+) -> Result<(), OmcRegistryError> {
+    let local_directories = std::mem::take(&mut requirements.python_local_directory_requirements);
     specs.extend(requirements.specs);
     options.constraints.extend(requirements.constraints);
     options.hashes.extend(requirements.hashes);
@@ -13624,6 +13739,39 @@ fn apply_pypi_install_requirements(
     options
         .python_vcs_requirements
         .extend(requirements.python_vcs_requirements);
+    specs.extend(prepare_pip_local_directory_archive_specs(
+        source_project_dir,
+        wheel_project_dir,
+        local_directories,
+        options,
+    )?);
+    Ok(())
+}
+
+fn apply_pypi_requirement_files_with_local_directories(
+    options: &mut LinkOptions,
+    specs: &mut Vec<PackageSpec>,
+    source_project_dir: &Path,
+    wheel_project_dir: &Path,
+) -> Result<bool, OmcRegistryError> {
+    if options.requirement_files.is_empty() {
+        return Ok(false);
+    }
+
+    let requirements = read_requirements_files(&options.requirement_files)?;
+    if requirements.python_local_directory_requirements.is_empty() {
+        return Ok(false);
+    }
+
+    options.requirement_files.clear();
+    apply_pypi_install_requirements(
+        options,
+        specs,
+        requirements,
+        source_project_dir,
+        wheel_project_dir,
+    )?;
+    Ok(true)
 }
 
 fn prepare_pip_local_directory_archive_specs(
@@ -13712,7 +13860,14 @@ fn apply_pip_constraint_files_for_explicit_specs(
 
     let constraints = read_constraint_files(&options.constraint_files)?;
     let mut ignored_specs = Vec::new();
-    apply_pypi_install_requirements(options, &mut ignored_specs, constraints);
+    let project_dir = options.project_dir.clone();
+    apply_pypi_install_requirements(
+        options,
+        &mut ignored_specs,
+        constraints,
+        &project_dir,
+        &project_dir,
+    )?;
     Ok(())
 }
 
@@ -42419,6 +42574,61 @@ version = "0.1.0"
 
         let _ = fs::remove_dir_all(project);
         let _ = fs::remove_dir_all(local);
+    }
+
+    #[test]
+    fn pip_install_requirements_local_directory_installs_wheel_not_editable() {
+        let project = test_dir("pip-install-requirements-local-project");
+        let local = project.join("localpkg");
+        fs::create_dir_all(local.join("src").join("requirements_local")).unwrap();
+        fs::write(
+            local
+                .join("src")
+                .join("requirements_local")
+                .join("__init__.py"),
+            "VALUE = 17\n",
+        )
+        .unwrap();
+        fs::write(
+            local.join("pyproject.toml"),
+            r#"
+[project]
+name = "requirements-local"
+version = "0.1.0"
+"#,
+        )
+        .unwrap();
+        fs::write(project.join("requirements.txt"), "./localpkg\n").unwrap();
+
+        let status = with_clean_pip_env(|| {
+            run_pip_compat(
+                &project,
+                &args(&["install", "-r", "requirements.txt", "--no-deps"]),
+            )
+        })
+        .unwrap();
+
+        assert_eq!(status, ExitCode::SUCCESS);
+        let site_packages = project.join(".omc").join("python").join("site-packages");
+        assert!(site_packages
+            .join("requirements_local")
+            .join("__init__.py")
+            .exists());
+        assert!(site_packages
+            .join("requirements_local-0.1.0.dist-info")
+            .join("METADATA")
+            .exists());
+        assert!(pip_freeze_local_path_requirements(&project)
+            .unwrap()
+            .is_empty());
+
+        let lock = read_lockfile(project.join("omc.lock")).unwrap();
+        assert!(lock
+            .packages
+            .iter()
+            .any(|package| package.name == "requirements-local" && package.version == "0.1.0"));
+
+        let _ = fs::remove_dir_all(project);
     }
 
     #[test]
