@@ -237,6 +237,7 @@ cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip install ./dist
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip lock -r requirements.txt -o pylock.toml
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip install -r pylock.toml
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip download -r requirements.txt -d wheelhouse
+cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip download -qr requirements.txt -qdwheelhouse
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip download ../local-package -d wheelhouse --no-deps
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip download --only-binary=:all: --platform manylinux_2_28_x86_64 --python-version 3.11 --implementation cp --abi cp311 requests -d wheelhouse
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip wheel -r requirements.txt -w wheelhouse
@@ -247,6 +248,7 @@ cargo run -p omc-cli --bin pip3 -- --omc-project-dir /tmp/omc-demo freeze
 cargo run -p omc-cli --bin python3 -- --omc-project-dir /tmp/omc-demo -m pip freeze
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip freeze
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip freeze -r requirements.txt
+cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip freeze -qr requirements.txt
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip show requests
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip show --user local-package
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip list --format=json
@@ -265,6 +267,7 @@ cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip cache list
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip config get global.index-url
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip config set global.index-url https://pypi.org/simple/
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip uninstall -r requirements.txt -y
+cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip uninstall -yr requirements.txt
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip uninstall --user -y local-package
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo twine check --strict dist/*
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo twine upload -r testpypi dist/*

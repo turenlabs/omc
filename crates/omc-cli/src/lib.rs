@@ -30381,6 +30381,8 @@ fn pip_config_assignment(key: &str, value: &str) -> Result<(String, String), Omc
 }
 
 fn parse_pip_uninstall_args(args: &[String]) -> Result<PipCompatAction, OmcRegistryError> {
+    let expanded_short_clusters = expand_pip_uninstall_short_clusters(args);
+    let args = expanded_short_clusters.as_slice();
     let mut requirements = Vec::new();
     let mut user = false;
     let mut filtered = Vec::new();
@@ -30440,6 +30442,14 @@ fn parse_pip_uninstall_args(args: &[String]) -> Result<PipCompatAction, OmcRegis
         allow_flow,
         allow_all_host,
     })
+}
+
+fn expand_pip_uninstall_short_clusters(args: &[String]) -> Vec<String> {
+    args.iter()
+        .flat_map(|arg| {
+            expand_pip_short_cluster(arg, &['y'], &['r']).unwrap_or_else(|| vec![arg.clone()])
+        })
+        .collect()
 }
 
 fn parse_pip_show_args(args: &[String]) -> Result<PipCompatAction, OmcRegistryError> {
@@ -30708,6 +30718,8 @@ fn parse_pip_inspect_args(args: &[String]) -> Result<PipCompatAction, OmcRegistr
 }
 
 fn parse_pip_freeze_args(args: &[String]) -> Result<PipFreezeAction, OmcRegistryError> {
+    let expanded_short_clusters = expand_pip_freeze_short_clusters(args);
+    let args = expanded_short_clusters.as_slice();
     let mut action = PipFreezeAction::default();
     let mut index = 0;
     while index < args.len() {
@@ -31169,6 +31181,14 @@ fn expand_pip_install_short_clusters(args: &[String]) -> Vec<String> {
         .collect()
 }
 
+fn expand_pip_freeze_short_clusters(args: &[String]) -> Vec<String> {
+    args.iter()
+        .flat_map(|arg| {
+            expand_pip_short_cluster(arg, &[], &['r']).unwrap_or_else(|| vec![arg.clone()])
+        })
+        .collect()
+}
+
 fn parse_pip_download_args(args: &[String]) -> Result<PipCompatAction, OmcRegistryError> {
     parse_pip_artifact_args(args, PipArtifactCommand::Download)
 }
@@ -31187,6 +31207,8 @@ fn parse_pip_artifact_args(
     args: &[String],
     command: PipArtifactCommand,
 ) -> Result<PipCompatAction, OmcRegistryError> {
+    let expanded_short_clusters = expand_pip_artifact_short_clusters(args, command);
+    let args = expanded_short_clusters.as_slice();
     let mut requirements = Vec::new();
     let mut constraints = Vec::new();
     let mut index_url = None;
@@ -31481,6 +31503,18 @@ fn parse_pip_artifact_args(
         PipArtifactCommand::Download => PipCompatAction::Download(Box::new(action)),
         PipArtifactCommand::Wheel => PipCompatAction::Wheel(Box::new(action)),
     })
+}
+
+fn expand_pip_artifact_short_clusters(args: &[String], command: PipArtifactCommand) -> Vec<String> {
+    let value_flags = match command {
+        PipArtifactCommand::Download => &['r', 'c', 'd', 'i', 'f'][..],
+        PipArtifactCommand::Wheel => &['r', 'c', 'w', 'i', 'f', 'e', 'C'][..],
+    };
+    args.iter()
+        .flat_map(|arg| {
+            expand_pip_short_cluster(arg, &[], value_flags).unwrap_or_else(|| vec![arg.clone()])
+        })
+        .collect()
 }
 
 fn pip_ignored_install_value_flag(arg: &str) -> bool {
@@ -42833,10 +42867,49 @@ verdict = "accepted"
         }
 
         match parse_pip_compat_action(&args(&[
+            "download",
+            "-qr",
+            "requirements.txt",
+            "-qdwheelhouse",
+        ]))
+        .unwrap()
+        {
+            PipCompatAction::Download(action) => {
+                assert_eq!(action.requirements, vec![PathBuf::from("requirements.txt")]);
+                assert_eq!(action.destination, PathBuf::from("wheelhouse"));
+            }
+            other => panic!("expected pip download action, got {other:?}"),
+        }
+
+        match parse_pip_compat_action(&args(&[
             "wheel",
             "-rrequirements.txt",
             "-wwheelhouse",
             "-e../editable_pkg",
+        ]))
+        .unwrap()
+        {
+            PipCompatAction::Wheel(action) => {
+                assert_eq!(action.requirements, vec![PathBuf::from("requirements.txt")]);
+                assert_eq!(action.destination, PathBuf::from("wheelhouse"));
+                assert_eq!(
+                    action.local_paths,
+                    vec![PythonLocalRequirement::new(
+                        PathBuf::from("../editable_pkg"),
+                        BTreeSet::new()
+                    )]
+                );
+            }
+            other => panic!("expected pip wheel action, got {other:?}"),
+        }
+
+        match parse_pip_compat_action(&args(&[
+            "wheel",
+            "-qr",
+            "requirements.txt",
+            "-qwwheelhouse",
+            "-qe../editable_pkg",
+            "-qCeditable_mode=strict",
         ]))
         .unwrap()
         {
@@ -42861,7 +42934,21 @@ verdict = "accepted"
             other => panic!("expected pip uninstall action, got {other:?}"),
         }
 
+        match parse_pip_compat_action(&args(&["uninstall", "-yr", "requirements.txt"])).unwrap() {
+            PipCompatAction::Uninstall { requirements, .. } => {
+                assert_eq!(requirements, vec![PathBuf::from("requirements.txt")]);
+            }
+            other => panic!("expected pip uninstall action, got {other:?}"),
+        }
+
         match parse_pip_compat_action(&args(&["freeze", "-rrequirements.txt"])).unwrap() {
+            PipCompatAction::Freeze { action } => {
+                assert_eq!(action.requirements, vec![PathBuf::from("requirements.txt")]);
+            }
+            other => panic!("expected pip freeze action, got {other:?}"),
+        }
+
+        match parse_pip_compat_action(&args(&["freeze", "-qr", "requirements.txt"])).unwrap() {
             PipCompatAction::Freeze { action } => {
                 assert_eq!(action.requirements, vec![PathBuf::from("requirements.txt")]);
             }
