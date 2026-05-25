@@ -22020,9 +22020,7 @@ fn project_python_path(project_dir: &Path) -> Result<OsString, OmcRegistryError>
         &mut paths,
         &project_dir.join(".omc").join("python").join("local-paths"),
     )?;
-    if let Some(existing) = env::var_os("PYTHONPATH") {
-        paths.extend(env::split_paths(&existing));
-    }
+    extend_python_path_env(&mut paths)?;
     if let Ok(user_paths) = pip_user_paths() {
         if user_paths.site_packages.exists() || user_paths.state_project.exists() {
             paths.push(user_paths.site_packages.clone());
@@ -22035,6 +22033,17 @@ fn project_python_path(project_dir: &Path) -> Result<OsString, OmcRegistryError>
     }
     dedup_paths(&mut paths);
     env::join_paths(paths).map_err(|error| OmcRegistryError::UnsupportedSpec(error.to_string()))
+}
+
+fn extend_python_path_env(paths: &mut Vec<PathBuf>) -> Result<(), OmcRegistryError> {
+    let Some(existing) = env::var_os("PYTHONPATH") else {
+        return Ok(());
+    };
+    for path in env::split_paths(&existing) {
+        paths.push(path.clone());
+        extend_python_path_file(paths, &path.join(".omc-local-paths"))?;
+    }
+    Ok(())
 }
 
 fn extend_python_path_file(
@@ -43335,9 +43344,16 @@ verdict = "accepted"
         let project = test_dir("pythonpath-preserve-project");
         let extra_a = test_dir("pythonpath-preserve-extra-a");
         let extra_b = test_dir("pythonpath-preserve-extra-b");
+        let editable_src = test_dir("pythonpath-preserve-editable-src");
         let user_base = test_dir("pythonpath-preserve-user-base");
         fs::create_dir_all(&extra_a).unwrap();
         fs::create_dir_all(&extra_b).unwrap();
+        fs::create_dir_all(&editable_src).unwrap();
+        fs::write(
+            extra_a.join(".omc-local-paths"),
+            format!("{}\n", editable_src.display()),
+        )
+        .unwrap();
         let existing = env::join_paths([extra_a.as_path(), extra_b.as_path()])
             .unwrap()
             .to_string_lossy()
@@ -43360,18 +43376,23 @@ verdict = "accepted"
                 );
                 assert!(paths.contains(&extra_a));
                 assert!(paths.contains(&extra_b));
+                assert!(paths.contains(&editable_src));
                 let extra_position = paths.iter().position(|path| path == &extra_a).unwrap();
+                let editable_position =
+                    paths.iter().position(|path| path == &editable_src).unwrap();
+                assert!(extra_position < editable_position);
                 let user_position = paths
                     .iter()
                     .position(|path| path == &user_paths.site_packages)
                     .unwrap();
-                assert!(extra_position < user_position);
+                assert!(editable_position < user_position);
             },
         );
 
         fs::remove_dir_all(project).unwrap();
         fs::remove_dir_all(extra_a).unwrap();
         fs::remove_dir_all(extra_b).unwrap();
+        fs::remove_dir_all(editable_src).unwrap();
         fs::remove_dir_all(user_base).unwrap();
     }
 
