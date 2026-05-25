@@ -1312,6 +1312,7 @@ struct PipInstallAction {
     dry_run: bool,
     archive_references: Vec<String>,
     local_paths: Vec<PythonLocalRequirement>,
+    local_directories: Vec<PythonLocalRequirement>,
     index_url: Option<String>,
     extra_index_urls: Vec<String>,
     find_links: Vec<String>,
@@ -2100,6 +2101,7 @@ fn run_pip_lock(project_dir: &Path, action: PipLockAction) -> Result<ExitCode, O
         dry_run: _,
         archive_references,
         local_paths,
+        local_directories,
         index_url,
         extra_index_urls,
         find_links,
@@ -2153,6 +2155,7 @@ fn run_pip_lock(project_dir: &Path, action: PipLockAction) -> Result<ExitCode, O
     options.constraint_files = absolutize_paths(project_dir, constraints);
     options.python_local_requirements =
         absolutize_python_local_requirements(project_dir, local_paths);
+    let local_directories = absolutize_python_local_requirements(project_dir, local_directories);
     if !groups.is_empty() {
         options
             .python_local_requirements
@@ -2185,6 +2188,12 @@ fn run_pip_lock(project_dir: &Path, action: PipLockAction) -> Result<ExitCode, O
     resolved_specs.extend(parse_pip_archive_references(
         project_dir,
         &archive_references,
+        &mut options,
+    )?);
+    resolved_specs.extend(prepare_pip_local_directory_archive_specs(
+        project_dir,
+        temp_project.path(),
+        local_directories,
         &mut options,
     )?);
     if !script_requirements.is_empty() {
@@ -5914,6 +5923,7 @@ fn run_pip_compat_with_cwd(
                 dry_run: _,
                 archive_references,
                 local_paths,
+                local_directories,
                 index_url,
                 extra_index_urls,
                 find_links,
@@ -5943,6 +5953,7 @@ fn run_pip_compat_with_cwd(
                 + script_requirements.len()
                 + archive_references.len()
                 + local_paths.len()
+                + local_directories.len()
                 + groups.len()
                 + vcs_requirements.len();
             if requested_count == 0 {
@@ -5951,7 +5962,11 @@ fn run_pip_compat_with_cwd(
                         .to_owned(),
                 ));
             }
-            if specs.is_empty() && archive_references.is_empty() && script_requirements.is_empty() {
+            if specs.is_empty()
+                && archive_references.is_empty()
+                && local_directories.is_empty()
+                && script_requirements.is_empty()
+            {
                 let mut options = LinkOptions::new(project_dir);
                 options.discover_project_requirements = !groups.is_empty();
                 apply_cli_policy_options(&mut options, &allow, &allow_flow, allow_all_host)?;
@@ -5986,6 +6001,8 @@ fn run_pip_compat_with_cwd(
             } else {
                 let mut options = LinkOptions::new(project_dir);
                 options.discover_project_requirements = !groups.is_empty();
+                let local_directories =
+                    absolutize_python_local_requirements(project_dir, local_directories);
                 apply_cli_policy_options(&mut options, &allow, &allow_flow, allow_all_host)?;
                 options.requirement_files = absolutize_paths(project_dir, requirements);
                 options.constraint_files = absolutize_paths(project_dir, constraints);
@@ -6016,6 +6033,12 @@ fn run_pip_compat_with_cwd(
                 specs.extend(parse_pip_archive_references(
                     project_dir,
                     &archive_references,
+                    &mut options,
+                )?);
+                specs.extend(prepare_pip_local_directory_archive_specs(
+                    project_dir,
+                    project_dir,
+                    local_directories,
                     &mut options,
                 )?);
                 if !script_requirements.is_empty() {
@@ -7072,6 +7095,7 @@ fn run_pip_install_dry_run(
         dry_run: _,
         archive_references,
         local_paths,
+        local_directories,
         index_url,
         extra_index_urls,
         find_links,
@@ -7156,6 +7180,7 @@ fn run_pip_install_dry_run(
     apply_pip_compatibility_target(&mut options, compatibility);
     options.python_local_requirements =
         absolutize_python_local_requirements(project_dir, local_paths);
+    let local_directories = absolutize_python_local_requirements(project_dir, local_directories);
     options.project_extras = groups.into_iter().collect();
     options.python_vcs_requirements = vcs_requirements;
 
@@ -7165,6 +7190,12 @@ fn run_pip_install_dry_run(
     resolved_specs.extend(parse_pip_archive_references(
         project_dir,
         &archive_references,
+        &mut options,
+    )?);
+    resolved_specs.extend(prepare_pip_local_directory_archive_specs(
+        project_dir,
+        dry_run_project.path(),
+        local_directories,
         &mut options,
     )?);
     if !options.requirement_files.is_empty() {
@@ -7360,6 +7391,7 @@ fn run_pip_install_target(
         dry_run: _,
         archive_references,
         local_paths,
+        local_directories,
         index_url,
         extra_index_urls,
         find_links,
@@ -7396,6 +7428,7 @@ fn run_pip_install_target(
     options.constraint_files = absolutize_paths(project_dir, constraints);
     options.python_local_requirements =
         absolutize_python_local_requirements(project_dir, local_paths);
+    let local_directories = absolutize_python_local_requirements(project_dir, local_directories);
     options.project_extras = groups.into_iter().collect();
     apply_pip_compat_index_options(
         &mut options,
@@ -7427,6 +7460,12 @@ fn run_pip_install_target(
     resolved_specs.extend(parse_pip_archive_references(
         project_dir,
         &archive_references,
+        &mut options,
+    )?);
+    resolved_specs.extend(prepare_pip_local_directory_archive_specs(
+        project_dir,
+        target_project.path(),
+        local_directories,
         &mut options,
     )?);
     if !script_requirements.is_empty() {
@@ -7483,6 +7522,7 @@ fn run_pip_install_prefix(
         dry_run: _,
         archive_references,
         local_paths,
+        local_directories,
         index_url,
         extra_index_urls,
         find_links,
@@ -7522,6 +7562,7 @@ fn run_pip_install_prefix(
     options.constraint_files = absolutize_paths(project_dir, constraints);
     options.python_local_requirements =
         absolutize_python_local_requirements(project_dir, local_paths);
+    let local_directories = absolutize_python_local_requirements(project_dir, local_directories);
     options.project_extras = groups.into_iter().collect();
     apply_pip_compat_index_options(
         &mut options,
@@ -7549,6 +7590,12 @@ fn run_pip_install_prefix(
     resolved_specs.extend(parse_pip_archive_references(
         project_dir,
         &archive_references,
+        &mut options,
+    )?);
+    resolved_specs.extend(prepare_pip_local_directory_archive_specs(
+        project_dir,
+        prefix_project.path(),
+        local_directories,
         &mut options,
     )?);
     if !script_requirements.is_empty() {
@@ -7605,6 +7652,7 @@ fn run_pip_install_root(
         dry_run: _,
         archive_references,
         local_paths,
+        local_directories,
         index_url,
         extra_index_urls,
         find_links,
@@ -7642,6 +7690,7 @@ fn run_pip_install_root(
     options.constraint_files = absolutize_paths(project_dir, constraints);
     options.python_local_requirements =
         absolutize_python_local_requirements(project_dir, local_paths);
+    let local_directories = absolutize_python_local_requirements(project_dir, local_directories);
     options.project_extras = groups.into_iter().collect();
     apply_pip_compat_index_options(
         &mut options,
@@ -7669,6 +7718,12 @@ fn run_pip_install_root(
     resolved_specs.extend(parse_pip_archive_references(
         project_dir,
         &archive_references,
+        &mut options,
+    )?);
+    resolved_specs.extend(prepare_pip_local_directory_archive_specs(
+        project_dir,
+        root_project.path(),
+        local_directories,
         &mut options,
     )?);
     if !script_requirements.is_empty() {
@@ -7725,6 +7780,7 @@ fn run_pip_install_user(
         dry_run: _,
         archive_references,
         local_paths,
+        local_directories,
         index_url,
         extra_index_urls,
         find_links,
@@ -7778,6 +7834,7 @@ fn run_pip_install_user(
     options.constraint_files = absolutize_paths(project_dir, constraints);
     options.python_local_requirements =
         absolutize_python_local_requirements(project_dir, local_paths);
+    let local_directories = absolutize_python_local_requirements(project_dir, local_directories);
     options.project_extras = groups.into_iter().collect();
     apply_pip_compat_index_options(
         &mut options,
@@ -7805,6 +7862,12 @@ fn run_pip_install_user(
     resolved_specs.extend(parse_pip_archive_references(
         project_dir,
         &archive_references,
+        &mut options,
+    )?);
+    resolved_specs.extend(prepare_pip_local_directory_archive_specs(
+        project_dir,
+        &state_project,
+        local_directories,
         &mut options,
     )?);
     if !script_requirements.is_empty() {
@@ -13561,6 +13624,70 @@ fn apply_pypi_install_requirements(
     options
         .python_vcs_requirements
         .extend(requirements.python_vcs_requirements);
+}
+
+fn prepare_pip_local_directory_archive_specs(
+    source_project_dir: &Path,
+    wheel_project_dir: &Path,
+    mut requirements: Vec<PythonLocalRequirement>,
+    options: &mut LinkOptions,
+) -> Result<Vec<PackageSpec>, OmcRegistryError> {
+    if requirements.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let wheelhouse = wheel_project_dir
+        .join(".omc")
+        .join("python")
+        .join("local-wheels");
+    if wheelhouse.exists() {
+        fs::remove_dir_all(&wheelhouse)?;
+    }
+    fs::create_dir_all(&wheelhouse)?;
+
+    if options.pypi_include_dependencies {
+        let _ = collect_pip_local_wheel_dependencies(source_project_dir, &mut requirements)?;
+    }
+    build_pip_local_wheels(source_project_dir, &wheelhouse, &requirements)?;
+
+    let wheelhouse_value = wheelhouse.to_string_lossy().into_owned();
+    if !options.pypi_find_links.contains(&wheelhouse_value) {
+        options.pypi_find_links.push(wheelhouse_value);
+    }
+
+    let mut specs = Vec::new();
+    let mut seen = BTreeSet::new();
+    for requirement in requirements {
+        let package_dir = resolve_pip_local_wheel_path(source_project_dir, &requirement)?;
+        let metadata = read_pip_local_wheel_metadata(&package_dir, &requirement.extras)?;
+        let wheel_path = wheelhouse.join(pip_local_wheel_filename(&metadata));
+        let wheel_url = reqwest::Url::from_file_path(&wheel_path).map_err(|_| {
+            OmcRegistryError::UnsupportedRequirement(format!(
+                "local wheel path `{}` could not be converted to a file URL",
+                wheel_path.display()
+            ))
+        })?;
+        let Some((spec, hashes)) =
+            parse_pypi_direct_archive_reference(wheel_url.as_str(), wheel_project_dir)?
+        else {
+            return Err(OmcRegistryError::UnsupportedSpec(format!(
+                "unsupported generated local wheel `{}`",
+                wheel_path.display()
+            )));
+        };
+        if !hashes.is_empty() {
+            options
+                .hashes
+                .entry(spec.package_key())
+                .or_default()
+                .extend(hashes);
+        }
+        if seen.insert(spec.requested()) {
+            specs.push(spec);
+        }
+    }
+
+    Ok(specs)
 }
 
 fn merge_pypi_release_controls(target: &mut PypiReleaseControls, source: PypiReleaseControls) {
@@ -30263,6 +30390,7 @@ fn parse_pip_install_args(args: &[String]) -> Result<PipCompatAction, OmcRegistr
     let mut groups = Vec::new();
     let mut archive_references = Vec::new();
     let mut local_paths = Vec::new();
+    let mut local_directories = Vec::new();
     let mut vcs_requirements = Vec::new();
     let mut filtered = Vec::new();
     let mut index = 0;
@@ -30532,7 +30660,7 @@ fn parse_pip_install_args(args: &[String]) -> Result<PipCompatAction, OmcRegistr
         } else if is_pip_pylock_requirements_arg(arg) {
             requirements.push(PathBuf::from(arg));
         } else if is_pip_local_directory_arg(arg) {
-            local_paths.push(pip_local_path_arg(arg)?);
+            local_directories.push(pip_local_path_arg(arg)?);
         } else {
             filtered.push(arg.clone());
         }
@@ -30557,6 +30685,7 @@ fn parse_pip_install_args(args: &[String]) -> Result<PipCompatAction, OmcRegistr
         dry_run,
         archive_references,
         local_paths,
+        local_directories,
         index_url,
         extra_index_urls,
         find_links,
@@ -41450,6 +41579,7 @@ verdict = "accepted"
                 dry_run: true,
                 archive_references: Vec::new(),
                 local_paths: Vec::new(),
+                local_directories: Vec::new(),
                 index_url: Some("https://mirror.example/simple".to_owned()),
                 extra_index_urls: vec!["https://extra.example/simple".to_owned()],
                 find_links: vec!["wheelhouse".to_owned()],
@@ -41581,6 +41711,7 @@ verdict = "accepted"
                         BTreeSet::from(["tools".to_owned()])
                     )]
                 );
+                assert!(action.local_directories.is_empty());
             }
             other => panic!("expected pip install action, got {other:?}"),
         }
@@ -41921,8 +42052,11 @@ verdict = "accepted"
                         BTreeSet::from(["dev".to_owned()]),
                     ),
                     PythonLocalRequirement::new(PathBuf::from("./another_pkg"), BTreeSet::new()),
-                    PythonLocalRequirement::new(PathBuf::from("./local_pkg"), BTreeSet::new()),
                 ],
+                local_directories: vec![PythonLocalRequirement::new(
+                    PathBuf::from("./local_pkg"),
+                    BTreeSet::new()
+                ),],
                 index_url: None,
                 extra_index_urls: Vec::new(),
                 find_links: Vec::new(),
@@ -41966,6 +42100,7 @@ verdict = "accepted"
                 dry_run: false,
                 archive_references: Vec::new(),
                 local_paths: Vec::new(),
+                local_directories: Vec::new(),
                 index_url: None,
                 extra_index_urls: Vec::new(),
                 find_links: Vec::new(),
@@ -42235,6 +42370,58 @@ local-cli = "local_pkg:main"
     }
 
     #[test]
+    fn pip_install_local_directory_installs_wheel_not_editable() {
+        let project = test_dir("pip-install-direct-local-project");
+        let local = test_dir("pip-install-direct-local-package");
+        fs::create_dir_all(local.join("src").join("direct_local")).unwrap();
+        fs::write(
+            local.join("src").join("direct_local").join("__init__.py"),
+            "VALUE = 11\n",
+        )
+        .unwrap();
+        fs::write(
+            local.join("pyproject.toml"),
+            r#"
+[project]
+name = "direct-local"
+version = "0.1.0"
+"#,
+        )
+        .unwrap();
+
+        let status = with_clean_pip_env(|| {
+            run_pip_compat(
+                &project,
+                &args(&["install", local.to_str().unwrap(), "--no-deps"]),
+            )
+        })
+        .unwrap();
+
+        assert_eq!(status, ExitCode::SUCCESS);
+        let site_packages = project.join(".omc").join("python").join("site-packages");
+        assert!(site_packages
+            .join("direct_local")
+            .join("__init__.py")
+            .exists());
+        assert!(site_packages
+            .join("direct_local-0.1.0.dist-info")
+            .join("METADATA")
+            .exists());
+        assert!(pip_freeze_local_path_requirements(&project)
+            .unwrap()
+            .is_empty());
+
+        let lock = read_lockfile(project.join("omc.lock")).unwrap();
+        assert!(lock
+            .packages
+            .iter()
+            .any(|package| package.name == "direct-local" && package.version == "0.1.0"));
+
+        let _ = fs::remove_dir_all(project);
+        let _ = fs::remove_dir_all(local);
+    }
+
+    #[test]
     fn pip_wheel_builds_recursive_local_directory_dependencies() {
         let project = test_dir("pip-wheel-local-dependencies-project");
         let parent = test_dir("pip-wheel-local-parent-package");
@@ -42376,7 +42563,8 @@ version = "0.1.0"
                 report: None,
                 dry_run: true,
                 archive_references: Vec::new(),
-                local_paths: vec![PythonLocalRequirement::new(local, BTreeSet::new())],
+                local_paths: Vec::new(),
+                local_directories: vec![PythonLocalRequirement::new(local, BTreeSet::new())],
                 index_url: None,
                 extra_index_urls: Vec::new(),
                 find_links: Vec::new(),
@@ -43615,6 +43803,7 @@ verdict = "accepted"
                     "https://files.example/source_pkg-2.0.0.tar.gz#sha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_owned(),
                 ],
                 local_paths: Vec::new(),
+                local_directories: Vec::new(),
                 index_url: None,
                 extra_index_urls: Vec::new(),
                 find_links: Vec::new(),
