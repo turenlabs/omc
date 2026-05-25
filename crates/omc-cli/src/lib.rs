@@ -12929,17 +12929,12 @@ fn print_npm_explain(
         .iter()
         .map(|spec| npm_explain_requested_name(spec))
         .collect::<Result<BTreeSet<_>, _>>()?;
-    let lock = read_lockfile(project_dir.join("omc.lock"))?;
-    let packages = lock
-        .packages
-        .iter()
-        .filter(|package| package.ecosystem == Ecosystem::Npm)
-        .collect::<Vec<_>>();
+    let packages = listed_locked_packages(project_dir, Some(Ecosystem::Npm), &[])?;
     let root_dependencies = npm_root_dependency_names(project_dir)?;
     let root = npm_outdated_dependent(project_dir);
     let mut rows = Vec::new();
 
-    for package in packages.iter().copied() {
+    for package in &packages {
         if !targets.contains(&package.name) {
             continue;
         }
@@ -18898,12 +18893,7 @@ fn npm_query_items(
     project_dir: &Path,
     action: &NpmQueryAction,
 ) -> Result<Vec<NpmQueryItem>, OmcRegistryError> {
-    let lock = read_lockfile(project_dir.join("omc.lock"))?;
-    let packages = lock
-        .packages
-        .into_iter()
-        .filter(|package| package.ecosystem == Ecosystem::Npm)
-        .collect::<Vec<_>>();
+    let packages = listed_locked_packages(project_dir, Some(Ecosystem::Npm), &[])?;
     let target_dirs = npm_query_target_dirs(project_dir, action)?;
     let mut kinds = npm_query_dependency_kinds(project_dir, &target_dirs)?;
     let workspace_packages = if action.package_lock_only {
@@ -40084,6 +40074,18 @@ version = "0.1.0"
             ),
         )
         .unwrap();
+        fs::write(
+            project.join("package.json"),
+            format!(
+                r#"{{
+                  "name": "root",
+                  "version": "1.0.0",
+                  "dependencies": {{ "local-tool": "file:{}" }}
+                }}"#,
+                local.display()
+            ),
+        )
+        .unwrap();
         fs::write(project.join("omc.lock"), "version = 1\n").unwrap();
 
         let packages = listed_locked_packages(&project, Some(Ecosystem::Npm), &[]).unwrap();
@@ -40103,6 +40105,23 @@ version = "0.1.0"
             listed_locked_packages(&project, Some(Ecosystem::Npm), &["missing".to_owned()])
                 .unwrap();
         assert!(missing.is_empty());
+
+        let query = NpmQueryAction {
+            selector: ":root > *".to_owned(),
+            workspaces: Vec::new(),
+            all_workspaces: false,
+            include_workspace_root: false,
+            package_lock_only: false,
+            expect_results: None,
+            expect_result_count: None,
+        };
+        let selected = npm_query_items(&project, &query)
+            .unwrap()
+            .into_iter()
+            .filter(|item| npm_query_selector_matches(item, &query.selector).unwrap())
+            .map(|item| item.name)
+            .collect::<Vec<_>>();
+        assert_eq!(selected, vec!["local-tool"]);
 
         let _ = fs::remove_dir_all(project);
     }
