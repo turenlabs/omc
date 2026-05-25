@@ -18697,18 +18697,7 @@ fn print_locked_packages(
     json: bool,
     filters: &[String],
 ) -> Result<(), OmcRegistryError> {
-    let filter_names = package_list_filter_names(filters, ecosystem)?;
-    let lock = read_lockfile(project_dir.join("omc.lock"))?;
-    let packages = lock
-        .packages
-        .into_iter()
-        .filter(|package| {
-            ecosystem
-                .map(|ecosystem| package.ecosystem == ecosystem)
-                .unwrap_or(true)
-        })
-        .filter(|package| filter_names.is_empty() || filter_names.contains(&package.name))
-        .collect::<Vec<_>>();
+    let packages = listed_locked_packages(project_dir, ecosystem, filters)?;
     if json {
         println!("{}", serde_json::to_string_pretty(&packages)?);
     } else if packages.is_empty() {
@@ -18726,6 +18715,132 @@ fn print_locked_packages(
         }
     }
     Ok(())
+}
+
+fn listed_locked_packages(
+    project_dir: &Path,
+    ecosystem: Option<Ecosystem>,
+    filters: &[String],
+) -> Result<Vec<LockedPackage>, OmcRegistryError> {
+    let filter_names = package_list_filter_names(filters, ecosystem)?;
+    let lock = read_lockfile(project_dir.join("omc.lock"))?;
+    let mut packages = lock
+        .packages
+        .into_iter()
+        .filter(|package| {
+            ecosystem
+                .map(|ecosystem| package.ecosystem == ecosystem)
+                .unwrap_or(true)
+        })
+        .collect::<Vec<_>>();
+
+    if ecosystem
+        .map(|ecosystem| ecosystem == Ecosystem::Npm)
+        .unwrap_or(true)
+    {
+        let mut existing = packages
+            .iter()
+            .map(|package| (package.ecosystem, package.name.clone()))
+            .collect::<BTreeSet<_>>();
+        for package in npm_local_locked_packages(project_dir)? {
+            if existing.insert((package.ecosystem, package.name.clone())) {
+                packages.push(package);
+            }
+        }
+    }
+
+    packages.retain(|package| filter_names.is_empty() || filter_names.contains(&package.name));
+    packages.sort_by(|left, right| {
+        (
+            left.ecosystem,
+            left.name.as_str(),
+            left.version.as_str(),
+            left.source_url.as_str(),
+        )
+            .cmp(&(
+                right.ecosystem,
+                right.name.as_str(),
+                right.version.as_str(),
+                right.source_url.as_str(),
+            ))
+    });
+    Ok(packages)
+}
+
+fn npm_local_locked_packages(project_dir: &Path) -> Result<Vec<LockedPackage>, OmcRegistryError> {
+    let manifest = match read_manifest(project_dir.join("omc.toml")) {
+        Ok(manifest) => manifest,
+        Err(OmcRegistryError::Io(error)) if error.kind() == io::ErrorKind::NotFound => {
+            return Ok(Vec::new());
+        }
+        Err(error) => return Err(error),
+    };
+    let paths = manifest
+        .npm_local_paths
+        .into_iter()
+        .chain(manifest.npm_dev_local_paths)
+        .chain(manifest.npm_optional_local_paths)
+        .chain(manifest.npm_peer_local_paths)
+        .map(PathBuf::from)
+        .map(|path| absolutize_path(project_dir, path));
+
+    let mut packages = BTreeMap::new();
+    for path in paths {
+        if let Some(package) = npm_local_locked_package(&path)? {
+            packages.insert(package.name.clone(), package);
+        }
+    }
+    Ok(packages.into_values().collect())
+}
+
+fn npm_local_locked_package(path: &Path) -> Result<Option<LockedPackage>, OmcRegistryError> {
+    let package_json = path.join("package.json");
+    if !package_json.exists() {
+        return Ok(None);
+    }
+    let manifest = read_npm_pkg_json(&package_json)?;
+    let name = npm_package_json_name(&manifest)?;
+    let version = manifest
+        .get("version")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("0.0.0")
+        .to_owned();
+    let source_url = reqwest::Url::from_directory_path(path)
+        .map(|url| url.to_string())
+        .unwrap_or_else(|_| format!("file:{}", path.display()));
+    Ok(Some(LockedPackage {
+        ecosystem: Ecosystem::Npm,
+        name,
+        version,
+        source_url,
+        archive: String::new(),
+        artifact: String::new(),
+        sha256: String::new(),
+        behavior: Behavior::HostCapability,
+        verdict: Verdict::Accepted,
+        dependencies: npm_package_dependency_specs(&manifest, "dependencies"),
+        optional_dependencies: npm_package_dependency_specs(&manifest, "optionalDependencies"),
+        peer_dependencies: npm_package_dependency_specs(&manifest, "peerDependencies"),
+        grants: Vec::new(),
+        capabilities: Vec::new(),
+        verifier_findings: Vec::new(),
+    }))
+}
+
+fn npm_package_dependency_specs(package: &serde_json::Value, field: &str) -> Vec<String> {
+    package
+        .get(field)
+        .and_then(serde_json::Value::as_object)
+        .map(|dependencies| {
+            dependencies
+                .iter()
+                .map(|(name, requirement)| {
+                    let requirement = requirement.as_str().unwrap_or("*");
+                    format!("npm:{name}@{requirement}")
+                })
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 #[derive(Debug, Clone, Default)]
@@ -39940,6 +40055,56 @@ verdict = "accepted"
         .unwrap();
 
         assert_eq!(status, ExitCode::SUCCESS);
+    }
+
+    #[test]
+    fn npm_list_includes_manifest_local_paths() {
+        let project = test_dir("npm-list-local-paths-project");
+        let local = project.join("vendor/local-tool");
+        fs::create_dir_all(&local).unwrap();
+        fs::write(
+            local.join("package.json"),
+            r#"{
+              "name": "local-tool",
+              "version": "1.2.3",
+              "dependencies": { "left-pad": "^1.3.0" }
+            }"#,
+        )
+        .unwrap();
+        fs::write(
+            project.join("omc.toml"),
+            format!(
+                r#"npm-local-paths = ["{}"]
+
+[project]
+name = "root"
+version = "0.1.0"
+"#,
+                local.display()
+            ),
+        )
+        .unwrap();
+        fs::write(project.join("omc.lock"), "version = 1\n").unwrap();
+
+        let packages = listed_locked_packages(&project, Some(Ecosystem::Npm), &[]).unwrap();
+        assert_eq!(packages.len(), 1);
+        assert_eq!(packages[0].name, "local-tool");
+        assert_eq!(packages[0].version, "1.2.3");
+        assert_eq!(packages[0].verdict, Verdict::Accepted);
+        assert_eq!(packages[0].behavior, Behavior::HostCapability);
+        assert_eq!(packages[0].dependencies, vec!["npm:left-pad@^1.3.0"]);
+        assert!(packages[0].source_url.starts_with("file:"));
+
+        let filtered =
+            listed_locked_packages(&project, Some(Ecosystem::Npm), &["local-tool".to_owned()])
+                .unwrap();
+        assert_eq!(filtered.len(), 1);
+        let missing =
+            listed_locked_packages(&project, Some(Ecosystem::Npm), &["missing".to_owned()])
+                .unwrap();
+        assert!(missing.is_empty());
+
+        let _ = fs::remove_dir_all(project);
     }
 
     #[test]
