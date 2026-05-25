@@ -151,9 +151,11 @@ cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm explore left-p
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm audit --json
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm outdated --json
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm outdated left-pad --json
+cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm outdated -l --json
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm explain left-pad --json
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm query ':root > *'
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm ls --depth 0 left-pad --json
+cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm ls -al --json
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm prune --omit=dev
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm prune --dry-run --json
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm dedupe

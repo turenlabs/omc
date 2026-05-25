@@ -28703,7 +28703,8 @@ fn parse_npm_outdated_args(args: &[String]) -> Result<NpmCompatAction, OmcRegist
                 | "--prod"
                 | "--production"
                 | "--color=false"
-        ) {
+        ) || npm_all_long_short_flag(arg)
+        {
         } else if matches!(
             arg.as_str(),
             "--depth" | "--omit" | "--include" | "--loglevel" | "--userconfig"
@@ -28745,6 +28746,13 @@ fn npm_outdated_equals_value_flag(arg: &str) -> bool {
     ]
     .iter()
     .any(|prefix| arg.starts_with(prefix))
+}
+
+fn npm_all_long_short_flag(arg: &str) -> bool {
+    let Some(rest) = arg.strip_prefix('-') else {
+        return false;
+    };
+    !rest.is_empty() && !rest.starts_with('-') && rest.chars().all(|ch| matches!(ch, 'a' | 'l'))
 }
 
 fn parse_npm_config_args(args: &[String]) -> Result<NpmCompatAction, OmcRegistryError> {
@@ -32461,6 +32469,7 @@ fn parse_npm_list_args(args: &[String]) -> Result<NpmCompatAction, OmcRegistryEr
                 | "--color=false"
                 | "--no-color"
         ) || npm_workspace_scope_ignored_flag(arg)
+            || npm_all_long_short_flag(arg)
         {
         } else if matches!(
             arg.as_str(),
@@ -38817,6 +38826,15 @@ verdict = "accepted"
                 json: true,
                 parseable: false,
                 packages: vec!["left-pad@1.1.0".to_owned(), "@demo/pkg".to_owned()],
+                npm_registry: None,
+            }
+        );
+        assert_eq!(
+            parse_npm_compat_action(&args(&["outdated", "-al", "--json"])).unwrap(),
+            NpmCompatAction::Outdated {
+                json: true,
+                parseable: false,
+                packages: Vec::new(),
                 npm_registry: None,
             }
         );
@@ -46642,6 +46660,15 @@ resolved_commit = "0123456789abcdef0123456789abcdef01234567"
     fn parses_npm_and_pip_machine_readable_lists() {
         assert_eq!(
             parse_npm_compat_action(&args(&["list", "--json"])).unwrap(),
+            NpmCompatAction::List {
+                action: NpmListAction {
+                    json: true,
+                    packages: Vec::new(),
+                },
+            }
+        );
+        assert_eq!(
+            parse_npm_compat_action(&args(&["ls", "-al", "--json"])).unwrap(),
             NpmCompatAction::List {
                 action: NpmListAction {
                     json: true,
