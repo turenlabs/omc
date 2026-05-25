@@ -1265,9 +1265,20 @@ enum PipCompletionShell {
 enum PipCacheAction {
     Dir,
     Info,
-    List { pattern: Option<String> },
-    Remove { pattern: String },
+    List {
+        pattern: Option<String>,
+        format: PipCacheListFormat,
+    },
+    Remove {
+        pattern: String,
+    },
     Purge,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PipCacheListFormat {
+    Human,
+    Abspath,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -17719,14 +17730,14 @@ fn print_pip_cache(project_dir: &Path, action: PipCacheAction) -> Result<(), Omc
             println!("Number of files: {}", files.len());
             println!("Size: {bytes} bytes");
         }
-        PipCacheAction::List { pattern } => {
+        PipCacheAction::List { pattern, format } => {
             let mut files = compat_cache_files(&cache_dir)?;
             if let Some(pattern) = pattern {
                 files.retain(|path| compat_cache_pattern_matches(path, &cache_dir, &pattern));
             }
             files.sort();
             for path in files {
-                println!("{}", compat_cache_display_path(&path, &cache_dir));
+                println!("{}", pip_cache_list_display_path(&path, &cache_dir, format));
             }
         }
         PipCacheAction::Remove { pattern } => {
@@ -17955,6 +17966,17 @@ fn compat_cache_display_path(path: &Path, cache_dir: &Path) -> String {
         .to_string_lossy()
         .trim_start_matches(std::path::MAIN_SEPARATOR)
         .to_owned()
+}
+
+fn pip_cache_list_display_path(
+    path: &Path,
+    cache_dir: &Path,
+    format: PipCacheListFormat,
+) -> String {
+    match format {
+        PipCacheListFormat::Human => compat_cache_display_path(path, cache_dir),
+        PipCacheListFormat::Abspath => path.display().to_string(),
+    }
 }
 
 fn wildcard_match(value: &str, pattern: &str) -> bool {
@@ -30969,14 +30991,27 @@ fn parse_pip_hash_algorithm(value: &str) -> Result<PipHashAlgorithm, OmcRegistry
 
 fn parse_pip_cache_args(args: &[String]) -> Result<PipCompatAction, OmcRegistryError> {
     let mut filtered = Vec::new();
-    for arg in args {
+    let mut format = PipCacheListFormat::Human;
+    let mut index = 0;
+    while index < args.len() {
+        let arg = &args[index];
         if arg == "--disable-pip-version-check" || pip_ignored_verbosity_flag(arg) {
-            continue;
-        }
-        if arg.starts_with('-') {
+        } else if arg == "--format" {
+            index += 1;
+            let Some(value) = args.get(index) else {
+                return Err(OmcRegistryError::UnsupportedSpec(
+                    "pip cache --format needs a value".to_owned(),
+                ));
+            };
+            format = parse_pip_cache_list_format(value)?;
+        } else if let Some(value) = arg.strip_prefix("--format=") {
+            format = parse_pip_cache_list_format(value)?;
+        } else if arg.starts_with('-') {
             return Err(unsupported_compat_arg("pip cache", arg));
+        } else {
+            filtered.push(arg.clone());
         }
-        filtered.push(arg.clone());
+        index += 1;
     }
     let Some(command) = filtered.first().map(String::as_str) else {
         return Err(OmcRegistryError::UnsupportedSpec(
@@ -31003,6 +31038,7 @@ fn parse_pip_cache_args(args: &[String]) -> Result<PipCompatAction, OmcRegistryE
             }
             PipCacheAction::List {
                 pattern: rest.first().cloned(),
+                format,
             }
         }
         "remove" | "rm" => {
@@ -31028,6 +31064,16 @@ fn parse_pip_cache_args(args: &[String]) -> Result<PipCompatAction, OmcRegistryE
         }
     };
     Ok(PipCompatAction::Cache { action })
+}
+
+fn parse_pip_cache_list_format(value: &str) -> Result<PipCacheListFormat, OmcRegistryError> {
+    match value {
+        "human" => Ok(PipCacheListFormat::Human),
+        "abspath" => Ok(PipCacheListFormat::Abspath),
+        other => Err(OmcRegistryError::UnsupportedSpec(format!(
+            "unsupported pip cache list format `{other}`"
+        ))),
+    }
 }
 
 fn parse_pip_check_args(args: &[String]) -> Result<PipCompatAction, OmcRegistryError> {
@@ -47150,9 +47196,29 @@ version = "0.2.0"
             PipCompatAction::Cache {
                 action: PipCacheAction::List {
                     pattern: Some("idna".to_owned()),
+                    format: PipCacheListFormat::Human,
                 },
             }
         );
+        assert_eq!(
+            parse_pip_compat_action(&args(&["cache", "--format=abspath", "list", "idna"])).unwrap(),
+            PipCompatAction::Cache {
+                action: PipCacheAction::List {
+                    pattern: Some("idna".to_owned()),
+                    format: PipCacheListFormat::Abspath,
+                },
+            }
+        );
+        assert_eq!(
+            parse_pip_compat_action(&args(&["cache", "list", "--format", "human"])).unwrap(),
+            PipCompatAction::Cache {
+                action: PipCacheAction::List {
+                    pattern: None,
+                    format: PipCacheListFormat::Human,
+                },
+            }
+        );
+        assert!(parse_pip_compat_action(&args(&["cache", "dir", "--format=bad"])).is_err());
         assert_eq!(
             parse_pip_compat_action(&args(&["cache", "remove", "idna"])).unwrap(),
             PipCompatAction::Cache {
@@ -47167,6 +47233,20 @@ version = "0.2.0"
             PipCompatAction::Cache {
                 action: PipCacheAction::Purge,
             }
+        );
+    }
+
+    #[test]
+    fn formats_pip_cache_list_paths() {
+        let cache_dir = PathBuf::from("/tmp/omc-cache");
+        let path = cache_dir.join("wheels").join("idna-3.4-py3-none-any.whl");
+        assert_eq!(
+            pip_cache_list_display_path(&path, &cache_dir, PipCacheListFormat::Human),
+            "wheels/idna-3.4-py3-none-any.whl"
+        );
+        assert_eq!(
+            pip_cache_list_display_path(&path, &cache_dir, PipCacheListFormat::Abspath),
+            "/tmp/omc-cache/wheels/idna-3.4-py3-none-any.whl"
         );
     }
 

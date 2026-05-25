@@ -712,6 +712,7 @@ Supported now:
   `--all`, and `-a` for transitive dependency expansion
 - `omc pip` compatibility commands for common `install`, `lock`, `uninstall`, `freeze`,
   `download`, `check`, `debug`, `help`, `inspect`, `show`, `hash`, `cache dir/list/remove/purge`,
+  including `pip cache list --format=human|abspath`,
   `wheel`, `index versions`, `config get/set/unset/list`, and
   `list --format=columns|freeze|json` flows, including `pip list --outdated`
   and `pip list --uptodate`
