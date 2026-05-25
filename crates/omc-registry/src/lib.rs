@@ -6713,6 +6713,22 @@ fn read_requirements_file_inner(
             continue;
         }
 
+        if let Some((spec, hashes)) = parse_pypi_direct_archive_url_reference(&parsed.requirement)?
+        {
+            if mode == RequirementsMode::Constraint {
+                return Err(OmcRegistryError::UnsupportedRequirement(line.to_owned()));
+            }
+            if !parsed.hashes.is_empty() || !hashes.is_empty() {
+                discovered
+                    .hashes
+                    .entry(spec.constraint_key())
+                    .or_default()
+                    .extend(parsed.hashes.into_iter().chain(hashes));
+            }
+            discovered.specs.push(spec);
+            continue;
+        }
+
         if pypi_direct_reference_applies(&parsed.requirement, &BTreeSet::new()) {
             return Err(OmcRegistryError::UnsupportedRequirement(line.to_owned()));
         }
@@ -22270,6 +22286,52 @@ wheels = [
             BTreeSet::from([
                 "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_owned(),
                 "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_owned()
+            ])
+        );
+    }
+
+    #[test]
+    fn reads_bare_direct_archive_url_requirements() {
+        let dir = tempfile::tempdir().unwrap();
+        let wheel = dir.path().join("demo_pkg-1.0.0-py3-none-any.whl");
+        fs::write(&wheel, b"not a real wheel").unwrap();
+        let file_url = reqwest::Url::from_file_path(&wheel).unwrap().to_string();
+        let requirements = dir.path().join("requirements.txt");
+        fs::write(
+            &requirements,
+            format!(
+                "{file_url}#sha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa --hash=sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\nhttps://files.example/source_pkg-2.0.0.tar.gz#sha256=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\n"
+            ),
+        )
+        .unwrap();
+
+        let discovered = read_requirements_file(&requirements).unwrap();
+        let demo = discovered
+            .specs
+            .iter()
+            .find(|spec| spec.name == "demo-pkg")
+            .unwrap();
+        assert_eq!(demo.direct_url.as_deref(), Some(file_url.as_str()));
+        assert_eq!(
+            discovered.hashes.get("pypi:demo-pkg").cloned().unwrap(),
+            BTreeSet::from([
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_owned(),
+                "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_owned()
+            ])
+        );
+        let source = discovered
+            .specs
+            .iter()
+            .find(|spec| spec.name == "source-pkg")
+            .unwrap();
+        assert_eq!(
+            source.direct_url.as_deref(),
+            Some("https://files.example/source_pkg-2.0.0.tar.gz")
+        );
+        assert_eq!(
+            discovered.hashes.get("pypi:source-pkg").cloned().unwrap(),
+            BTreeSet::from([
+                "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc".to_owned()
             ])
         );
     }
