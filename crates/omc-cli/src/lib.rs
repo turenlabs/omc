@@ -6312,7 +6312,7 @@ fn run_pip_compat_with_cwd(
         PipCompatAction::Hash { algorithm, paths } => {
             print_pip_hash(invocation_cwd, algorithm, paths)?
         }
-        PipCompatAction::Cache { action } => print_pip_cache(project_dir, action)?,
+        PipCompatAction::Cache { action } => return print_pip_cache(project_dir, action),
         PipCompatAction::Check { user } => {
             if user {
                 let paths = pip_effective_scope_paths(invocation_cwd, &[], true)?;
@@ -17719,7 +17719,10 @@ fn verify_npm_locked_cache(project_dir: &Path) -> Result<usize, OmcRegistryError
     Ok(verified)
 }
 
-fn print_pip_cache(project_dir: &Path, action: PipCacheAction) -> Result<(), OmcRegistryError> {
+fn print_pip_cache(
+    project_dir: &Path,
+    action: PipCacheAction,
+) -> Result<ExitCode, OmcRegistryError> {
     let cache_dir = pip_cache_dir(project_dir);
     match action {
         PipCacheAction::Dir => println!("{}", cache_dir.display()),
@@ -17743,6 +17746,10 @@ fn print_pip_cache(project_dir: &Path, action: PipCacheAction) -> Result<(), Omc
         PipCacheAction::Remove { pattern } => {
             let mut files = compat_cache_files(&cache_dir)?;
             files.retain(|path| compat_cache_pattern_matches(path, &cache_dir, &pattern));
+            if files.is_empty() {
+                eprintln!("ERROR: No matching packages");
+                return Ok(ExitCode::FAILURE);
+            }
             let count = remove_cache_files(&files)?;
             prune_empty_cache_dirs(&cache_dir)?;
             println!("Files removed: {count}");
@@ -17755,7 +17762,7 @@ fn print_pip_cache(project_dir: &Path, action: PipCacheAction) -> Result<(), Omc
             println!("Files removed: {count}");
         }
     }
-    Ok(())
+    Ok(ExitCode::SUCCESS)
 }
 
 fn print_pip_debug(project_dir: &Path, action: PipDebugAction) -> Result<(), OmcRegistryError> {
@@ -47248,6 +47255,41 @@ version = "0.2.0"
             pip_cache_list_display_path(&path, &cache_dir, PipCacheListFormat::Abspath),
             "/tmp/omc-cache/wheels/idna-3.4-py3-none-any.whl"
         );
+    }
+
+    #[test]
+    fn pip_cache_remove_missing_pattern_fails_like_pip() {
+        let project = test_dir("pip-cache-remove-missing");
+        let cache_file = pip_cache_dir(&project)
+            .join("wheels")
+            .join("idna")
+            .join("idna-3.4-py3-none-any.whl");
+        fs::create_dir_all(cache_file.parent().unwrap()).unwrap();
+        fs::write(&cache_file, b"wheel").unwrap();
+
+        assert_eq!(
+            print_pip_cache(
+                &project,
+                PipCacheAction::Remove {
+                    pattern: "definitely-not-a-cache-hit".to_owned(),
+                },
+            )
+            .unwrap(),
+            ExitCode::FAILURE
+        );
+        assert!(cache_file.exists());
+
+        assert_eq!(
+            print_pip_cache(
+                &project,
+                PipCacheAction::Remove {
+                    pattern: "idna".to_owned(),
+                },
+            )
+            .unwrap(),
+            ExitCode::SUCCESS
+        );
+        assert!(!cache_file.exists());
     }
 
     #[test]
