@@ -8708,7 +8708,7 @@ fn npm_help_text(topic: Option<&str>) -> String {
             &[
                 "Resolve, verify, lock, and install npm packages with OMC.",
                 "Aliases: i, add, update, up, upgrade, udpate.",
-                "Common flags: --save, --no-save, --save-dev, --save-optional, --save-peer, --only=prod|dev, --also=dev, --no-optional, --omit=dev|optional|peer, --include=dev|optional|peer, --workspace, --workspaces, --include-workspace-root, --package-lock-only, --prefer-offline, --prefer-online, --prefer-dedupe, --dry-run, --json, --tag, --before, --min-release-age, --engine-strict, --offline, --install-links, --registry, --allow, --allow-all-host.",
+                "Common flags: --save, --no-save, --save-dev, --save-optional, --save-peer, --only=prod|dev, --also=dev, --no-optional, --omit=dev|optional|peer, --include=dev|optional|peer, --workspace, --workspaces/--ws, --include-workspace-root, --package-lock-only, --prefer-offline, --prefer-online, --prefer-dedupe, --dry-run, --json, --tag, --before, --min-release-age, --engine-strict, --offline, --install-links, --registry, --allow, --allow-all-host.",
                 "Direct local inputs are supported for .tgz archives and local package directories.",
                 "Workspace installs save dependencies into selected workspace package.json files and install the root OMC graph.",
             ],
@@ -8749,7 +8749,7 @@ fn npm_help_text(topic: Option<&str>) -> String {
             &[
                 "Run package.json scripts with OMC npm/Python bins and imports on PATH.",
                 "Without a script, lists scripts in text or JSON mode.",
-                "Common flags: --if-present, --workspace, --workspaces, --include-workspace-root, --json, --silent.",
+                "Common flags: --if-present, --workspace, --workspaces/--ws, --include-workspace-root, --json, --silent.",
                 "Aliases: run-script. Also supports npm test/start/stop/restart.",
             ],
         ),
@@ -8758,7 +8758,7 @@ fn npm_help_text(topic: Option<&str>) -> String {
             &[
                 "Run a project-local executable with OMC runtime paths.",
                 "--package installs verified packages into a temporary OMC project before running the command; --call/-c runs a shell command with the same OMC runtime paths.",
-                "Aliases: x, npx. Common flags: --yes, --no-install, --package, --call, --workspace, --workspaces, --include-workspace-root, --cache, --registry, --allow, --allow-all-host.",
+                "Aliases: x, npx. Common flags: --yes, --no-install, --package, --call, --workspace, --workspaces/--ws, --include-workspace-root, --cache, --registry, --allow, --allow-all-host.",
             ],
         ),
         Some("completion") => npm_command_help(
@@ -9226,6 +9226,7 @@ const NPM_COMPLETION_OPTIONS: &[&str] = &[
     "--userconfig",
     "--workspace",
     "--workspaces",
+    "--ws",
     "--include-workspace-root",
     "--omit",
     "--include",
@@ -23692,7 +23693,8 @@ fn npm_global_arg_supported_by_command(command: &str, arg: &str) -> bool {
     if matches!(arg, "--workspace" | "-w")
         || arg.starts_with("--workspace=")
         || arg.starts_with("-w=")
-        || npm_attached_short_value(arg, 'w').is_some()
+        || (npm_attached_short_value(arg, 'w').is_some()
+            && npm_all_workspaces_flag_value(arg).is_none())
     {
         return matches!(
             command,
@@ -23734,8 +23736,10 @@ fn npm_global_arg_supported_by_command(command: &str, arg: &str) -> bool {
                 | "shrinkwrap"
         );
     }
-    if matches!(arg, "--workspaces" | "--include-workspace-root")
+    if npm_all_workspaces_flag_value(arg).is_some()
+        || npm_include_workspace_root_flag_value(arg).is_some()
         || arg.starts_with("--workspaces=")
+        || arg.starts_with("--ws=")
         || arg.starts_with("--include-workspace-root=")
     {
         return matches!(
@@ -23900,6 +23904,10 @@ fn npm_global_arg_supported_by_command(command: &str, arg: &str) -> bool {
 }
 
 fn npm_global_preserved_bool_flag(arg: &str) -> bool {
+    if npm_workspace_scope_ignored_flag(arg) {
+        return true;
+    }
+
     matches!(
         arg,
         "--json"
@@ -24021,7 +24029,10 @@ fn npm_global_preserved_value_flag(arg: &str) -> bool {
 }
 
 fn npm_global_preserved_equals_flag(arg: &str) -> bool {
-    if npm_attached_short_value(arg, 'w').is_some() {
+    if npm_all_workspaces_flag_value(arg).is_some()
+        || (npm_attached_short_value(arg, 'w').is_some()
+            && npm_all_workspaces_flag_value(arg).is_none())
+    {
         return true;
     }
 
@@ -24808,6 +24819,27 @@ fn npm_bool_flag_value(arg: &str, flag: &str) -> Option<bool> {
     }
 }
 
+fn npm_all_workspaces_flag_value(arg: &str) -> Option<bool> {
+    match arg {
+        "--workspaces" | "--workspaces=true" | "--ws" | "--ws=true" | "-ws" => Some(true),
+        "--no-workspaces" | "--workspaces=false" | "--no-ws" | "--ws=false" => Some(false),
+        _ => None,
+    }
+}
+
+fn npm_include_workspace_root_flag_value(arg: &str) -> Option<bool> {
+    match arg {
+        "--include-workspace-root" | "--include-workspace-root=true" => Some(true),
+        "--no-include-workspace-root" | "--include-workspace-root=false" => Some(false),
+        _ => None,
+    }
+}
+
+fn npm_workspace_scope_ignored_flag(arg: &str) -> bool {
+    npm_all_workspaces_flag_value(arg).is_some()
+        || npm_include_workspace_root_flag_value(arg).is_some()
+}
+
 fn npm_attached_short_value(arg: &str, flag: char) -> Option<&str> {
     if arg.starts_with("--") {
         return None;
@@ -25188,13 +25220,10 @@ fn parse_npm_fund_args(args: &[String]) -> Result<NpmCompatAction, OmcRegistryEr
             json = true;
         } else if arg == "--json=false" {
             json = false;
-        } else if matches!(arg.as_str(), "--workspaces" | "--workspace=true") {
-            all_workspaces = true;
-        } else if matches!(
-            arg.as_str(),
-            "--include-workspace-root" | "--include-workspace-root=true"
-        ) {
-            include_workspace_root = true;
+        } else if let Some(value) = npm_all_workspaces_flag_value(arg) {
+            all_workspaces = value;
+        } else if let Some(value) = npm_include_workspace_root_flag_value(arg) {
+            include_workspace_root = value;
         } else if matches!(
             arg.as_str(),
             "--silent"
@@ -25366,10 +25395,9 @@ fn parse_npm_pkg_args(args: &[String]) -> Result<NpmCompatAction, OmcRegistryErr
         let arg = &args[index];
         if arg == "--json" {
             json = true;
-        } else if matches!(
-            arg.as_str(),
-            "--silent" | "-s" | "--parseable" | "-p" | "--workspaces" | "--include-workspace-root"
-        ) {
+        } else if matches!(arg.as_str(), "--silent" | "-s" | "--parseable" | "-p")
+            || npm_workspace_scope_ignored_flag(arg)
+        {
         } else if matches!(arg.as_str(), "--workspace" | "-w" | "--loglevel") {
             index += 1;
             if args.get(index).is_none() {
@@ -25617,17 +25645,10 @@ fn parse_npm_publish_args(args: &[String]) -> Result<NpmCompatAction, OmcRegistr
             .or_else(|| arg.strip_prefix("-w="))
         {
             workspaces.push(value.to_owned());
-        } else if matches!(arg.as_str(), "--workspaces" | "--workspaces=true") {
-            all_workspaces = true;
-        } else if arg == "--workspaces=false" {
-            all_workspaces = false;
-        } else if matches!(
-            arg.as_str(),
-            "--include-workspace-root" | "--include-workspace-root=true"
-        ) {
-            include_workspace_root = true;
-        } else if arg == "--include-workspace-root=false" {
-            include_workspace_root = false;
+        } else if let Some(value) = npm_all_workspaces_flag_value(arg) {
+            all_workspaces = value;
+        } else if let Some(value) = npm_include_workspace_root_flag_value(arg) {
+            include_workspace_root = value;
         } else if matches!(arg.as_str(), "--provenance" | "--provenance=true") {
             provenance = NpmPublishProvenance::Generate;
         } else if matches!(arg.as_str(), "--no-provenance" | "--provenance=false") {
@@ -25732,17 +25753,10 @@ fn parse_npm_unpublish_args(args: &[String]) -> Result<NpmCompatAction, OmcRegis
             .or_else(|| arg.strip_prefix("-w="))
         {
             workspaces.push(value.to_owned());
-        } else if matches!(arg.as_str(), "--workspaces" | "--workspaces=true") {
-            all_workspaces = true;
-        } else if arg == "--workspaces=false" {
-            all_workspaces = false;
-        } else if matches!(
-            arg.as_str(),
-            "--include-workspace-root" | "--include-workspace-root=true"
-        ) {
-            include_workspace_root = true;
-        } else if arg == "--include-workspace-root=false" {
-            include_workspace_root = false;
+        } else if let Some(value) = npm_all_workspaces_flag_value(arg) {
+            all_workspaces = value;
+        } else if let Some(value) = npm_include_workspace_root_flag_value(arg) {
+            include_workspace_root = value;
         } else if matches!(arg.as_str(), "--silent" | "-s") {
         } else if matches!(arg.as_str(), "--loglevel" | "--cache") {
             index += 1;
@@ -26359,17 +26373,11 @@ fn parse_npm_login_args(args: &[String]) -> Result<NpmCompatAction, OmcRegistryE
                     "{arg} needs a value"
                 )));
             }
-        } else if npm_login_ignored_equals_flag(arg)
+        } else if npm_workspace_scope_ignored_flag(arg)
+            || npm_login_ignored_equals_flag(arg)
             || matches!(
                 arg.as_str(),
-                "--silent"
-                    | "-s"
-                    | "--always-auth"
-                    | "--no-always-auth"
-                    | "--workspaces"
-                    | "--include-workspace-root"
-                    | "--workspace"
-                    | "-w"
+                "--silent" | "-s" | "--always-auth" | "--no-always-auth" | "--workspace" | "-w"
             )
         {
             if matches!(arg.as_str(), "--workspace" | "-w") {
@@ -26454,16 +26462,9 @@ fn parse_npm_logout_args(args: &[String]) -> Result<NpmCompatAction, OmcRegistry
                     "{arg} needs a value"
                 )));
             }
-        } else if npm_logout_ignored_equals_flag(arg)
-            || matches!(
-                arg.as_str(),
-                "--silent"
-                    | "-s"
-                    | "--workspaces"
-                    | "--include-workspace-root"
-                    | "--workspace"
-                    | "-w"
-            )
+        } else if npm_workspace_scope_ignored_flag(arg)
+            || npm_logout_ignored_equals_flag(arg)
+            || matches!(arg.as_str(), "--silent" | "-s" | "--workspace" | "-w")
         {
             if matches!(arg.as_str(), "--workspace" | "-w") {
                 index += 1;
@@ -27330,10 +27331,9 @@ fn parse_npm_profile_args(args: &[String]) -> Result<NpmCompatAction, OmcRegistr
             otp = Some(npm_profile_flag_value(args, index, arg)?);
         } else if let Some(value) = arg.strip_prefix("--otp=") {
             otp = Some(value.to_owned());
-        } else if matches!(
-            arg.as_str(),
-            "--silent" | "-s" | "--workspaces" | "--include-workspace-root"
-        ) || npm_profile_ignored_equals_flag(arg)
+        } else if matches!(arg.as_str(), "--silent" | "-s")
+            || npm_workspace_scope_ignored_flag(arg)
+            || npm_profile_ignored_equals_flag(arg)
         {
         } else if matches!(
             arg.as_str(),
@@ -27479,10 +27479,9 @@ fn parse_npm_owner_args(args: &[String]) -> Result<NpmCompatAction, OmcRegistryE
             otp = Some(npm_owner_flag_value(args, index, arg)?);
         } else if let Some(value) = arg.strip_prefix("--otp=") {
             otp = Some(value.to_owned());
-        } else if matches!(
-            arg.as_str(),
-            "--silent" | "-s" | "--parseable" | "-p" | "--workspaces" | "--include-workspace-root"
-        ) || npm_owner_ignored_equals_flag(arg)
+        } else if matches!(arg.as_str(), "--silent" | "-s" | "--parseable" | "-p")
+            || npm_workspace_scope_ignored_flag(arg)
+            || npm_owner_ignored_equals_flag(arg)
         {
         } else if matches!(arg.as_str(), "--loglevel" | "--workspace" | "-w") {
             index += 1;
@@ -27620,10 +27619,9 @@ fn parse_npm_access_args(args: &[String]) -> Result<NpmCompatAction, OmcRegistry
             otp = Some(npm_access_flag_value(args, index, arg)?);
         } else if let Some(value) = arg.strip_prefix("--otp=") {
             otp = Some(value.to_owned());
-        } else if matches!(
-            arg.as_str(),
-            "--silent" | "-s" | "--parseable" | "-p" | "--workspaces" | "--include-workspace-root"
-        ) || npm_access_ignored_equals_flag(arg)
+        } else if matches!(arg.as_str(), "--silent" | "-s" | "--parseable" | "-p")
+            || npm_workspace_scope_ignored_flag(arg)
+            || npm_access_ignored_equals_flag(arg)
         {
         } else if matches!(
             arg.as_str(),
@@ -28025,10 +28023,9 @@ fn parse_npm_org_args(args: &[String]) -> Result<NpmCompatAction, OmcRegistryErr
             otp = Some(npm_org_flag_value(args, index, arg)?);
         } else if let Some(value) = arg.strip_prefix("--otp=") {
             otp = Some(value.to_owned());
-        } else if matches!(
-            arg.as_str(),
-            "--silent" | "-s" | "--workspaces" | "--include-workspace-root"
-        ) || npm_org_ignored_equals_flag(arg)
+        } else if matches!(arg.as_str(), "--silent" | "-s")
+            || npm_workspace_scope_ignored_flag(arg)
+            || npm_org_ignored_equals_flag(arg)
         {
         } else if matches!(
             arg.as_str(),
@@ -28182,10 +28179,9 @@ fn parse_npm_team_args(args: &[String]) -> Result<NpmCompatAction, OmcRegistryEr
             otp = Some(npm_team_flag_value(args, index, arg)?);
         } else if let Some(value) = arg.strip_prefix("--otp=") {
             otp = Some(value.to_owned());
-        } else if matches!(
-            arg.as_str(),
-            "--silent" | "-s" | "--workspaces" | "--include-workspace-root"
-        ) || npm_team_ignored_equals_flag(arg)
+        } else if matches!(arg.as_str(), "--silent" | "-s")
+            || npm_workspace_scope_ignored_flag(arg)
+            || npm_team_ignored_equals_flag(arg)
         {
         } else if matches!(
             arg.as_str(),
@@ -28342,7 +28338,8 @@ fn parse_npm_dist_tag_args(args: &[String]) -> Result<NpmCompatAction, OmcRegist
                 | "-p"
                 | "--workspaces"
                 | "--include-workspace-root"
-        ) || npm_dist_tag_ignored_equals_flag(arg)
+        ) || npm_workspace_scope_ignored_flag(arg)
+            || npm_dist_tag_ignored_equals_flag(arg)
         {
         } else if arg == "--registry" {
             index += 1;
@@ -28511,7 +28508,8 @@ fn parse_npm_sbom_args(args: &[String]) -> Result<NpmCompatAction, OmcRegistryEr
                 | "-s"
                 | "--workspaces"
                 | "--include-workspace-root"
-        ) || npm_sbom_ignored_equals_flag(arg)
+        ) || npm_workspace_scope_ignored_flag(arg)
+            || npm_sbom_ignored_equals_flag(arg)
         {
         } else if matches!(
             arg.as_str(),
@@ -29162,13 +29160,10 @@ fn parse_npm_run_args(
             json = true;
         } else if arg == "--json=false" {
             json = false;
-        } else if matches!(arg.as_str(), "--workspaces" | "--workspace=true") {
-            all_workspaces = true;
-        } else if matches!(
-            arg.as_str(),
-            "--include-workspace-root" | "--include-workspace-root=true"
-        ) {
-            include_workspace_root = true;
+        } else if let Some(value) = npm_all_workspaces_flag_value(arg) {
+            all_workspaces = value;
+        } else if let Some(value) = npm_include_workspace_root_flag_value(arg) {
+            include_workspace_root = value;
         } else if matches!(arg.as_str(), "--workspace" | "-w") {
             index += 1;
             let Some(workspace) = args.get(index) else {
@@ -29308,17 +29303,10 @@ fn parse_npm_exec_args(
             allow_flow.push(flow.to_owned());
         } else if arg == "--allow-all-host" {
             allow_all_host = true;
-        } else if matches!(arg.as_str(), "--workspaces" | "--workspaces=true") {
-            all_workspaces = true;
-        } else if arg == "--workspaces=false" {
-            all_workspaces = false;
-        } else if matches!(
-            arg.as_str(),
-            "--include-workspace-root" | "--include-workspace-root=true"
-        ) {
-            include_workspace_root = true;
-        } else if arg == "--include-workspace-root=false" {
-            include_workspace_root = false;
+        } else if let Some(value) = npm_all_workspaces_flag_value(arg) {
+            all_workspaces = value;
+        } else if let Some(value) = npm_include_workspace_root_flag_value(arg) {
+            include_workspace_root = value;
         } else if matches!(arg.as_str(), "--workspace" | "-w") {
             index += 1;
             let Some(workspace) = args.get(index) else {
@@ -29331,13 +29319,7 @@ fn parse_npm_exec_args(
             .strip_prefix("--workspace=")
             .or_else(|| arg.strip_prefix("-w="))
         {
-            if workspace == "true" {
-                all_workspaces = true;
-            } else if workspace == "false" {
-                all_workspaces = false;
-            } else {
-                workspaces.push(workspace.to_owned());
-            }
+            workspaces.push(workspace.to_owned());
         } else if let Some(workspace) = npm_attached_short_value(arg, 'w') {
             workspaces.push(workspace.to_owned());
         } else if ignored_npm_install_preference_flag(arg) {
@@ -32130,26 +32112,13 @@ fn parse_common_compat_flags(
                 .strip_prefix("--workspace=")
                 .or_else(|| arg.strip_prefix("-w="))
             {
-                if workspace == "true" {
-                    parsed.all_workspaces = true;
-                } else if workspace == "false" {
-                    parsed.all_workspaces = false;
-                } else {
-                    parsed.workspaces.push(workspace.to_owned());
-                }
+                parsed.workspaces.push(workspace.to_owned());
+            } else if let Some(value) = npm_all_workspaces_flag_value(arg) {
+                parsed.all_workspaces = value;
             } else if let Some(workspace) = npm_attached_short_value(arg, 'w') {
                 parsed.workspaces.push(workspace.to_owned());
-            } else if matches!(arg.as_str(), "--workspaces" | "--workspaces=true") {
-                parsed.all_workspaces = true;
-            } else if arg == "--workspaces=false" {
-                parsed.all_workspaces = false;
-            } else if matches!(
-                arg.as_str(),
-                "--include-workspace-root" | "--include-workspace-root=true"
-            ) {
-                parsed.include_workspace_root = true;
-            } else if arg == "--include-workspace-root=false" {
-                parsed.include_workspace_root = false;
+            } else if let Some(value) = npm_include_workspace_root_flag_value(arg) {
+                parsed.include_workspace_root = value;
             } else if ignored_npm_value_flag(arg) {
                 index += 1;
                 if args.get(index).is_none() {
@@ -32377,10 +32346,10 @@ fn parse_npm_list_args(args: &[String]) -> Result<NpmCompatAction, OmcRegistryEr
                 | "-g"
                 | "--silent"
                 | "-s"
-                | "--workspaces"
                 | "--color=false"
                 | "--no-color"
-        ) {
+        ) || npm_workspace_scope_ignored_flag(arg)
+        {
         } else if matches!(
             arg.as_str(),
             "--depth" | "--omit" | "--include" | "--loglevel" | "--workspace" | "-w"
@@ -32426,17 +32395,10 @@ fn parse_npm_query_args(args: &[String]) -> Result<NpmCompatAction, OmcRegistryE
             package_lock_only = true;
         } else if arg == "--package-lock-only=false" {
             package_lock_only = false;
-        } else if matches!(arg.as_str(), "--workspaces" | "--workspaces=true") {
-            all_workspaces = true;
-        } else if arg == "--workspaces=false" {
-            all_workspaces = false;
-        } else if matches!(
-            arg.as_str(),
-            "--include-workspace-root" | "--include-workspace-root=true"
-        ) {
-            include_workspace_root = true;
-        } else if arg == "--include-workspace-root=false" {
-            include_workspace_root = false;
+        } else if let Some(value) = npm_all_workspaces_flag_value(arg) {
+            all_workspaces = value;
+        } else if let Some(value) = npm_include_workspace_root_flag_value(arg) {
+            include_workspace_root = value;
         } else if matches!(arg.as_str(), "--expect-results" | "--expect-results=true") {
             expect_results = Some(true);
         } else if matches!(
@@ -37551,6 +37513,31 @@ verdict = "accepted"
         };
         assert_eq!(workspaces, vec!["@demo/lib"]);
 
+        let action = parse_npm_compat_action(&args(&["install", "-ws", "left-pad"])).unwrap();
+        let NpmCompatAction::Install {
+            workspaces,
+            all_workspaces,
+            ..
+        } = action
+        else {
+            panic!("expected npm install action");
+        };
+        assert!(workspaces.is_empty());
+        assert!(all_workspaces);
+
+        let action =
+            parse_npm_compat_action(&args(&["install", "--workspace=true", "left-pad"])).unwrap();
+        let NpmCompatAction::Install {
+            workspaces,
+            all_workspaces,
+            ..
+        } = action
+        else {
+            panic!("expected npm install action");
+        };
+        assert_eq!(workspaces, vec!["true"]);
+        assert!(!all_workspaces);
+
         assert_eq!(
             parse_npm_compat_action(&args(&[
                 "remove",
@@ -37909,8 +37896,8 @@ verdict = "accepted"
         assert_eq!(
             parse_npm_compat_action(&args(&[
                 "test",
-                "--workspaces",
-                "--include-workspace-root",
+                "--workspaces=true",
+                "--include-workspace-root=false",
                 "--if-present",
             ]))
             .unwrap(),
@@ -37921,7 +37908,19 @@ verdict = "accepted"
                 if_present: true,
                 workspaces: Vec::new(),
                 all_workspaces: true,
-                include_workspace_root: true,
+                include_workspace_root: false,
+            }
+        );
+        assert_eq!(
+            parse_npm_compat_action(&args(&["--ws", "run", "build"])).unwrap(),
+            NpmCompatAction::RunScript {
+                command: "run".to_owned(),
+                name: "build".to_owned(),
+                args: Vec::new(),
+                if_present: false,
+                workspaces: Vec::new(),
+                all_workspaces: true,
+                include_workspace_root: false,
             }
         );
         assert_eq!(
@@ -38129,9 +38128,9 @@ verdict = "accepted"
         );
         assert_eq!(
             parse_npm_compat_action(&args(&[
-                "-w@demo/lib",
+                "-ws",
                 "exec",
-                "--include-workspace-root",
+                "--include-workspace-root=false",
                 "--",
                 "node",
                 "-e",
@@ -38149,9 +38148,9 @@ verdict = "accepted"
                     allow: Vec::new(),
                     allow_flow: Vec::new(),
                     allow_all_host: false,
-                    workspaces: vec!["@demo/lib".to_owned()],
-                    all_workspaces: false,
-                    include_workspace_root: true,
+                    workspaces: Vec::new(),
+                    all_workspaces: true,
+                    include_workspace_root: false,
                 },
             }
         );
@@ -38576,7 +38575,7 @@ verdict = "accepted"
         assert_eq!(
             parse_npm_compat_action(&args(&[
                 "fund",
-                "--workspaces",
+                "--ws",
                 "--include-workspace-root",
                 "--which",
                 "1",
@@ -46449,7 +46448,7 @@ resolved_commit = "0123456789abcdef0123456789abcdef01234567"
         );
         assert_eq!(
             parse_npm_compat_action(&args(&[
-                "--workspaces",
+                "--ws",
                 "--include-workspace-root=false",
                 "--package-lock-only",
                 "--expect-results=false",
