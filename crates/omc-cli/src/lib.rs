@@ -25554,7 +25554,7 @@ fn parse_npm_install_args(
             npm_before = Some(npm_min_release_age_before(value)?);
         } else if let Some(value) = npm_global_location_flag_value(args, &mut index, arg)? {
             global = value;
-        } else if is_npm_archive_arg(arg) {
+        } else if is_npm_archive_arg(arg) || is_npm_github_dependency_arg(arg) {
             archive_references.push(arg.clone());
         } else if ignored_npm_value_flag(arg) {
             filtered.push(arg.clone());
@@ -32806,6 +32806,40 @@ fn is_npm_archive_arg(value: &str) -> bool {
             || path.contains('\\'))
 }
 
+fn is_npm_github_dependency_arg(value: &str) -> bool {
+    let value = value.trim();
+    let source = value
+        .split_once('#')
+        .map(|(source, _)| source)
+        .unwrap_or(value);
+    if value.starts_with("github:")
+        || value.starts_with("git@github.com:")
+        || value.starts_with("git+https://github.com/")
+        || value.starts_with("git+ssh://git@github.com/")
+        || source.starts_with("https://github.com/") && source.ends_with(".git")
+        || value.starts_with("ssh://git@github.com/")
+    {
+        return true;
+    }
+    if value.starts_with('@')
+        || value.starts_with('-')
+        || value.starts_with('.')
+        || value.starts_with('/')
+        || value.starts_with("~/")
+        || value.starts_with("file:")
+        || value.starts_with("link:")
+        || value.contains("://")
+        || value.starts_with("git+")
+    {
+        return false;
+    }
+    let segments = source.split('/').collect::<Vec<_>>();
+    segments.len() == 2
+        && segments
+            .iter()
+            .all(|segment| !segment.is_empty() && !segment.starts_with('.'))
+}
+
 fn pip_local_path_arg(value: &str) -> Result<PythonLocalRequirement, OmcRegistryError> {
     if value.starts_with("git+") || is_pip_archive_arg(value) {
         return Err(OmcRegistryError::UnsupportedSpec(format!(
@@ -38468,6 +38502,32 @@ verdict = "accepted"
         assert_eq!(specs, vec!["left-pad".to_owned()]);
         assert!(dry_run);
         assert!(json);
+
+        let action = parse_npm_compat_action(&args(&[
+            "install",
+            "github:turenio/omc#main",
+            "turenio/omc#v1.0.0",
+            "left-pad",
+        ]))
+        .unwrap();
+        let NpmCompatAction::Install {
+            specs,
+            archive_references,
+            local_paths,
+            ..
+        } = action
+        else {
+            panic!("expected npm install action");
+        };
+        assert_eq!(specs, vec!["left-pad".to_owned()]);
+        assert_eq!(
+            archive_references,
+            vec![
+                "github:turenio/omc#main".to_owned(),
+                "turenio/omc#v1.0.0".to_owned()
+            ]
+        );
+        assert!(local_paths.is_empty());
 
         let action =
             parse_npm_compat_action(&args(&["install", "--tag", "beta", "left-pad"])).unwrap();

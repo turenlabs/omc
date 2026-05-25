@@ -212,6 +212,7 @@ fn parse_npm_spec(raw: &str, rest: &str) -> Result<PackageSpec> {
         if name.is_empty() || url.is_empty() {
             return Err(OmcRegistryError::UnsupportedSpec(raw.to_owned()));
         }
+        let url = npm_github_archive_url(url)?.unwrap_or_else(|| url.to_owned());
         return Ok(PackageSpec::with_direct_url(
             Ecosystem::Npm,
             name,
@@ -2133,7 +2134,9 @@ fn resolve_python_local_requirements(
 }
 
 fn parse_manifest_dependency(key: &str, requirement: &str) -> Result<PackageSpec> {
-    if is_direct_dependency_requirement(requirement) {
+    if is_direct_dependency_requirement(requirement)
+        || npm_github_dependency_parts(requirement)?.is_some()
+    {
         return PackageSpec::parse(&format!("{key} @ {requirement}"));
     }
     PackageSpec::parse(&format!("{key}@{requirement}"))
@@ -4429,6 +4432,11 @@ fn npm_local_protocol_path(
 }
 
 fn npm_direct_tarball_url(requirement: &str, base_dir: &Path) -> Result<Option<String>> {
+    let requirement = requirement.trim();
+    if let Some(url) = npm_github_archive_url(requirement)? {
+        return Ok(Some(url));
+    }
+
     if requirement.starts_with("https://") {
         require_npm_tarball_path(requirement)?;
         return Ok(Some(requirement.to_owned()));
@@ -4471,6 +4479,172 @@ fn npm_direct_tarball_url(requirement: &str, base_dir: &Path) -> Result<Option<S
     }
 
     Ok(None)
+}
+
+fn npm_github_archive_url(requirement: &str) -> Result<Option<String>> {
+    let Some((owner, repo, reference)) = npm_github_dependency_parts(requirement)? else {
+        return Ok(None);
+    };
+    if reference
+        .as_deref()
+        .is_some_and(|reference| reference.starts_with("semver:"))
+    {
+        return Err(OmcRegistryError::UnsupportedSpec(format!(
+            "npm GitHub dependency `{requirement}` uses semver refs, which OMC does not resolve yet"
+        )));
+    }
+    let reference = reference.as_deref().unwrap_or("HEAD");
+    let owner = npm_github_path_segment(owner);
+    let repo = npm_github_path_segment(repo);
+    let reference = npm_github_ref_path(reference);
+    Ok(Some(format!(
+        "https://github.com/{owner}/{repo}/archive/{reference}.tar.gz"
+    )))
+}
+
+fn npm_github_dependency_parts(
+    requirement: &str,
+) -> Result<Option<(String, String, Option<String>)>> {
+    let requirement = requirement.trim();
+    if requirement.is_empty() {
+        return Ok(None);
+    }
+
+    if let Some(rest) = requirement.strip_prefix("github:") {
+        return npm_github_shorthand_parts(rest, requirement);
+    }
+    if let Some(rest) = requirement.strip_prefix("git@github.com:") {
+        return npm_github_shorthand_parts(rest, requirement);
+    }
+
+    let (source, reference) = split_npm_git_reference(requirement);
+    let source = source.strip_prefix("git+").unwrap_or(source);
+    if source.starts_with("git@github.com:") {
+        return npm_github_shorthand_parts(&source["git@github.com:".len()..], requirement);
+    }
+    if let Ok(url) = reqwest::Url::parse(source) {
+        let Some(host) = url.host_str() else {
+            return Ok(None);
+        };
+        if !host.eq_ignore_ascii_case("github.com") {
+            return Ok(None);
+        }
+        if !matches!(url.scheme(), "https" | "ssh") {
+            return Ok(None);
+        }
+        let segments = url
+            .path_segments()
+            .map(|segments| {
+                segments
+                    .filter(|segment| !segment.is_empty())
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        if segments.len() != 2 {
+            return Ok(None);
+        }
+        let Some(owner) = segments.first() else {
+            return Ok(None);
+        };
+        let Some(repo) = segments.get(1) else {
+            return Ok(None);
+        };
+        let repo = repo.strip_suffix(".git").unwrap_or(repo);
+        return Ok(Some(npm_valid_github_parts(
+            owner,
+            repo,
+            reference.map(str::to_owned),
+            requirement,
+        )?));
+    }
+
+    if npm_bare_github_shorthand(requirement) {
+        return npm_github_shorthand_parts(requirement, requirement);
+    }
+
+    Ok(None)
+}
+
+fn split_npm_git_reference(value: &str) -> (&str, Option<&str>) {
+    value
+        .split_once('#')
+        .map(|(source, reference)| {
+            (
+                source,
+                (!reference.trim().is_empty()).then_some(reference.trim()),
+            )
+        })
+        .unwrap_or((value, None))
+}
+
+fn npm_github_shorthand_parts(
+    value: &str,
+    original: &str,
+) -> Result<Option<(String, String, Option<String>)>> {
+    let (path, reference) = split_npm_git_reference(value.trim());
+    let mut segments = path.split('/').filter(|segment| !segment.is_empty());
+    let Some(owner) = segments.next() else {
+        return Ok(None);
+    };
+    let Some(repo) = segments.next() else {
+        return Ok(None);
+    };
+    if segments.next().is_some() {
+        return Ok(None);
+    }
+    let repo = repo.strip_suffix(".git").unwrap_or(repo);
+    Ok(Some(npm_valid_github_parts(
+        owner,
+        repo,
+        reference.map(str::to_owned),
+        original,
+    )?))
+}
+
+fn npm_valid_github_parts(
+    owner: &str,
+    repo: &str,
+    reference: Option<String>,
+    original: &str,
+) -> Result<(String, String, Option<String>)> {
+    if owner.is_empty() || repo.is_empty() || owner.starts_with('.') || repo.starts_with('.') {
+        return Err(OmcRegistryError::UnsupportedSpec(format!(
+            "invalid npm GitHub dependency `{original}`"
+        )));
+    }
+    Ok((owner.to_owned(), repo.to_owned(), reference))
+}
+
+fn npm_bare_github_shorthand(requirement: &str) -> bool {
+    if requirement.starts_with('@')
+        || requirement.starts_with('.')
+        || requirement.starts_with('/')
+        || requirement.starts_with("~/")
+        || requirement.contains("://")
+        || requirement.starts_with("git+")
+        || requirement.starts_with("file:")
+        || requirement.starts_with("link:")
+    {
+        return false;
+    }
+    let (path, _) = split_npm_git_reference(requirement);
+    let segments = path.split('/').collect::<Vec<_>>();
+    segments.len() == 2
+        && segments
+            .iter()
+            .all(|segment| !segment.is_empty() && !segment.starts_with('.'))
+}
+
+fn npm_github_path_segment(value: String) -> String {
+    urlencoding::encode(&value).into_owned()
+}
+
+fn npm_github_ref_path(value: &str) -> String {
+    value
+        .split('/')
+        .map(|segment| urlencoding::encode(segment).into_owned())
+        .collect::<Vec<_>>()
+        .join("/")
 }
 
 fn require_npm_tarball_path(path: &str) -> Result<()> {
@@ -18785,6 +18959,78 @@ mod tests {
             spec.direct_url.as_deref(),
             Some("https://example.invalid/local-pkg-1.0.0.tgz")
         );
+    }
+
+    #[test]
+    fn parses_npm_github_dependencies_as_direct_archives() {
+        let spec = PackageSpec::parse("npm:github-pkg @ github:turenio/omc#main").unwrap();
+        assert_eq!(spec.name, "github-pkg");
+        assert_eq!(
+            spec.direct_url.as_deref(),
+            Some("https://github.com/turenio/omc/archive/main.tar.gz")
+        );
+
+        let spec = PackageSpec::parse(
+            "npm:github-pkg @ git+ssh://git@github.com/turenio/omc.git#refs/tags/v1.0.0",
+        )
+        .unwrap();
+        assert_eq!(
+            spec.direct_url.as_deref(),
+            Some("https://github.com/turenio/omc/archive/refs/tags/v1.0.0.tar.gz")
+        );
+
+        let spec = parse_npm_direct_archive_reference(
+            "git+https://github.com/turenio/omc.git#v1.0.0",
+            Path::new("."),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(spec.name, NPM_DIRECT_TARBALL_PLACEHOLDER);
+        assert_eq!(
+            spec.direct_url.as_deref(),
+            Some("https://github.com/turenio/omc/archive/v1.0.0.tar.gz")
+        );
+
+        let direct_archive = parse_npm_direct_archive_reference(
+            "https://github.com/turenio/omc/archive/main.tar.gz",
+            Path::new("."),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            direct_archive.direct_url.as_deref(),
+            Some("https://github.com/turenio/omc/archive/main.tar.gz")
+        );
+
+        let error =
+            PackageSpec::parse("npm:github-pkg @ github:turenio/omc#semver:^1.0.0").unwrap_err();
+        assert!(error.to_string().contains("uses semver refs"));
+    }
+
+    #[test]
+    fn reads_package_json_github_dependencies_as_direct_archives() {
+        let dir = tempfile::tempdir().unwrap();
+        let package_json = dir.path().join("package.json");
+        fs::write(
+            &package_json,
+            r#"{
+                "name": "github-demo",
+                "dependencies": {
+                    "github-pkg": "github:turenio/omc#main",
+                    "bare-github": "turenio/omc#v1.0.0"
+                }
+            }"#,
+        )
+        .unwrap();
+
+        let specs = read_package_json_specs(&package_json, false).unwrap();
+
+        assert!(specs.iter().any(|spec| spec.name == "github-pkg"
+            && spec.direct_url.as_deref()
+                == Some("https://github.com/turenio/omc/archive/main.tar.gz")));
+        assert!(specs.iter().any(|spec| spec.name == "bare-github"
+            && spec.direct_url.as_deref()
+                == Some("https://github.com/turenio/omc/archive/v1.0.0.tar.gz")));
     }
 
     #[test]

@@ -314,7 +314,7 @@ paths.
 For existing projects, `install` reads normal project files:
 
 ```text
-package.json       root/workspace dependencies, devDependencies, optionalDependencies, peers, bundleDependencies/bundledDependencies, overrides/resolutions, HTTPS/file tarball deps, local file/link dirs; use --omit-dev for production installs
+package.json       root/workspace dependencies, devDependencies, optionalDependencies, peers, bundleDependencies/bundledDependencies, overrides/resolutions, HTTPS/file tarball deps, GitHub npm deps, local file/link dirs; use --omit-dev for production installs
 .npmrc             global/project/user npm registry, scoped registry, and host-scoped auth token configuration; NPM_CONFIG_GLOBALCONFIG selects a custom global file, NPM_CONFIG_USERCONFIG selects a custom user file, and NPM_CONFIG_REGISTRY / npm_config_registry override the default registry
 package-lock.json  exact versions, resolved tarball URLs, integrity hashes, and verified local-source file entries for uniquely locked npm packages
 npm-shrinkwrap.json exact versions, resolved tarball URLs, integrity hashes, and verified local-source file entries for uniquely locked npm packages
@@ -540,6 +540,10 @@ Supported now:
   artifacts or local links, including registry, tarball, and local directory
   dependencies declared by those local packages; local package directories
   installed with `-D` are omitted by `--omit-dev`
+- direct and `package.json` GitHub npm dependencies such as
+  `github:owner/repo#ref`, `owner/repo#ref`, and
+  `git+https://github.com/owner/repo.git#ref`, resolved as HTTPS source
+  archives before entering the normal OMC verifier and installer path
 - npm save-location flags for OMC manifests: `--save-prod`/`-P`,
   `--save-dev`/`-D`, `--save-optional`/`-O`, and `--save-peer`, including
   `=true`, `=false`, and `--no-save-*` boolean forms
