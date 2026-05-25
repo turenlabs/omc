@@ -30453,6 +30453,8 @@ fn expand_pip_uninstall_short_clusters(args: &[String]) -> Vec<String> {
 }
 
 fn parse_pip_show_args(args: &[String]) -> Result<PipCompatAction, OmcRegistryError> {
+    let expanded_short_clusters = expand_pip_show_short_clusters(args);
+    let args = expanded_short_clusters.as_slice();
     let mut specs = Vec::new();
     let mut files = false;
     let mut user = false;
@@ -30485,6 +30487,14 @@ fn parse_pip_show_args(args: &[String]) -> Result<PipCompatAction, OmcRegistryEr
     Ok(PipCompatAction::Show { specs, files, user })
 }
 
+fn expand_pip_show_short_clusters(args: &[String]) -> Vec<String> {
+    args.iter()
+        .flat_map(|arg| {
+            expand_pip_short_cluster(arg, &['f'], &[]).unwrap_or_else(|| vec![arg.clone()])
+        })
+        .collect()
+}
+
 fn parse_pip_hash_args(args: &[String]) -> Result<PipCompatAction, OmcRegistryError> {
     let mut algorithm = PipHashAlgorithm::Sha256;
     let mut paths = Vec::new();
@@ -30500,6 +30510,8 @@ fn parse_pip_hash_args(args: &[String]) -> Result<PipCompatAction, OmcRegistryEr
             };
             algorithm = parse_pip_hash_algorithm(value)?;
         } else if let Some(value) = arg.strip_prefix("--algorithm=") {
+            algorithm = parse_pip_hash_algorithm(value)?;
+        } else if let Some(value) = pip_attached_short_value(arg, 'a') {
             algorithm = parse_pip_hash_algorithm(value)?;
         } else if arg == "--disable-pip-version-check" || pip_ignored_verbosity_flag(arg) {
         } else if arg.starts_with('-') {
@@ -46418,6 +46430,14 @@ version = "0.2.0"
             }
         );
         assert_eq!(
+            parse_pip_compat_action(&args(&["show", "-fv", "requests"])).unwrap(),
+            PipCompatAction::Show {
+                specs: vec!["requests".to_owned()],
+                files: true,
+                user: false,
+            }
+        );
+        assert_eq!(
             parse_pip_compat_action(&args(&["show", "--user", "demoedit"])).unwrap(),
             PipCompatAction::Show {
                 specs: vec!["demoedit".to_owned()],
@@ -46436,6 +46456,13 @@ version = "0.2.0"
             .unwrap(),
             PipCompatAction::Hash {
                 algorithm: PipHashAlgorithm::Sha512,
+                paths: vec![PathBuf::from("dist/pkg.whl")],
+            }
+        );
+        assert_eq!(
+            parse_pip_compat_action(&args(&["hash", "-asha384", "dist/pkg.whl"])).unwrap(),
+            PipCompatAction::Hash {
+                algorithm: PipHashAlgorithm::Sha384,
                 paths: vec![PathBuf::from("dist/pkg.whl")],
             }
         );

@@ -250,6 +250,7 @@ cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip freeze
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip freeze -r requirements.txt
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip freeze -qr requirements.txt
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip show requests
+cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip show -fv requests
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip show --user local-package
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip list --format=json
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip list --editable --format=columns
@@ -264,6 +265,7 @@ cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip list --uptodat
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip index versions requests
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip index versions orjson --platform macosx_14_0_arm64 --python-version 3.12 --implementation cp --abi cp312
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip hash ./dist/local_pkg-1.0.0-py3-none-any.whl
+cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip hash -asha384 ./dist/local_pkg-1.0.0-py3-none-any.whl
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip cache list
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip config get global.index-url
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip config set global.index-url https://pypi.org/simple/
