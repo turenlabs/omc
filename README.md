@@ -381,12 +381,16 @@ install pip --user packages into Python's user site-packages through OMC-managed
 verify cached archive sha256 from omc.lock before extracting locked installs
 install npm package bins, including root project bins, into node_modules/.bin
 link npm workspace/local directory packages into node_modules and node_modules/.bin
+compile and sign npm workspace/local directory source artifacts before linking
+them into node_modules
 persist direct npm local directory installs in omc.toml, including dev-only
 local paths, and link them during install/ci
 clone Python git/VCS dependencies into .omc/python/vcs and install them as isolated local imports
 record resolved Python git/VCS commits in omc.lock and reuse those commits for --locked/ci installs
 cache pinned Python git/VCS checkout archives under .omc/cache/python-vcs for locked restore
 install Python console_scripts/gui_scripts from wheels, the root Python project, and pyproject/setup.cfg/setup.py local path packages into .omc/python/bin
+compile and sign Python editable/local directory source artifacts before adding
+them to OMC-managed import paths
 prune stale lockfile entries and installed packages during install
 ```
 
@@ -475,6 +479,9 @@ Supported now:
 - local source directory/archive compilation into signed OMC artifact JSON via
   `omc compile`, using the same source profiler, capability lowering, verifier,
   and artifact signing path as registry packages
+- install/ci-time source artifact compilation for npm workspace/local directory
+  dependencies and Python editable/local directory dependencies before they are
+  linked into `node_modules` or OMC-managed Python import paths
 - npm semver range resolution for common dependency ranges
 - global, project, and user `.npmrc` support for `registry`, `@scope:registry`,
   and host-scoped `_authToken` npm registry access, plus `NPM_CONFIG_REGISTRY` /

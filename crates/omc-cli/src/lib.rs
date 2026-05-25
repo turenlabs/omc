@@ -2164,9 +2164,10 @@ fn apply_pip_compatibility_target(options: &mut LinkOptions, target: PipCompatib
 
 fn print_install_report(install: &InstallReport) {
     println!(
-        "installed npm={} pypi={} npm_bins={} python_scripts={} node_modules={} python_site_packages={}",
+        "installed npm={} pypi={} local_artifacts={} npm_bins={} python_scripts={} node_modules={} python_site_packages={}",
         install.npm_packages,
         install.pypi_packages,
+        install.local_source_artifacts,
         install.npm_bins,
         install.python_scripts,
         install.node_modules.display(),
@@ -2229,6 +2230,7 @@ fn npm_install_json_report(
         serde_json::json!({
             "npm": install.npm_packages,
             "pypi": install.pypi_packages,
+            "localSourceArtifacts": install.local_source_artifacts,
             "npmBins": install.npm_bins,
             "pythonScripts": install.python_scripts,
             "nodeModules": install.node_modules,
@@ -2549,6 +2551,7 @@ fn pip_install_report_json(
             "python_site_packages": install.python_site_packages,
             "python_bin_dir": install.python_bin_dir,
             "python_scripts": install.python_scripts,
+            "local_source_artifacts": install.local_source_artifacts,
             "pypi_packages": install.pypi_packages,
         },
     }))
@@ -3109,6 +3112,7 @@ fn run_npm_exec(
     options.discover_project_requirements = false;
     options.save_manifest_dependency = true;
     options.npm_local_paths = local_paths;
+    options.enforce_local_source_verdicts = false;
 
     for spec in specs {
         add_package_graph(&spec, &options)?;
@@ -4631,9 +4635,10 @@ fn run_npm_ci_dry_run(
         return Ok(ExitCode::SUCCESS);
     }
     println!(
-        "dry-run: would install npm={} pypi={} npm_bins={} python_scripts={} node_modules={} python_site_packages={}",
+        "dry-run: would install npm={} pypi={} local_artifacts={} npm_bins={} python_scripts={} node_modules={} python_site_packages={}",
         install.npm_packages,
         install.pypi_packages,
+        install.local_source_artifacts,
         install.npm_bins,
         install.python_scripts,
         project_dir.join("node_modules").display(),
@@ -7627,6 +7632,7 @@ fn run_pip_install_dry_run(
             let install = InstallReport {
                 npm_packages: 0,
                 pypi_packages: 0,
+                local_source_artifacts: 0,
                 npm_bins: 0,
                 python_scripts: 0,
                 node_modules: project_dir.join("node_modules"),
@@ -7751,6 +7757,7 @@ fn run_pip_install_dry_run(
     let install = InstallReport {
         npm_packages: 0,
         pypi_packages,
+        local_source_artifacts: 0,
         npm_bins: 0,
         python_scripts: 0,
         node_modules: project_dir.join("node_modules"),
@@ -8414,6 +8421,7 @@ fn run_pip_uninstall_user(
         InstallReport {
             npm_packages: 0,
             pypi_packages: 0,
+            local_source_artifacts: 0,
             npm_bins: 0,
             python_scripts: 0,
             node_modules: user_paths.state_project.join("node_modules"),
@@ -18846,6 +18854,7 @@ fn print_npm_maintenance_report(
                 "install": {
                     "npm": install.npm_packages,
                     "pypi": install.pypi_packages,
+                    "localSourceArtifacts": install.local_source_artifacts,
                     "npmBins": install.npm_bins,
                     "pythonScripts": install.python_scripts,
                     "nodeModules": install.node_modules,
@@ -18924,6 +18933,7 @@ fn npm_maintenance_dry_run_report(project_dir: &Path) -> Result<InstallReport, O
             .iter()
             .filter(|package| package.ecosystem == Ecosystem::Pypi)
             .count(),
+        local_source_artifacts: 0,
         npm_bins: 0,
         python_scripts: 0,
         node_modules: project_dir.join("node_modules"),
@@ -36454,6 +36464,7 @@ mod tests {
         let install = InstallReport {
             npm_packages: 2,
             pypi_packages: 1,
+            local_source_artifacts: 1,
             npm_bins: 1,
             python_scripts: 1,
             node_modules: project.join("node_modules"),
@@ -36477,6 +36488,7 @@ mod tests {
         assert_eq!(report["lockOnly"], false);
         assert_eq!(report["omc"]["install"]["npm"], 2);
         assert_eq!(report["omc"]["install"]["pypi"], 1);
+        assert_eq!(report["omc"]["install"]["localSourceArtifacts"], 1);
         assert_eq!(report["omc"]["install"]["npmBins"], 1);
         assert_eq!(report["omc"]["localPaths"][0]["path"], "../local-pkg");
 
