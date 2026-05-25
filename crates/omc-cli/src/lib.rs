@@ -17734,13 +17734,8 @@ fn print_pip_cache(
             println!("Size: {bytes} bytes");
         }
         PipCacheAction::List { pattern, format } => {
-            let mut files = compat_cache_files(&cache_dir)?;
-            if let Some(pattern) = pattern {
-                files.retain(|path| compat_cache_pattern_matches(path, &cache_dir, &pattern));
-            }
-            files.sort();
-            for path in files {
-                println!("{}", pip_cache_list_display_path(&path, &cache_dir, format));
+            for line in pip_cache_list_lines(&cache_dir, pattern.as_deref(), format)? {
+                println!("{line}");
             }
         }
         PipCacheAction::Remove { pattern } => {
@@ -17939,6 +17934,25 @@ fn remove_cache_files(files: &[PathBuf]) -> Result<usize, OmcRegistryError> {
         count += 1;
     }
     Ok(count)
+}
+
+fn pip_cache_list_lines(
+    cache_dir: &Path,
+    pattern: Option<&str>,
+    format: PipCacheListFormat,
+) -> Result<Vec<String>, OmcRegistryError> {
+    let mut files = compat_cache_files(cache_dir)?;
+    if let Some(pattern) = pattern {
+        files.retain(|path| compat_cache_pattern_matches(path, cache_dir, pattern));
+    }
+    files.sort();
+    if files.is_empty() && format == PipCacheListFormat::Human {
+        return Ok(vec!["Nothing cached.".to_owned()]);
+    }
+    Ok(files
+        .into_iter()
+        .map(|path| pip_cache_list_display_path(&path, cache_dir, format))
+        .collect())
 }
 
 fn prune_empty_cache_dirs(root: &Path) -> Result<(), OmcRegistryError> {
@@ -31013,6 +31027,14 @@ fn parse_pip_cache_args(args: &[String]) -> Result<PipCompatAction, OmcRegistryE
             format = parse_pip_cache_list_format(value)?;
         } else if let Some(value) = arg.strip_prefix("--format=") {
             format = parse_pip_cache_list_format(value)?;
+        } else if pip_global_ignored_bool_flag(arg) || pip_global_ignored_equals_flag(arg) {
+        } else if pip_global_ignored_value_flag(arg) {
+            index += 1;
+            if args.get(index).is_none() {
+                return Err(OmcRegistryError::UnsupportedSpec(format!(
+                    "{arg} needs a value"
+                )));
+            }
         } else if arg.starts_with('-') {
             return Err(unsupported_compat_arg("pip cache", arg));
         } else {
@@ -47225,6 +47247,25 @@ version = "0.2.0"
                 },
             }
         );
+        assert_eq!(
+            parse_pip_compat_action(&args(&["cache", "--cache-dir", ".pip-cache", "list"]))
+                .unwrap(),
+            PipCompatAction::Cache {
+                action: PipCacheAction::List {
+                    pattern: None,
+                    format: PipCacheListFormat::Human,
+                },
+            }
+        );
+        assert_eq!(
+            parse_pip_compat_action(&args(&["cache", "list", "--cache-dir=.pip-cache"])).unwrap(),
+            PipCompatAction::Cache {
+                action: PipCacheAction::List {
+                    pattern: None,
+                    format: PipCacheListFormat::Human,
+                },
+            }
+        );
         assert!(parse_pip_compat_action(&args(&["cache", "dir", "--format=bad"])).is_err());
         assert_eq!(
             parse_pip_compat_action(&args(&["cache", "remove", "idna"])).unwrap(),
@@ -47254,6 +47295,16 @@ version = "0.2.0"
         assert_eq!(
             pip_cache_list_display_path(&path, &cache_dir, PipCacheListFormat::Abspath),
             "/tmp/omc-cache/wheels/idna-3.4-py3-none-any.whl"
+        );
+        let empty_cache = test_dir("pip-cache-empty-list").join("cache");
+        assert_eq!(
+            pip_cache_list_lines(&empty_cache, None, PipCacheListFormat::Human).unwrap(),
+            vec!["Nothing cached.".to_owned()]
+        );
+        assert!(
+            pip_cache_list_lines(&empty_cache, None, PipCacheListFormat::Abspath)
+                .unwrap()
+                .is_empty()
         );
     }
 
