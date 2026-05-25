@@ -6336,6 +6336,21 @@ fn strip_relative_local_path_scheme(path: &str) -> &str {
         .unwrap_or(path)
 }
 
+fn local_file_url_path(value: &str) -> Result<Option<PathBuf>> {
+    if !value.contains("://") {
+        return Ok(None);
+    }
+    let Ok(url) = reqwest::Url::parse(value) else {
+        return Ok(None);
+    };
+    if url.scheme() != "file" {
+        return Ok(None);
+    }
+    url.to_file_path()
+        .map(Some)
+        .map_err(|_| OmcRegistryError::UnsupportedRequirement(value.to_owned()))
+}
+
 fn poetry_local_archive_dependency_spec(
     name: &str,
     path: &str,
@@ -15363,8 +15378,10 @@ fn parse_pypi_local_path_requirement(
         }
     }
 
-    if !looks_like_local_path_requirement(requirement_body)
-        || requirement_body.contains("://")
+    let (path, _) = split_python_local_path_extras(requirement_body);
+    let local_file_url = path.starts_with("file://");
+    if (!looks_like_local_path_requirement(requirement_body) && !local_file_url)
+        || (requirement_body.contains("://") && !local_file_url)
         || is_pypi_archive_reference(requirement_body)
     {
         return Ok(None);
@@ -15685,6 +15702,9 @@ fn normalize_requirements_editable_path(
     base_dir: &Path,
 ) -> Result<PythonLocalRequirement> {
     let (path, extras) = split_python_local_path_extras(value);
+    if let Some(path) = local_file_url_path(path)? {
+        return Ok(PythonLocalRequirement::new(path, extras));
+    }
     if path.contains("://") || path.starts_with("git+") {
         return Err(OmcRegistryError::UnsupportedRequirement(format!(
             "editable requirement `{value}` must be a local path"
@@ -20622,7 +20642,15 @@ print("hi")
     fn reads_requirements_local_editable_paths() {
         let dir = tempfile::tempdir().unwrap();
         let requirements = dir.path().join("requirements.txt");
-        fs::write(&requirements, "-e .\n--editable ./vendor/pkg[dev]\n").unwrap();
+        let file_url_pkg = dir.path().join("vendor/file-url-edit");
+        let file_url = reqwest::Url::from_directory_path(&file_url_pkg)
+            .unwrap()
+            .to_string();
+        fs::write(
+            &requirements,
+            format!("-e .\n--editable ./vendor/pkg[dev]\n-e {file_url}\n"),
+        )
+        .unwrap();
 
         let discovered = read_requirements_file(&requirements).unwrap();
         assert_eq!(
@@ -20632,7 +20660,8 @@ print("hi")
                 PythonLocalRequirement::new(
                     dir.path().join("./vendor/pkg"),
                     BTreeSet::from(["dev".to_owned()])
-                )
+                ),
+                PythonLocalRequirement::new(file_url_pkg, BTreeSet::new())
             ]
         );
 
@@ -20650,16 +20679,21 @@ print("hi")
         let local_pkg = dir.path().join("vendor/local-pkg");
         let file_url_pkg = dir.path().join("vendor/file-url-pkg");
         let bare_pkg = dir.path().join("vendor/bare-pkg");
+        let bare_file_url_pkg = dir.path().join("vendor/bare-file-url-pkg");
         fs::create_dir_all(&local_pkg).unwrap();
         fs::create_dir_all(&file_url_pkg).unwrap();
         fs::create_dir_all(&bare_pkg).unwrap();
+        fs::create_dir_all(&bare_file_url_pkg).unwrap();
         let file_url = reqwest::Url::from_directory_path(&file_url_pkg)
+            .unwrap()
+            .to_string();
+        let bare_file_url = reqwest::Url::from_directory_path(&bare_file_url_pkg)
             .unwrap()
             .to_string();
         fs::write(
             &requirements,
             format!(
-                "local-pkg @ file:./vendor/local-pkg\nfile-url-pkg @ {file_url}\nlink:./vendor/bare-pkg[dev]\n./missing-bare; sys_platform == 'win32'\nskipped-local @ ./missing; sys_platform == 'definitely-not' and (python_version < '0' or python_version >= '3')\n"
+                "local-pkg @ file:./vendor/local-pkg\nfile-url-pkg @ {file_url}\nlink:./vendor/bare-pkg[dev]\n{bare_file_url}\n./missing-bare; sys_platform == 'win32'\nskipped-local @ ./missing; sys_platform == 'definitely-not' and (python_version < '0' or python_version >= '3')\n"
             ),
         )
         .unwrap();
@@ -20671,7 +20705,8 @@ print("hi")
             vec![
                 PythonLocalRequirement::new(local_pkg, BTreeSet::new()),
                 PythonLocalRequirement::new(file_url_pkg, BTreeSet::new()),
-                PythonLocalRequirement::new(bare_pkg, BTreeSet::from(["dev".to_owned()]))
+                PythonLocalRequirement::new(bare_pkg, BTreeSet::from(["dev".to_owned()])),
+                PythonLocalRequirement::new(bare_file_url_pkg, BTreeSet::new())
             ]
         );
 
