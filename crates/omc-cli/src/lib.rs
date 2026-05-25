@@ -18763,6 +18763,25 @@ fn listed_locked_packages(
 }
 
 fn npm_local_locked_packages(project_dir: &Path) -> Result<Vec<LockedPackage>, OmcRegistryError> {
+    let mut paths = npm_manifest_local_package_paths(project_dir)?;
+    extend_npm_package_json_local_package_paths(project_dir, &mut paths)?;
+    let mut packages = BTreeMap::new();
+    let mut queue = VecDeque::from(paths);
+    let mut seen = BTreeSet::new();
+    while let Some(path) = queue.pop_front() {
+        let key = fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
+        if !seen.insert(key) {
+            continue;
+        }
+        if let Some((package, nested_paths)) = npm_local_locked_package(&path)? {
+            queue.extend(nested_paths);
+            packages.insert(package.name.clone(), package);
+        }
+    }
+    Ok(packages.into_values().collect())
+}
+
+fn npm_manifest_local_package_paths(project_dir: &Path) -> Result<Vec<PathBuf>, OmcRegistryError> {
     let manifest = match read_manifest(project_dir.join("omc.toml")) {
         Ok(manifest) => manifest,
         Err(OmcRegistryError::Io(error)) if error.kind() == io::ErrorKind::NotFound => {
@@ -18770,25 +18789,76 @@ fn npm_local_locked_packages(project_dir: &Path) -> Result<Vec<LockedPackage>, O
         }
         Err(error) => return Err(error),
     };
-    let paths = manifest
+    Ok(manifest
         .npm_local_paths
         .into_iter()
         .chain(manifest.npm_dev_local_paths)
         .chain(manifest.npm_optional_local_paths)
         .chain(manifest.npm_peer_local_paths)
         .map(PathBuf::from)
-        .map(|path| absolutize_path(project_dir, path));
-
-    let mut packages = BTreeMap::new();
-    for path in paths {
-        if let Some(package) = npm_local_locked_package(&path)? {
-            packages.insert(package.name.clone(), package);
-        }
-    }
-    Ok(packages.into_values().collect())
+        .map(|path| absolutize_path(project_dir, path))
+        .collect())
 }
 
-fn npm_local_locked_package(path: &Path) -> Result<Option<LockedPackage>, OmcRegistryError> {
+fn extend_npm_package_json_local_package_paths(
+    project_dir: &Path,
+    paths: &mut Vec<PathBuf>,
+) -> Result<(), OmcRegistryError> {
+    collect_npm_package_json_local_package_paths(project_dir, paths)?;
+    for workspace in read_npm_workspace_packages(project_dir)? {
+        collect_npm_package_json_local_package_paths(&workspace.path, paths)?;
+    }
+    Ok(())
+}
+
+fn collect_npm_package_json_local_package_paths(
+    package_dir: &Path,
+    paths: &mut Vec<PathBuf>,
+) -> Result<(), OmcRegistryError> {
+    let package_json = package_dir.join("package.json");
+    if !package_json.exists() {
+        return Ok(());
+    }
+    let manifest = read_npm_pkg_json(&package_json)?;
+    for field in [
+        "dependencies",
+        "devDependencies",
+        "optionalDependencies",
+        "peerDependencies",
+    ] {
+        let Some(dependencies) = manifest.get(field).and_then(serde_json::Value::as_object) else {
+            continue;
+        };
+        for requirement in dependencies.values().filter_map(serde_json::Value::as_str) {
+            if let Some(path) = npm_package_json_local_directory_path(package_dir, requirement)? {
+                paths.push(path);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn npm_package_json_local_directory_path(
+    base_dir: &Path,
+    requirement: &str,
+) -> Result<Option<PathBuf>, OmcRegistryError> {
+    let local = requirement.starts_with("file:")
+        || requirement.starts_with("link:")
+        || is_npm_local_directory_arg(requirement);
+    if !local {
+        return Ok(None);
+    }
+    let path = absolutize_path(base_dir, npm_local_path_arg(requirement)?);
+    if path.join("package.json").exists() {
+        Ok(Some(path))
+    } else {
+        Ok(None)
+    }
+}
+
+fn npm_local_locked_package(
+    path: &Path,
+) -> Result<Option<(LockedPackage, Vec<PathBuf>)>, OmcRegistryError> {
     let package_json = path.join("package.json");
     if !package_json.exists() {
         return Ok(None);
@@ -18803,23 +18873,28 @@ fn npm_local_locked_package(path: &Path) -> Result<Option<LockedPackage>, OmcReg
     let source_url = reqwest::Url::from_directory_path(path)
         .map(|url| url.to_string())
         .unwrap_or_else(|_| format!("file:{}", path.display()));
-    Ok(Some(LockedPackage {
-        ecosystem: Ecosystem::Npm,
-        name,
-        version,
-        source_url,
-        archive: String::new(),
-        artifact: String::new(),
-        sha256: String::new(),
-        behavior: Behavior::HostCapability,
-        verdict: Verdict::Accepted,
-        dependencies: npm_package_dependency_specs(&manifest, "dependencies"),
-        optional_dependencies: npm_package_dependency_specs(&manifest, "optionalDependencies"),
-        peer_dependencies: npm_package_dependency_specs(&manifest, "peerDependencies"),
-        grants: Vec::new(),
-        capabilities: Vec::new(),
-        verifier_findings: Vec::new(),
-    }))
+    let mut nested_paths = Vec::new();
+    collect_npm_package_json_local_package_paths(path, &mut nested_paths)?;
+    Ok(Some((
+        LockedPackage {
+            ecosystem: Ecosystem::Npm,
+            name,
+            version,
+            source_url,
+            archive: String::new(),
+            artifact: String::new(),
+            sha256: String::new(),
+            behavior: Behavior::HostCapability,
+            verdict: Verdict::Accepted,
+            dependencies: npm_package_dependency_specs(&manifest, "dependencies"),
+            optional_dependencies: npm_package_dependency_specs(&manifest, "optionalDependencies"),
+            peer_dependencies: npm_package_dependency_specs(&manifest, "peerDependencies"),
+            grants: Vec::new(),
+            capabilities: Vec::new(),
+            verifier_findings: Vec::new(),
+        },
+        nested_paths,
+    )))
 }
 
 fn npm_package_dependency_specs(package: &serde_json::Value, field: &str) -> Vec<String> {
@@ -40122,6 +40197,75 @@ version = "0.1.0"
             listed_locked_packages(&project, Some(Ecosystem::Npm), &["missing".to_owned()])
                 .unwrap();
         assert!(missing.is_empty());
+
+        let query = NpmQueryAction {
+            selector: ":root > *".to_owned(),
+            workspaces: Vec::new(),
+            all_workspaces: false,
+            include_workspace_root: false,
+            package_lock_only: false,
+            expect_results: None,
+            expect_result_count: None,
+        };
+        let selected = npm_query_items(&project, &query)
+            .unwrap()
+            .into_iter()
+            .filter(|item| npm_query_selector_matches(item, &query.selector).unwrap())
+            .map(|item| item.name)
+            .collect::<Vec<_>>();
+        assert_eq!(selected, vec!["local-tool"]);
+
+        let _ = fs::remove_dir_all(project);
+    }
+
+    #[test]
+    fn npm_list_includes_package_json_local_paths() {
+        let project = test_dir("npm-list-package-json-local-paths-project");
+        let local = project.join("vendor/local-tool");
+        let child = project.join("vendor/child-tool");
+        fs::create_dir_all(&local).unwrap();
+        fs::create_dir_all(&child).unwrap();
+        fs::write(
+            local.join("package.json"),
+            r#"{
+              "name": "local-tool",
+              "version": "1.2.3",
+              "dependencies": { "child-tool": "file:../child-tool" }
+            }"#,
+        )
+        .unwrap();
+        fs::write(
+            child.join("package.json"),
+            r#"{ "name": "child-tool", "version": "0.5.0" }"#,
+        )
+        .unwrap();
+        fs::write(
+            project.join("package.json"),
+            r#"{
+              "name": "root",
+              "version": "1.0.0",
+              "dependencies": { "local-tool": "file:vendor/local-tool" }
+            }"#,
+        )
+        .unwrap();
+        fs::write(project.join("omc.lock"), "version = 1\n").unwrap();
+
+        let packages = listed_locked_packages(&project, Some(Ecosystem::Npm), &[]).unwrap();
+        assert_eq!(
+            packages
+                .iter()
+                .map(|package| (package.name.as_str(), package.version.as_str()))
+                .collect::<Vec<_>>(),
+            vec![("child-tool", "0.5.0"), ("local-tool", "1.2.3")]
+        );
+        let local_package = packages
+            .iter()
+            .find(|package| package.name == "local-tool")
+            .unwrap();
+        assert_eq!(
+            local_package.dependencies,
+            vec!["npm:child-tool@file:../child-tool"]
+        );
 
         let query = NpmQueryAction {
             selector: ":root > *".to_owned(),
