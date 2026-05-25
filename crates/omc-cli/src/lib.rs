@@ -16,9 +16,9 @@ use omc_registry::{
     add_manifest_npm_local_paths, add_manifest_policy_flows, add_manifest_policy_grants,
     add_npm_dist_tag, add_npm_team_user, add_package_graph, apply_pypi_binary_option,
     apply_pypi_environment_defaults, apply_pypi_release_control, check_pypi_distribution,
-    compare_npm_versions, compare_pypi_versions, create_npm_team, create_npm_token,
-    create_npm_trust, deprecate_npm_package, destroy_npm_team, download_npm_package_tarball,
-    grant_npm_access, init_project, install_locked_packages,
+    compare_npm_versions, compare_pypi_versions, compile_source_path, create_npm_team,
+    create_npm_token, create_npm_trust, deprecate_npm_package, destroy_npm_team,
+    download_npm_package_tarball, grant_npm_access, init_project, install_locked_packages,
     install_locked_packages_with_python_target, install_locked_project, install_project,
     install_python_project_local_import_paths, lock_project, mutate_npm_package_owner,
     mutate_npm_package_star, parse_capability_grant, parse_flow_rule,
@@ -35,18 +35,19 @@ use omc_registry::{
     remove_locked_packages, remove_manifest_dependency, remove_npm_dist_tag, remove_npm_org_user,
     remove_npm_team_user, revoke_npm_access, revoke_npm_token, revoke_npm_trust,
     set_npm_access_mfa, set_npm_access_status, set_npm_org_user, set_npm_profile_property,
-    unpublish_npm_package, upload_pypi_distribution, Behavior, Ecosystem, InstallReport,
-    LinkOptions, LinkReport, LockedPackage, LockedPythonVcsDependency, ManifestDependencyKind,
-    NpmAccessMapResult, NpmAccessMutationResult, NpmAccessStatusResult, NpmAccessToken,
-    NpmDeprecateResult, NpmDistTagMutationResult, NpmOrgListResult, NpmOrgMutationResult,
-    NpmOwnerListResult, NpmOwnerMutationResult, NpmPackageTarball, NpmPingResult,
-    NpmProfileMutationResult, NpmProfileResult, NpmProvenanceBundle, NpmPublishPackage,
-    NpmPublishResult, NpmSearchPackage, NpmStarMutationResult, NpmStarsResult, NpmTeamListResult,
-    NpmTeamMutationResult, NpmTokenCreateOptions, NpmTokenCreateResult, NpmTokenListResult,
-    NpmTokenRevokeResult, NpmUnpublishResult, NpmWhoamiResult, NpmWorkspacePackage, OmcLock,
-    OmcRegistryError, PackageSpec, ProjectRequirements, PypiAvailableVersionsOptions,
-    PypiBinaryMode, PypiCheckIssue, PypiReleaseControl, PypiReleaseControls, PypiUploadOptions,
-    PypiUploadResult, PypiUploadSignature, PythonLocalRequirement, PythonVcsRequirement, Verdict,
+    unpublish_npm_package, upload_pypi_distribution, Behavior, CompileSourceOptions, Ecosystem,
+    InstallReport, LinkOptions, LinkReport, LockedPackage, LockedPythonVcsDependency,
+    ManifestDependencyKind, NpmAccessMapResult, NpmAccessMutationResult, NpmAccessStatusResult,
+    NpmAccessToken, NpmDeprecateResult, NpmDistTagMutationResult, NpmOrgListResult,
+    NpmOrgMutationResult, NpmOwnerListResult, NpmOwnerMutationResult, NpmPackageTarball,
+    NpmPingResult, NpmProfileMutationResult, NpmProfileResult, NpmProvenanceBundle,
+    NpmPublishPackage, NpmPublishResult, NpmSearchPackage, NpmStarMutationResult, NpmStarsResult,
+    NpmTeamListResult, NpmTeamMutationResult, NpmTokenCreateOptions, NpmTokenCreateResult,
+    NpmTokenListResult, NpmTokenRevokeResult, NpmUnpublishResult, NpmWhoamiResult,
+    NpmWorkspacePackage, OmcLock, OmcRegistryError, PackageSpec, ProjectRequirements,
+    PypiAvailableVersionsOptions, PypiBinaryMode, PypiCheckIssue, PypiReleaseControl,
+    PypiReleaseControls, PypiUploadOptions, PypiUploadResult, PypiUploadSignature,
+    PythonLocalRequirement, PythonVcsRequirement, Verdict,
 };
 use sha2::{Digest, Sha256, Sha384, Sha512};
 
@@ -129,6 +130,50 @@ enum Command {
         #[arg(
             long = "allow-flow",
             help = "Grant a data flow, e.g. env:API_TOKEN->network:api.example.com"
+        )]
+        allow_flow: Vec<String>,
+        #[arg(long, help = "Grant all host capabilities for compatibility testing")]
+        allow_all_host: bool,
+    },
+    #[command(about = "Compile local source into a signed OMC artifact")]
+    Compile {
+        #[arg(
+            long,
+            conflicts_with = "pypi",
+            help = "Compile the source as an npm package"
+        )]
+        npm: bool,
+        #[arg(
+            long,
+            conflicts_with = "npm",
+            help = "Compile the source as a PyPI package"
+        )]
+        pypi: bool,
+        #[arg(help = "Source directory or archive to profile into OMC microcode")]
+        source: PathBuf,
+        #[arg(long, help = "Package name for the generated artifact")]
+        name: Option<String>,
+        #[arg(
+            long,
+            default_value = "0.0.0",
+            help = "Package version for the generated artifact"
+        )]
+        version: String,
+        #[arg(long, help = "Write artifact JSON to this path instead of stdout")]
+        output: Option<PathBuf>,
+        #[arg(
+            long,
+            help = "Store artifact under .omc/artifacts as well as returning output"
+        )]
+        store: bool,
+        #[arg(
+            long = "allow",
+            help = "Grant a capability while verifying the generated artifact"
+        )]
+        allow: Vec<String>,
+        #[arg(
+            long = "allow-flow",
+            help = "Grant a data flow while verifying the generated artifact"
         )]
         allow_flow: Vec<String>,
         #[arg(long, help = "Grant all host capabilities for compatibility testing")]
@@ -1738,6 +1783,34 @@ fn run() -> Result<ExitCode, OmcRegistryError> {
             println!();
             print_install_report(&install);
         }
+        Command::Compile {
+            npm,
+            pypi,
+            source,
+            name,
+            version,
+            output,
+            store,
+            allow,
+            allow_flow,
+            allow_all_host,
+        } => {
+            print_compile_source(
+                &cli.project_dir,
+                CompileCommand {
+                    npm,
+                    pypi,
+                    source,
+                    name,
+                    version,
+                    output,
+                    store,
+                    allow,
+                    allow_flow,
+                    allow_all_host,
+                },
+            )?;
+        }
         Command::Remove {
             npm,
             pypi,
@@ -1924,6 +1997,121 @@ impl<'a> CliPolicyArgs<'a> {
             allow_all_host,
         }
     }
+}
+
+#[derive(Debug)]
+struct CompileCommand {
+    npm: bool,
+    pypi: bool,
+    source: PathBuf,
+    name: Option<String>,
+    version: String,
+    output: Option<PathBuf>,
+    store: bool,
+    allow: Vec<String>,
+    allow_flow: Vec<String>,
+    allow_all_host: bool,
+}
+
+fn print_compile_source(
+    project_dir: &Path,
+    command: CompileCommand,
+) -> Result<(), OmcRegistryError> {
+    let ecosystem = infer_compile_ecosystem(&command.source, command.npm, command.pypi)?;
+    let name = command
+        .name
+        .unwrap_or_else(|| compile_source_default_name(&command.source));
+    let report = compile_source_path(CompileSourceOptions {
+        project_dir: project_dir.to_path_buf(),
+        source_path: command.source,
+        ecosystem,
+        name,
+        version: command.version,
+        allowed_capabilities: parse_grants(&command.allow, command.allow_all_host)?,
+        allowed_flows: parse_flow_grants(&command.allow_flow)?,
+        write_artifact: command.store,
+    })?;
+
+    if let Some(output) = command.output {
+        if let Some(parent) = output
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+        {
+            fs::create_dir_all(parent)?;
+        }
+        fs::write(&output, serde_json::to_string_pretty(&report.artifact)?)?;
+        println!("{}", output.display());
+    } else if let Some(artifact_path) = report.artifact_path {
+        println!("{}", artifact_path.display());
+    } else {
+        println!("{}", serde_json::to_string_pretty(&report.artifact)?);
+    }
+
+    Ok(())
+}
+
+fn infer_compile_ecosystem(
+    source: &Path,
+    npm: bool,
+    pypi: bool,
+) -> Result<Ecosystem, OmcRegistryError> {
+    match (npm, pypi) {
+        (true, false) => return Ok(Ecosystem::Npm),
+        (false, true) => return Ok(Ecosystem::Pypi),
+        (true, true) => {
+            return Err(OmcRegistryError::UnsupportedSpec(
+                "omc compile cannot combine --npm and --pypi".to_owned(),
+            ));
+        }
+        (false, false) => {}
+    }
+
+    if source.is_dir() {
+        if source.join("package.json").exists() {
+            return Ok(Ecosystem::Npm);
+        }
+        if source.join("pyproject.toml").exists()
+            || source.join("setup.cfg").exists()
+            || source.join("setup.py").exists()
+        {
+            return Ok(Ecosystem::Pypi);
+        }
+    }
+
+    let lower_name = source
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    if lower_name.ends_with(".whl") {
+        return Ok(Ecosystem::Pypi);
+    }
+    match source.extension().and_then(|extension| extension.to_str()) {
+        Some("js" | "mjs" | "cjs" | "ts" | "tsx" | "jsx") => Ok(Ecosystem::Npm),
+        Some("py") => Ok(Ecosystem::Pypi),
+        _ => Err(OmcRegistryError::UnsupportedSpec(
+            "omc compile needs --npm or --pypi when the source ecosystem cannot be inferred"
+                .to_owned(),
+        )),
+    }
+}
+
+fn compile_source_default_name(source: &Path) -> String {
+    let name = source
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("local-source");
+    let name = name
+        .strip_suffix(".tar.gz")
+        .or_else(|| name.strip_suffix(".tgz"))
+        .or_else(|| name.strip_suffix(".whl"))
+        .or_else(|| name.strip_suffix(".zip"))
+        .unwrap_or(name);
+    name.trim()
+        .is_empty()
+        .then_some("local-source")
+        .unwrap_or(name)
+        .to_owned()
 }
 
 fn apply_dependency_omit_flags(
@@ -35244,6 +35432,74 @@ mod tests {
             direct_compat_mode(Some(Path::new("/tmp/omc").as_os_str())),
             None
         );
+    }
+
+    #[test]
+    fn parses_compile_command_and_infers_source_metadata() {
+        let cli = Cli::try_parse_from(args(&[
+            "omc",
+            "compile",
+            "--npm",
+            "--name",
+            "date-helper",
+            "--version",
+            "1.2.4",
+            "--output",
+            "dist/date-helper.omc.json",
+            "--store",
+            "--allow",
+            "env:NPM_TOKEN",
+            "--allow-flow",
+            "env:NPM_TOKEN->network:api.example.com",
+            "src/index.js",
+        ]))
+        .unwrap();
+
+        match cli.command {
+            Command::Compile {
+                npm,
+                pypi,
+                source,
+                name,
+                version,
+                output,
+                store,
+                allow,
+                allow_flow,
+                allow_all_host,
+            } => {
+                assert!(npm);
+                assert!(!pypi);
+                assert_eq!(source, PathBuf::from("src/index.js"));
+                assert_eq!(name.as_deref(), Some("date-helper"));
+                assert_eq!(version, "1.2.4");
+                assert_eq!(output, Some(PathBuf::from("dist/date-helper.omc.json")));
+                assert!(store);
+                assert_eq!(allow, vec!["env:NPM_TOKEN"]);
+                assert_eq!(allow_flow, vec!["env:NPM_TOKEN->network:api.example.com"]);
+                assert!(!allow_all_host);
+            }
+            other => panic!("expected compile command, got {other:?}"),
+        }
+
+        let dir = test_dir("compile-infer");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("package.json"), "{}").unwrap();
+        assert_eq!(
+            infer_compile_ecosystem(&dir, false, false).unwrap(),
+            Ecosystem::Npm
+        );
+        fs::remove_file(dir.join("package.json")).unwrap();
+        fs::write(dir.join("pyproject.toml"), "[project]\nname = \"demo\"\n").unwrap();
+        assert_eq!(
+            infer_compile_ecosystem(&dir, false, false).unwrap(),
+            Ecosystem::Pypi
+        );
+        assert_eq!(
+            compile_source_default_name(Path::new("pkg-1.0.0.tar.gz")),
+            "pkg-1.0.0"
+        );
+        let _ = fs::remove_dir_all(dir);
     }
 
     #[test]

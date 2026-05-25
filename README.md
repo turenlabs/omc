@@ -104,6 +104,7 @@ cargo install --path crates/omc-cli --bins
 
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo init --name demo
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo allow http:api.example.com env:API_TOKEN
+cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo compile --npm --name local-date-helper --version 1.0.0 --store ./packages/local-date-helper
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo add --npm is-odd@3.0.1 left-pad@1.3.0
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo add --npm is-number@7.0.0 --dev
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo node -e "console.log(require('is-odd')(3))"
@@ -471,6 +472,9 @@ Supported now:
   simple stack-visible flows
 - interpreter checks the same broker policy at runtime
 - npm and PyPI exact-version resolution
+- local source directory/archive compilation into signed OMC artifact JSON via
+  `omc compile`, using the same source profiler, capability lowering, verifier,
+  and artifact signing path as registry packages
 - npm semver range resolution for common dependency ranges
 - global, project, and user `.npmrc` support for `registry`, `@scope:registry`,
   and host-scoped `_authToken` npm registry access, plus `NPM_CONFIG_REGISTRY` /

