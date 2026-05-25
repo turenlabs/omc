@@ -1216,6 +1216,7 @@ enum PipCompatAction {
     },
     List {
         format: PipListFormat,
+        verbose: bool,
         outdated: bool,
         uptodate: bool,
         paths: Vec<PathBuf>,
@@ -6339,6 +6340,7 @@ fn run_pip_compat_with_cwd(
         }
         PipCompatAction::List {
             format,
+            verbose,
             outdated,
             uptodate,
             paths,
@@ -6359,6 +6361,7 @@ fn run_pip_compat_with_cwd(
                     project_dir,
                     PipOutdatedOptions {
                         format,
+                        verbose,
                         paths: &paths,
                         exclude: &exclude,
                         editable,
@@ -6375,6 +6378,7 @@ fn run_pip_compat_with_cwd(
                 print_pip_path_list(
                     project_dir,
                     format,
+                    verbose,
                     &paths,
                     &exclude,
                     editable,
@@ -6385,6 +6389,7 @@ fn run_pip_compat_with_cwd(
                     PipListFormat::Columns => print_locked_pip_list(
                         project_dir,
                         PipListFormat::Columns,
+                        verbose,
                         &exclude,
                         editable,
                         not_required,
@@ -6394,6 +6399,7 @@ fn run_pip_compat_with_cwd(
                             print_locked_pip_list(
                                 project_dir,
                                 PipListFormat::Freeze,
+                                verbose,
                                 &exclude,
                                 editable,
                                 true,
@@ -6402,6 +6408,7 @@ fn run_pip_compat_with_cwd(
                             print_locked_pip_list(
                                 project_dir,
                                 PipListFormat::Freeze,
+                                verbose,
                                 &exclude,
                                 editable,
                                 false,
@@ -6411,6 +6418,7 @@ fn run_pip_compat_with_cwd(
                     PipListFormat::Json => print_locked_pip_list(
                         project_dir,
                         PipListFormat::Json,
+                        verbose,
                         &exclude,
                         editable,
                         not_required,
@@ -20655,6 +20663,7 @@ fn pip_freeze_vcs_requirement(dependency: &LockedPythonVcsDependency) -> String 
 fn print_locked_pip_list(
     project_dir: &Path,
     format: PipListFormat,
+    verbose: bool,
     exclude: &[String],
     editable: PipEditableMode,
     not_required: bool,
@@ -20663,7 +20672,7 @@ fn print_locked_pip_list(
     if not_required {
         packages = pip_not_required_packages(packages);
     }
-    print_pip_installed_list(format, &packages)
+    print_pip_installed_list(format, verbose, &packages)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -20671,6 +20680,7 @@ struct InstalledPythonPackage {
     name: String,
     version: String,
     dependencies: Vec<String>,
+    install_location: Option<PathBuf>,
     metadata_location: Option<PathBuf>,
     editable_project_location: Option<PathBuf>,
 }
@@ -20678,6 +20688,7 @@ struct InstalledPythonPackage {
 fn print_pip_path_list(
     project_dir: &Path,
     format: PipListFormat,
+    verbose: bool,
     paths: &[PathBuf],
     exclude: &[String],
     editable: PipEditableMode,
@@ -20687,16 +20698,17 @@ fn print_pip_path_list(
     if not_required {
         packages = pip_not_required_packages(packages);
     }
-    print_pip_installed_list(format, &packages)
+    print_pip_installed_list(format, verbose, &packages)
 }
 
 fn print_pip_installed_list(
     format: PipListFormat,
+    verbose: bool,
     packages: &[InstalledPythonPackage],
 ) -> Result<(), OmcRegistryError> {
     match format {
         PipListFormat::Columns => {
-            if let Some(output) = pip_columns_list_output(packages) {
+            if let Some(output) = pip_columns_list_output(packages, verbose) {
                 print!("{output}");
             }
         }
@@ -20706,7 +20718,7 @@ fn print_pip_installed_list(
             }
         }
         PipListFormat::Json => {
-            println!("{}", pip_installed_list_json_output(packages)?);
+            println!("{}", pip_installed_list_json_output(packages, verbose)?);
         }
     }
     Ok(())
@@ -20714,6 +20726,7 @@ fn print_pip_installed_list(
 
 fn pip_installed_list_json_output(
     packages: &[InstalledPythonPackage],
+    verbose: bool,
 ) -> Result<String, OmcRegistryError> {
     let packages = packages
         .iter()
@@ -20733,13 +20746,25 @@ fn pip_installed_list_json_output(
                     serde_json::Value::String(location.display().to_string()),
                 );
             }
+            if verbose {
+                if let Some(location) = &package.install_location {
+                    item.insert(
+                        "location".to_owned(),
+                        serde_json::Value::String(location.display().to_string()),
+                    );
+                }
+                item.insert(
+                    "installer".to_owned(),
+                    serde_json::Value::String("omc".to_owned()),
+                );
+            }
             serde_json::Value::Object(item)
         })
         .collect::<Vec<_>>();
     Ok(serde_json::to_string(&packages)?)
 }
 
-fn pip_columns_list_output(packages: &[InstalledPythonPackage]) -> Option<String> {
+fn pip_columns_list_output(packages: &[InstalledPythonPackage], verbose: bool) -> Option<String> {
     if packages.is_empty() {
         return None;
     }
@@ -20747,7 +20772,17 @@ fn pip_columns_list_output(packages: &[InstalledPythonPackage]) -> Option<String
     let has_editable_locations = packages
         .iter()
         .any(|package| package.editable_project_location.is_some());
-    let headers = if has_editable_locations {
+    let headers = if verbose && has_editable_locations {
+        vec![
+            "Package",
+            "Version",
+            "Editable project location",
+            "Location",
+            "Installer",
+        ]
+    } else if verbose {
+        vec!["Package", "Version", "Location", "Installer"]
+    } else if has_editable_locations {
         vec!["Package", "Version", "Location"]
     } else {
         vec!["Package", "Version"]
@@ -20764,6 +20799,16 @@ fn pip_columns_list_output(packages: &[InstalledPythonPackage]) -> Option<String
                         .map(|path| path.display().to_string())
                         .unwrap_or_default(),
                 );
+            }
+            if verbose {
+                row.push(
+                    package
+                        .install_location
+                        .as_ref()
+                        .map(|path| path.display().to_string())
+                        .unwrap_or_default(),
+                );
+                row.push("omc".to_owned());
             }
             row
         })
@@ -20862,7 +20907,7 @@ fn pip_local_editable_packages_from_file(
     local_paths_file: PathBuf,
     excluded: &BTreeSet<String>,
 ) -> Result<Vec<InstalledPythonPackage>, OmcRegistryError> {
-    let content = match fs::read_to_string(local_paths_file) {
+    let content = match fs::read_to_string(&local_paths_file) {
         Ok(content) => content,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
         Err(error) => return Err(error.into()),
@@ -20874,14 +20919,23 @@ fn pip_local_editable_packages_from_file(
         .filter(|line| !line.is_empty())
     {
         let path = PathBuf::from(line);
-        let Some(package) = pip_local_editable_package(&path)? else {
+        let Some(mut package) = pip_local_editable_package(&path)? else {
             continue;
         };
+        package.install_location = pip_local_paths_install_location(&local_paths_file);
         if !pip_name_excluded(&package.name, excluded) {
             packages.insert(normalize_pip_show_name(&package.name), package);
         }
     }
     Ok(packages.into_values().collect())
+}
+
+fn pip_local_paths_install_location(local_paths_file: &Path) -> Option<PathBuf> {
+    let parent = local_paths_file.parent()?;
+    if local_paths_file.file_name().and_then(|name| name.to_str()) == Some("local-paths") {
+        return Some(parent.join("site-packages"));
+    }
+    Some(parent.to_path_buf())
 }
 
 fn pip_local_editable_package(
@@ -20900,6 +20954,7 @@ fn pip_local_editable_package(
         } else {
             metadata.requires_dist
         },
+        install_location: None,
         metadata_location: None,
         editable_project_location: Some(import_path.to_path_buf()),
     }))
@@ -21349,6 +21404,7 @@ fn read_dist_info_metadata(
                 name,
                 version,
                 dependencies,
+                install_location: dist_info.parent().map(Path::to_path_buf),
                 metadata_location: Some(dist_info.to_path_buf()),
                 editable_project_location: None,
             }));
@@ -21365,6 +21421,7 @@ fn read_dist_info_metadata(
         name: name.replace('_', "-"),
         version: version.to_owned(),
         dependencies: Vec::new(),
+        install_location: dist_info.parent().map(Path::to_path_buf),
         metadata_location: Some(dist_info.to_path_buf()),
         editable_project_location: None,
     }))
@@ -21522,10 +21579,13 @@ struct PipOutdatedPackage {
     version: String,
     latest_version: String,
     latest_filetype: String,
+    install_location: Option<PathBuf>,
+    installer: String,
 }
 
 struct PipOutdatedOptions<'a> {
     format: PipListFormat,
+    verbose: bool,
     paths: &'a [PathBuf],
     exclude: &'a [String],
     editable: PipEditableMode,
@@ -21581,10 +21641,12 @@ fn print_pip_outdated(
                 version: package.version,
                 latest_version: latest_version.clone(),
                 latest_filetype: "wheel".to_owned(),
+                install_location: package.install_location,
+                installer: "omc".to_owned(),
             });
         }
     }
-    print_pip_outdated_rows(options.format, rows)
+    print_pip_outdated_rows(options.format, options.verbose, rows)
 }
 
 fn print_locked_pip_outdated(
@@ -21593,6 +21655,10 @@ fn print_locked_pip_outdated(
 ) -> Result<(), OmcRegistryError> {
     let excluded = pip_excluded_names(options.exclude);
     let lock = read_lockfile(project_dir.join("omc.lock"))?;
+    let site_packages = project_dir
+        .join(".omc")
+        .join("python")
+        .join("site-packages");
     let required = if options.not_required {
         lock.packages
             .iter()
@@ -21633,11 +21699,19 @@ fn print_locked_pip_outdated(
                 continue;
             };
             if pip_version_status_matches(latest_version, &package.version, options.uptodate) {
+                let metadata_location = match_dist_info_dir(&site_packages, &package)?;
+                let install_location = metadata_location
+                    .as_deref()
+                    .and_then(Path::parent)
+                    .map(Path::to_path_buf)
+                    .unwrap_or_else(|| site_packages.clone());
                 rows.push(PipOutdatedPackage {
                     name: package.name.clone(),
                     version: package.version.clone(),
                     latest_version: latest_version.clone(),
                     latest_filetype: pip_locked_package_filetype(&package).to_owned(),
+                    install_location: Some(install_location),
+                    installer: "omc".to_owned(),
                 });
             }
         }
@@ -21671,11 +21745,13 @@ fn print_locked_pip_outdated(
                     version: package.version,
                     latest_version: latest_version.clone(),
                     latest_filetype: "editable".to_owned(),
+                    install_location: package.install_location,
+                    installer: "omc".to_owned(),
                 });
             }
         }
     }
-    print_pip_outdated_rows(options.format, rows)
+    print_pip_outdated_rows(options.format, options.verbose, rows)
 }
 
 fn pip_version_status_matches(latest_version: &str, current_version: &str, uptodate: bool) -> bool {
@@ -21689,6 +21765,7 @@ fn pip_version_status_matches(latest_version: &str, current_version: &str, uptod
 
 fn print_pip_outdated_rows(
     format: PipListFormat,
+    verbose: bool,
     mut rows: Vec<PipOutdatedPackage>,
 ) -> Result<(), OmcRegistryError> {
     rows.sort_by(|left, right| left.name.cmp(&right.name));
@@ -21696,17 +21773,76 @@ fn print_pip_outdated_rows(
     match format {
         PipListFormat::Columns => {
             if !rows.is_empty() {
-                println!("Package Version Latest Type");
+                let headers = if verbose {
+                    vec![
+                        "Package",
+                        "Version",
+                        "Latest",
+                        "Type",
+                        "Location",
+                        "Installer",
+                    ]
+                } else {
+                    vec!["Package", "Version", "Latest", "Type"]
+                };
+                let rows = rows
+                    .into_iter()
+                    .map(|row| {
+                        let mut values = vec![
+                            row.name,
+                            row.version,
+                            row.latest_version,
+                            row.latest_filetype,
+                        ];
+                        if verbose {
+                            values.push(
+                                row.install_location
+                                    .map(|path| path.display().to_string())
+                                    .unwrap_or_default(),
+                            );
+                            values.push(row.installer);
+                        }
+                        values
+                    })
+                    .collect::<Vec<_>>();
+                let widths = headers
+                    .iter()
+                    .enumerate()
+                    .map(|(index, header)| {
+                        rows.iter()
+                            .map(|row| row[index].len())
+                            .chain(std::iter::once(header.len()))
+                            .max()
+                            .unwrap_or(header.len())
+                    })
+                    .collect::<Vec<_>>();
+                println!(
+                    "{}",
+                    pip_columns_join_row(
+                        &headers
+                            .iter()
+                            .map(|value| value.to_string())
+                            .collect::<Vec<_>>(),
+                        &widths,
+                    )
+                );
+                println!(
+                    "{}",
+                    pip_columns_join_row(
+                        &widths
+                            .iter()
+                            .map(|width| "-".repeat(*width))
+                            .collect::<Vec<_>>(),
+                        &widths,
+                    )
+                );
                 for row in rows {
-                    println!(
-                        "{} {} {} {}",
-                        row.name, row.version, row.latest_version, row.latest_filetype
-                    );
+                    println!("{}", pip_columns_join_row(&row, &widths));
                 }
             }
         }
         PipListFormat::Json => {
-            println!("{}", pip_outdated_rows_json_output(&rows)?);
+            println!("{}", pip_outdated_rows_json_output(&rows, verbose)?);
         }
         PipListFormat::Freeze => {
             for row in rows {
@@ -21717,16 +21853,43 @@ fn print_pip_outdated_rows(
     Ok(())
 }
 
-fn pip_outdated_rows_json_output(rows: &[PipOutdatedPackage]) -> Result<String, OmcRegistryError> {
+fn pip_outdated_rows_json_output(
+    rows: &[PipOutdatedPackage],
+    verbose: bool,
+) -> Result<String, OmcRegistryError> {
     let packages = rows
         .iter()
         .map(|row| {
-            serde_json::json!({
-                "name": row.name,
-                "version": row.version,
-                "latest_version": row.latest_version,
-                "latest_filetype": row.latest_filetype,
-            })
+            let mut item = serde_json::Map::new();
+            item.insert(
+                "name".to_owned(),
+                serde_json::Value::String(row.name.clone()),
+            );
+            item.insert(
+                "version".to_owned(),
+                serde_json::Value::String(row.version.clone()),
+            );
+            if verbose {
+                if let Some(location) = &row.install_location {
+                    item.insert(
+                        "location".to_owned(),
+                        serde_json::Value::String(location.display().to_string()),
+                    );
+                }
+                item.insert(
+                    "installer".to_owned(),
+                    serde_json::Value::String(row.installer.clone()),
+                );
+            }
+            item.insert(
+                "latest_version".to_owned(),
+                serde_json::Value::String(row.latest_version.clone()),
+            );
+            item.insert(
+                "latest_filetype".to_owned(),
+                serde_json::Value::String(row.latest_filetype.clone()),
+            );
+            serde_json::Value::Object(item)
         })
         .collect::<Vec<_>>();
     Ok(serde_json::to_string(&packages)?)
@@ -21739,21 +21902,33 @@ fn locked_pip_installed_packages(
 ) -> Result<Vec<InstalledPythonPackage>, OmcRegistryError> {
     let excluded = pip_excluded_names(exclude);
     let lock = read_lockfile(project_dir.join("omc.lock"))?;
+    let site_packages = project_dir
+        .join(".omc")
+        .join("python")
+        .join("site-packages");
     let mut packages = Vec::new();
     if editable.includes_regular() {
-        packages.extend(
-            lock.packages
-                .into_iter()
-                .filter(|package| package.ecosystem == Ecosystem::Pypi)
-                .filter(|package| !pip_name_excluded(&package.name, &excluded))
-                .map(|package| InstalledPythonPackage {
-                    name: package.name,
-                    version: package.version,
-                    dependencies: package.dependencies,
-                    metadata_location: None,
-                    editable_project_location: None,
-                }),
-        );
+        for package in lock
+            .packages
+            .into_iter()
+            .filter(|package| package.ecosystem == Ecosystem::Pypi)
+            .filter(|package| !pip_name_excluded(&package.name, &excluded))
+        {
+            let metadata_location = match_dist_info_dir(&site_packages, &package)?;
+            let install_location = metadata_location
+                .as_deref()
+                .and_then(Path::parent)
+                .map(Path::to_path_buf)
+                .unwrap_or_else(|| site_packages.clone());
+            packages.push(InstalledPythonPackage {
+                name: package.name,
+                version: package.version,
+                dependencies: package.dependencies,
+                install_location: Some(install_location),
+                metadata_location,
+                editable_project_location: None,
+            });
+        }
     }
     if editable.includes_editables() {
         append_pip_project_editables(project_dir, exclude, &mut packages)?;
@@ -21933,6 +22108,7 @@ fn pip_check_installed_packages(
             name: package.name.clone(),
             version: package.version.clone(),
             dependencies: package.dependencies.clone(),
+            install_location: None,
             metadata_location: None,
             editable_project_location: None,
         })
@@ -32893,6 +33069,7 @@ fn parse_pip_list_args(args: &[String]) -> Result<PipCompatAction, OmcRegistryEr
     let expanded_short_clusters = expand_pip_list_short_clusters(args);
     let args = expanded_short_clusters.as_slice();
     let mut format = PipListFormat::Columns;
+    let mut verbose = false;
     let mut outdated = false;
     let mut uptodate = false;
     let mut index_url = None;
@@ -32962,6 +33139,8 @@ fn parse_pip_list_args(args: &[String]) -> Result<PipCompatAction, OmcRegistryEr
             allow_prereleases = true;
         } else if arg == "--user" {
             user = true;
+        } else if pip_verbose_flag(arg) {
+            verbose = true;
         } else if matches!(
             arg.as_str(),
             "--local" | "-l" | "--disable-pip-version-check" | "--ignore-requires-python"
@@ -33011,6 +33190,7 @@ fn parse_pip_list_args(args: &[String]) -> Result<PipCompatAction, OmcRegistryEr
     }
     Ok(PipCompatAction::List {
         format,
+        verbose,
         outdated,
         uptodate,
         paths,
@@ -45014,6 +45194,7 @@ print("ok")
                 name: "demo-pkg".to_owned(),
                 version: "1.0.0".to_owned(),
                 dependencies: vec!["idna>=3".to_owned()],
+                install_location: Some(project.join("vendor")),
                 metadata_location: Some(project.join("vendor").join("demo_pkg-1.0.0.dist-info")),
                 editable_project_location: None,
             }]
@@ -46170,6 +46351,7 @@ version = "0.1.2"
                 name: "demoedit".to_owned(),
                 version: "0.1.2".to_owned(),
                 dependencies: Vec::new(),
+                install_location: Some(project.join(".omc").join("python").join("site-packages")),
                 metadata_location: None,
                 editable_project_location: Some(src.clone()),
             }]
@@ -46435,6 +46617,7 @@ version = "0.2.0"
                 name: "demoedit".to_owned(),
                 version: "0.1.2".to_owned(),
                 dependencies: vec!["idna>=3".to_owned()],
+                install_location: Some(project.join(".omc").join("python").join("site-packages")),
                 metadata_location: None,
                 editable_project_location: Some(src.clone()),
             }]
@@ -46574,6 +46757,7 @@ version = "0.2.0"
                     "pypi:idna>=3".to_owned(),
                     "charset-normalizer>=2".to_owned(),
                 ],
+                install_location: None,
                 metadata_location: None,
                 editable_project_location: None,
             },
@@ -46581,6 +46765,7 @@ version = "0.2.0"
                 name: "idna".to_owned(),
                 version: "3.7".to_owned(),
                 dependencies: Vec::new(),
+                install_location: None,
                 metadata_location: None,
                 editable_project_location: None,
             },
@@ -46588,6 +46773,7 @@ version = "0.2.0"
                 name: "charset-normalizer".to_owned(),
                 version: "3.3.2".to_owned(),
                 dependencies: Vec::new(),
+                install_location: None,
                 metadata_location: None,
                 editable_project_location: None,
             },
@@ -46595,6 +46781,7 @@ version = "0.2.0"
                 name: "pytest".to_owned(),
                 version: "8.0.0".to_owned(),
                 dependencies: Vec::new(),
+                install_location: None,
                 metadata_location: None,
                 editable_project_location: None,
             },
@@ -46616,6 +46803,7 @@ version = "0.2.0"
                 name: "idna".to_owned(),
                 version: "3.4".to_owned(),
                 dependencies: Vec::new(),
+                install_location: Some(PathBuf::from("/tmp/site-packages")),
                 metadata_location: None,
                 editable_project_location: None,
             },
@@ -46623,45 +46811,65 @@ version = "0.2.0"
                 name: "setuptools".to_owned(),
                 version: "58.0.4".to_owned(),
                 dependencies: Vec::new(),
+                install_location: Some(PathBuf::from("/tmp/site-packages")),
                 metadata_location: None,
                 editable_project_location: None,
             },
         ];
         assert_eq!(
-            pip_columns_list_output(&packages).unwrap(),
+            pip_columns_list_output(&packages, false).unwrap(),
             "Package    Version\n---------- -------\nidna       3.4\nsetuptools 58.0.4\n"
         );
         assert_eq!(
-            pip_installed_list_json_output(&packages).unwrap(),
+            pip_columns_list_output(&packages, true).unwrap(),
+            "Package    Version Location           Installer\n---------- ------- ------------------ ---------\nidna       3.4     /tmp/site-packages omc\nsetuptools 58.0.4  /tmp/site-packages omc\n"
+        );
+        assert_eq!(
+            pip_installed_list_json_output(&packages, false).unwrap(),
             r#"[{"name":"idna","version":"3.4"},{"name":"setuptools","version":"58.0.4"}]"#
+        );
+        assert_eq!(
+            pip_installed_list_json_output(&packages, true).unwrap(),
+            r#"[{"installer":"omc","location":"/tmp/site-packages","name":"idna","version":"3.4"},{"installer":"omc","location":"/tmp/site-packages","name":"setuptools","version":"58.0.4"}]"#
         );
 
         let editable = vec![InstalledPythonPackage {
             name: "demoedit".to_owned(),
             version: "0.1.0".to_owned(),
             dependencies: Vec::new(),
+            install_location: Some(PathBuf::from("/tmp/site-packages")),
             metadata_location: None,
             editable_project_location: Some(PathBuf::from("/tmp/demoedit")),
         }];
         assert_eq!(
-            pip_columns_list_output(&editable).unwrap(),
+            pip_columns_list_output(&editable, false).unwrap(),
             "Package  Version Location\n-------- ------- -------------\ndemoedit 0.1.0   /tmp/demoedit\n"
         );
         assert_eq!(
-            pip_installed_list_json_output(&editable).unwrap(),
+            pip_installed_list_json_output(&editable, false).unwrap(),
             r#"[{"editable_project_location":"/tmp/demoedit","name":"demoedit","version":"0.1.0"}]"#
         );
-        assert!(pip_columns_list_output(&[]).is_none());
+        assert_eq!(
+            pip_installed_list_json_output(&editable, true).unwrap(),
+            r#"[{"editable_project_location":"/tmp/demoedit","installer":"omc","location":"/tmp/site-packages","name":"demoedit","version":"0.1.0"}]"#
+        );
+        assert!(pip_columns_list_output(&[], false).is_none());
 
         let outdated = vec![PipOutdatedPackage {
             name: "idna".to_owned(),
             version: "3.4".to_owned(),
             latest_version: "3.14".to_owned(),
             latest_filetype: "wheel".to_owned(),
+            install_location: Some(PathBuf::from("/tmp/site-packages")),
+            installer: "omc".to_owned(),
         }];
         assert_eq!(
-            pip_outdated_rows_json_output(&outdated).unwrap(),
+            pip_outdated_rows_json_output(&outdated, false).unwrap(),
             r#"[{"latest_filetype":"wheel","latest_version":"3.14","name":"idna","version":"3.4"}]"#
+        );
+        assert_eq!(
+            pip_outdated_rows_json_output(&outdated, true).unwrap(),
+            r#"[{"installer":"omc","latest_filetype":"wheel","latest_version":"3.14","location":"/tmp/site-packages","name":"idna","version":"3.4"}]"#
         );
     }
 
@@ -47217,6 +47425,7 @@ resolved_commit = "0123456789abcdef0123456789abcdef01234567"
             parse_pip_compat_action(&args(&["list", "-qq", "--format=freeze"])).unwrap(),
             PipCompatAction::List {
                 format: PipListFormat::Freeze,
+                verbose: false,
                 outdated: false,
                 uptodate: false,
                 paths: Vec::new(),
@@ -47242,6 +47451,7 @@ resolved_commit = "0123456789abcdef0123456789abcdef01234567"
             .unwrap(),
             PipCompatAction::List {
                 format: PipListFormat::Json,
+                verbose: false,
                 outdated: true,
                 uptodate: false,
                 paths: Vec::new(),
@@ -47261,6 +47471,7 @@ resolved_commit = "0123456789abcdef0123456789abcdef01234567"
                 .unwrap(),
             PipCompatAction::List {
                 format: PipListFormat::Json,
+                verbose: false,
                 outdated: false,
                 uptodate: false,
                 paths: Vec::new(),
@@ -47288,6 +47499,7 @@ resolved_commit = "0123456789abcdef0123456789abcdef01234567"
             .unwrap(),
             PipCompatAction::List {
                 format: PipListFormat::Json,
+                verbose: false,
                 outdated: false,
                 uptodate: false,
                 paths: vec![PathBuf::from("vendor")],
@@ -47306,6 +47518,7 @@ resolved_commit = "0123456789abcdef0123456789abcdef01234567"
             parse_pip_compat_action(&args(&["list", "--editable", "--format=columns"])).unwrap(),
             PipCompatAction::List {
                 format: PipListFormat::Columns,
+                verbose: false,
                 outdated: false,
                 uptodate: false,
                 paths: Vec::new(),
@@ -47333,6 +47546,7 @@ resolved_commit = "0123456789abcdef0123456789abcdef01234567"
             .unwrap(),
             PipCompatAction::List {
                 format: PipListFormat::Json,
+                verbose: false,
                 outdated: false,
                 uptodate: true,
                 paths: Vec::new(),
@@ -47352,6 +47566,7 @@ resolved_commit = "0123456789abcdef0123456789abcdef01234567"
                 .unwrap(),
             PipCompatAction::List {
                 format: PipListFormat::Freeze,
+                verbose: false,
                 outdated: true,
                 uptodate: false,
                 paths: Vec::new(),
@@ -47370,10 +47585,30 @@ resolved_commit = "0123456789abcdef0123456789abcdef01234567"
             parse_pip_compat_action(&args(&["list", "--user", "--format=json"])).unwrap(),
             PipCompatAction::List {
                 format: PipListFormat::Json,
+                verbose: false,
                 outdated: false,
                 uptodate: false,
                 paths: Vec::new(),
                 user: true,
+                exclude: Vec::new(),
+                editable: PipEditableMode::Include,
+                not_required: false,
+                index_url: None,
+                extra_index_urls: Vec::new(),
+                find_links: Vec::new(),
+                no_index: false,
+                allow_prereleases: false,
+            }
+        );
+        assert_eq!(
+            parse_pip_compat_action(&args(&["list", "-v", "--format=json"])).unwrap(),
+            PipCompatAction::List {
+                format: PipListFormat::Json,
+                verbose: true,
+                outdated: false,
+                uptodate: false,
+                paths: Vec::new(),
+                user: false,
                 exclude: Vec::new(),
                 editable: PipEditableMode::Include,
                 not_required: false,
