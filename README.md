@@ -707,7 +707,8 @@ Supported now:
   lifecycle hooks are executed around the requested script; common script and
   workspace flags such as `--if-present`, `--workspace`, `--workspaces`,
   `--ws`, `-ws`, `--include-workspace-root`, `--silent`, `-s`, and
-  `--loglevel=silent` are understood
+  `--loglevel=silent` are understood; `npm ls --json` emits an npm-shaped
+  dependency tree instead of raw OMC lock entries
 - `omc pip` compatibility commands for common `install`, `lock`, `uninstall`, `freeze`,
   `download`, `check`, `debug`, `help`, `inspect`, `show`, `hash`, `cache dir/list/remove/purge`,
   `wheel`, `index versions`, `config get/set/unset/list`, and

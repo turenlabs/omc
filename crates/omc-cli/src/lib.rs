@@ -4791,12 +4791,7 @@ fn run_npm_compat_with_cwd(
             return run_npm_edit(project_dir, invocation_cwd, &target, editor)
         }
         NpmCompatAction::Path { kind, global } => print_npm_path(project_dir, kind, global)?,
-        NpmCompatAction::List { action } => print_locked_packages(
-            project_dir,
-            Some(Ecosystem::Npm),
-            action.json,
-            &action.packages,
-        )?,
+        NpmCompatAction::List { action } => print_npm_list(project_dir, &action)?,
         NpmCompatAction::Query { action } => return print_npm_query(project_dir, action),
         NpmCompatAction::Explain { specs, json } => {
             return print_npm_explain(project_dir, &specs, json)
@@ -19222,6 +19217,139 @@ fn print_locked_packages(
         }
     }
     Ok(())
+}
+
+fn print_npm_list(project_dir: &Path, action: &NpmListAction) -> Result<(), OmcRegistryError> {
+    if action.json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&npm_list_json_tree(project_dir, &action.packages)?)?
+        );
+        return Ok(());
+    }
+
+    print_locked_packages(project_dir, Some(Ecosystem::Npm), false, &action.packages)
+}
+
+fn npm_list_json_tree(
+    project_dir: &Path,
+    filters: &[String],
+) -> Result<serde_json::Value, OmcRegistryError> {
+    let packages = listed_locked_packages(project_dir, Some(Ecosystem::Npm), &[])?;
+    let mut packages_by_name = BTreeMap::new();
+    for package in &packages {
+        packages_by_name
+            .entry(package.name.clone())
+            .or_insert(package);
+    }
+
+    let filter_names = package_list_filter_names(filters, Some(Ecosystem::Npm))?;
+    let mut root_dependencies = if filter_names.is_empty() {
+        npm_root_dependency_names(project_dir)?
+    } else {
+        filter_names
+    };
+    if root_dependencies.is_empty() && filters.is_empty() {
+        root_dependencies.extend(packages.iter().map(|package| package.name.clone()));
+    }
+
+    let (name, version) = npm_list_root_metadata(project_dir)?;
+    let mut root = serde_json::Map::new();
+    root.insert("version".to_owned(), serde_json::Value::String(version));
+    root.insert("name".to_owned(), serde_json::Value::String(name));
+
+    let mut dependencies = serde_json::Map::new();
+    for dependency in root_dependencies {
+        if let Some(package) = packages_by_name.get(&dependency) {
+            let mut visiting = BTreeSet::new();
+            dependencies.insert(
+                dependency,
+                npm_list_package_json(package, &packages_by_name, &mut visiting),
+            );
+        }
+    }
+    if !dependencies.is_empty() {
+        root.insert(
+            "dependencies".to_owned(),
+            serde_json::Value::Object(dependencies),
+        );
+    }
+
+    Ok(serde_json::Value::Object(root))
+}
+
+fn npm_list_root_metadata(project_dir: &Path) -> Result<(String, String), OmcRegistryError> {
+    let fallback_name = project_dir
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("omc-project")
+        .to_owned();
+    let package_json = project_dir.join("package.json");
+    if !package_json.exists() {
+        return Ok((fallback_name, "0.0.0".to_owned()));
+    }
+
+    let package = read_npm_pkg_json(&package_json)?;
+    let name = package
+        .get("name")
+        .and_then(serde_json::Value::as_str)
+        .filter(|name| !name.is_empty())
+        .unwrap_or(&fallback_name)
+        .to_owned();
+    let version = package
+        .get("version")
+        .and_then(serde_json::Value::as_str)
+        .filter(|version| !version.is_empty())
+        .unwrap_or("0.0.0")
+        .to_owned();
+    Ok((name, version))
+}
+
+fn npm_list_package_json(
+    package: &LockedPackage,
+    packages_by_name: &BTreeMap<String, &LockedPackage>,
+    visiting: &mut BTreeSet<(String, String)>,
+) -> serde_json::Value {
+    let mut item = serde_json::Map::new();
+    item.insert(
+        "version".to_owned(),
+        serde_json::Value::String(package.version.clone()),
+    );
+    if !package.source_url.is_empty() {
+        item.insert(
+            "resolved".to_owned(),
+            serde_json::Value::String(package.source_url.clone()),
+        );
+    }
+    item.insert("overridden".to_owned(), serde_json::Value::Bool(false));
+
+    let visit_key = (package.name.clone(), package.version.clone());
+    if visiting.insert(visit_key.clone()) {
+        let mut dependencies = serde_json::Map::new();
+        for dependency in package
+            .dependencies
+            .iter()
+            .chain(package.optional_dependencies.iter())
+            .chain(package.peer_dependencies.iter())
+            .filter_map(|dependency| npm_dependency_name(dependency))
+        {
+            if let Some(dependency_package) = packages_by_name.get(&dependency) {
+                dependencies.insert(
+                    dependency,
+                    npm_list_package_json(dependency_package, packages_by_name, visiting),
+                );
+            }
+        }
+        if !dependencies.is_empty() {
+            item.insert(
+                "dependencies".to_owned(),
+                serde_json::Value::Object(dependencies),
+            );
+        }
+        visiting.remove(&visit_key);
+    }
+
+    serde_json::Value::Object(item)
 }
 
 fn listed_locked_packages(
@@ -41208,6 +41336,53 @@ version = "0.1.0"
             .map(|item| item.name)
             .collect::<Vec<_>>();
         assert_eq!(selected, vec!["local-tool"]);
+
+        let _ = fs::remove_dir_all(project);
+    }
+
+    #[test]
+    fn npm_list_json_uses_npm_tree_shape() {
+        let project = test_dir("npm-list-json-tree-project");
+        fs::write(
+            project.join("package.json"),
+            r#"{
+              "name": "root",
+              "version": "1.0.0",
+              "dependencies": { "left-pad": "1.1.0" }
+            }"#,
+        )
+        .unwrap();
+        fs::write(
+            project.join("omc.lock"),
+            toml::to_string_pretty(&OmcLock {
+                version: 1,
+                packages: vec![
+                    locked_npm_package("left-pad", "1.1.0", vec!["npm:dep@1.0.0".to_owned()]),
+                    locked_npm_package("dep", "1.0.0", Vec::new()),
+                ],
+                python_vcs: Vec::new(),
+            })
+            .unwrap(),
+        )
+        .unwrap();
+
+        let tree = npm_list_json_tree(&project, &[]).unwrap();
+        assert_eq!(tree["name"], "root");
+        assert_eq!(tree["version"], "1.0.0");
+        assert_eq!(tree["dependencies"]["left-pad"]["version"], "1.1.0");
+        assert_eq!(
+            tree["dependencies"]["left-pad"]["resolved"],
+            "https://registry.example/left-pad/-/left-pad-1.1.0.tgz"
+        );
+        assert_eq!(
+            tree["dependencies"]["left-pad"]["dependencies"]["dep"]["version"],
+            "1.0.0"
+        );
+        assert!(tree.as_array().is_none());
+
+        let filtered = npm_list_json_tree(&project, &["dep".to_owned()]).unwrap();
+        assert!(filtered["dependencies"].get("left-pad").is_none());
+        assert_eq!(filtered["dependencies"]["dep"]["version"], "1.0.0");
 
         let _ = fs::remove_dir_all(project);
     }
