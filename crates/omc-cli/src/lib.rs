@@ -23795,7 +23795,7 @@ fn npm_global_arg_supported_by_command(command: &str, arg: &str) -> bool {
                 | "shrinkwrap"
         );
     }
-    if matches!(arg, "--json" | "--no-json") || arg.starts_with("--json=") {
+    if npm_json_flag_value(arg).is_some() {
         return matches!(
             command,
             "install"
@@ -23924,6 +23924,7 @@ fn npm_global_preserved_bool_flag(arg: &str) -> bool {
     matches!(
         arg,
         "--json"
+            | "-j"
             | "--no-json"
             | "--global"
             | "-g"
@@ -36687,6 +36688,15 @@ verdict = "accepted"
         );
         assert_eq!(
             parse_npm_compat_action(&args(&["view", "left-pad", "version", "-j"])).unwrap(),
+            NpmCompatAction::View {
+                spec: "left-pad".to_owned(),
+                fields: vec!["version".to_owned()],
+                json: true,
+                npm_registry: None,
+            }
+        );
+        assert_eq!(
+            parse_npm_compat_action(&args(&["-j", "view", "left-pad", "version"])).unwrap(),
             NpmCompatAction::View {
                 spec: "left-pad".to_owned(),
                 fields: vec!["version".to_owned()],

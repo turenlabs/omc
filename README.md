@@ -210,6 +210,7 @@ cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm dist-tag rm le
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm sbom --sbom-format=cyclonedx
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm view left-pad version
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm view left-pad version -j
+cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm -j view left-pad version
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm view left-pad --json
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm view left-pad time.modified --json
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm view left-pad 'versions[0]' --json
