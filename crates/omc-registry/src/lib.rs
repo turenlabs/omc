@@ -15814,36 +15814,47 @@ pub fn pypi_marker_applies(marker: &str, active_extras: &BTreeSet<String>) -> bo
 }
 
 fn evaluate_pypi_marker(marker: &str, env: &PypiMarkerEnvironment) -> Option<bool> {
-    let mut saw_unknown_true_path = false;
+    evaluate_pypi_marker_expression(marker.trim(), env)
+}
 
-    for or_group in split_marker_keyword(marker, "or") {
+fn evaluate_pypi_marker_expression(marker: &str, env: &PypiMarkerEnvironment) -> Option<bool> {
+    let marker = strip_enclosing_marker_parentheses(marker.trim());
+
+    let or_parts = split_marker_keyword(marker, "or");
+    if or_parts.len() > 1 {
+        let mut saw_unknown_true_path = false;
+
+        for part in or_parts {
+            match evaluate_pypi_marker_expression(part, env) {
+                Some(true) => return Some(true),
+                Some(false) => {}
+                None => saw_unknown_true_path = true,
+            }
+        }
+
+        return if saw_unknown_true_path {
+            None
+        } else {
+            Some(false)
+        };
+    }
+
+    let and_parts = split_marker_keyword(marker, "and");
+    if and_parts.len() > 1 {
         let mut group_unknown = false;
-        let mut group_matches = true;
 
-        for atom in split_marker_keyword(or_group, "and") {
-            match evaluate_pypi_marker_atom(atom, env) {
+        for part in and_parts {
+            match evaluate_pypi_marker_expression(part, env) {
                 Some(true) => {}
-                Some(false) => {
-                    group_matches = false;
-                    break;
-                }
+                Some(false) => return Some(false),
                 None => group_unknown = true,
             }
         }
 
-        if group_matches && !group_unknown {
-            return Some(true);
-        }
-        if group_matches {
-            saw_unknown_true_path = true;
-        }
+        return if group_unknown { None } else { Some(true) };
     }
 
-    if saw_unknown_true_path {
-        None
-    } else {
-        Some(false)
-    }
+    evaluate_pypi_marker_atom(marker, env)
 }
 
 fn evaluate_pypi_marker_atom(atom: &str, env: &PypiMarkerEnvironment) -> Option<bool> {
@@ -15934,6 +15945,7 @@ fn split_marker_keyword<'a>(marker: &'a str, keyword: &str) -> Vec<&'a str> {
     let mut parts = Vec::new();
     let mut start = 0;
     let mut quote = None;
+    let mut depth = 0usize;
     let mut index = 0;
 
     while index < marker.len() {
@@ -15948,7 +15960,18 @@ fn split_marker_keyword<'a>(marker: &'a str, keyword: &str) -> Vec<&'a str> {
             }
         }
 
-        if quote.is_none() && marker[index..].to_ascii_lowercase().starts_with(&separator) {
+        if quote.is_none() {
+            match ch {
+                '(' => depth += 1,
+                ')' => depth = depth.saturating_sub(1),
+                _ => {}
+            }
+        }
+
+        if quote.is_none()
+            && depth == 0
+            && marker[index..].to_ascii_lowercase().starts_with(&separator)
+        {
             parts.push(marker[start..index].trim());
             index += separator.len();
             start = index;
@@ -15960,6 +15983,54 @@ fn split_marker_keyword<'a>(marker: &'a str, keyword: &str) -> Vec<&'a str> {
 
     parts.push(marker[start..].trim());
     parts
+}
+
+fn strip_enclosing_marker_parentheses(mut marker: &str) -> &str {
+    loop {
+        let trimmed = marker.trim();
+        if !marker_has_enclosing_parentheses(trimmed) {
+            return trimmed;
+        }
+        marker = &trimmed[1..trimmed.len() - 1];
+    }
+}
+
+fn marker_has_enclosing_parentheses(marker: &str) -> bool {
+    if !marker.starts_with('(') || !marker.ends_with(')') {
+        return false;
+    }
+
+    let mut quote = None;
+    let mut depth = 0usize;
+    for (index, ch) in marker.char_indices() {
+        if matches!(ch, '\'' | '"') {
+            if quote == Some(ch) {
+                quote = None;
+            } else if quote.is_none() {
+                quote = Some(ch);
+            }
+            continue;
+        }
+        if quote.is_some() {
+            continue;
+        }
+
+        match ch {
+            '(' => depth += 1,
+            ')' => {
+                let Some(next_depth) = depth.checked_sub(1) else {
+                    return false;
+                };
+                depth = next_depth;
+                if depth == 0 && index + ch.len_utf8() != marker.len() {
+                    return false;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    depth == 0
 }
 
 fn find_outside_quotes(haystack: &str, needle: &str) -> Option<usize> {
@@ -20588,7 +20659,7 @@ print("hi")
         fs::write(
             &requirements,
             format!(
-                "local-pkg @ file:./vendor/local-pkg\nfile-url-pkg @ {file_url}\nlink:./vendor/bare-pkg[dev]\n./missing-bare; sys_platform == 'win32'\nskipped-local @ ./missing; sys_platform == 'win32'\n"
+                "local-pkg @ file:./vendor/local-pkg\nfile-url-pkg @ {file_url}\nlink:./vendor/bare-pkg[dev]\n./missing-bare; sys_platform == 'win32'\nskipped-local @ ./missing; sys_platform == 'definitely-not' and (python_version < '0' or python_version >= '3')\n"
             ),
         )
         .unwrap();
@@ -23176,6 +23247,34 @@ wheels = [
         );
         assert_eq!(
             evaluate_pypi_marker("os_name == 'nt' and python_version >= '3.0'", &env),
+            Some(false)
+        );
+        assert_eq!(
+            evaluate_pypi_marker(
+                "sys_platform == 'linux' and (python_version < '0' or python_version >= '3')",
+                &env
+            ),
+            Some(false)
+        );
+        assert_eq!(
+            evaluate_pypi_marker(
+                "sys_platform == 'darwin' and (python_version < '0' or python_version >= '3')",
+                &env
+            ),
+            Some(true)
+        );
+        assert_eq!(
+            evaluate_pypi_marker(
+                "(sys_platform == 'linux' or sys_platform == 'darwin') and python_version >= '3'",
+                &env
+            ),
+            Some(true)
+        );
+        assert_eq!(
+            evaluate_pypi_marker(
+                "(sys_platform == 'linux' or sys_platform == 'win32') and python_version >= '3'",
+                &env
+            ),
             Some(false)
         );
     }

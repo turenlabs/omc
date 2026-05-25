@@ -22595,7 +22595,7 @@ fn project_python_path(project_dir: &Path) -> Result<OsString, OmcRegistryError>
     )?;
     extend_python_path_env(&mut paths)?;
     if let Ok(user_paths) = pip_user_paths() {
-        if user_paths.site_packages.exists() || user_paths.state_project.exists() {
+        if user_paths.state_project.exists() {
             paths.push(user_paths.site_packages.clone());
             extend_python_path_file(&mut paths, &pip_user_install_local_paths_file(&user_paths)?)?;
             extend_python_path_file(
@@ -44581,6 +44581,7 @@ verdict = "accepted"
             || {
                 let user_paths = pip_user_paths().unwrap();
                 fs::create_dir_all(&user_paths.site_packages).unwrap();
+                fs::create_dir_all(&user_paths.state_project).unwrap();
 
                 let paths =
                     env::split_paths(&project_python_path(&project).unwrap()).collect::<Vec<_>>();
@@ -44618,6 +44619,37 @@ verdict = "accepted"
         fs::remove_dir_all(editable_src).unwrap();
         fs::remove_dir_all(prefix_root).unwrap();
         fs::remove_dir_all(prefix_editable_src).unwrap();
+        fs::remove_dir_all(user_base).unwrap();
+    }
+
+    #[test]
+    fn project_python_path_omits_ambient_user_site_without_omc_state() {
+        let project = test_dir("pythonpath-no-ambient-user-project");
+        let user_base = test_dir("pythonpath-no-ambient-user-base");
+
+        with_env_values(
+            &[("PYTHONUSERBASE", Some(user_base.to_str().unwrap()))],
+            || {
+                let user_paths = pip_user_paths().unwrap();
+                fs::create_dir_all(&user_paths.site_packages).unwrap();
+                fs::create_dir_all(user_paths.site_packages.join("ambientpkg")).unwrap();
+
+                let paths =
+                    env::split_paths(&project_python_path(&project).unwrap()).collect::<Vec<_>>();
+                assert_eq!(
+                    paths.first(),
+                    Some(&project.join(".omc").join("python").join("site-packages"))
+                );
+                assert!(!paths.contains(&user_paths.site_packages));
+
+                fs::create_dir_all(&user_paths.state_project).unwrap();
+                let paths =
+                    env::split_paths(&project_python_path(&project).unwrap()).collect::<Vec<_>>();
+                assert!(paths.contains(&user_paths.site_packages));
+            },
+        );
+
+        fs::remove_dir_all(project).unwrap();
         fs::remove_dir_all(user_base).unwrap();
     }
 
