@@ -22020,6 +22020,9 @@ fn project_python_path(project_dir: &Path) -> Result<OsString, OmcRegistryError>
         &mut paths,
         &project_dir.join(".omc").join("python").join("local-paths"),
     )?;
+    if let Some(existing) = env::var_os("PYTHONPATH") {
+        paths.extend(env::split_paths(&existing));
+    }
     if let Ok(user_paths) = pip_user_paths() {
         if user_paths.site_packages.exists() || user_paths.state_project.exists() {
             paths.push(user_paths.site_packages.clone());
@@ -43325,6 +43328,72 @@ verdict = "accepted"
         fs::remove_dir_all(project).unwrap();
         fs::remove_dir_all(local).unwrap();
         fs::remove_dir_all(user_base).unwrap();
+    }
+
+    #[test]
+    fn project_python_path_preserves_existing_pythonpath() {
+        let project = test_dir("pythonpath-preserve-project");
+        let extra_a = test_dir("pythonpath-preserve-extra-a");
+        let extra_b = test_dir("pythonpath-preserve-extra-b");
+        let user_base = test_dir("pythonpath-preserve-user-base");
+        fs::create_dir_all(&extra_a).unwrap();
+        fs::create_dir_all(&extra_b).unwrap();
+        let existing = env::join_paths([extra_a.as_path(), extra_b.as_path()])
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+
+        with_env_values(
+            &[
+                ("PYTHONPATH", Some(existing.as_str())),
+                ("PYTHONUSERBASE", Some(user_base.to_str().unwrap())),
+            ],
+            || {
+                let user_paths = pip_user_paths().unwrap();
+                fs::create_dir_all(&user_paths.site_packages).unwrap();
+
+                let paths =
+                    env::split_paths(&project_python_path(&project).unwrap()).collect::<Vec<_>>();
+                assert_eq!(
+                    paths.first(),
+                    Some(&project.join(".omc").join("python").join("site-packages"))
+                );
+                assert!(paths.contains(&extra_a));
+                assert!(paths.contains(&extra_b));
+                let extra_position = paths.iter().position(|path| path == &extra_a).unwrap();
+                let user_position = paths
+                    .iter()
+                    .position(|path| path == &user_paths.site_packages)
+                    .unwrap();
+                assert!(extra_position < user_position);
+            },
+        );
+
+        fs::remove_dir_all(project).unwrap();
+        fs::remove_dir_all(extra_a).unwrap();
+        fs::remove_dir_all(extra_b).unwrap();
+        fs::remove_dir_all(user_base).unwrap();
+    }
+
+    #[test]
+    fn project_python_path_starts_with_omc_project_paths() {
+        let project = test_dir("pythonpath-project-first");
+        let extra = test_dir("pythonpath-project-first-extra");
+        fs::create_dir_all(&extra).unwrap();
+        let existing = extra.to_string_lossy().into_owned();
+
+        with_env_values(&[("PYTHONPATH", Some(existing.as_str()))], || {
+            let paths =
+                env::split_paths(&project_python_path(&project).unwrap()).collect::<Vec<_>>();
+            assert_eq!(
+                paths.first(),
+                Some(&project.join(".omc").join("python").join("site-packages"))
+            );
+            assert!(paths.contains(&extra));
+        });
+
+        fs::remove_dir_all(project).unwrap();
+        fs::remove_dir_all(extra).unwrap();
     }
 
     #[test]
