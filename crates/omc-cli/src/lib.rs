@@ -31650,12 +31650,17 @@ fn is_npm_archive_arg(value: &str) -> bool {
 }
 
 fn pip_local_path_arg(value: &str) -> Result<PythonLocalRequirement, OmcRegistryError> {
-    if value.contains("://") || value.starts_with("git+") || is_pip_archive_arg(value) {
+    if value.starts_with("git+") || is_pip_archive_arg(value) {
         return Err(OmcRegistryError::UnsupportedSpec(format!(
             "pip editable path `{value}` must be a local directory"
         )));
     }
     let (path, extras) = pip_local_path_and_extras(value);
+    let path = if let Some(path) = pip_local_file_url_path(path)? {
+        return Ok(PythonLocalRequirement::new(path, extras));
+    } else {
+        path
+    };
     let path = path
         .strip_prefix("file:")
         .or_else(|| path.strip_prefix("link:"))
@@ -31669,10 +31674,13 @@ fn pip_local_path_arg(value: &str) -> Result<PythonLocalRequirement, OmcRegistry
 }
 
 fn is_pip_local_directory_arg(value: &str) -> bool {
-    if value.contains("://") || value.starts_with("git+") || is_pip_archive_arg(value) {
+    if value.starts_with("git+") || is_pip_archive_arg(value) {
         return false;
     }
     let (path, _) = pip_local_path_and_extras(value);
+    if path.contains("://") {
+        return path.starts_with("file://");
+    }
     let path = path
         .strip_prefix("file:")
         .or_else(|| path.strip_prefix("link:"))
@@ -31684,6 +31692,24 @@ fn is_pip_local_directory_arg(value: &str) -> bool {
         || path.starts_with("~/")
         || path.contains('/')
         || path.contains('\\')
+}
+
+fn pip_local_file_url_path(value: &str) -> Result<Option<PathBuf>, OmcRegistryError> {
+    if !value.contains("://") {
+        return Ok(None);
+    }
+    let url = reqwest::Url::parse(value)
+        .map_err(|_| OmcRegistryError::UnsupportedSpec(value.to_owned()))?;
+    if url.scheme() != "file" {
+        return Err(OmcRegistryError::UnsupportedSpec(format!(
+            "pip local directory URL `{value}` must use file://"
+        )));
+    }
+    url.to_file_path().map(Some).map_err(|_| {
+        OmcRegistryError::UnsupportedSpec(format!(
+            "pip local directory URL `{value}` must use a valid file URL"
+        ))
+    })
 }
 
 fn is_pip_pylock_requirements_arg(value: &str) -> bool {
@@ -42978,6 +43004,52 @@ version = "0.1.0"
     }
 
     #[test]
+    fn pip_install_file_url_local_directory_installs_wheel_not_editable() {
+        let project = test_dir("pip-install-file-url-local-project");
+        let local = test_dir("pip-install-file-url-local-package");
+        fs::create_dir_all(local.join("src").join("file_url_local")).unwrap();
+        fs::write(
+            local.join("src").join("file_url_local").join("__init__.py"),
+            "VALUE = 23\n",
+        )
+        .unwrap();
+        fs::write(
+            local.join("pyproject.toml"),
+            r#"
+[project]
+name = "file-url-local"
+version = "0.1.0"
+"#,
+        )
+        .unwrap();
+        let local_url = reqwest::Url::from_directory_path(&local)
+            .unwrap()
+            .to_string();
+
+        let status = with_clean_pip_env(|| {
+            run_pip_compat(&project, &args(&["install", &local_url, "--no-deps"]))
+        })
+        .unwrap();
+
+        assert_eq!(status, ExitCode::SUCCESS);
+        let site_packages = project.join(".omc").join("python").join("site-packages");
+        assert!(site_packages
+            .join("file_url_local")
+            .join("__init__.py")
+            .exists());
+        assert!(site_packages
+            .join("file_url_local-0.1.0.dist-info")
+            .join("METADATA")
+            .exists());
+        assert!(pip_freeze_local_path_requirements(&project)
+            .unwrap()
+            .is_empty());
+
+        let _ = fs::remove_dir_all(project);
+        let _ = fs::remove_dir_all(local);
+    }
+
+    #[test]
     fn pip_install_requirements_local_directory_installs_wheel_not_editable() {
         let project = test_dir("pip-install-requirements-local-project");
         let local = project.join("localpkg");
@@ -43030,6 +43102,48 @@ version = "0.1.0"
             .any(|package| package.name == "requirements-local" && package.version == "0.1.0"));
 
         let _ = fs::remove_dir_all(project);
+    }
+
+    #[test]
+    fn pip_install_editable_file_url_local_directory_adds_local_path() {
+        let project = test_dir("pip-install-editable-file-url-local-project");
+        let local = test_dir("pip-install-editable-file-url-local-package");
+        fs::create_dir_all(local.join("src").join("fileurledit")).unwrap();
+        fs::write(
+            local.join("src").join("fileurledit").join("__init__.py"),
+            "VALUE = 29\n",
+        )
+        .unwrap();
+        fs::write(
+            local.join("pyproject.toml"),
+            r#"
+[project]
+name = "fileurledit"
+version = "0.1.0"
+"#,
+        )
+        .unwrap();
+        let local_url = reqwest::Url::from_directory_path(&local)
+            .unwrap()
+            .to_string();
+
+        let status =
+            with_clean_pip_env(|| run_pip_compat(&project, &args(&["install", "-e", &local_url])))
+                .unwrap();
+
+        assert_eq!(status, ExitCode::SUCCESS);
+        let local_src = fs::canonicalize(local.join("src")).unwrap();
+        assert_eq!(
+            pip_freeze_local_path_requirements(&project).unwrap(),
+            vec![format!("-e {}", local_src.display())]
+        );
+        assert_eq!(
+            run_python(&project, &args(&["-c", "import fileurledit"])).unwrap(),
+            ExitCode::SUCCESS
+        );
+
+        let _ = fs::remove_dir_all(project);
+        let _ = fs::remove_dir_all(local);
     }
 
     #[test]

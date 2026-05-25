@@ -761,8 +761,9 @@ Supported now:
   `--editable`, `--include-editable`, and `--exclude-editable` filter local
   editable installs recorded by OMC, and `pip list --not-required` filters to
   top-level packages not required by another installed package;
-  direct `pip install -e PATH` and `pip install ./path` local directory
-  installs, including selected extras such as
+  direct `pip install -e PATH`, `pip install ./path`, and
+  `pip install file:///absolute/path` local directory installs, including
+  selected extras such as
   `pip install -e '.[dev]'`; direct
   `pip install ./archive.whl`, `./archive.tar.gz`, and HTTPS archive URL
   installs; editable git/VCS installs such as `pip install -e git+...#egg=name`;
