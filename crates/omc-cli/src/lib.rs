@@ -4829,7 +4829,7 @@ fn run_npm_compat_with_cwd(
         NpmCompatAction::Audit { json } => return print_audit_report(project_dir, json),
         NpmCompatAction::Fund { action } => print_npm_fund(project_dir, action)?,
         NpmCompatAction::Cache { action, cache_dir } => {
-            let cache_dir = cache_dir.map(|path| absolutize_path(invocation_cwd, path));
+            let cache_dir = npm_cache_arg_or_env(invocation_cwd, cache_dir);
             print_npm_cache(project_dir, action, cache_dir.as_deref())?
         }
         NpmCompatAction::Pkg { action } => print_npm_pkg(project_dir, action)?,
@@ -6318,7 +6318,7 @@ fn run_pip_compat_with_cwd(
             print_pip_hash(invocation_cwd, algorithm, paths)?
         }
         PipCompatAction::Cache { action, cache_dir } => {
-            let cache_dir = cache_dir.map(|path| absolutize_path(invocation_cwd, path));
+            let cache_dir = pip_cache_arg_or_env(invocation_cwd, cache_dir);
             return print_pip_cache(project_dir, action, cache_dir.as_deref());
         }
         PipCompatAction::Check { user } => {
@@ -15435,6 +15435,16 @@ fn npm_compat_cache_dir(project_dir: &Path, cache_dir: Option<&Path>) -> PathBuf
         .unwrap_or_else(|| npm_cache_dir(project_dir))
 }
 
+fn npm_cache_arg_or_env(invocation_cwd: &Path, cache_dir: Option<PathBuf>) -> Option<PathBuf> {
+    cache_dir
+        .or_else(npm_cache_dir_env)
+        .map(|path| absolutize_path(invocation_cwd, path))
+}
+
+fn npm_cache_dir_env() -> Option<PathBuf> {
+    env_path_from_any(["NPM_CONFIG_CACHE", "npm_config_cache"])
+}
+
 fn remove_npm_cache_entries(cache_dir: &Path, pattern: &str) -> Result<usize, OmcRegistryError> {
     let mut files = compat_cache_files(cache_dir)?;
     files.retain(|path| compat_cache_pattern_matches(path, cache_dir, pattern));
@@ -17928,6 +17938,24 @@ fn pip_debug_report(
 
 fn pip_cache_dir(project_dir: &Path) -> PathBuf {
     project_dir.join(".omc").join("cache").join("pypi")
+}
+
+fn pip_cache_arg_or_env(invocation_cwd: &Path, cache_dir: Option<PathBuf>) -> Option<PathBuf> {
+    cache_dir
+        .or_else(pip_cache_dir_env)
+        .map(|path| absolutize_path(invocation_cwd, path))
+}
+
+fn pip_cache_dir_env() -> Option<PathBuf> {
+    env_path_from_any(["PIP_CACHE_DIR"])
+}
+
+fn env_path_from_any<const N: usize>(keys: [&str; N]) -> Option<PathBuf> {
+    keys.into_iter().find_map(|key| {
+        env::var_os(key)
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from)
+    })
 }
 
 fn compat_cache_files(cache_dir: &Path) -> Result<Vec<PathBuf>, OmcRegistryError> {
@@ -33711,6 +33739,7 @@ mod tests {
                 ("PIP_DEST", None),
                 ("PIP_DESTINATION_DIR", None),
                 ("PIP_WHEEL_DIR", None),
+                ("PIP_CACHE_DIR", None),
             ],
             f,
         )
@@ -40668,6 +40697,27 @@ verdict = "accepted"
     }
 
     #[test]
+    fn npm_cache_dir_prefers_cli_then_env_like_npm() {
+        let cwd = test_dir("npm-cache-env-cwd");
+        with_env_values(
+            &[
+                ("NPM_CONFIG_CACHE", Some("upper-cache")),
+                ("npm_config_cache", Some("lower-cache")),
+            ],
+            || {
+                assert_eq!(
+                    npm_cache_arg_or_env(&cwd, None).unwrap(),
+                    cwd.join("upper-cache")
+                );
+                assert_eq!(
+                    npm_cache_arg_or_env(&cwd, Some(PathBuf::from("cli-cache"))).unwrap(),
+                    cwd.join("cli-cache")
+                );
+            },
+        );
+    }
+
+    #[test]
     fn npm_cache_remove_missing_pattern_preserves_cache_like_npm() {
         let project = test_dir("npm-cache-remove-missing");
         let cache_file = npm_cache_dir(&project)
@@ -47465,6 +47515,21 @@ version = "0.2.0"
                 "Number of wheels: 1".to_owned(),
             ]
         );
+    }
+
+    #[test]
+    fn pip_cache_dir_prefers_cli_then_env_like_pip() {
+        let cwd = test_dir("pip-cache-env-cwd");
+        with_env_values(&[("PIP_CACHE_DIR", Some("env-cache"))], || {
+            assert_eq!(
+                pip_cache_arg_or_env(&cwd, None).unwrap(),
+                cwd.join("env-cache")
+            );
+            assert_eq!(
+                pip_cache_arg_or_env(&cwd, Some(PathBuf::from("cli-cache"))).unwrap(),
+                cwd.join("cli-cache")
+            );
+        });
     }
 
     #[test]
