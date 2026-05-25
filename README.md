@@ -215,6 +215,7 @@ cargo run -p omc-cli --bin npx -- --omc-project-dir /tmp/omc-demo --allow-all-ho
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm root
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm bin
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip install -r requirements.txt -c constraints.txt
+cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip install -Ur requirements.txt
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip help install
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip completion --bash
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip install --dry-run --report install-report.json requests==2.32.3

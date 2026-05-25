@@ -30756,6 +30756,8 @@ fn parse_pip_freeze_args(args: &[String]) -> Result<PipFreezeAction, OmcRegistry
 }
 
 fn parse_pip_install_args(args: &[String]) -> Result<PipCompatAction, OmcRegistryError> {
+    let expanded_short_clusters = expand_pip_install_short_clusters(args);
+    let args = expanded_short_clusters.as_slice();
     let mut requirements = Vec::new();
     let mut constraints = Vec::new();
     let mut script_requirements = Vec::new();
@@ -31158,6 +31160,15 @@ fn parse_pip_lock_args(args: &[String]) -> Result<PipCompatAction, OmcRegistryEr
     })))
 }
 
+fn expand_pip_install_short_clusters(args: &[String]) -> Vec<String> {
+    args.iter()
+        .flat_map(|arg| {
+            expand_pip_short_cluster(arg, &['U', 'I'], &['r', 'c', 'i', 'f', 't', 'e', 'C'])
+                .unwrap_or_else(|| vec![arg.clone()])
+        })
+        .collect()
+}
+
 fn parse_pip_download_args(args: &[String]) -> Result<PipCompatAction, OmcRegistryError> {
     parse_pip_artifact_args(args, PipArtifactCommand::Download)
 }
@@ -31544,6 +31555,50 @@ fn pip_attached_short_value(arg: &str, flag: char) -> Option<&str> {
     let rest = arg.strip_prefix('-')?;
     let value = rest.strip_prefix(flag)?;
     (!value.is_empty()).then_some(value)
+}
+
+fn expand_pip_short_cluster(
+    arg: &str,
+    bool_flags: &[char],
+    value_flags: &[char],
+) -> Option<Vec<String>> {
+    if arg.starts_with("--") {
+        return None;
+    }
+    let body = arg.strip_prefix('-')?;
+    if body.chars().count() <= 1 {
+        return None;
+    }
+
+    let chars = body.chars().collect::<Vec<_>>();
+    if value_flags.contains(&chars[0]) {
+        return (chars[0] == 'C' && chars.len() > 1)
+            .then(|| vec!["-C".to_owned(), chars[1..].iter().collect::<String>()]);
+    }
+
+    let mut expanded = Vec::new();
+    let mut index = 0;
+    while index < chars.len() {
+        let flag = chars[index];
+        if matches!(flag, 'q' | 'v') || bool_flags.contains(&flag) {
+            expanded.push(format!("-{flag}"));
+            index += 1;
+        } else if value_flags.contains(&flag) {
+            let value = chars[index + 1..].iter().collect::<String>();
+            if value.is_empty() {
+                expanded.push(format!("-{flag}"));
+            } else if flag == 'C' {
+                expanded.push("-C".to_owned());
+                expanded.push(value);
+            } else {
+                expanded.push(format!("-{flag}{value}"));
+            }
+            return Some(expanded);
+        } else {
+            return None;
+        }
+    }
+    Some(expanded)
 }
 
 fn pip_target_flag_value(
@@ -42726,6 +42781,30 @@ verdict = "accepted"
                     )]
                 );
                 assert_eq!(action.specs, vec!["requests==2.32.3"]);
+            }
+            other => panic!("expected pip install action, got {other:?}"),
+        }
+
+        match parse_pip_compat_action(&args(&[
+            "install",
+            "-Ur",
+            "requirements.txt",
+            "-Ue../editable_pkg",
+            "-ICeditable_mode=strict",
+        ]))
+        .unwrap()
+        {
+            PipCompatAction::Install(action) => {
+                assert_eq!(action.requirements, vec![PathBuf::from("requirements.txt")]);
+                assert_eq!(
+                    action.local_paths,
+                    vec![PythonLocalRequirement::new(
+                        PathBuf::from("../editable_pkg"),
+                        BTreeSet::new()
+                    )]
+                );
+                assert!(action.upgrade);
+                assert!(action.force_reinstall);
             }
             other => panic!("expected pip install action, got {other:?}"),
         }
