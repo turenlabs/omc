@@ -18737,11 +18737,19 @@ fn remove_specs(
     let mut removed_locked = false;
     let mut removed_manifest = false;
     for spec in &specs {
-        let removed_from_manifest = if missing_ok && !project_dir.join("omc.toml").exists() {
-            false
+        let removed_from_manifest_dependency =
+            if missing_ok && !project_dir.join("omc.toml").exists() {
+                false
+            } else {
+                remove_manifest_dependency(project_dir, spec)?
+            };
+        let removed_from_manifest_local_path = if spec.ecosystem == Ecosystem::Npm {
+            remove_manifest_npm_local_paths_for_package(project_dir, &spec.name)?
         } else {
-            remove_manifest_dependency(project_dir, spec)?
+            false
         };
+        let removed_from_manifest =
+            removed_from_manifest_dependency || removed_from_manifest_local_path;
         removed_manifest |= removed_from_manifest;
         let removed_from_package_json =
             if update_npm_package_json && spec.ecosystem == Ecosystem::Npm {
@@ -18834,6 +18842,78 @@ fn remove_specs(
     println!("removed {}", removed.join(", "));
     print_install_report(&install);
     Ok(true)
+}
+
+fn remove_manifest_npm_local_paths_for_package(
+    project_dir: &Path,
+    name: &str,
+) -> Result<bool, OmcRegistryError> {
+    let manifest_path = project_dir.join("omc.toml");
+    if !manifest_path.exists() {
+        return Ok(false);
+    }
+
+    let mut manifest = read_manifest(&manifest_path)?;
+    let mut removed = false;
+    removed |= remove_manifest_npm_local_paths_for_package_from_vec(
+        project_dir,
+        &mut manifest.npm_local_paths,
+        name,
+    )?;
+    removed |= remove_manifest_npm_local_paths_for_package_from_vec(
+        project_dir,
+        &mut manifest.npm_dev_local_paths,
+        name,
+    )?;
+    removed |= remove_manifest_npm_local_paths_for_package_from_vec(
+        project_dir,
+        &mut manifest.npm_optional_local_paths,
+        name,
+    )?;
+    removed |= remove_manifest_npm_local_paths_for_package_from_vec(
+        project_dir,
+        &mut manifest.npm_peer_local_paths,
+        name,
+    )?;
+
+    if removed {
+        fs::write(&manifest_path, toml::to_string_pretty(&manifest)?)?;
+    }
+    Ok(removed)
+}
+
+fn remove_manifest_npm_local_paths_for_package_from_vec(
+    project_dir: &Path,
+    paths: &mut Vec<String>,
+    name: &str,
+) -> Result<bool, OmcRegistryError> {
+    let mut kept = Vec::with_capacity(paths.len());
+    let mut removed = false;
+    for path in std::mem::take(paths) {
+        if npm_manifest_local_path_has_package_name(project_dir, &path, name)? {
+            removed = true;
+        } else {
+            kept.push(path);
+        }
+    }
+    *paths = kept;
+    Ok(removed)
+}
+
+fn npm_manifest_local_path_has_package_name(
+    project_dir: &Path,
+    path: &str,
+    name: &str,
+) -> Result<bool, OmcRegistryError> {
+    let package_json = absolutize_path(project_dir, PathBuf::from(path)).join("package.json");
+    if !package_json.exists() {
+        return Ok(false);
+    }
+    let package = read_npm_pkg_json(&package_json)?;
+    Ok(package
+        .get("name")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|package_name| package_name == name))
 }
 
 #[derive(Default)]
@@ -35328,6 +35408,70 @@ mod tests {
         ] {
             assert!(!lock_packages.contains_key(path));
         }
+
+        let _ = fs::remove_dir_all(project);
+    }
+
+    #[test]
+    fn npm_remove_prunes_saved_local_directory_links() {
+        let project = test_dir("npm-remove-local-directory-link-project");
+        let local_package = project.join("pkg");
+        fs::create_dir_all(&local_package).unwrap();
+        fs::write(
+            project.join("package.json"),
+            r#"{"name":"root","version":"1.0.0"}"#,
+        )
+        .unwrap();
+        fs::write(
+            local_package.join("package.json"),
+            r#"{"name":"local-pkg","version":"1.0.0","main":"index.js","bin":{"local-tool":"cli.js"}}"#,
+        )
+        .unwrap();
+        fs::write(local_package.join("index.js"), "module.exports = 61;\n").unwrap();
+        fs::write(local_package.join("cli.js"), "#!/usr/bin/env node\n").unwrap();
+
+        let status = run_npm_compat(
+            &project,
+            &args(&["install", "--package-lock=false", "./pkg"]),
+        )
+        .unwrap();
+
+        assert_eq!(status, ExitCode::SUCCESS);
+        assert!(project.join("node_modules/local-pkg").exists());
+        assert!(project.join("node_modules/.bin/local-tool").exists());
+        let manifest = read_manifest(project.join("omc.toml")).unwrap();
+        assert_eq!(
+            manifest.npm_local_paths,
+            vec![project.join("./pkg").display().to_string()]
+        );
+        let package_json = read_npm_pkg_json(&project.join("package.json")).unwrap();
+        assert_eq!(
+            package_json["dependencies"]["local-pkg"],
+            format!(
+                "file:{}",
+                fs::canonicalize(&local_package).unwrap().display()
+            )
+        );
+
+        let status = run_npm_compat(
+            &project,
+            &args(&["uninstall", "--package-lock=false", "local-pkg"]),
+        )
+        .unwrap();
+
+        assert_eq!(status, ExitCode::SUCCESS);
+        assert!(!project.join("node_modules/local-pkg").exists());
+        assert!(!project.join("node_modules/.bin/local-tool").exists());
+        let manifest = read_manifest(project.join("omc.toml")).unwrap();
+        assert!(manifest.npm_local_paths.is_empty());
+        assert!(manifest.npm_dev_local_paths.is_empty());
+        assert!(manifest.npm_optional_local_paths.is_empty());
+        assert!(manifest.npm_peer_local_paths.is_empty());
+        let package_json = read_npm_pkg_json(&project.join("package.json")).unwrap();
+        assert!(package_json
+            .get("dependencies")
+            .and_then(serde_json::Value::as_object)
+            .is_none_or(|dependencies| !dependencies.contains_key("local-pkg")));
 
         let _ = fs::remove_dir_all(project);
     }
