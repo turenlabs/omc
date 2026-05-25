@@ -22042,6 +22042,11 @@ fn extend_python_path_env(paths: &mut Vec<PathBuf>) -> Result<(), OmcRegistryErr
     for path in env::split_paths(&existing) {
         paths.push(path.clone());
         extend_python_path_file(paths, &path.join(".omc-local-paths"))?;
+        if path.file_name().and_then(|name| name.to_str()) == Some("site-packages") {
+            if let Some(parent) = path.parent() {
+                extend_python_path_file(paths, &parent.join("local-paths"))?;
+            }
+        }
     }
     Ok(())
 }
@@ -43345,19 +43350,33 @@ verdict = "accepted"
         let extra_a = test_dir("pythonpath-preserve-extra-a");
         let extra_b = test_dir("pythonpath-preserve-extra-b");
         let editable_src = test_dir("pythonpath-preserve-editable-src");
+        let prefix_root = test_dir("pythonpath-preserve-prefix");
+        let prefix_site = prefix_root
+            .join("lib")
+            .join("python3.12")
+            .join("site-packages");
+        let prefix_editable_src = test_dir("pythonpath-preserve-prefix-editable-src");
         let user_base = test_dir("pythonpath-preserve-user-base");
         fs::create_dir_all(&extra_a).unwrap();
         fs::create_dir_all(&extra_b).unwrap();
         fs::create_dir_all(&editable_src).unwrap();
+        fs::create_dir_all(&prefix_site).unwrap();
+        fs::create_dir_all(&prefix_editable_src).unwrap();
         fs::write(
             extra_a.join(".omc-local-paths"),
             format!("{}\n", editable_src.display()),
         )
         .unwrap();
-        let existing = env::join_paths([extra_a.as_path(), extra_b.as_path()])
-            .unwrap()
-            .to_string_lossy()
-            .into_owned();
+        fs::write(
+            prefix_site.parent().unwrap().join("local-paths"),
+            format!("{}\n", prefix_editable_src.display()),
+        )
+        .unwrap();
+        let existing =
+            env::join_paths([extra_a.as_path(), prefix_site.as_path(), extra_b.as_path()])
+                .unwrap()
+                .to_string_lossy()
+                .into_owned();
 
         with_env_values(
             &[
@@ -43377,15 +43396,24 @@ verdict = "accepted"
                 assert!(paths.contains(&extra_a));
                 assert!(paths.contains(&extra_b));
                 assert!(paths.contains(&editable_src));
+                assert!(paths.contains(&prefix_site));
+                assert!(paths.contains(&prefix_editable_src));
                 let extra_position = paths.iter().position(|path| path == &extra_a).unwrap();
                 let editable_position =
                     paths.iter().position(|path| path == &editable_src).unwrap();
                 assert!(extra_position < editable_position);
+                let prefix_position = paths.iter().position(|path| path == &prefix_site).unwrap();
+                let prefix_editable_position = paths
+                    .iter()
+                    .position(|path| path == &prefix_editable_src)
+                    .unwrap();
+                assert!(prefix_position < prefix_editable_position);
                 let user_position = paths
                     .iter()
                     .position(|path| path == &user_paths.site_packages)
                     .unwrap();
                 assert!(editable_position < user_position);
+                assert!(prefix_editable_position < user_position);
             },
         );
 
@@ -43393,6 +43421,8 @@ verdict = "accepted"
         fs::remove_dir_all(extra_a).unwrap();
         fs::remove_dir_all(extra_b).unwrap();
         fs::remove_dir_all(editable_src).unwrap();
+        fs::remove_dir_all(prefix_root).unwrap();
+        fs::remove_dir_all(prefix_editable_src).unwrap();
         fs::remove_dir_all(user_base).unwrap();
     }
 
