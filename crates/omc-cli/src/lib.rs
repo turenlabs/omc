@@ -13913,6 +13913,7 @@ fn prepare_pip_local_directory_archive_specs(
     }
     fs::create_dir_all(&wheelhouse)?;
 
+    let requested_requirements = requirements.len();
     if options.pypi_include_dependencies {
         let _ = collect_pip_local_wheel_dependencies(source_project_dir, &mut requirements)?;
     }
@@ -13930,7 +13931,7 @@ fn prepare_pip_local_directory_archive_specs(
 
     let mut specs = Vec::new();
     let mut seen = BTreeSet::new();
-    for requirement in requirements {
+    for (index, requirement) in requirements.into_iter().enumerate() {
         let package_dir = resolve_pip_local_wheel_path(source_project_dir, &requirement)?;
         let metadata = read_pip_local_wheel_metadata(&package_dir, &requirement.extras)?;
         let wheel_path = wheelhouse.join(pip_local_wheel_filename(&metadata));
@@ -13955,7 +13956,7 @@ fn prepare_pip_local_directory_archive_specs(
                 .or_default()
                 .extend(hashes);
         }
-        if seen.insert(spec.requested()) {
+        if index < requested_requirements && seen.insert(spec.requested()) {
             specs.push(spec);
         }
     }
@@ -14179,6 +14180,10 @@ fn pip_local_wheel_dependency_source(
             ))
         })?
     } else {
+        let source = source
+            .strip_prefix("file:")
+            .or_else(|| source.strip_prefix("link:"))
+            .unwrap_or(source);
         let path = PathBuf::from(source);
         if path.is_absolute() {
             path
@@ -43071,6 +43076,63 @@ dev = ["deppkg @ file:./dep"]
         assert!(site_packages.join("rootpkg-0.1.0.dist-info").exists());
         assert!(!site_packages.join("deppkg").exists());
         assert!(!site_packages.join("deppkg-0.1.0.dist-info").exists());
+
+        let _ = fs::remove_dir_all(project);
+    }
+
+    #[test]
+    fn pip_install_local_directory_file_dependency_builds_recursive_wheels() {
+        let project = test_dir("pip-install-local-file-dependency-project");
+        let package = project.join("pkg");
+        let dependency = package.join("dep");
+        fs::create_dir_all(package.join("src").join("rootpkg")).unwrap();
+        fs::create_dir_all(dependency.join("src").join("deppkg")).unwrap();
+        fs::write(
+            package.join("src").join("rootpkg").join("__init__.py"),
+            "VALUE = 'root'\n",
+        )
+        .unwrap();
+        fs::write(
+            dependency.join("src").join("deppkg").join("__init__.py"),
+            "VALUE = 'dep'\n",
+        )
+        .unwrap();
+        fs::write(
+            dependency.join("pyproject.toml"),
+            r#"
+[project]
+name = "deppkg"
+version = "0.1.0"
+"#,
+        )
+        .unwrap();
+        fs::write(
+            package.join("pyproject.toml"),
+            r#"
+[project]
+name = "rootpkg"
+version = "0.1.0"
+dependencies = ["deppkg @ file:./dep"]
+"#,
+        )
+        .unwrap();
+
+        let status =
+            with_clean_pip_env(|| run_pip_compat(&project, &args(&["install", "./pkg"]))).unwrap();
+
+        assert_eq!(status, ExitCode::SUCCESS);
+        let site_packages = project.join(".omc").join("python").join("site-packages");
+        assert!(site_packages.join("rootpkg").join("__init__.py").exists());
+        assert!(site_packages.join("deppkg").join("__init__.py").exists());
+        let lock = read_lockfile(project.join("omc.lock")).unwrap();
+        assert!(lock
+            .packages
+            .iter()
+            .any(|package| package.name == "rootpkg" && package.version == "0.1.0"));
+        assert!(lock
+            .packages
+            .iter()
+            .any(|package| package.name == "deppkg" && package.version == "0.1.0"));
 
         let _ = fs::remove_dir_all(project);
     }
