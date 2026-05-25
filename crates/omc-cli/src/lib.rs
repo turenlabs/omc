@@ -17727,11 +17727,9 @@ fn print_pip_cache(
     match action {
         PipCacheAction::Dir => println!("{}", cache_dir.display()),
         PipCacheAction::Info => {
-            let files = compat_cache_files(&cache_dir)?;
-            let bytes = cache_files_size(&files)?;
-            println!("Package index page cache location: {}", cache_dir.display());
-            println!("Number of files: {}", files.len());
-            println!("Size: {bytes} bytes");
+            for line in pip_cache_info_lines(&cache_dir)? {
+                println!("{line}");
+            }
         }
         PipCacheAction::List { pattern, format } => {
             for line in pip_cache_list_lines(&cache_dir, pattern.as_deref(), format)? {
@@ -17953,6 +17951,22 @@ fn pip_cache_list_lines(
         .into_iter()
         .map(|path| pip_cache_list_display_path(&path, cache_dir, format))
         .collect())
+}
+
+fn pip_cache_info_lines(cache_dir: &Path) -> Result<Vec<String>, OmcRegistryError> {
+    let files = compat_cache_files(cache_dir)?;
+    let bytes = cache_files_size(&files)?;
+    Ok(vec![
+        format!(
+            "Package index page cache location: {}",
+            cache_dir.join("http").display()
+        ),
+        "Package index page cache size: 0 bytes".to_owned(),
+        "Number of HTTP files: 0".to_owned(),
+        format!("Wheels location: {}", cache_dir.display()),
+        format!("Wheels size: {bytes} bytes"),
+        format!("Number of wheels: {}", files.len()),
+    ])
 }
 
 fn prune_empty_cache_dirs(root: &Path) -> Result<(), OmcRegistryError> {
@@ -47305,6 +47319,26 @@ version = "0.2.0"
             pip_cache_list_lines(&empty_cache, None, PipCacheListFormat::Abspath)
                 .unwrap()
                 .is_empty()
+        );
+
+        let info_cache = test_dir("pip-cache-info");
+        let info_file = info_cache.join("wheels").join("demo.whl");
+        fs::create_dir_all(info_file.parent().unwrap()).unwrap();
+        fs::write(&info_file, b"wheel").unwrap();
+        let info = pip_cache_info_lines(&info_cache).unwrap();
+        assert_eq!(
+            info,
+            vec![
+                format!(
+                    "Package index page cache location: {}",
+                    info_cache.join("http").display()
+                ),
+                "Package index page cache size: 0 bytes".to_owned(),
+                "Number of HTTP files: 0".to_owned(),
+                format!("Wheels location: {}", info_cache.display()),
+                "Wheels size: 5 bytes".to_owned(),
+                "Number of wheels: 1".to_owned(),
+            ]
         );
     }
 
