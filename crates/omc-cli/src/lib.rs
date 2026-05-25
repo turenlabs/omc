@@ -23692,6 +23692,7 @@ fn npm_global_arg_supported_by_command(command: &str, arg: &str) -> bool {
     if matches!(arg, "--workspace" | "-w")
         || arg.starts_with("--workspace=")
         || arg.starts_with("-w=")
+        || npm_attached_short_value(arg, 'w').is_some()
     {
         return matches!(
             command,
@@ -24020,6 +24021,10 @@ fn npm_global_preserved_value_flag(arg: &str) -> bool {
 }
 
 fn npm_global_preserved_equals_flag(arg: &str) -> bool {
+    if npm_attached_short_value(arg, 'w').is_some() {
+        return true;
+    }
+
     [
         "--registry=",
         "--json=",
@@ -24800,6 +24805,25 @@ fn npm_bool_flag_value(arg: &str, flag: &str) -> Option<bool> {
         "true" => Some(true),
         "false" => Some(false),
         _ => None,
+    }
+}
+
+fn npm_attached_short_value(arg: &str, flag: char) -> Option<&str> {
+    if arg.starts_with("--") {
+        return None;
+    }
+
+    let body = arg.strip_prefix('-')?;
+    let mut chars = body.chars();
+    if chars.next()? != flag {
+        return None;
+    }
+
+    let value = chars.as_str();
+    if value.is_empty() || value.starts_with('=') {
+        None
+    } else {
+        Some(value)
     }
 }
 
@@ -29158,6 +29182,8 @@ fn parse_npm_run_args(
             .or_else(|| arg.strip_prefix("-w="))
         {
             workspaces.push(workspace.to_owned());
+        } else if let Some(workspace) = npm_attached_short_value(arg, 'w') {
+            workspaces.push(workspace.to_owned());
         } else if arg == "--loglevel" {
             index += 1;
             if args.get(index).is_none() {
@@ -29312,6 +29338,8 @@ fn parse_npm_exec_args(
             } else {
                 workspaces.push(workspace.to_owned());
             }
+        } else if let Some(workspace) = npm_attached_short_value(arg, 'w') {
+            workspaces.push(workspace.to_owned());
         } else if ignored_npm_install_preference_flag(arg) {
         } else if matches!(arg.as_str(), "--cache" | "--userconfig" | "--loglevel") {
             index += 1;
@@ -32109,6 +32137,8 @@ fn parse_common_compat_flags(
                 } else {
                     parsed.workspaces.push(workspace.to_owned());
                 }
+            } else if let Some(workspace) = npm_attached_short_value(arg, 'w') {
+                parsed.workspaces.push(workspace.to_owned());
             } else if matches!(arg.as_str(), "--workspaces" | "--workspaces=true") {
                 parsed.all_workspaces = true;
             } else if arg == "--workspaces=false" {
@@ -37514,6 +37544,13 @@ verdict = "accepted"
             }
         );
 
+        let action =
+            parse_npm_compat_action(&args(&["install", "-w@demo/lib", "left-pad"])).unwrap();
+        let NpmCompatAction::Install { workspaces, .. } = action else {
+            panic!("expected npm install action");
+        };
+        assert_eq!(workspaces, vec!["@demo/lib"]);
+
         assert_eq!(
             parse_npm_compat_action(&args(&[
                 "remove",
@@ -37857,15 +37894,8 @@ verdict = "accepted"
             }
         );
         assert_eq!(
-            parse_npm_compat_action(&args(&[
-                "--workspace",
-                "@demo/lib",
-                "run",
-                "build",
-                "--",
-                "--watch",
-            ]))
-            .unwrap(),
+            parse_npm_compat_action(&args(&["-w@demo/lib", "run", "build", "--", "--watch",]))
+                .unwrap(),
             NpmCompatAction::RunScript {
                 command: "run".to_owned(),
                 name: "build".to_owned(),
@@ -38099,8 +38129,7 @@ verdict = "accepted"
         );
         assert_eq!(
             parse_npm_compat_action(&args(&[
-                "--workspace",
-                "@demo/lib",
+                "-w@demo/lib",
                 "exec",
                 "--include-workspace-root",
                 "--",
