@@ -16572,13 +16572,22 @@ fn collect_quoted_argument_targets(content: &str, marker: &str, targets: &mut BT
 fn extract_http_hosts(content: &str) -> BTreeSet<String> {
     quoted_string_literals(content)
         .into_iter()
-        .filter(|literal| literal.starts_with("http://") || literal.starts_with("https://"))
-        .filter_map(|literal| {
-            reqwest::Url::parse(&literal)
-                .ok()
-                .and_then(|url| url.host_str().map(str::to_owned))
-        })
+        .filter_map(|literal| http_url_host_authority(&literal))
         .collect()
+}
+
+fn http_url_host_authority(literal: &str) -> Option<String> {
+    let scheme = literal.split_once(':')?.0;
+    if !matches!(scheme.to_ascii_lowercase().as_str(), "http" | "https") {
+        return None;
+    }
+    let url = reqwest::Url::parse(literal).ok()?;
+    let host = url.host_str()?;
+    Some(
+        url.port()
+            .map(|port| format!("{host}:{port}"))
+            .unwrap_or_else(|| host.to_owned()),
+    )
 }
 
 fn quoted_string_literals(content: &str) -> Vec<String> {
@@ -23818,6 +23827,32 @@ wheels = [
             |finding| finding.kind == CapabilityKind::EnvRead && finding.target == "NPM_TOKEN"
         ));
         assert!(profile
+            .capabilities
+            .iter()
+            .any(|finding| finding.kind == CapabilityKind::HttpRequest
+                && finding.target == "evil.example"));
+    }
+
+    #[test]
+    fn profiler_preserves_static_url_ports_for_network_capabilities() {
+        let mut profiler = SourceProfiler::default();
+        profiler.scan_file(
+            "index.js",
+            "fetch('HTTPS://evil.example:8443/path'); fetch('http://plain.example:8080/a');",
+        );
+        let profile = profiler.finish();
+
+        assert!(profile
+            .capabilities
+            .iter()
+            .any(|finding| finding.kind == CapabilityKind::HttpRequest
+                && finding.target == "evil.example:8443"));
+        assert!(profile
+            .capabilities
+            .iter()
+            .any(|finding| finding.kind == CapabilityKind::HttpRequest
+                && finding.target == "plain.example:8080"));
+        assert!(!profile
             .capabilities
             .iter()
             .any(|finding| finding.kind == CapabilityKind::HttpRequest
