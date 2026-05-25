@@ -30728,7 +30728,7 @@ fn parse_pip_freeze_args(args: &[String]) -> Result<PipFreezeAction, OmcRegistry
             action.user = true;
         } else if matches!(
             arg.as_str(),
-            "--all" | "--local" | "--exclude-editable" | "--disable-pip-version-check"
+            "--all" | "--local" | "-l" | "--exclude-editable" | "--disable-pip-version-check"
         ) || pip_ignored_verbosity_flag(arg)
         {
             if arg == "--exclude-editable" {
@@ -31184,7 +31184,7 @@ fn expand_pip_install_short_clusters(args: &[String]) -> Vec<String> {
 fn expand_pip_freeze_short_clusters(args: &[String]) -> Vec<String> {
     args.iter()
         .flat_map(|arg| {
-            expand_pip_short_cluster(arg, &[], &['r']).unwrap_or_else(|| vec![arg.clone()])
+            expand_pip_short_cluster(arg, &['l'], &['r']).unwrap_or_else(|| vec![arg.clone()])
         })
         .collect()
 }
@@ -32580,6 +32580,8 @@ fn npm_list_ignored_equals_flag(arg: &str) -> bool {
 }
 
 fn parse_pip_list_args(args: &[String]) -> Result<PipCompatAction, OmcRegistryError> {
+    let expanded_short_clusters = expand_pip_list_short_clusters(args);
+    let args = expanded_short_clusters.as_slice();
     let mut format = PipListFormat::Columns;
     let mut outdated = false;
     let mut uptodate = false;
@@ -32652,7 +32654,7 @@ fn parse_pip_list_args(args: &[String]) -> Result<PipCompatAction, OmcRegistryEr
             user = true;
         } else if matches!(
             arg.as_str(),
-            "--local" | "--disable-pip-version-check" | "--ignore-requires-python"
+            "--local" | "-l" | "--disable-pip-version-check" | "--ignore-requires-python"
         ) || pip_ignored_verbosity_flag(arg)
         {
         } else if arg == "-e" || arg == "--editable" {
@@ -32712,6 +32714,15 @@ fn parse_pip_list_args(args: &[String]) -> Result<PipCompatAction, OmcRegistryEr
         no_index,
         allow_prereleases,
     })
+}
+
+fn expand_pip_list_short_clusters(args: &[String]) -> Vec<String> {
+    args.iter()
+        .flat_map(|arg| {
+            expand_pip_short_cluster(arg, &['o', 'u', 'e', 'l'], &['i', 'f'])
+                .unwrap_or_else(|| vec![arg.clone()])
+        })
+        .collect()
 }
 
 fn parse_pip_list_format_value(value: &str) -> Result<PipListFormat, OmcRegistryError> {
@@ -46670,6 +46681,18 @@ resolved_commit = "0123456789abcdef0123456789abcdef01234567"
             }
         );
         assert_eq!(
+            parse_pip_compat_action(&args(&["freeze", "-lr", "requirements.txt"])).unwrap(),
+            PipCompatAction::Freeze {
+                action: PipFreezeAction {
+                    requirements: vec![PathBuf::from("requirements.txt")],
+                    paths: Vec::new(),
+                    user: false,
+                    exclude: Vec::new(),
+                    exclude_editable: false,
+                },
+            }
+        );
+        assert_eq!(
             parse_pip_compat_action(&args(&["list", "-qq", "--format=freeze"])).unwrap(),
             PipCompatAction::List {
                 format: PipListFormat::Freeze,
@@ -46683,6 +46706,31 @@ resolved_commit = "0123456789abcdef0123456789abcdef01234567"
                 index_url: None,
                 extra_index_urls: Vec::new(),
                 find_links: Vec::new(),
+                no_index: false,
+                allow_prereleases: false,
+            }
+        );
+        assert_eq!(
+            parse_pip_compat_action(&args(&[
+                "list",
+                "-oel",
+                "-ihttps://mirror.example/simple",
+                "-fwheelhouse",
+                "--format=json",
+            ]))
+            .unwrap(),
+            PipCompatAction::List {
+                format: PipListFormat::Json,
+                outdated: true,
+                uptodate: false,
+                paths: Vec::new(),
+                user: false,
+                exclude: Vec::new(),
+                editable: PipEditableMode::Only,
+                not_required: false,
+                index_url: Some("https://mirror.example/simple".to_owned()),
+                extra_index_urls: Vec::new(),
+                find_links: vec!["wheelhouse".to_owned()],
                 no_index: false,
                 allow_prereleases: false,
             }

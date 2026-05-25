@@ -253,6 +253,7 @@ cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip show requests
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip show --user local-package
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip list --format=json
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip list --editable --format=columns
+cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip list -oel --format=json
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip list --not-required --format=json
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip inspect
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip check --user
