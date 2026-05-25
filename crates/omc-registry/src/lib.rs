@@ -15621,9 +15621,7 @@ fn parse_requirements_include(line: &str) -> Option<RequirementsInclude> {
             RequirementsMode::Constraint,
         ),
     ] {
-        if let Some(path) = parse_requirements_option_value(line, prefixes)
-            .or_else(|| parse_attached_short_requirements_option(line, mode))
-        {
+        if let Some(path) = parse_requirements_option_value(line, prefixes) {
             if !path.is_empty() {
                 return Some(RequirementsInclude { path, mode });
             }
@@ -15631,18 +15629,6 @@ fn parse_requirements_include(line: &str) -> Option<RequirementsInclude> {
     }
 
     None
-}
-
-fn parse_attached_short_requirements_option(line: &str, mode: RequirementsMode) -> Option<String> {
-    let prefix = match mode {
-        RequirementsMode::Install => "-r",
-        RequirementsMode::Constraint => "-c",
-    };
-    let rest = line.strip_prefix(prefix)?;
-    if rest.is_empty() || rest.starts_with(char::is_whitespace) {
-        return None;
-    }
-    first_shell_like_token(rest)
 }
 
 fn parse_requirements_index_url(line: &str) -> Option<String> {
@@ -15759,9 +15745,22 @@ fn parse_requirements_option_value(line: &str, prefixes: &[&str]) -> Option<Stri
                 .get(1)
                 .filter(|value| !value.is_empty())
                 .cloned();
+        } else if let Some(value) = short_option_attached_value(line, prefix) {
+            return Some(value.to_owned());
         }
     }
     None
+}
+
+fn short_option_attached_value<'a>(arg: &'a str, prefix: &str) -> Option<&'a str> {
+    if !prefix.starts_with('-') || prefix.starts_with("--") || prefix.len() != 2 {
+        return None;
+    }
+    let value = arg.strip_prefix(prefix)?;
+    if value.is_empty() || value.starts_with(char::is_whitespace) {
+        return None;
+    }
+    Some(value)
 }
 
 fn first_shell_like_token(value: &str) -> Option<String> {
@@ -20121,6 +20120,51 @@ packages:
                 .path()
                 .join(".")
                 .join("wheel house")
+                .to_string_lossy()
+                .into_owned()]
+        );
+        assert_eq!(
+            discovered.pypi_index_url.as_deref(),
+            Some("https://index.example.invalid/simple/")
+        );
+    }
+
+    #[test]
+    fn reads_requirements_attached_short_option_values() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir_all(dir.path().join("requirements")).unwrap();
+        fs::create_dir_all(dir.path().join("constraints")).unwrap();
+        fs::create_dir_all(dir.path().join("wheelhouse")).unwrap();
+        let requirements = dir.path().join("requirements.txt");
+        fs::write(
+            dir.path().join("requirements").join("base.txt"),
+            "certifi==2024.2.2\n",
+        )
+        .unwrap();
+        fs::write(
+            dir.path().join("constraints").join("base.txt"),
+            "idna==3.7\n",
+        )
+        .unwrap();
+        fs::write(
+            &requirements,
+            "-rrequirements/base.txt\n-cconstraints/base.txt\n-f./wheelhouse\n-ihttps://index.example.invalid/simple\nidna>=2\n",
+        )
+        .unwrap();
+
+        let discovered = read_requirements_file(&requirements).unwrap();
+        assert!(has_spec(&discovered.specs, "certifi", "==2024.2.2"));
+        assert!(has_spec(&discovered.specs, "idna", ">=2"));
+        assert_eq!(
+            discovered.constraints.get("pypi:idna").map(String::as_str),
+            Some("==3.7")
+        );
+        assert_eq!(
+            discovered.pypi_find_links,
+            vec![dir
+                .path()
+                .join(".")
+                .join("wheelhouse")
                 .to_string_lossy()
                 .into_owned()]
         );

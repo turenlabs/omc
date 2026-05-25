@@ -30018,6 +30018,8 @@ fn parse_pip_index_common_args(args: &[String]) -> Result<PipIndexArgs, OmcRegis
             parsed.index_url = Some(url.clone());
         } else if let Some(url) = arg.strip_prefix("--index-url=") {
             parsed.index_url = Some(url.to_owned());
+        } else if let Some(url) = pip_attached_short_value(arg, 'i') {
+            parsed.index_url = Some(url.to_owned());
         } else if arg == "--extra-index-url" {
             index += 1;
             let Some(url) = args.get(index) else {
@@ -30037,6 +30039,8 @@ fn parse_pip_index_common_args(args: &[String]) -> Result<PipIndexArgs, OmcRegis
             };
             parsed.find_links.push(value.clone());
         } else if let Some(value) = arg.strip_prefix("--find-links=") {
+            parsed.find_links.push(value.to_owned());
+        } else if let Some(value) = pip_attached_short_value(arg, 'f') {
             parsed.find_links.push(value.to_owned());
         } else if let Some(value) = pip_bool_flag_value(arg, "--no-index") {
             parsed.no_index = value;
@@ -30382,6 +30386,8 @@ fn parse_pip_uninstall_args(args: &[String]) -> Result<PipCompatAction, OmcRegis
             };
             requirements.push(PathBuf::from(path));
         } else if let Some(path) = arg.strip_prefix("--requirement=") {
+            requirements.push(PathBuf::from(path));
+        } else if let Some(path) = pip_attached_short_value(arg, 'r') {
             requirements.push(PathBuf::from(path));
         } else if matches!(arg.as_str(), "--user" | "--user=true") {
             user = true;
@@ -30729,6 +30735,8 @@ fn parse_pip_freeze_args(args: &[String]) -> Result<PipFreezeAction, OmcRegistry
             action.exclude.push(exclude.to_owned());
         } else if let Some(requirement) = arg.strip_prefix("--requirement=") {
             action.requirements.push(PathBuf::from(requirement));
+        } else if let Some(requirement) = pip_attached_short_value(arg, 'r') {
+            action.requirements.push(PathBuf::from(requirement));
         } else {
             return Err(unsupported_compat_arg("pip freeze", arg));
         }
@@ -30780,6 +30788,8 @@ fn parse_pip_install_args(args: &[String]) -> Result<PipCompatAction, OmcRegistr
             requirements.push(PathBuf::from(path));
         } else if let Some(path) = arg.strip_prefix("--requirement=") {
             requirements.push(PathBuf::from(path));
+        } else if let Some(path) = pip_attached_short_value(arg, 'r') {
+            requirements.push(PathBuf::from(path));
         } else if arg == "-c" || arg == "--constraint" {
             index += 1;
             let Some(path) = args.get(index) else {
@@ -30789,6 +30799,8 @@ fn parse_pip_install_args(args: &[String]) -> Result<PipCompatAction, OmcRegistr
             };
             constraints.push(PathBuf::from(path));
         } else if let Some(path) = arg.strip_prefix("--constraint=") {
+            constraints.push(PathBuf::from(path));
+        } else if let Some(path) = pip_attached_short_value(arg, 'c') {
             constraints.push(PathBuf::from(path));
         } else if arg == "--requirements-from-script" {
             index += 1;
@@ -30822,6 +30834,8 @@ fn parse_pip_install_args(args: &[String]) -> Result<PipCompatAction, OmcRegistr
             index_url = Some(url.clone());
         } else if let Some(url) = arg.strip_prefix("--index-url=") {
             index_url = Some(url.to_owned());
+        } else if let Some(url) = pip_attached_short_value(arg, 'i') {
+            index_url = Some(url.to_owned());
         } else if arg == "--extra-index-url" {
             index += 1;
             let Some(url) = args.get(index) else {
@@ -30841,6 +30855,8 @@ fn parse_pip_install_args(args: &[String]) -> Result<PipCompatAction, OmcRegistr
             };
             find_links.push(value.clone());
         } else if let Some(value) = arg.strip_prefix("--find-links=") {
+            find_links.push(value.to_owned());
+        } else if let Some(value) = pip_attached_short_value(arg, 'f') {
             find_links.push(value.to_owned());
         } else if let Some(value) = pip_bool_flag_value(arg, "--no-index") {
             no_index = value;
@@ -30893,6 +30909,8 @@ fn parse_pip_install_args(args: &[String]) -> Result<PipCompatAction, OmcRegistr
             };
             target = Some(PathBuf::from(path));
         } else if let Some(path) = arg.strip_prefix("--target=") {
+            target = Some(PathBuf::from(path));
+        } else if let Some(path) = pip_attached_short_value(arg, 't') {
             target = Some(PathBuf::from(path));
         } else if arg == "--prefix" {
             index += 1;
@@ -30983,6 +31001,12 @@ fn parse_pip_install_args(args: &[String]) -> Result<PipCompatAction, OmcRegistr
                 local_paths.push(pip_local_path_arg(path)?);
             }
         } else if let Some(path) = arg.strip_prefix("--editable=") {
+            if let Some(requirement) = parse_pypi_vcs_requirement(path)? {
+                vcs_requirements.push(requirement);
+            } else {
+                local_paths.push(pip_local_path_arg(path)?);
+            }
+        } else if let Some(path) = pip_attached_short_value(arg, 'e') {
             if let Some(requirement) = parse_pypi_vcs_requirement(path)? {
                 vcs_requirements.push(requirement);
             } else {
@@ -31173,6 +31197,8 @@ fn parse_pip_artifact_args(
             requirements.push(PathBuf::from(path));
         } else if let Some(path) = arg.strip_prefix("--requirement=") {
             requirements.push(PathBuf::from(path));
+        } else if let Some(path) = pip_attached_short_value(arg, 'r') {
+            requirements.push(PathBuf::from(path));
         } else if arg == "-c" || arg == "--constraint" {
             index += 1;
             let Some(path) = args.get(index) else {
@@ -31182,6 +31208,8 @@ fn parse_pip_artifact_args(
             };
             constraints.push(PathBuf::from(path));
         } else if let Some(path) = arg.strip_prefix("--constraint=") {
+            constraints.push(PathBuf::from(path));
+        } else if let Some(path) = pip_attached_short_value(arg, 'c') {
             constraints.push(PathBuf::from(path));
         } else if command == PipArtifactCommand::Download
             && (arg == "-d" || arg == "--dest" || arg == "--destination-dir")
@@ -31204,6 +31232,11 @@ fn parse_pip_artifact_args(
                 .or_else(|| arg.strip_prefix("--destination-dir="))
                 .expect("checked path option");
             destination = PathBuf::from(path);
+        } else if command == PipArtifactCommand::Download
+            && pip_attached_short_value(arg, 'd').is_some()
+        {
+            let path = pip_attached_short_value(arg, 'd').expect("checked download dest");
+            destination = PathBuf::from(path);
         } else if command == PipArtifactCommand::Wheel && (arg == "-w" || arg == "--wheel-dir") {
             index += 1;
             let Some(path) = args.get(index) else {
@@ -31217,6 +31250,11 @@ fn parse_pip_artifact_args(
                 .strip_prefix("--wheel-dir=")
                 .expect("checked wheel-dir option");
             destination = PathBuf::from(path);
+        } else if command == PipArtifactCommand::Wheel
+            && pip_attached_short_value(arg, 'w').is_some()
+        {
+            let path = pip_attached_short_value(arg, 'w').expect("checked wheel dir");
+            destination = PathBuf::from(path);
         } else if arg == "-i" || arg == "--index-url" {
             index += 1;
             let Some(url) = args.get(index) else {
@@ -31226,6 +31264,8 @@ fn parse_pip_artifact_args(
             };
             index_url = Some(url.clone());
         } else if let Some(url) = arg.strip_prefix("--index-url=") {
+            index_url = Some(url.to_owned());
+        } else if let Some(url) = pip_attached_short_value(arg, 'i') {
             index_url = Some(url.to_owned());
         } else if arg == "--extra-index-url" {
             index += 1;
@@ -31246,6 +31286,8 @@ fn parse_pip_artifact_args(
             };
             find_links.push(value.clone());
         } else if let Some(value) = arg.strip_prefix("--find-links=") {
+            find_links.push(value.to_owned());
+        } else if let Some(value) = pip_attached_short_value(arg, 'f') {
             find_links.push(value.to_owned());
         } else if let Some(value) = pip_bool_flag_value(arg, "--no-index") {
             no_index = value;
@@ -31349,6 +31391,11 @@ fn parse_pip_artifact_args(
             let path = arg
                 .strip_prefix("--editable=")
                 .expect("checked editable option");
+            local_paths.push(pip_local_path_arg(path)?);
+        } else if command == PipArtifactCommand::Wheel
+            && pip_attached_short_value(arg, 'e').is_some()
+        {
+            let path = pip_attached_short_value(arg, 'e').expect("checked editable option");
             local_paths.push(pip_local_path_arg(path)?);
         } else if command == PipArtifactCommand::Wheel && pip_ignored_wheel_value_flag(arg) {
             index += 1;
@@ -31478,6 +31525,15 @@ fn pip_bool_flag_value(arg: &str, flag: &str) -> Option<bool> {
         "false" => Some(false),
         _ => None,
     }
+}
+
+fn pip_attached_short_value(arg: &str, flag: char) -> Option<&str> {
+    if arg.starts_with("--") {
+        return None;
+    }
+    let rest = arg.strip_prefix('-')?;
+    let value = rest.strip_prefix(flag)?;
+    (!value.is_empty()).then_some(value)
 }
 
 fn pip_target_flag_value(
@@ -32483,6 +32539,8 @@ fn parse_pip_list_args(args: &[String]) -> Result<PipCompatAction, OmcRegistryEr
             index_url = Some(url.clone());
         } else if let Some(url) = arg.strip_prefix("--index-url=") {
             index_url = Some(url.to_owned());
+        } else if let Some(url) = pip_attached_short_value(arg, 'i') {
+            index_url = Some(url.to_owned());
         } else if arg == "--extra-index-url" {
             index += 1;
             let Some(url) = args.get(index) else {
@@ -32502,6 +32560,8 @@ fn parse_pip_list_args(args: &[String]) -> Result<PipCompatAction, OmcRegistryEr
             };
             find_links.push(value.clone());
         } else if let Some(value) = arg.strip_prefix("--find-links=") {
+            find_links.push(value.to_owned());
+        } else if let Some(value) = pip_attached_short_value(arg, 'f') {
             find_links.push(value.to_owned());
         } else if arg == "--no-index" {
             no_index = true;
@@ -42604,6 +42664,140 @@ verdict = "accepted"
                 assert!(action.local_paths.is_empty());
             }
             other => panic!("expected pip download action, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_pip_attached_short_value_options() {
+        match parse_pip_compat_action(&args(&[
+            "install",
+            "-rrequirements.txt",
+            "-cconstraints.txt",
+            "-ihttps://mirror.example/simple",
+            "-fwheelhouse",
+            "-tvendor",
+            "-e../editable_pkg[dev]",
+            "requests==2.32.3",
+        ]))
+        .unwrap()
+        {
+            PipCompatAction::Install(action) => {
+                assert_eq!(action.requirements, vec![PathBuf::from("requirements.txt")]);
+                assert_eq!(action.constraints, vec![PathBuf::from("constraints.txt")]);
+                assert_eq!(
+                    action.index_url.as_deref(),
+                    Some("https://mirror.example/simple")
+                );
+                assert_eq!(action.find_links, vec!["wheelhouse".to_owned()]);
+                assert_eq!(action.target, Some(PathBuf::from("vendor")));
+                assert_eq!(
+                    action.local_paths,
+                    vec![PythonLocalRequirement::new(
+                        PathBuf::from("../editable_pkg"),
+                        BTreeSet::from(["dev".to_owned()])
+                    )]
+                );
+                assert_eq!(action.specs, vec!["requests==2.32.3"]);
+            }
+            other => panic!("expected pip install action, got {other:?}"),
+        }
+
+        match parse_pip_compat_action(&args(&[
+            "download",
+            "-rrequirements.txt",
+            "-cconstraints.txt",
+            "-dwheelhouse",
+            "-ihttps://mirror.example/simple",
+            "-fwheels",
+        ]))
+        .unwrap()
+        {
+            PipCompatAction::Download(action) => {
+                assert_eq!(action.requirements, vec![PathBuf::from("requirements.txt")]);
+                assert_eq!(action.constraints, vec![PathBuf::from("constraints.txt")]);
+                assert_eq!(action.destination, PathBuf::from("wheelhouse"));
+                assert_eq!(
+                    action.index_url.as_deref(),
+                    Some("https://mirror.example/simple")
+                );
+                assert_eq!(action.find_links, vec!["wheels".to_owned()]);
+            }
+            other => panic!("expected pip download action, got {other:?}"),
+        }
+
+        match parse_pip_compat_action(&args(&[
+            "wheel",
+            "-rrequirements.txt",
+            "-wwheelhouse",
+            "-e../editable_pkg",
+        ]))
+        .unwrap()
+        {
+            PipCompatAction::Wheel(action) => {
+                assert_eq!(action.requirements, vec![PathBuf::from("requirements.txt")]);
+                assert_eq!(action.destination, PathBuf::from("wheelhouse"));
+                assert_eq!(
+                    action.local_paths,
+                    vec![PythonLocalRequirement::new(
+                        PathBuf::from("../editable_pkg"),
+                        BTreeSet::new()
+                    )]
+                );
+            }
+            other => panic!("expected pip wheel action, got {other:?}"),
+        }
+
+        match parse_pip_compat_action(&args(&["uninstall", "-rrequirements.txt", "-y"])).unwrap() {
+            PipCompatAction::Uninstall { requirements, .. } => {
+                assert_eq!(requirements, vec![PathBuf::from("requirements.txt")]);
+            }
+            other => panic!("expected pip uninstall action, got {other:?}"),
+        }
+
+        match parse_pip_compat_action(&args(&["freeze", "-rrequirements.txt"])).unwrap() {
+            PipCompatAction::Freeze { action } => {
+                assert_eq!(action.requirements, vec![PathBuf::from("requirements.txt")]);
+            }
+            other => panic!("expected pip freeze action, got {other:?}"),
+        }
+
+        match parse_pip_compat_action(&args(&[
+            "list",
+            "--outdated",
+            "-ihttps://mirror.example/simple",
+            "-fwheelhouse",
+        ]))
+        .unwrap()
+        {
+            PipCompatAction::List {
+                index_url,
+                find_links,
+                ..
+            } => {
+                assert_eq!(index_url.as_deref(), Some("https://mirror.example/simple"));
+                assert_eq!(find_links, vec!["wheelhouse".to_owned()]);
+            }
+            other => panic!("expected pip list action, got {other:?}"),
+        }
+
+        match parse_pip_compat_action(&args(&[
+            "index",
+            "versions",
+            "idna",
+            "-ihttps://mirror.example/simple",
+            "-fwheelhouse",
+        ]))
+        .unwrap()
+        {
+            PipCompatAction::IndexVersions {
+                index_url,
+                find_links,
+                ..
+            } => {
+                assert_eq!(index_url.as_deref(), Some("https://mirror.example/simple"));
+                assert_eq!(find_links, vec!["wheelhouse".to_owned()]);
+            }
+            other => panic!("expected pip index versions action, got {other:?}"),
         }
     }
 
