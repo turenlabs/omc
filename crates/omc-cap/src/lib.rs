@@ -209,6 +209,13 @@ impl Policy {
         self
     }
 
+    /// Whether the sensitive-file-read protection has been lifted on this
+    /// policy. Lets callers that merge policies (e.g. layering an `omc.policy`
+    /// grant onto the manifest baseline) propagate the flag.
+    pub fn sensitive_reads_allowed(&self) -> bool {
+        self.allow_sensitive_reads
+    }
+
     pub fn require(&self, requested: Capability) -> Result<(), Trap> {
         if self.allows_capability(&requested) {
             return Ok(());

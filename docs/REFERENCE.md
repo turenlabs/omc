@@ -263,6 +263,119 @@ allow-flow = ["env:API_TOKEN -> network:api.example.com"]
 For the full command surface and supported manifest/lockfile formats, see the
 sections below.
 
+## Policy DSL (`omc.policy`)
+
+The `omc.toml` `[policy]` block is a single flat allow-list applied to the whole
+dependency graph: a grant for one package is a grant for all of them. The
+optional **`omc.policy`** file (placed next to `omc.toml` in the project dir)
+adds **per-package scoping** — a `default` baseline plus `package` blocks that
+`allow`/`deny` capabilities, declare data `flow`s, reset a package to `pure`, or
+lift the sensitive-file read guard, all optionally scoped by ecosystem and
+version range.
+
+`omc.policy` is **fully optional and back-compatible**: if the file is absent,
+behavior is exactly as before (only the `omc.toml` `[policy]` / CLI grants
+apply). A present-but-malformed file is a **hard error** — the parser is
+deny-by-default and never silently falls back to an empty or permissive policy.
+
+### Example
+
+```
+# omc.policy — comments start with '#'
+default {                          # optional baseline applied to every package
+  allow time, random               # multiple capabilities, comma-separated
+}
+
+package "is-odd" { pure }          # 'pure' = zero host capabilities (drops the default)
+
+package "stripe" >=12.0.0 {        # optional version constraint after the name
+  allow env "STRIPE_API_KEY"
+  allow read "./config/stripe.json"
+  allow net "api.stripe.com"
+  deny  net "*"                    # 'deny' removes a matching allow when layering
+  flow env "STRIPE_API_KEY" -> net "api.stripe.com"
+}
+
+npm package "@acme/*" {            # ecosystem qualifier (npm|pypi) + name glob ('*')
+  allow net "*"
+  allow-sensitive                  # lift the sensitive-file read guard for this package
+}
+```
+
+### Grammar
+
+```text
+document          := item*
+item              := default_block | package_block
+default_block     := "default" "{" stmt* "}"
+package_block     := [("npm"|"pypi")] "package" STRING [version_constraint] "{" stmt* "}"
+version_constraint:= ("=="|">="|">"|"<="|"<"|"^"|"~") (STRING | bareversion)
+stmt              := "pure"
+                   | "allow-sensitive"
+                   | ("allow"|"deny") cap ("," cap)*
+                   | "flow" flow_src "->" flow_sink
+cap               := ("env"|"read"|"write"|"net"|"http"|"dns"|"spawn"|"exec") STRING
+                   | "eval" | "time" | "random"
+flow_src          := ("env"|"file"|"read"|"secret") STRING | "any"
+flow_sink         := ("net"|"http") STRING | "write" STRING
+                   | ("spawn"|"exec") STRING | "eval"
+```
+
+Capabilities map onto the runtime capability model: `env`→env read,
+`read`/`write`→file read/write, `net`/`http`→HTTP host, `dns`→DNS host,
+`spawn`/`exec`→process spawn, plus the targetless `eval`, `time`, `random`. A
+target of `"*"` is a wildcard. Flow sources lower to `Env`/`File`/`Secret`/`Any`
+label matchers and sinks to `Network`/`File`/`Process`/`Eval`.
+
+### `default` vs `package` blocks, and layering
+
+`compile_for(ecosystem, name, version)` builds a package's effective policy by:
+
+1. Applying the `default` block (and the `omc.toml` `[policy]` grants, which act
+   as additional default grants) as the baseline.
+2. Applying every matching `package` block in source order. A block matches when
+   its ecosystem is unqualified-or-equal **and** its name glob matches **and**
+   its version constraint (if any) is satisfied.
+
+Within that accumulation:
+
+- `pure` resets the accumulated capabilities to empty for this package (flows
+  and the sensitive flag are left intact).
+- `allow` adds capabilities; `deny` removes matching ones — `deny net "*"` strips
+  every host grant, and a specific `deny net "api.x"` removes that host *and* any
+  surviving `net "*"` wildcard so the denied target cannot leak back in.
+- `flow` appends a flow rule; `allow-sensitive` lifts the sensitive-read guard.
+
+A package with **no matching block** gets only the baseline — which is
+deny-all unless the `default` block or `omc.toml` `[policy]` granted something.
+
+Version constraints use a SemVer-ish numeric subset: dotted numeric components
+are compared (missing components default to `0`, a leading `v` is tolerated,
+`-prerelease`/`+build` suffixes are ignored for ordering). `^` locks the
+left-most non-zero component; `~` locks the minor (or major when only a major is
+given). A non-numeric version is incomparable, so only a verbatim `==` matches it
+and every ordered operator fails closed.
+
+### Where it applies
+
+The compiled per-package policy is enforced wherever a package is verified:
+
+- at **install time**, each resolved dependency (and each locally compiled
+  source) is checked against *its* block, not just one global allow-list;
+- on the **in-cell exec path** (`omc exec-cell`), the entry is run under its own
+  compiled policy.
+
+### Commands
+
+```bash
+omc policy validate            # parse omc.policy; prints OK or a located parse error
+omc policy check <pkg>[@<ver>] [--npm|--pypi]   # print the effective compiled policy
+```
+
+`omc policy check` defaults to the npm ecosystem and version `0.0.0` when those
+are omitted. Scoped npm names keep their leading `@` (`omc policy check
+@acme/widget@2.0.0`).
+
 ## Package Manager Prototype
 
 The `omc` CLI is the first working slice of a PyPI/npm replacement:

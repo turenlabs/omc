@@ -31,6 +31,9 @@ pub type Result<T> = std::result::Result<T, OmcRegistryError>;
 
 const LOCKFILE: &str = "omc.lock";
 const MANIFEST: &str = "omc.toml";
+/// Optional per-package capability policy DSL, layered on top of the flat
+/// `[policy]` grants in `omc.toml`. When absent, behaviour is exactly as before.
+const POLICY_FILE: &str = "omc.policy";
 const ARTIFACT_SCHEMA: u32 = 1;
 const ARTIFACT_SIGNING_KEY: &str = "artifact-ed25519.key";
 const MAX_FILE_BYTES: u64 = 2 * 1024 * 1024;
@@ -84,6 +87,8 @@ pub enum OmcRegistryError {
     TomlEncode(#[from] toml::ser::Error),
     #[error("zip error: {0}")]
     Zip(#[from] zip::result::ZipError),
+    #[error("omc.policy parse error: {0}")]
+    PolicyParse(#[from] omc_policy::PolicyError),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -3319,6 +3324,16 @@ fn link_package_inner(
     } else {
         policy
     };
+    // Layer the optional per-package `omc.policy` DSL on top of the flat grants
+    // so each dependency is verified against ITS block (deny-by-default: a
+    // package with no matching block keeps just the default/[policy] grants).
+    let policy = effective_package_policy(
+        &options.project_dir,
+        policy,
+        resolved.ecosystem,
+        &resolved.name,
+        &resolved.version,
+    )?;
     let verification = verify_module(&module, &policy);
     let verifier_findings = verification
         .err()
@@ -3519,6 +3534,77 @@ fn default_public_capabilities() -> Vec<Capability> {
         .iter()
         .map(|name| Capability::EnvRead((*name).to_owned()))
         .collect()
+}
+
+/// Map a registry [`Ecosystem`] onto the policy DSL's own ecosystem enum.
+fn policy_ecosystem(ecosystem: Ecosystem) -> omc_policy::Ecosystem {
+    match ecosystem {
+        Ecosystem::Npm => omc_policy::Ecosystem::Npm,
+        Ecosystem::Pypi => omc_policy::Ecosystem::Pypi,
+    }
+}
+
+/// Load and parse the optional `omc.policy` DSL file from a project directory.
+///
+/// Returns `Ok(None)` when the file is absent (full back-compat: behaviour is
+/// exactly as before). A present-but-malformed file is a hard, clearly-reported
+/// error — the policy layer is deny-by-default and never fails open.
+pub fn load_policy_document(project_dir: &Path) -> Result<Option<omc_policy::PolicyDocument>> {
+    let path = project_dir.join(POLICY_FILE);
+    if !path.exists() {
+        return Ok(None);
+    }
+    // batou:ignore file_read -- `omc.policy` is a fixed, project-local config
+    // file name joined onto the operator-chosen project dir; reading it is the
+    // explicit purpose, identical to how `read_manifest` loads `omc.toml`.
+    let source = fs::read_to_string(&path)?;
+    Ok(Some(omc_policy::parse(&source)?))
+}
+
+/// Merge the DSL-compiled per-package [`Policy`] into a base policy built from
+/// the flat `omc.toml [policy]` / CLI grants.
+///
+/// The existing flat grants are treated as additional `default` grants (they
+/// stay in `base`); the DSL `default` block plus every matching `package` block
+/// are layered on top. Capabilities and flows are unioned (deduped); the
+/// sensitive-read guard is lifted if either side lifted it.
+fn merge_dsl_policy(base: Policy, dsl: &Policy) -> Policy {
+    let mut merged = base;
+    for capability in &dsl.allowed_capabilities {
+        if !merged.allowed_capabilities.contains(capability) {
+            merged = merged.allow_capability(capability.clone());
+        }
+    }
+    for flow in &dsl.allowed_flows {
+        if !merged.allowed_flows.contains(flow) {
+            merged = merged.allow_flow_rule(flow.clone());
+        }
+    }
+    if dsl.sensitive_reads_allowed() {
+        merged = merged.allow_sensitive_reads();
+    }
+    merged
+}
+
+/// Build the effective verification [`Policy`] for one concrete package.
+///
+/// `base` is the policy assembled from the flat `omc.toml [policy]` / CLI grants
+/// (the historical global allow-list). When an `omc.policy` DSL file is present,
+/// the package's compiled per-package policy is layered on top so each
+/// dependency is checked against ITS block, not just the one global list. When
+/// no `omc.policy` exists, `base` is returned unchanged.
+pub fn effective_package_policy(
+    project_dir: &Path,
+    base: Policy,
+    ecosystem: Ecosystem,
+    name: &str,
+    version: &str,
+) -> Result<Policy> {
+    let Some(document) = load_policy_document(project_dir)? else {
+        return Ok(base);
+    };
+    let dsl = document.compile_for(policy_ecosystem(ecosystem), name, version);
+    Ok(merge_dsl_policy(base, &dsl))
 }
 
 fn apply_manifest_config(manifest: &OmcManifest, options: &mut LinkOptions) -> Result<()> {
@@ -17598,6 +17684,16 @@ pub fn compile_source_path(options: CompileSourceOptions) -> Result<CompileSourc
     } else {
         policy
     };
+    // Layer the optional `omc.policy` DSL for this compiled local source too, so
+    // a locally-compiled package is held to the same per-package block an
+    // installed one would be.
+    let policy = effective_package_policy(
+        &options.project_dir,
+        policy,
+        package.ecosystem,
+        &package.name,
+        &package.version,
+    )?;
     let verifier_findings = verify_module(&module, &policy)
         .err()
         .map(|error| {
@@ -30066,5 +30162,211 @@ wheels = [
             local_sources: Vec::new(),
             python_vcs: Vec::new(),
         }
+    }
+}
+
+#[cfg(test)]
+mod policy_dsl_tests {
+    use super::*;
+
+    /// A base policy mimicking what the flat `omc.toml [policy]` / CLI grants
+    /// would produce: just the public env reads, no host capabilities.
+    fn base_policy() -> Policy {
+        policy_from_link_options(&LinkOptions::new("."))
+    }
+
+    fn write_policy(dir: &Path, src: &str) {
+        std::fs::write(dir.join(POLICY_FILE), src).unwrap();
+    }
+
+    #[test]
+    fn no_policy_file_returns_base_unchanged() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(load_policy_document(dir.path()).unwrap().is_none());
+        let effective = effective_package_policy(
+            dir.path(),
+            base_policy(),
+            Ecosystem::Npm,
+            "left-pad",
+            "1.3.0",
+        )
+        .unwrap();
+        // Identical to today's behaviour: only the default public env reads.
+        assert_eq!(
+            effective.allowed_capabilities,
+            base_policy().allowed_capabilities
+        );
+        assert!(effective.allowed_flows.is_empty());
+        assert!(!effective.sensitive_reads_allowed());
+    }
+
+    #[test]
+    fn matching_package_block_grants_are_layered_on() {
+        let dir = tempfile::tempdir().unwrap();
+        write_policy(
+            dir.path(),
+            r#"
+            npm package "stripe" >=12.0.0 {
+                allow env "STRIPE_API_KEY"
+                allow net "api.stripe.com"
+                flow env "STRIPE_API_KEY" -> net "api.stripe.com"
+            }
+            "#,
+        );
+        let effective = effective_package_policy(
+            dir.path(),
+            base_policy(),
+            Ecosystem::Npm,
+            "stripe",
+            "13.1.0",
+        )
+        .unwrap();
+        assert!(effective
+            .allowed_capabilities
+            .contains(&Capability::EnvRead("STRIPE_API_KEY".to_owned())));
+        assert!(effective
+            .allowed_capabilities
+            .contains(&Capability::HttpHost("api.stripe.com".to_owned())));
+        assert_eq!(effective.allowed_flows.len(), 1);
+        // The base public env read is preserved (the flat grants stay as the
+        // default baseline beneath the DSL).
+        assert!(effective
+            .allowed_capabilities
+            .contains(&Capability::EnvRead("NODE_DEBUG".to_owned())));
+    }
+
+    #[test]
+    fn non_matching_version_leaves_package_denied() {
+        let dir = tempfile::tempdir().unwrap();
+        write_policy(
+            dir.path(),
+            r#"
+            npm package "stripe" >=12.0.0 { allow net "api.stripe.com" }
+            "#,
+        );
+        // stripe@11 does not satisfy >=12.0.0, so it gets only the base policy.
+        let effective = effective_package_policy(
+            dir.path(),
+            base_policy(),
+            Ecosystem::Npm,
+            "stripe",
+            "11.4.0",
+        )
+        .unwrap();
+        assert!(!effective
+            .allowed_capabilities
+            .contains(&Capability::HttpHost("api.stripe.com".to_owned())));
+    }
+
+    #[test]
+    fn pure_block_resets_default_grants_for_that_package() {
+        let dir = tempfile::tempdir().unwrap();
+        write_policy(
+            dir.path(),
+            r#"
+            default { allow time, random }
+            package "is-odd" { pure }
+            "#,
+        );
+        // is-odd is reset to pure; even the default time/random are dropped.
+        let effective =
+            effective_package_policy(dir.path(), base_policy(), Ecosystem::Npm, "is-odd", "1.0.0")
+                .unwrap();
+        assert!(!effective
+            .allowed_capabilities
+            .contains(&Capability::TimeNow));
+        assert!(!effective
+            .allowed_capabilities
+            .contains(&Capability::RandomBytes));
+        // A different package still picks up the default baseline.
+        let other = effective_package_policy(
+            dir.path(),
+            base_policy(),
+            Ecosystem::Npm,
+            "left-pad",
+            "1.0.0",
+        )
+        .unwrap();
+        assert!(other.allowed_capabilities.contains(&Capability::TimeNow));
+    }
+
+    #[test]
+    fn deny_removes_a_matching_default_grant() {
+        let dir = tempfile::tempdir().unwrap();
+        write_policy(
+            dir.path(),
+            r#"
+            default { allow net "*" }
+            npm package "is-odd" { deny net "*" }
+            "#,
+        );
+        let effective =
+            effective_package_policy(dir.path(), base_policy(), Ecosystem::Npm, "is-odd", "1.0.0")
+                .unwrap();
+        assert!(!effective
+            .allowed_capabilities
+            .iter()
+            .any(|cap| matches!(cap, Capability::HttpHost(_))));
+    }
+
+    #[test]
+    fn allow_sensitive_lifts_the_guard() {
+        let dir = tempfile::tempdir().unwrap();
+        write_policy(
+            dir.path(),
+            r#"
+            npm package "creds" {
+                allow read "*"
+                allow-sensitive
+            }
+            "#,
+        );
+        let effective =
+            effective_package_policy(dir.path(), base_policy(), Ecosystem::Npm, "creds", "1.0.0")
+                .unwrap();
+        assert!(effective.sensitive_reads_allowed());
+    }
+
+    #[test]
+    fn ecosystem_qualifier_scopes_the_block() {
+        let dir = tempfile::tempdir().unwrap();
+        write_policy(
+            dir.path(),
+            r#"
+            npm package "shared" { allow net "npm.example" }
+            "#,
+        );
+        // The npm-qualified block does not apply to a PyPI package of the same name.
+        let pypi = effective_package_policy(
+            dir.path(),
+            base_policy(),
+            Ecosystem::Pypi,
+            "shared",
+            "1.0.0",
+        )
+        .unwrap();
+        assert!(!pypi
+            .allowed_capabilities
+            .contains(&Capability::HttpHost("npm.example".to_owned())));
+        let npm =
+            effective_package_policy(dir.path(), base_policy(), Ecosystem::Npm, "shared", "1.0.0")
+                .unwrap();
+        assert!(npm
+            .allowed_capabilities
+            .contains(&Capability::HttpHost("npm.example".to_owned())));
+    }
+
+    #[test]
+    fn malformed_policy_is_a_hard_error_never_silently_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        // `allow nonsense "x"` — `nonsense` is not a known capability keyword.
+        write_policy(dir.path(), "package \"x\" { allow nonsense \"y\" }");
+        let err = load_policy_document(dir.path()).unwrap_err();
+        assert!(matches!(err, OmcRegistryError::PolicyParse(_)));
+        // The install/verify path therefore fails closed too.
+        assert!(
+            effective_package_policy(dir.path(), base_policy(), Ecosystem::Npm, "x", "1.0.0")
+                .is_err()
+        );
     }
 }

@@ -411,6 +411,39 @@ enum Command {
         )]
         fallback: bool,
     },
+    #[command(about = "Inspect and validate the per-package omc.policy DSL")]
+    Policy {
+        #[command(subcommand)]
+        action: PolicyCommand,
+    },
+}
+
+/// `omc policy <subcommand>` — inspect and validate the `omc.policy` DSL.
+#[derive(Debug, Subcommand)]
+enum PolicyCommand {
+    #[command(
+        about = "Show the effective compiled policy for a package, e.g. omc policy check stripe@13.1.0"
+    )]
+    Check {
+        #[arg(
+            long,
+            conflicts_with = "pypi",
+            help = "Resolve the package against the npm ecosystem (the default)"
+        )]
+        npm: bool,
+        #[arg(
+            long,
+            conflicts_with = "npm",
+            help = "Resolve the package against the PyPI ecosystem"
+        )]
+        pypi: bool,
+        #[arg(
+            help = "Package, optionally with a version: NAME or NAME@VERSION (defaults to 0.0.0)"
+        )]
+        package: String,
+    },
+    #[command(about = "Parse omc.policy and report OK, or the parse error with its location")]
+    Validate,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -2034,9 +2067,62 @@ fn run() -> Result<ExitCode, OmcRegistryError> {
                 },
             )
         }
+        Command::Policy { action } => return run_policy_command(&cli.project_dir, action),
     }
 
     Ok(ExitCode::SUCCESS)
+}
+
+/// Dispatch `omc policy <check|validate>`.
+fn run_policy_command(
+    project_dir: &Path,
+    action: PolicyCommand,
+) -> Result<ExitCode, OmcRegistryError> {
+    match action {
+        PolicyCommand::Validate => {
+            match omc_registry::load_policy_document(project_dir)? {
+                Some(_) => println!("omc.policy OK"),
+                None => println!(
+                    "no omc.policy in {} (deny-by-default)",
+                    project_dir.display()
+                ),
+            }
+            Ok(ExitCode::SUCCESS)
+        }
+        PolicyCommand::Check { npm, pypi, package } => {
+            // Parse NAME or NAME@VERSION; a leading `@scope/name` keeps its first
+            // `@`, so only split on an `@` that is not at index 0.
+            let (name, version) = match package
+                .char_indices()
+                .find(|&(idx, ch)| ch == '@' && idx > 0)
+            {
+                Some((idx, _)) => (&package[..idx], &package[idx + 1..]),
+                None => (package.as_str(), "0.0.0"),
+            };
+            let ecosystem = match (npm, pypi) {
+                (false, true) => omc_policy::Ecosystem::Pypi,
+                // npm is the default when neither flag is given.
+                _ => omc_policy::Ecosystem::Npm,
+            };
+            match omc_registry::load_policy_document(project_dir)? {
+                Some(document) => {
+                    print!("{}", document.explain_for(ecosystem, name, version));
+                }
+                None => {
+                    let eco = match ecosystem {
+                        omc_policy::Ecosystem::Npm => "npm",
+                        omc_policy::Ecosystem::Pypi => "pypi",
+                    };
+                    println!(
+                        "no omc.policy in {}; {eco}:{name}@{version} gets the deny-by-default policy \
+                         (only omc.toml [policy] / CLI grants apply)",
+                        project_dir.display()
+                    );
+                }
+            }
+            Ok(ExitCode::SUCCESS)
+        }
+    }
 }
 
 fn install_options(
@@ -34068,6 +34154,16 @@ fn run_exec_cell(
     if command.allow_sensitive {
         policy = policy.allow_sensitive_reads();
     }
+    // Layer the optional `omc.policy` DSL for the entry package on top of the
+    // manifest + CLI grants, so an in-cell run is held to the same per-package
+    // block an installed package would be (no `omc.policy` => unchanged).
+    policy = omc_registry::effective_package_policy(
+        project_dir,
+        policy,
+        ecosystem,
+        &pkg_name,
+        &command.version,
+    )?;
 
     // Lower the source through the matching front end (deny-by-default: an
     // unsupported construct is a hard FrontendError, surfaced below).
@@ -34317,6 +34413,56 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    #[test]
+    fn policy_validate_reports_ok_for_a_well_formed_file() {
+        let dir = test_dir("policy-validate-ok");
+        fs::write(dir.join("omc.policy"), "package \"is-odd\" { pure }\n").unwrap();
+        let code = run_policy_command(&dir, PolicyCommand::Validate).unwrap();
+        assert_eq!(code, ExitCode::SUCCESS);
+    }
+
+    #[test]
+    fn policy_validate_is_a_hard_error_on_malformed_input() {
+        let dir = test_dir("policy-validate-bad");
+        fs::write(
+            dir.join("omc.policy"),
+            "package \"x\" { allow bogus \"y\" }\n",
+        )
+        .unwrap();
+        let err = run_policy_command(&dir, PolicyCommand::Validate).unwrap_err();
+        assert!(matches!(err, OmcRegistryError::PolicyParse(_)));
+    }
+
+    #[test]
+    fn policy_validate_without_file_succeeds() {
+        let dir = test_dir("policy-validate-missing");
+        // No omc.policy present: validate still succeeds (deny-by-default).
+        let code = run_policy_command(&dir, PolicyCommand::Validate).unwrap();
+        assert_eq!(code, ExitCode::SUCCESS);
+    }
+
+    #[test]
+    fn policy_check_runs_for_scoped_name_at_version() {
+        let dir = test_dir("policy-check");
+        fs::write(
+            dir.join("omc.policy"),
+            "npm package \"@acme/*\" { allow net \"*\" }\n",
+        )
+        .unwrap();
+        // `@acme/widget@2.0.0` — the leading `@` of the scope must be preserved
+        // and only the `@` before the version split off.
+        let code = run_policy_command(
+            &dir,
+            PolicyCommand::Check {
+                npm: true,
+                pypi: false,
+                package: "@acme/widget@2.0.0".to_string(),
+            },
+        )
+        .unwrap();
+        assert_eq!(code, ExitCode::SUCCESS);
     }
 
     fn pypi_sdist_for_test(root: &str, files: &[(&str, &str)]) -> Vec<u8> {

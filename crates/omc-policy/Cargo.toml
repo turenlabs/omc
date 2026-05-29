@@ -1,0 +1,9 @@
+[package]
+name = "omc-policy"
+description = "Per-package capability policy DSL (omc.policy) for OSS Microcode"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[dependencies]
+omc-cap = { path = "../omc-cap" }

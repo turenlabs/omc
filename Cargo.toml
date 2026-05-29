@@ -7,6 +7,7 @@ members = [
     "crates/omc-frontend-js",
     "crates/omc-frontend-py",
     "crates/omc-linker",
+    "crates/omc-policy",
     "crates/omc-registry",
     "crates/omc-runtime",
     "crates/omc-taint",
@@ -18,7 +19,7 @@ resolver = "2"
 [workspace.package]
 edition = "2021"
 license = "Apache-2.0"
-version = "0.2.0"
+version = "0.3.0"
 repository = "https://github.com/turenio/omc"
 homepage = "https://github.com/turenio/omc"
 

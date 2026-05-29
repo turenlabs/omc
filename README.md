@@ -21,6 +21,31 @@ omc add --npm esbuild@0.19.12 --allow http:registry.npmjs.org   # ✓ allowed + 
 
 That's the whole idea: **dependencies are behavior-typed artifacts, not trusted code.**
 
+## Per-package policy (`omc.policy`)
+
+`omc.toml`'s `[policy]` block is one flat allow-list for the whole project. Drop an optional **`omc.policy`** file next to it to scope grants to *individual* packages — a `default` baseline plus `package` blocks that `allow`/`deny` capabilities, declare `flow`s, mark a package `pure`, or lift the sensitive-read guard:
+
+```
+# omc.policy
+default { allow time, random }          # baseline for every package
+package "is-odd" { pure }                # zero host capabilities
+npm package "stripe" >=12.0.0 {         # ecosystem + version-scoped
+  allow env "STRIPE_API_KEY"
+  allow net "api.stripe.com"
+  flow env "STRIPE_API_KEY" -> net "api.stripe.com"
+}
+npm package "@acme/*" { allow net "*" }  # name globs
+```
+
+Each dependency is verified against *its* block (deny-by-default: no match means no grants). The `omc.toml` `[policy]` grants still apply as part of the baseline, so existing projects keep working unchanged. Inspect and validate it:
+
+```bash
+omc policy validate                      # parse omc.policy; OK or a located error
+omc policy check stripe@13.1.0           # show the effective compiled policy
+```
+
+Full grammar and semantics: **[docs/REFERENCE.md → Policy DSL](docs/REFERENCE.md#policy-dsl-omcpolicy)**.
+
 ---
 
 - 📖 **[Quickstart & full reference →](docs/REFERENCE.md)**

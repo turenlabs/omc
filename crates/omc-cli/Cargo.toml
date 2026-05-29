@@ -59,6 +59,7 @@ omc-cap = { path = "../omc-cap" }
 omc-format = { path = "../omc-format" }
 omc-frontend-js = { path = "../omc-frontend-js" }
 omc-frontend-py = { path = "../omc-frontend-py" }
+omc-policy = { path = "../omc-policy" }
 omc-registry = { path = "../omc-registry" }
 omc-runtime = { path = "../omc-runtime" }
 omc-taint = { path = "../omc-taint" }
