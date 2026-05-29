@@ -64,6 +64,8 @@ pub enum OmcRegistryError {
     UnsupportedInstallArtifact(String),
     #[error("archive contains an unsafe path: {0}")]
     UnsafeArchivePath(String),
+    #[error("could not locate an entry source file for {0}")]
+    MissingEntrySource(String),
     #[error("downloaded artifact digest mismatch for {name}: expected {expected}, got {actual}")]
     DigestMismatch {
         name: String,
@@ -7996,6 +7998,139 @@ fn read_locked_archive(project_dir: &Path, package: &LockedPackage) -> Result<Ve
         });
     }
     Ok(bytes)
+}
+
+/// The entry source of a locked package, extracted from its cached archive.
+///
+/// `module_id` is the canonical `eco:name@version` id (matching `Module.id`),
+/// and `source` is the UTF-8 text of the package's entry source file. This is
+/// the REAL package source — it is handed to a language front end for in-cell
+/// lowering, never executed on the host.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LockedEntrySource {
+    pub module_id: String,
+    pub ecosystem: Ecosystem,
+    pub name: String,
+    pub version: String,
+    pub source: String,
+}
+
+/// Minimal view of a package.json used only to locate the npm entry file.
+#[derive(Debug, Default, Deserialize)]
+struct NpmEntryManifest {
+    #[serde(default)]
+    main: Option<String>,
+}
+
+/// Read the entry source file for a locked package out of its cached archive.
+///
+/// The archive is verified against the lock's sha256 (via [`read_locked_archive`])
+/// before any bytes are interpreted. For npm the entry file is the `main` field
+/// of package.json (defaulting to `index.js`); for PyPI it is the package's
+/// top-level module — `{name}/__init__.py` or `{name}.py` (dashes normalized to
+/// underscores). Deny-by-default: if no entry source can be located, this fails
+/// with [`OmcRegistryError::MissingEntrySource`] rather than guessing.
+pub fn read_locked_package_entry_source(
+    project_dir: impl AsRef<Path>,
+    package: &LockedPackage,
+) -> Result<LockedEntrySource> {
+    let project_dir = project_dir.as_ref();
+    let bytes = read_locked_archive(project_dir, package)?;
+    let files = read_archive_text_files(&bytes)?;
+
+    let source = match package.ecosystem {
+        Ecosystem::Npm => locate_npm_entry_source(&files),
+        Ecosystem::Pypi => locate_pypi_entry_source(&package.name, &files),
+    }
+    .ok_or_else(|| OmcRegistryError::MissingEntrySource(locked_package_key(package)))?;
+
+    Ok(LockedEntrySource {
+        module_id: locked_package_key(package),
+        ecosystem: package.ecosystem,
+        name: package.name.clone(),
+        version: package.version.clone(),
+        source,
+    })
+}
+
+/// Decode a gzip tarball into a map of archive-relative path -> UTF-8 contents.
+/// The leading distribution directory (`package/`, `name-version/`) is stripped
+/// so callers index by the in-package path (e.g. `package.json`, `index.js`).
+/// Binary (non-UTF-8) entries are skipped — only text sources are surfaced.
+fn read_archive_text_files(bytes: &[u8]) -> Result<BTreeMap<String, String>> {
+    let decoder = GzDecoder::new(Cursor::new(bytes));
+    let mut archive = Archive::new(decoder);
+    let mut files = BTreeMap::new();
+    for entry in archive.entries()? {
+        let mut entry = entry?;
+        if !entry.header().entry_type().is_file() {
+            continue;
+        }
+        let raw_path = entry.path()?.to_string_lossy().into_owned();
+        if is_ignorable_archive_metadata_path(&raw_path) {
+            continue;
+        }
+        let Some(stripped) = strip_first_path_component(Path::new(&raw_path)) else {
+            continue;
+        };
+        let mut contents = String::new();
+        if entry.read_to_string(&mut contents).is_err() {
+            // Non-UTF-8 (binary) entry; not a lowerable text source.
+            continue;
+        }
+        files.insert(stripped.to_string_lossy().replace('\\', "/"), contents);
+    }
+    Ok(files)
+}
+
+/// Pick the npm entry source: package.json `main` (defaulting to `index.js`).
+fn locate_npm_entry_source(files: &BTreeMap<String, String>) -> Option<String> {
+    let main = files
+        .get("package.json")
+        .and_then(|raw| serde_json::from_str::<NpmEntryManifest>(raw).ok())
+        .and_then(|manifest| manifest.main)
+        .filter(|main| !main.trim().is_empty())
+        .unwrap_or_else(|| "index.js".to_owned());
+
+    let candidates = [
+        normalize_archive_rel_path(&main),
+        format!("{}.js", normalize_archive_rel_path(&main).trim_end_matches('/')),
+        format!(
+            "{}/index.js",
+            normalize_archive_rel_path(&main).trim_end_matches('/')
+        ),
+        "index.js".to_owned(),
+    ];
+    for candidate in candidates {
+        if let Some(source) = files.get(&candidate) {
+            return Some(source.clone());
+        }
+    }
+    None
+}
+
+/// Pick the PyPI entry source: the package's top-level module. Tries
+/// `{name}/__init__.py` (package layout) then `{name}.py` (single-module), with
+/// dashes normalized to underscores per the import-name convention.
+fn locate_pypi_entry_source(name: &str, files: &BTreeMap<String, String>) -> Option<String> {
+    let module = name.replace('-', "_");
+    let candidates = [
+        format!("{module}/__init__.py"),
+        format!("{module}.py"),
+        format!("src/{module}/__init__.py"),
+        format!("src/{module}.py"),
+    ];
+    for candidate in candidates {
+        if let Some(source) = files.get(&candidate) {
+            return Some(source.clone());
+        }
+    }
+    None
+}
+
+/// Normalize an archive-relative path: strip a leading `./`, collapse backslashes.
+fn normalize_archive_rel_path(path: &str) -> String {
+    path.trim_start_matches("./").replace('\\', "/")
 }
 
 fn verify_locked_artifact(project_dir: &Path, package: &LockedPackage) -> Result<()> {
@@ -21129,6 +21264,108 @@ packages:
         let node_modules = dir.path().join("node_modules");
         let target = install_npm_package_to(dir.path(), &package, &node_modules).unwrap();
         assert!(target.join("package.json").exists());
+    }
+
+    #[test]
+    fn reads_npm_entry_source_from_locked_archive() {
+        let dir = tempfile::tempdir().unwrap();
+        let bytes = npm_tgz_with_files(
+            r#"{"name":"is-odd","version":"3.0.1","main":"lib/main.js"}"#,
+            &[("lib/main.js", "module.exports = function isOdd(n){return n%2===1;};")],
+        );
+        let archive = dir.path().join(".omc/cache/npm/is-odd.tgz");
+        fs::create_dir_all(archive.parent().unwrap()).unwrap();
+        fs::write(&archive, &bytes).unwrap();
+
+        let mut package = locked_package_for_test(Ecosystem::Npm, "is-odd", "3.0.1");
+        package.archive = relative_path(dir.path(), &archive);
+        package.sha256 = sha256_hex(&bytes);
+
+        let entry = read_locked_package_entry_source(dir.path(), &package).unwrap();
+        assert_eq!(entry.module_id, "npm:is-odd@3.0.1");
+        assert!(entry.source.contains("isOdd"));
+    }
+
+    #[test]
+    fn npm_entry_source_defaults_to_index_js() {
+        let dir = tempfile::tempdir().unwrap();
+        let bytes = npm_tgz_with_files(
+            r#"{"name":"pkg","version":"1.0.0"}"#,
+            &[("index.js", "module.exports = function f(){return 1;};")],
+        );
+        let archive = dir.path().join(".omc/cache/npm/pkg.tgz");
+        fs::create_dir_all(archive.parent().unwrap()).unwrap();
+        fs::write(&archive, &bytes).unwrap();
+
+        let mut package = locked_package_for_test(Ecosystem::Npm, "pkg", "1.0.0");
+        package.archive = relative_path(dir.path(), &archive);
+        package.sha256 = sha256_hex(&bytes);
+
+        let entry = read_locked_package_entry_source(dir.path(), &package).unwrap();
+        assert!(entry.source.contains("function f"));
+    }
+
+    #[test]
+    fn reads_pypi_entry_source_from_init_py() {
+        let dir = tempfile::tempdir().unwrap();
+        let bytes = python_sdist_for_test(&[("mathy/__init__.py", "def main(n):\n    return n+1\n")]);
+        let archive = dir.path().join(".omc/cache/pypi/mathy.tar.gz");
+        fs::create_dir_all(archive.parent().unwrap()).unwrap();
+        fs::write(&archive, &bytes).unwrap();
+
+        let mut package = locked_package_for_test(Ecosystem::Pypi, "mathy", "1.0.0");
+        package.archive = relative_path(dir.path(), &archive);
+        package.sha256 = sha256_hex(&bytes);
+
+        let entry = read_locked_package_entry_source(dir.path(), &package).unwrap();
+        assert_eq!(entry.module_id, "pypi:mathy@1.0.0");
+        assert!(entry.source.contains("def main"));
+    }
+
+    #[test]
+    fn missing_entry_source_fails_closed() {
+        let dir = tempfile::tempdir().unwrap();
+        // An npm archive whose package.json points at a file that is absent.
+        let bytes = npm_tgz_with_files(
+            r#"{"name":"pkg","version":"1.0.0","main":"missing.js"}"#,
+            &[("other.js", "module.exports = 1;")],
+        );
+        let archive = dir.path().join(".omc/cache/npm/pkg.tgz");
+        fs::create_dir_all(archive.parent().unwrap()).unwrap();
+        fs::write(&archive, &bytes).unwrap();
+
+        let mut package = locked_package_for_test(Ecosystem::Npm, "pkg", "1.0.0");
+        package.archive = relative_path(dir.path(), &archive);
+        package.sha256 = sha256_hex(&bytes);
+
+        let err = read_locked_package_entry_source(dir.path(), &package).unwrap_err();
+        assert!(matches!(err, OmcRegistryError::MissingEntrySource(_)), "got {err:?}");
+    }
+
+    fn npm_tgz_with_files(package_json: &str, files: &[(&str, &str)]) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        {
+            let encoder = flate2::write::GzEncoder::new(&mut bytes, flate2::Compression::default());
+            let mut archive = tar::Builder::new(encoder);
+            let mut header = tar::Header::new_gnu();
+            header.set_size(package_json.len() as u64);
+            header.set_mode(0o644);
+            header.set_cksum();
+            archive
+                .append_data(&mut header, "package/package.json", package_json.as_bytes())
+                .unwrap();
+            for (path, content) in files {
+                let mut header = tar::Header::new_gnu();
+                header.set_size(content.len() as u64);
+                header.set_mode(0o644);
+                header.set_cksum();
+                archive
+                    .append_data(&mut header, format!("package/{path}"), content.as_bytes())
+                    .unwrap();
+            }
+            archive.into_inner().unwrap().finish().unwrap();
+        }
+        bytes
     }
 
     #[test]

@@ -8,11 +8,17 @@ version.workspace = true
 [dependencies]
 omc-cap = { path = "../omc-cap" }
 omc-format = { path = "../omc-format" }
+omc-frontend-js = { path = "../omc-frontend-js" }
+omc-frontend-py = { path = "../omc-frontend-py" }
 omc-linker = { path = "../omc-linker" }
+omc-registry = { path = "../omc-registry" }
 omc-taint = { path = "../omc-taint" }
 omc-verify = { path = "../omc-verify" }
 omc-vm = { path = "../omc-vm" }
 
 [dev-dependencies]
-omc-frontend-js = { path = "../omc-frontend-js" }
-omc-frontend-py = { path = "../omc-frontend-py" }
+tempfile = "3"
+sha2 = "0.10"
+flate2 = "1"
+tar = "0.4"
+toml = "0.8"

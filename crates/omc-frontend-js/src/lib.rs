@@ -8,7 +8,7 @@
 //!
 //! # Frontend contract (frozen)
 //!
-//! A front end is a pure function `compile(source, meta) -> Result<Module,
+//! A front end is a pure function `compile(source, meta) -> Result<CompileOutput,
 //! FrontendError>` over a DEFINED SUBSET of the language. It NEVER executes the
 //! source and adds NO external parser/codegen dependency: the parser is a small
 //! hand-written recursive-descent parser for the subset only. Anything outside
@@ -52,7 +52,12 @@ mod lexer;
 mod lower;
 mod parser;
 
-use omc_format::{BehaviorType, Module};
+use omc_format::BehaviorType;
+/// Re-exported so callers can name the front end's output types directly. The
+/// `CompileOutput`/`ImportSpec` shape is shared across every language front end
+/// (defined in `omc-format`) so the linker consumes one type regardless of the
+/// source ecosystem.
+pub use omc_format::{CompileOutput, ImportSpec};
 
 /// Metadata describing the package being compiled. The linker uses
 /// `package`/`version` to form the module id `npm:{package}@{version}`.
@@ -88,7 +93,8 @@ impl std::fmt::Display for FrontendError {
 
 impl std::error::Error for FrontendError {}
 
-/// Lower a JS-subset source string into an OSS Microcode [`Module`].
+/// Lower a JS-subset source string into an OSS Microcode [`Module`] and its
+/// positional import table.
 ///
 /// Pipeline: `lex` -> `parse` (recursive descent over the defined subset) ->
 /// `lower` (AST to `omc_format::Module`). Pure and offline: the source is never
@@ -99,7 +105,7 @@ impl std::error::Error for FrontendError {}
 /// The returned module is NOT yet verified — callers must run
 /// [`omc_verify::verify_module`] against the importer policy before linking or
 /// running it.
-pub fn compile(source: &str, meta: &PackageMeta) -> Result<Module, FrontendError> {
+pub fn compile(source: &str, meta: &PackageMeta) -> Result<CompileOutput, FrontendError> {
     let tokens = lexer::lex(source)?;
     let program = parser::parse(&tokens)?;
     lower::lower(&program, meta)
@@ -110,7 +116,7 @@ mod tests {
     use super::*;
 
     use omc_cap::{Capability, LabelMatcher, MemoryBroker, Policy, Sink};
-    use omc_format::{CapOp, Op, Value};
+    use omc_format::{CapOp, ImportSpec, Op, Value};
     use omc_taint::{Label, Labeled};
     use omc_verify::verify_module;
     use omc_vm::{run_cell, Cell};
@@ -131,7 +137,10 @@ mod tests {
 
     #[test]
     fn lowers_is_odd_to_a_pure_module_that_verifies_and_runs() {
-        let module = compile(IS_ODD_SRC, &meta("is-odd", "3.0.1", BehaviorType::Pure)).unwrap();
+        let out = compile(IS_ODD_SRC, &meta("is-odd", "3.0.1", BehaviorType::Pure)).unwrap();
+        // A pure module requires no third-party packages: its import table is empty.
+        assert!(out.imports.is_empty());
+        let module = out.module;
 
         // Module identity follows the npm:{pkg}@{ver} convention.
         assert_eq!(module.id, "npm:is-odd@3.0.1");
@@ -188,7 +197,8 @@ mod tests {
             EXFIL_SRC,
             &meta("sneaky", "1.0.0", BehaviorType::HostCapability),
         )
-        .unwrap();
+        .unwrap()
+        .module;
 
         let entry = module.entry().unwrap();
         // The dangerous behavior is explicit: an EnvRead and an HttpRequest cap.
@@ -233,7 +243,9 @@ mod tests {
         // the EnvRead capability is granted, runs in the VM, and the value comes
         // back labeled with its env taint.
         let src = "module.exports = function readEnv() { return process.env.HOME; };";
-        let module = compile(src, &meta("read-home", "1.0.0", BehaviorType::HostCapability)).unwrap();
+        let module = compile(src, &meta("read-home", "1.0.0", BehaviorType::HostCapability))
+            .unwrap()
+            .module;
 
         let policy = Policy::pure().allow_capability(Capability::EnvRead("HOME".to_owned()));
         verify_module(&module, &policy).unwrap();
@@ -254,7 +266,9 @@ mod tests {
              if (n < 0) { r = 0; } else { r = n; } \
              return r; \
          };";
-        let module = compile(src, &meta("clamp", "0.1.0", BehaviorType::Pure)).unwrap();
+        let module = compile(src, &meta("clamp", "0.1.0", BehaviorType::Pure))
+            .unwrap()
+            .module;
         verify_module(&module, &Policy::pure()).unwrap();
 
         let mut broker = MemoryBroker::new();
@@ -278,15 +292,86 @@ mod tests {
              const dep = require('left-pad'); \
              return dep(x); \
          };";
-        let module = compile(src, &meta("uses-dep", "1.0.0", BehaviorType::Pure)).unwrap();
-        let entry = module.entry().unwrap();
-        assert!(entry.code.iter().any(|op| matches!(op, Op::CallImport(_))));
+        let out = compile(src, &meta("uses-dep", "1.0.0", BehaviorType::Pure)).unwrap();
+        let entry = out.module.entry().unwrap();
+        // The single required package is interned at ImportId 0.
+        assert!(entry
+            .code
+            .iter()
+            .any(|op| matches!(op, Op::CallImport(0))));
+        assert_eq!(
+            out.imports,
+            vec![ImportSpec {
+                package: "left-pad".to_owned(),
+                member: None,
+            }]
+        );
+    }
+
+    #[test]
+    fn distinct_required_packages_get_sequential_import_ids() {
+        // Two distinct required third-party packages get ImportIds 0 and 1 in
+        // first-use order, each recorded with its source-level ImportSpec.
+        let src = "module.exports = function combine(x) { \
+             const a = require('is-odd'); \
+             const b = require('left-pad'); \
+             return a(x) + b(x); \
+         };";
+        let out = compile(src, &meta("combiner", "1.0.0", BehaviorType::Pure)).unwrap();
+        let entry = out.module.entry().unwrap();
+        // First-used package (is-odd) is id 0, second (left-pad) is id 1.
+        assert!(entry
+            .code
+            .iter()
+            .any(|op| matches!(op, Op::CallImport(0))));
+        assert!(entry
+            .code
+            .iter()
+            .any(|op| matches!(op, Op::CallImport(1))));
+        assert_eq!(
+            out.imports,
+            vec![
+                ImportSpec {
+                    package: "is-odd".to_owned(),
+                    member: None,
+                },
+                ImportSpec {
+                    package: "left-pad".to_owned(),
+                    member: None,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn is_even_over_is_odd_shape_lowers_to_a_single_import() {
+        // The canonical is-even -> is-odd shape: require the dependency, bind it,
+        // and call it. It lowers to exactly one import at id 0.
+        let src = "module.exports = function isEven(n) { \
+             const isOdd = require('is-odd'); \
+             return !isOdd(n); \
+         };";
+        let out = compile(src, &meta("is-even", "1.0.0", BehaviorType::Pure)).unwrap();
+        let entry = out.module.entry().unwrap();
+        assert!(entry
+            .code
+            .iter()
+            .any(|op| matches!(op, Op::CallImport(0))));
+        assert_eq!(
+            out.imports,
+            vec![ImportSpec {
+                package: "is-odd".to_owned(),
+                member: None,
+            }]
+        );
     }
 
     #[test]
     fn arithmetic_and_comparison_subset_runs() {
         let src = "module.exports = function calc(a, b) { return (a * b + 1) % 7; };";
-        let module = compile(src, &meta("calc", "1.0.0", BehaviorType::Pure)).unwrap();
+        let module = compile(src, &meta("calc", "1.0.0", BehaviorType::Pure))
+            .unwrap()
+            .module;
         verify_module(&module, &Policy::pure()).unwrap();
 
         let mut broker = MemoryBroker::new();
@@ -360,7 +445,9 @@ mod tests {
              const cp = require('child_process'); \
              cp.exec('rm -rf /'); \
          };";
-        let module = compile(src, &meta("evil-build", "1.0.0", BehaviorType::Pure)).unwrap();
+        let module = compile(src, &meta("evil-build", "1.0.0", BehaviorType::Pure))
+            .unwrap()
+            .module;
         assert!(module
             .entry()
             .unwrap()

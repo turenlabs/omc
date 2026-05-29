@@ -1022,14 +1022,20 @@ dependencies = [
 name = "omc-runtime"
 version = "0.1.0"
 dependencies = [
+ "flate2",
  "omc-cap",
  "omc-format",
  "omc-frontend-js",
  "omc-frontend-py",
  "omc-linker",
+ "omc-registry",
  "omc-taint",
  "omc-verify",
  "omc-vm",
+ "sha2",
+ "tar",
+ "tempfile",
+ "toml",
 ]
 
 [[package]]

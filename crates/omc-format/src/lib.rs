@@ -250,6 +250,21 @@ impl Function {
     }
 }
 
+/// The source-level identity of a single positional import in a compiled
+/// module, indexed by [`Op::CallImport`] id. A front end produces one
+/// `ImportSpec` per distinct third-party package referenced (in first-use
+/// order); the linker resolves each into a concrete `ImportRef`.
+///
+/// `package` is the package name exactly as written in source (e.g. the
+/// argument to `require("is-odd")` or `from pkg import f`). `member` is the
+/// specific named export referenced (`Some("f")`), or `None` for the package's
+/// default/callable export.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ImportSpec {
+    pub package: String,
+    pub member: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Module {
     pub id: ModuleId,
@@ -267,6 +282,17 @@ impl Module {
     pub fn function(&self, id: FunctionId) -> Option<&Function> {
         self.functions.iter().find(|function| function.id == id)
     }
+}
+
+/// The result of lowering a single package source: the produced [`Module`] plus
+/// its ordered import table. `imports[i]` is the [`ImportSpec`] targeted by
+/// `Op::CallImport(i)`; the linker uses it to bind each import to a concrete
+/// module/function in the link graph. Shared by every language front end so the
+/// linker consumes one shape regardless of source ecosystem.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CompileOutput {
+    pub module: Module,
+    pub imports: Vec<ImportSpec>,
 }
 
 #[cfg(test)]

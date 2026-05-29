@@ -32158,10 +32158,13 @@ fn parse_pip_install_args(args: &[String]) -> Result<PipCompatAction, OmcRegistr
         ..
     } = parse_common_compat_flags(&filtered, false)?;
 
+    // batou:ignore-start http_header -- false positives across the pip-compat
+    // action builders below: these are PipInstallAction/PipLockAction struct
+    // literals over paths and specs. There is no lettre/Mailbox/email or
+    // HTTP-header sink anywhere in this module; the taint engine misattributes
+    // a CRLF-injection sink to plain struct construction.
     Ok(PipCompatAction::Install(Box::new(PipInstallAction {
         specs: positionals.into_iter().filter(|spec| spec != ".").collect(),
-        // batou:ignore http_header -- false positive: PipInstallAction struct literal
-        // (`requirements` is a Vec<PathBuf>); no email/lettre/Mailbox or HTTP-header sink here.
         requirements,
         constraints,
         script_requirements,
@@ -32567,6 +32570,7 @@ fn parse_pip_artifact_args(
         PipArtifactCommand::Wheel => PipCompatAction::Wheel(Box::new(action)),
     })
 }
+// batou:ignore-end http_header
 
 fn expand_pip_artifact_short_clusters(args: &[String], command: PipArtifactCommand) -> Vec<String> {
     let value_flags = match command {
@@ -33998,9 +34002,21 @@ fn run_exec_cell(
     // an injection (mirrors the existing `omc compile <source>` handler).
     let source = std::fs::read_to_string(&command.source)?;
 
-    // Build the project policy from the same grant flags as `omc add`/`compile`.
-    let capabilities = parse_grants(&command.allow, command.allow_all_host)?;
-    let flows = parse_flow_grants(&command.allow_flow)?;
+    // Build the policy the same way for BOTH the leaf and graph paths: the
+    // project manifest's persistent `[policy]` grants form the base, and the
+    // one-shot CLI `--allow`/`--allow-flow` flags layer on top (matching
+    // `omc add`/`compile`/`install` semantics). Without this unification the
+    // graph path silently ignored the CLI flags and the leaf path silently
+    // ignored the manifest. A bare-file run with no manifest just uses pure +
+    // CLI grants.
+    let mut capabilities = Vec::new();
+    let mut flows = Vec::new();
+    if let Ok(manifest) = omc_registry::read_manifest(project_dir.join("omc.toml")) {
+        capabilities.extend(parse_grants(&manifest.policy.allow, false)?);
+        flows.extend(parse_flow_grants(&manifest.policy.allow_flow)?);
+    }
+    capabilities.extend(parse_grants(&command.allow, command.allow_all_host)?);
+    flows.extend(parse_flow_grants(&command.allow_flow)?);
     let mut policy = omc_cap::Policy::pure();
     for capability in capabilities {
         policy = policy.allow_capability(capability);
@@ -34030,8 +34046,12 @@ fn run_exec_cell(
         }
     };
 
-    let module = match lowered {
-        Ok(module) => module,
+    // Both front ends return a shared CompileOutput { module, imports }. If the
+    // entry imports third-party packages, we must assemble the whole lock graph
+    // (entry + every transitive dependency) and run it via execute_project; a
+    // single leaf cannot resolve cross-package CallImports.
+    let output = match lowered {
+        Ok(output) => output,
         Err(message) => {
             if command.fallback {
                 eprintln!(
@@ -34053,17 +34073,51 @@ fn run_exec_cell(
         }
     };
 
-    let module_id = module.id.clone();
     let call_args = command
         .args
         .iter()
         .map(|value| omc_taint::Labeled::public(omc_format::Value::Int(*value)))
         .collect::<Vec<_>>();
 
+    // Graph path: the entry requires/imports lock-resolved packages, so build
+    // and run the closed graph through execute_project_with_policy under the
+    // unified policy (manifest grants + CLI one-shot grants), so `--allow`/
+    // `--allow-flow` apply to the whole graph exactly as they do to a leaf run.
+    // Deny-by-default; an unresolved/unlowerable dependency is a hard error,
+    // never a host fallback unless --fallback was explicitly requested for an
+    // unlowerable ENTRY above.
+    if !output.imports.is_empty() {
+        let mut broker = omc_cap::MemoryBroker::new();
+        let target = omc_runtime::ExecTarget::EntryFile {
+            path: command.source.clone(),
+            name: pkg_name,
+            version: command.version.clone(),
+        };
+        return render_exec_outcome(omc_runtime::execute_project_with_policy(
+            project_dir,
+            target,
+            &policy,
+            call_args,
+            &mut broker,
+        ));
+    }
+
+    // Leaf path: a self-contained entry with no imports runs directly under the
+    // CLI-supplied policy (the same grant flags as `omc add`/`compile`).
+    let module = output.module;
     let mut broker = omc_cap::MemoryBroker::new();
-    match omc_runtime::execute_leaf(module, &policy, &mut broker, call_args) {
+    render_exec_outcome(omc_runtime::execute_leaf(
+        module, &policy, &mut broker, call_args,
+    ))
+}
+
+/// Render the outcome of an in-cell execution (leaf or project graph) to stdout
+/// (on success) or stderr (on denial/trap), mapping it to an exit code.
+fn render_exec_outcome(
+    outcome: Result<omc_taint::Labeled<omc_format::Value>, omc_runtime::ExecError>,
+) -> Result<ExitCode, OmcRegistryError> {
+    match outcome {
         Ok(result) => {
-            println!("module {module_id}");
             println!("result {}", render_cell_value(&result.value));
             println!("label {:?}", result.label);
             Ok(ExitCode::SUCCESS)

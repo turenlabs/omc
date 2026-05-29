@@ -8,14 +8,14 @@
 use std::collections::HashMap;
 
 use omc_format::{
-    CapOp, Function, HttpRequest, Module, Op, TrapCode, Value, VirtualPath,
+    CapOp, Function, HttpRequest, ImportSpec, Module, Op, TrapCode, Value, VirtualPath,
 };
 
 use crate::ast::{BinOp, Expr, FunctionDecl, Program, Stmt};
-use crate::{FrontendError, PackageMeta};
+use crate::{CompileOutput, FrontendError, PackageMeta};
 
 /// Lower a parsed program against package metadata.
-pub fn lower(program: &Program, meta: &PackageMeta) -> Result<Module, FrontendError> {
+pub fn lower(program: &Program, meta: &PackageMeta) -> Result<CompileOutput, FrontendError> {
     let mut ctx = LowerCtx::new(&program.export)?;
     ctx.lower_body(&program.export.body)?;
 
@@ -27,13 +27,20 @@ pub fn lower(program: &Program, meta: &PackageMeta) -> Result<Module, FrontendEr
         ctx.emit(Op::Return);
     }
 
+    let LowerCtx {
+        code,
+        local_count,
+        imports,
+        ..
+    } = ctx;
+
     let function = Function::new(
         0,
         program.export.name.clone(),
         program.export.params.len() as u8,
-        ctx.code,
+        code,
     )
-    .with_locals(ctx.local_count);
+    .with_locals(local_count);
 
     let module = Module {
         id: format!("npm:{}@{}", meta.package, meta.version),
@@ -42,7 +49,7 @@ pub fn lower(program: &Program, meta: &PackageMeta) -> Result<Module, FrontendEr
         declared_behavior: meta.declared_behavior.clone(),
         functions: vec![function],
     };
-    Ok(module)
+    Ok(CompileOutput { module, imports })
 }
 
 struct LowerCtx {
@@ -55,6 +62,13 @@ struct LowerCtx {
     /// require('pkg') aliases: local var name -> imported module specifier.
     /// Phase 3 linker resolves these; we only track which names are imports.
     import_aliases: HashMap<String, ImportTarget>,
+    /// The positional import table, indexed by ImportId: the i-th entry is the
+    /// `ImportSpec` emitted as `Op::CallImport(i)`. Each distinct third-party
+    /// package gets one id, assigned in first-use order.
+    imports: Vec<ImportSpec>,
+    /// Memoizes the assigned ImportId for a `(package, member)` pair so repeated
+    /// calls to the same imported binding reuse one id.
+    import_ids: HashMap<(String, Option<String>), u32>,
 }
 
 #[derive(Clone)]
@@ -80,7 +94,31 @@ impl LowerCtx {
             locals: HashMap::new(),
             local_count: 0,
             import_aliases: HashMap::new(),
+            imports: Vec::new(),
+            import_ids: HashMap::new(),
         })
+    }
+
+    /// Assign (or reuse) the positional `ImportId` for a `(package, member)`
+    /// pair, recording its `ImportSpec` in first-use order. Distinct packages
+    /// get distinct ids; repeated use of the same binding reuses one id.
+    fn intern_import(
+        &mut self,
+        package: &str,
+        member: Option<&str>,
+    ) -> Result<u32, FrontendError> {
+        let key = (package.to_owned(), member.map(str::to_owned));
+        if let Some(id) = self.import_ids.get(&key) {
+            return Ok(*id);
+        }
+        let id = u32::try_from(self.imports.len())
+            .map_err(|_| FrontendError::new("too many imports"))?;
+        self.imports.push(ImportSpec {
+            package: package.to_owned(),
+            member: member.map(str::to_owned),
+        });
+        self.import_ids.insert(key, id);
+        Ok(id)
     }
 
     fn emit(&mut self, op: Op) -> usize {
@@ -417,7 +455,7 @@ impl LowerCtx {
                 }
                 if let Some(ImportTarget::Package(pkg)) = self.import_aliases.get(obj).cloned() {
                     // pkg.method(...) — a named export call into another module.
-                    return self.lower_import_call(&pkg, args);
+                    return self.lower_import_call(&pkg, Some(name), args);
                 }
             }
 
@@ -468,7 +506,7 @@ impl LowerCtx {
         // A bare call to a package alias bound via require: pkg(...) -> import.
         if let Expr::Ident(name) = callee {
             if let Some(ImportTarget::Package(pkg)) = self.import_aliases.get(name).cloned() {
-                return self.lower_import_call(&pkg, args);
+                return self.lower_import_call(&pkg, None, args);
             }
         }
 
@@ -584,17 +622,23 @@ impl LowerCtx {
         Ok(())
     }
 
-    fn lower_import_call(&mut self, _pkg: &str, args: &[Expr]) -> Result<(), FrontendError> {
+    fn lower_import_call(
+        &mut self,
+        pkg: &str,
+        member: Option<&str>,
+        args: &[Expr],
+    ) -> Result<(), FrontendError> {
         // Push the arguments left-to-right; the linker-resolved CallImport pops
         // N args (N = callee.args) and reverses, matching CallLocal semantics.
         for arg in args {
             self.lower_expr(arg)?;
         }
-        // ImportId 0: a module carries a positional import table; this minimal
-        // front end emits a single import per package alias at id 0. The linker
-        // resolves it by the recorded ImportRef. (Multi-import tables are a
-        // linker-side concern out of scope for this minimal frontend.)
-        self.emit(Op::CallImport(0));
+        // The module carries a positional import table indexed by ImportId.
+        // Each distinct (package, member) binding is interned to its own id in
+        // first-use order; `Op::CallImport(id)` references the recorded
+        // `ImportSpec`, which the linker resolves to a concrete `ImportRef`.
+        let id = self.intern_import(pkg, member)?;
+        self.emit(Op::CallImport(id));
         Ok(())
     }
 

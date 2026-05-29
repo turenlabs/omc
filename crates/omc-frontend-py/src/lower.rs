@@ -8,14 +8,20 @@
 use std::collections::HashMap;
 
 use omc_format::{
-    CapOp, Function, FunctionId, HttpRequest, ImportId, Module, Op, Value, VirtualPath,
+    CapOp, Function, FunctionId, HttpRequest, ImportId, ImportSpec, Module, Op, Value, VirtualPath,
 };
 
 use crate::parser::{BinOp, Expr, FuncDef, Import, ParsedModule, Stmt};
 use crate::{FrontendError, PackageMeta};
 
-/// Lower a parsed module into microcode.
-pub fn lower(parsed: &ParsedModule, meta: &PackageMeta) -> Result<Module, FrontendError> {
+/// Lower a parsed module into microcode plus its ordered import table.
+///
+/// The returned `imports` vector is indexed by [`ImportId`]: `imports[i]` is the
+/// [`ImportSpec`] resolved by `Op::CallImport(i)`.
+pub fn lower(
+    parsed: &ParsedModule,
+    meta: &PackageMeta,
+) -> Result<(Module, Vec<ImportSpec>), FrontendError> {
     let module_id = format!("pypi:{}@{}", meta.package, meta.version);
 
     // Build the import alias -> ImportId table. Each binding gets a positional
@@ -39,58 +45,88 @@ pub fn lower(parsed: &ParsedModule, meta: &PackageMeta) -> Result<Module, Fronte
         functions.push(lower_function(index as FunctionId, func, &func_ids, &imports)?);
     }
 
-    Ok(Module {
+    let module = Module {
         id: module_id,
         package: meta.package.clone(),
         version: meta.version.clone(),
         declared_behavior: meta.declared_behavior.clone(),
         functions,
-    })
+    };
+    Ok((module, imports.specs()))
 }
 
 /// Maps imported names to positional ImportIds and remembers which alias refers
 /// to which capability family (e.g. `requests` -> http client).
 struct ImportTable {
-    /// name (alias or imported symbol) -> (ImportId, source module dotted name)
-    bindings: HashMap<String, (ImportId, String)>,
+    /// name (alias or imported symbol) -> source module dotted name. Records
+    /// EVERY import — including capability-family modules (`os`, `requests`, …) —
+    /// so capability calls through an alias (`import requests as r`) still
+    /// resolve. Capability modules deliberately do NOT receive an `ImportId`.
+    sources: HashMap<String, String>,
+    /// name -> `ImportId` for cross-module (non-capability) imports only. The
+    /// id is the index into `specs`, i.e. the operand of `Op::CallImport`.
+    ids: HashMap<String, ImportId>,
+    /// The ordered import table, indexed by `ImportId`: `specs[i]` is the
+    /// [`ImportSpec`] for `Op::CallImport(i)`. Capability imports are excluded.
+    specs: Vec<ImportSpec>,
 }
 
 impl ImportTable {
     fn build(imports: &[Import]) -> Self {
-        let mut bindings = HashMap::new();
-        let mut next: ImportId = 0;
+        let mut sources: HashMap<String, String> = HashMap::new();
+        let mut ids: HashMap<String, ImportId> = HashMap::new();
+        let mut specs: Vec<ImportSpec> = Vec::new();
         for import in imports {
             match import {
                 Import::Module { name, alias } => {
-                    bindings
-                        .entry(alias.clone())
-                        .or_insert_with(|| {
-                            let id = next;
-                            next += 1;
-                            (id, name.clone())
+                    // `import a.b.c [as alias]` binds the whole module; its
+                    // ImportSpec carries the dotted package name and no member.
+                    sources.entry(alias.clone()).or_insert_with(|| name.clone());
+                    if !is_capability_module(name) && !ids.contains_key(alias) {
+                        ids.insert(alias.clone(), specs.len() as ImportId);
+                        specs.push(ImportSpec {
+                            package: name.clone(),
+                            member: None,
                         });
+                    }
                 }
                 Import::From { module, names } => {
+                    // `from pkg import f, g` binds each symbol to a distinct
+                    // ImportId; each ImportSpec names the package and the member.
                     for symbol in names {
-                        bindings.entry(symbol.clone()).or_insert_with(|| {
-                            let id = next;
-                            next += 1;
-                            (id, module.clone())
-                        });
+                        sources
+                            .entry(symbol.clone())
+                            .or_insert_with(|| module.clone());
+                        if !is_capability_module(module) && !ids.contains_key(symbol) {
+                            ids.insert(symbol.clone(), specs.len() as ImportId);
+                            specs.push(ImportSpec {
+                                package: module.clone(),
+                                member: Some(symbol.clone()),
+                            });
+                        }
                     }
                 }
             }
         }
-        Self { bindings }
+        Self {
+            sources,
+            ids,
+            specs,
+        }
     }
 
     /// The dotted source-module name a bound alias refers to, if any.
     fn source_of(&self, name: &str) -> Option<&str> {
-        self.bindings.get(name).map(|(_, module)| module.as_str())
+        self.sources.get(name).map(String::as_str)
     }
 
     fn import_id(&self, name: &str) -> Option<ImportId> {
-        self.bindings.get(name).map(|(id, _)| *id)
+        self.ids.get(name).copied()
+    }
+
+    /// The ordered import table, indexed by `ImportId`.
+    fn specs(self) -> Vec<ImportSpec> {
+        self.specs
     }
 }
 
@@ -732,6 +768,33 @@ fn is_sensitive_module(src: &str) -> bool {
     matches!(
         head,
         "os" | "subprocess" | "socket" | "requests" | "urllib" | "shutil" | "ctypes" | "pickle"
+    )
+}
+
+/// Is `src` a standard-library / capability-family module whose calls lower to
+/// `Op::Cap(..)` (or fail closed) rather than to a cross-module `Op::CallImport`?
+///
+/// Such imports are NOT cross-module package imports and must be kept out of the
+/// `ImportTable`: giving them an `ImportId` would both surface them in the
+/// surfaced import table and desync the positional `CallImport(i)` indexing for
+/// the real third-party imports. The set is the union of every module root the
+/// capability-lowering rules recognise, plus the sensitive modules that fail
+/// closed.
+fn is_capability_module(src: &str) -> bool {
+    let head = src.split('.').next().unwrap_or(src);
+    matches!(
+        head,
+        "os" | "subprocess"
+            | "socket"
+            | "requests"
+            | "urllib"
+            | "shutil"
+            | "ctypes"
+            | "pickle"
+            | "time"
+            | "datetime"
+            | "secrets"
+            | "pathlib"
     )
 }
 
