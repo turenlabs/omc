@@ -21,9 +21,15 @@ pub struct FunctionDecl {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Stmt {
     /// `const`/`let` local declaration with an initializer.
-    Local { name: String, value: Expr },
+    Local {
+        name: String,
+        value: Expr,
+    },
     /// Reassignment of an existing local: `name = expr;`.
-    Assign { name: String, value: Expr },
+    Assign {
+        name: String,
+        value: Expr,
+    },
     Return(Option<Expr>),
     If {
         cond: Expr,

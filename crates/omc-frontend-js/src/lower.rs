@@ -102,11 +102,7 @@ impl LowerCtx {
     /// Assign (or reuse) the positional `ImportId` for a `(package, member)`
     /// pair, recording its `ImportSpec` in first-use order. Distinct packages
     /// get distinct ids; repeated use of the same binding reuses one id.
-    fn intern_import(
-        &mut self,
-        package: &str,
-        member: Option<&str>,
-    ) -> Result<u32, FrontendError> {
+    fn intern_import(&mut self, package: &str, member: Option<&str>) -> Result<u32, FrontendError> {
         let key = (package.to_owned(), member.map(str::to_owned));
         if let Some(id) = self.import_ids.get(&key) {
             return Ok(*id);

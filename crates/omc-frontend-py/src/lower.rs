@@ -32,7 +32,10 @@ pub fn lower(
     // Resolve sibling-function names to FunctionIds (declaration order).
     let mut func_ids: HashMap<String, FunctionId> = HashMap::new();
     for (index, func) in parsed.functions.iter().enumerate() {
-        if func_ids.insert(func.name.clone(), index as FunctionId).is_some() {
+        if func_ids
+            .insert(func.name.clone(), index as FunctionId)
+            .is_some()
+        {
             return Err(FrontendError::new(format!(
                 "duplicate function definition `{}`",
                 func.name
@@ -42,7 +45,12 @@ pub fn lower(
 
     let mut functions = Vec::new();
     for (index, func) in parsed.functions.iter().enumerate() {
-        functions.push(lower_function(index as FunctionId, func, &func_ids, &imports)?);
+        functions.push(lower_function(
+            index as FunctionId,
+            func,
+            &func_ids,
+            &imports,
+        )?);
     }
 
     let module = Module {
@@ -185,8 +193,10 @@ fn lower_function(
     // parser.
 
     let locals_count = ctx.locals.len() as u16;
-    Ok(Function::new(id, func.name.clone(), func.params.len() as u8, ctx.code)
-        .with_locals(locals_count))
+    Ok(
+        Function::new(id, func.name.clone(), func.params.len() as u8, ctx.code)
+            .with_locals(locals_count),
+    )
 }
 
 /// Walk the body and assign a local slot to every assignment target. A name
@@ -670,7 +680,11 @@ impl LowerCtx<'_> {
 
         // open(p).read() — base is `open(p)`, attr is `read`.
         if attr == "read" {
-            if let Expr::Call { callee, args: open_args } = base {
+            if let Expr::Call {
+                callee,
+                args: open_args,
+            } = base
+            {
                 if let Expr::Name(fname) = callee.as_ref() {
                     if fname == "open" {
                         let path = const_string_arg(open_args, 0).unwrap_or_else(|| "*".to_owned());
@@ -812,10 +826,7 @@ fn host_of(url: &str) -> String {
     if url == "*" {
         return "*".to_owned();
     }
-    let without_scheme = url
-        .split_once("://")
-        .map(|(_, rest)| rest)
-        .unwrap_or(url);
+    let without_scheme = url.split_once("://").map(|(_, rest)| rest).unwrap_or(url);
     let host = without_scheme
         .split(['/', '?', '#'])
         .next()
@@ -829,4 +840,3 @@ fn host_of(url: &str) -> String {
         host.to_owned()
     }
 }
-

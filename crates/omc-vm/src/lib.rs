@@ -494,10 +494,7 @@ fn compare(op: &Op, left: Labeled<Value>, right: Labeled<Value>) -> Result<Label
     Ok(Labeled::new(Value::Bool(result), label))
 }
 
-fn index_value(
-    container: Labeled<Value>,
-    index: Labeled<Value>,
-) -> Result<Labeled<Value>, Trap> {
+fn index_value(container: Labeled<Value>, index: Labeled<Value>) -> Result<Labeled<Value>, Trap> {
     let label = container.label.join(index.label);
     match (container.value, index.value) {
         (Value::Array(values), Value::Int(idx)) => {
@@ -936,18 +933,18 @@ mod tests {
             "branch",
             1,
             vec![
-                Op::LoadArg(0),         // 0
+                Op::LoadArg(0),            // 0
                 Op::Const(Value::Int(10)), // 1
-                Op::Lt,                 // 2
-                Op::JmpIfFalse(4),      // 3 -> jump to 8 (the else arm)
-                Op::LoadArg(0),         // 4
-                Op::Const(Value::Int(2)), // 5
-                Op::Mul,                // 6
-                Op::Return,             // 7
-                Op::LoadArg(0),         // 8 (else)
-                Op::Const(Value::Int(1)), // 9
-                Op::Sub,                // 10
-                Op::Return,             // 11
+                Op::Lt,                    // 2
+                Op::JmpIfFalse(4),         // 3 -> jump to 8 (the else arm)
+                Op::LoadArg(0),            // 4
+                Op::Const(Value::Int(2)),  // 5
+                Op::Mul,                   // 6
+                Op::Return,                // 7
+                Op::LoadArg(0),            // 8 (else)
+                Op::Const(Value::Int(1)),  // 9
+                Op::Sub,                   // 10
+                Op::Return,                // 11
             ],
         );
 
@@ -967,27 +964,27 @@ mod tests {
             "sum",
             1,
             vec![
-                Op::Const(Value::Int(0)),  // 0
-                Op::StoreLocal(0),         // 1 acc=0
-                Op::Const(Value::Int(0)),  // 2
-                Op::StoreLocal(1),         // 3 i=0
+                Op::Const(Value::Int(0)), // 0
+                Op::StoreLocal(0),        // 1 acc=0
+                Op::Const(Value::Int(0)), // 2
+                Op::StoreLocal(1),        // 3 i=0
                 // loop head @4
-                Op::LoadLocal(1),          // 4 i
-                Op::LoadArg(0),            // 5 n
-                Op::Lt,                    // 6 i<n
-                Op::JmpIfFalse(9),         // 7 -> exit @17
-                Op::LoadLocal(0),          // 8 acc
-                Op::LoadLocal(1),          // 9 i
-                Op::Add,                   // 10 acc+i
-                Op::StoreLocal(0),         // 11 acc=
-                Op::LoadLocal(1),          // 12 i
-                Op::Const(Value::Int(1)),  // 13
-                Op::Add,                   // 14 i+1
-                Op::StoreLocal(1),         // 15 i=
-                Op::Jmp(-13),              // 16 back-edge: (16+1)-13 = 4
+                Op::LoadLocal(1),         // 4 i
+                Op::LoadArg(0),           // 5 n
+                Op::Lt,                   // 6 i<n
+                Op::JmpIfFalse(9),        // 7 -> exit @17
+                Op::LoadLocal(0),         // 8 acc
+                Op::LoadLocal(1),         // 9 i
+                Op::Add,                  // 10 acc+i
+                Op::StoreLocal(0),        // 11 acc=
+                Op::LoadLocal(1),         // 12 i
+                Op::Const(Value::Int(1)), // 13
+                Op::Add,                  // 14 i+1
+                Op::StoreLocal(1),        // 15 i=
+                Op::Jmp(-13),             // 16 back-edge: (16+1)-13 = 4
                 // exit @17
-                Op::LoadLocal(0),          // 17 acc
-                Op::Return,                // 18
+                Op::LoadLocal(0), // 17 acc
+                Op::Return,       // 18
             ],
         )
         .with_locals(2);

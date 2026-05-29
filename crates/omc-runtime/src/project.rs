@@ -245,8 +245,9 @@ fn lower_source(
                 version: version.to_owned(),
                 declared_behavior: omc_format::BehaviorType::Unknown,
             };
-            omc_frontend_js::compile(source, &meta)
-                .map_err(|error| ExecError::Lower(format!("{}: {error}", module_id(ecosystem, name, version))))
+            omc_frontend_js::compile(source, &meta).map_err(|error| {
+                ExecError::Lower(format!("{}: {error}", module_id(ecosystem, name, version)))
+            })
         }
         Ecosystem::Pypi => {
             let meta = omc_frontend_py::PackageMeta {
@@ -254,21 +255,28 @@ fn lower_source(
                 version: version.to_owned(),
                 declared_behavior: omc_format::BehaviorType::Unknown,
             };
-            omc_frontend_py::compile(source, &meta)
-                .map_err(|error| ExecError::Lower(format!("{}: {error}", module_id(ecosystem, name, version))))
+            omc_frontend_py::compile(source, &meta).map_err(|error| {
+                ExecError::Lower(format!("{}: {error}", module_id(ecosystem, name, version)))
+            })
         }
     }
 }
 
 /// Read a locked package's real entry source from its cached archive and lower
 /// it. Both archive errors and lowering errors fail closed.
-fn lower_locked_package(
-    project_dir: &Path,
-    package: &LockedPackage,
-) -> Result<Lowered, ExecError> {
-    let entry = read_locked_package_entry_source(project_dir, package)
-        .map_err(|error| ExecError::Lock(format!("entry source for {}: {error}", locked_module_id(package))))?;
-    lower_source(package.ecosystem, &package.name, &package.version, &entry.source)
+fn lower_locked_package(project_dir: &Path, package: &LockedPackage) -> Result<Lowered, ExecError> {
+    let entry = read_locked_package_entry_source(project_dir, package).map_err(|error| {
+        ExecError::Lock(format!(
+            "entry source for {}: {error}",
+            locked_module_id(package)
+        ))
+    })?;
+    lower_source(
+        package.ecosystem,
+        &package.name,
+        &package.version,
+        &entry.source,
+    )
 }
 
 /// Resolve the ENTRY package (by name, optionally ecosystem) in the lock.
@@ -338,8 +346,11 @@ fn resolve_import<'a>(
     // Synthetic entry file: resolve the bare import name against the lock. We do
     // not know the ecosystem of the import a priori, so match by name and reject
     // an ambiguous cross-ecosystem hit.
-    let matches: Vec<&LockedPackage> =
-        lock.packages.iter().filter(|pkg| pkg.name == package).collect();
+    let matches: Vec<&LockedPackage> = lock
+        .packages
+        .iter()
+        .filter(|pkg| pkg.name == package)
+        .collect();
     match matches.as_slice() {
         [] => Err(ExecError::Lock(format!(
             "entry `{importer_id}` imports `{package}`, which is not present in omc.lock"
@@ -381,7 +392,9 @@ fn target_entry_function(
         .entry()
         .map(|function| function.name.clone())
         .ok_or_else(|| {
-            ExecError::Lower(format!("target module `{dep_id}` has no entry function to import"))
+            ExecError::Lower(format!(
+                "target module `{dep_id}` has no entry function to import"
+            ))
         })
 }
 
@@ -428,19 +441,25 @@ mod tests {
     fn sha256_hex(bytes: &[u8]) -> String {
         let mut hasher = Sha256::new();
         hasher.update(bytes);
-        hasher.finalize().iter().map(|b| format!("{b:02x}")).collect()
+        hasher
+            .finalize()
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect()
     }
 
     /// Build a minimal npm `.tgz` (gzip tarball) containing a package.json with
     /// `main` and the named source files, each entry prefixed with `package/`.
     fn npm_tgz(main: &str, files: &[(&str, &str)]) -> Vec<u8> {
         let package_json = format!(r#"{{"name":"x","version":"1.0.0","main":"{main}"}}"#);
-        let mut entries: Vec<(String, String)> =
-            vec![("package.json".to_owned(), package_json)];
+        let mut entries: Vec<(String, String)> = vec![("package.json".to_owned(), package_json)];
         for (path, content) in files {
             entries.push(((*path).to_owned(), (*content).to_owned()));
         }
-        tgz(&entries.iter().map(|(p, c)| (format!("package/{p}"), c.clone())).collect::<Vec<_>>())
+        tgz(&entries
+            .iter()
+            .map(|(p, c)| (format!("package/{p}"), c.clone()))
+            .collect::<Vec<_>>())
     }
 
     /// Build a minimal pypi sdist `.tar.gz` with a top-level dist directory and
@@ -455,8 +474,7 @@ mod tests {
     fn tgz(entries: &[(String, String)]) -> Vec<u8> {
         let mut bytes = Vec::new();
         {
-            let encoder =
-                flate2::write::GzEncoder::new(&mut bytes, flate2::Compression::default());
+            let encoder = flate2::write::GzEncoder::new(&mut bytes, flate2::Compression::default());
             let mut archive = tar::Builder::new(encoder);
             for (path, content) in entries {
                 let mut header = tar::Header::new_gnu();
@@ -680,7 +698,10 @@ mod tests {
             "3.0.1",
             &npm_tgz(
                 "index.js",
-                &[("index.js", "module.exports = function isOdd(n) { return n % 2 === 1; };")],
+                &[(
+                    "index.js",
+                    "module.exports = function isOdd(n) { return n % 2 === 1; };",
+                )],
             ),
             Vec::new(),
         );
@@ -802,13 +823,8 @@ mod tests {
         write_lock(project, Vec::new());
 
         let mut broker = MemoryBroker::new();
-        let err = execute_project(
-            project,
-            ExecTarget::package("ghost"),
-            vec![],
-            &mut broker,
-        )
-        .unwrap_err();
+        let err = execute_project(project, ExecTarget::package("ghost"), vec![], &mut broker)
+            .unwrap_err();
         assert!(matches!(err, ExecError::Lock(_)), "got {err}");
     }
 

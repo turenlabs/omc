@@ -95,6 +95,37 @@ The demo grants both `env.read:NPM_TOKEN` and
 that env value to that network sink. The capability exists; the flow is still
 illegal.
 
+## Install
+
+Via Homebrew (installs `omc`; does not shadow your system `node`/`npm`/`pip`):
+
+```bash
+brew tap turenio/omc https://github.com/turenio/omc
+brew install omc
+omc --version
+```
+
+The drop-in `node`/`npm`/`npx`/`pip`/`pip3`/`python`/`python3`/`twine` shims are
+installed under the formula's `libexec/shims` and are opt-in (adding them to
+PATH shadows the system tools):
+
+```bash
+export PATH="$(brew --prefix omc)/libexec/shims:$PATH"
+```
+
+Prebuilt tarballs for macOS (arm64/x86_64) and Linux (x86_64) are attached to
+each [GitHub Release](https://github.com/turenio/omc/releases). Release
+engineering lives in [docs/RELEASING.md](docs/RELEASING.md).
+
+### Shipped security default: sensitive files are deny-by-default
+
+Reading sensitive files — `~/.ssh/*`, `.env`/`.env.*`, private keys
+(`*.pem`/`*.key`/`*.p12`), `.npmrc`/`.pypirc`/`.netrc` tokens, `.aws`/`.gnupg`/
+`.kube`/cloud credentials — is denied **even under a wildcard `fs.read:*` grant
+or `--allow-all-host`**. A package must be granted the exact path
+(`fs.read:/path/to/file`) to read one, or you pass `--allow-sensitive` to lift
+the protection globally. See `is_sensitive_read_path` in `omc-cap`.
+
 ## Package Manager Prototype
 
 The `omc` CLI is the first working slice of a PyPI/npm replacement:

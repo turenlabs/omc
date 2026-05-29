@@ -40,7 +40,7 @@ pub enum Tok {
     Plus,
     Minus,
     Star,
-    Slash,      // `/`
+    Slash,       // `/`
     DoubleSlash, // `//`
     Percent,
     EqEq,
@@ -89,11 +89,17 @@ pub fn lex(source: &str) -> Result<Vec<Token>, FrontendError> {
             let current = *indent_stack.last().expect("indent stack never empty");
             if indent > current {
                 indent_stack.push(indent);
-                tokens.push(Token { tok: Tok::Indent, line: line_no });
+                tokens.push(Token {
+                    tok: Tok::Indent,
+                    line: line_no,
+                });
             } else if indent < current {
                 while *indent_stack.last().expect("indent stack never empty") > indent {
                     indent_stack.pop();
-                    tokens.push(Token { tok: Tok::Dedent, line: line_no });
+                    tokens.push(Token {
+                        tok: Tok::Dedent,
+                        line: line_no,
+                    });
                 }
                 if *indent_stack.last().expect("indent stack never empty") != indent {
                     return Err(FrontendError::new(format!(
@@ -113,7 +119,10 @@ pub fn lex(source: &str) -> Result<Vec<Token>, FrontendError> {
         if paren_depth == 0 {
             if let Some(last) = tokens.last() {
                 if !matches!(last.tok, Tok::Newline | Tok::Indent | Tok::Dedent) {
-                    tokens.push(Token { tok: Tok::Newline, line: line_no });
+                    tokens.push(Token {
+                        tok: Tok::Newline,
+                        line: line_no,
+                    });
                 }
             }
         }
@@ -127,9 +136,15 @@ pub fn lex(source: &str) -> Result<Vec<Token>, FrontendError> {
     let final_line = tokens.last().map(|t| t.line).unwrap_or(1);
     while indent_stack.len() > 1 {
         indent_stack.pop();
-        tokens.push(Token { tok: Tok::Dedent, line: final_line });
+        tokens.push(Token {
+            tok: Tok::Dedent,
+            line: final_line,
+        });
     }
-    tokens.push(Token { tok: Tok::Eof, line: final_line });
+    tokens.push(Token {
+        tok: Tok::Eof,
+        line: final_line,
+    });
     Ok(tokens)
 }
 
@@ -285,7 +300,10 @@ fn lex_inline(
                 }
                 // Reject `1.5` etc. — floats are outside the subset.
                 if bytes.get(i) == Some(&'.')
-                    && bytes.get(i + 1).map(|c| c.is_ascii_digit()).unwrap_or(false)
+                    && bytes
+                        .get(i + 1)
+                        .map(|c| c.is_ascii_digit())
+                        .unwrap_or(false)
                 {
                     return Err(FrontendError::new(format!(
                         "line {line_no}: floating-point literals are not supported"
@@ -293,15 +311,15 @@ fn lex_inline(
                 }
                 let text: String = bytes[start..i].iter().collect();
                 let value: i64 = text.parse().map_err(|_| {
-                    FrontendError::new(format!("line {line_no}: integer literal out of range: {text}"))
+                    FrontendError::new(format!(
+                        "line {line_no}: integer literal out of range: {text}"
+                    ))
                 })?;
                 push(tokens, Tok::Int(value));
             }
             c if c.is_alphabetic() || c == '_' => {
                 let start = i;
-                while i < bytes.len()
-                    && (bytes[i].is_alphanumeric() || bytes[i] == '_')
-                {
+                while i < bytes.len() && (bytes[i].is_alphanumeric() || bytes[i] == '_') {
                     i += 1;
                 }
                 let word: String = bytes[start..i].iter().collect();
@@ -320,7 +338,11 @@ fn lex_inline(
 /// Lex a single-quoted or double-quoted string starting at `bytes[0]` (the
 /// quote). Returns the decoded contents and the number of chars consumed
 /// (including both quotes). Only a small set of escapes is supported.
-fn lex_string(bytes: &[char], quote: char, line_no: usize) -> Result<(String, usize), FrontendError> {
+fn lex_string(
+    bytes: &[char],
+    quote: char,
+    line_no: usize,
+) -> Result<(String, usize), FrontendError> {
     let mut out = String::new();
     let mut i = 1usize; // skip opening quote
     while i < bytes.len() {

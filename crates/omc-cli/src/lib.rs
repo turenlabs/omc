@@ -71,6 +71,7 @@ const DEFAULT_NPM_SAVE_PREFIX: &str = "^";
 #[derive(Debug, Parser)]
 #[command(name = "omc")]
 #[command(about = "OMC package-manager prototype")]
+#[command(version)]
 struct Cli {
     #[arg(long, global = true, default_value = ".")]
     project_dir: PathBuf,
@@ -371,9 +372,16 @@ enum Command {
     ExecCell {
         #[arg(help = "Path to a supported JS/Python source file to lower and execute")]
         source: PathBuf,
-        #[arg(long, help = "Package name for the lowered module id (defaults to file stem)")]
+        #[arg(
+            long,
+            help = "Package name for the lowered module id (defaults to file stem)"
+        )]
         name: Option<String>,
-        #[arg(long, default_value = "0.0.0", help = "Package version for the module id")]
+        #[arg(
+            long,
+            default_value = "0.0.0",
+            help = "Package version for the module id"
+        )]
         version: String,
         #[arg(
             long = "arg",
@@ -392,6 +400,11 @@ enum Command {
         allow_flow: Vec<String>,
         #[arg(long, help = "Grant all host capabilities (compatibility mode)")]
         allow_all_host: bool,
+        #[arg(
+            long,
+            help = "Let a wildcard fs.read grant also cover sensitive files (.ssh, .env, keys, tokens). Off by default: sensitive files are denied unless granted by exact path"
+        )]
+        allow_sensitive: bool,
         #[arg(
             long,
             help = "If the source is outside the supported subset, fall back to the host interpreter shim (node/python) instead of failing"
@@ -2003,6 +2016,7 @@ fn run() -> Result<ExitCode, OmcRegistryError> {
             allow,
             allow_flow,
             allow_all_host,
+            allow_sensitive,
             fallback,
         } => {
             return run_exec_cell(
@@ -2015,6 +2029,7 @@ fn run() -> Result<ExitCode, OmcRegistryError> {
                     allow,
                     allow_flow,
                     allow_all_host,
+                    allow_sensitive,
                     fallback,
                 },
             )
@@ -5370,8 +5385,7 @@ fn npm_args_with_environment_defaults(args: &[String]) -> Vec<String> {
 
 fn npm_environment_default_args() -> Vec<String> {
     let mut args = Vec::new();
-    if env::var("NODE_ENV")
-        .ok()
+    if npm_env_var("NODE_ENV")
         .map(|value| value == "production")
         .unwrap_or(false)
     {
@@ -5490,13 +5504,41 @@ fn append_npm_bool_default_arg(args: &mut Vec<String>, key: &str, true_arg: &str
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Test-only, thread-scoped override of the npm install-mode environment.
+    /// The env-defaults tests use it (via `with_npm_config_overrides`) to
+    /// exercise NPM_CONFIG_*/NODE_ENV defaulting WITHOUT mutating the
+    /// process-global environment — which would race with the many
+    /// `run_npm_compat` reader tests running concurrently on other threads.
+    /// Production never sets it; it stays `None`.
+    static NPM_ENV_OVERRIDE: std::cell::RefCell<Option<std::collections::HashMap<String, String>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Read an environment variable for npm install-mode config. In tests a
+/// thread-local override (if set) is authoritative — present keys return their
+/// value, absent keys read as unset — so a test sees a clean, deterministic env
+/// and never has to touch the shared process environment. In production (and
+/// when no override is set) it reads the real process environment.
+fn npm_env_var(key: &str) -> Option<String> {
+    #[cfg(test)]
+    {
+        let overridden = NPM_ENV_OVERRIDE.with(|cell| cell.borrow().is_some());
+        if overridden {
+            return NPM_ENV_OVERRIDE
+                .with(|cell| cell.borrow().as_ref().and_then(|map| map.get(key).cloned()));
+        }
+    }
+    env::var(key).ok()
+}
+
 fn npm_config_env(name: &str) -> Option<String> {
     let env_name = name.replace('-', "_");
     let lower = format!("npm_config_{env_name}");
     let upper = format!("NPM_CONFIG_{}", env_name.to_ascii_uppercase());
-    env::var(lower)
-        .ok()
-        .or_else(|| env::var(upper).ok())
+    npm_env_var(&lower)
+        .or_else(|| npm_env_var(&upper))
         .map(|value| value.trim().to_owned())
         .filter(|value| !value.is_empty())
 }
@@ -33975,6 +34017,7 @@ struct ExecCellCommand {
     allow: Vec<String>,
     allow_flow: Vec<String>,
     allow_all_host: bool,
+    allow_sensitive: bool,
     fallback: bool,
 }
 
@@ -34023,6 +34066,11 @@ fn run_exec_cell(
     }
     for flow in flows {
         policy = policy.allow_flow_rule(flow);
+    }
+    // Sensitive files (.ssh/.env/keys/tokens) are denied by default even under a
+    // wildcard fs.read grant; --allow-sensitive opts out of that protection.
+    if command.allow_sensitive {
+        policy = policy.allow_sensitive_reads();
     }
 
     // Lower the source through the matching front end (deny-by-default: an
@@ -34107,7 +34155,10 @@ fn run_exec_cell(
     let module = output.module;
     let mut broker = omc_cap::MemoryBroker::new();
     render_exec_outcome(omc_runtime::execute_leaf(
-        module, &policy, &mut broker, call_args,
+        module,
+        &policy,
+        &mut broker,
+        call_args,
     ))
 }
 
@@ -34441,9 +34492,27 @@ mod tests {
         with_npm_env_values(&[], f)
     }
 
+    /// Exercise NPM_CONFIG_*/NODE_ENV defaulting via a thread-local override
+    /// instead of mutating the process-global environment. Unlike
+    /// `with_env_values`, this never touches `std::env`, so it cannot leak
+    /// install-mode config (e.g. NPM_CONFIG_GLOBAL/DRY_RUN) into the many
+    /// `run_npm_compat` reader tests running concurrently on other threads. Only
+    /// the keys with a `Some` value are visible inside the closure; everything
+    /// else reads as unset.
+    fn with_npm_config_overrides<T>(values: &[(&str, Option<&str>)], f: impl FnOnce() -> T) -> T {
+        let map: std::collections::HashMap<String, String> = values
+            .iter()
+            .filter_map(|(key, value)| value.map(|value| ((*key).to_owned(), value.to_owned())))
+            .collect();
+        NPM_ENV_OVERRIDE.with(|cell| *cell.borrow_mut() = Some(map));
+        let result = f();
+        NPM_ENV_OVERRIDE.with(|cell| *cell.borrow_mut() = None);
+        result
+    }
+
     #[test]
     fn npm_environment_defaults_behave_like_global_config_flags() {
-        with_env_values(
+        with_npm_config_overrides(
             &[
                 ("NODE_ENV", Some("production")),
                 ("NPM_CONFIG_PRODUCTION", None),
@@ -34509,7 +34578,7 @@ mod tests {
             },
         );
 
-        with_env_values(
+        with_npm_config_overrides(
             &[
                 ("NODE_ENV", Some("production")),
                 ("NPM_CONFIG_PRODUCTION", Some("false")),
@@ -34572,7 +34641,7 @@ mod tests {
             },
         );
 
-        with_env_values(
+        with_npm_config_overrides(
             &[
                 ("NODE_ENV", None),
                 ("NPM_CONFIG_PRODUCTION", None),
@@ -34635,7 +34704,7 @@ mod tests {
             },
         );
 
-        with_env_values(
+        with_npm_config_overrides(
             &[
                 ("NODE_ENV", None),
                 ("NPM_CONFIG_PRODUCTION", None),
@@ -34709,7 +34778,7 @@ mod tests {
             },
         );
 
-        with_env_values(
+        with_npm_config_overrides(
             &[
                 ("NODE_ENV", Some("production")),
                 ("NPM_CONFIG_PRODUCTION", None),
@@ -34817,7 +34886,7 @@ mod tests {
             },
         );
 
-        with_env_values(
+        with_npm_config_overrides(
             &[
                 ("NODE_ENV", None),
                 ("NPM_CONFIG_PRODUCTION", None),
@@ -34886,7 +34955,7 @@ mod tests {
             },
         );
 
-        with_env_values(
+        with_npm_config_overrides(
             &[
                 ("NODE_ENV", None),
                 ("NPM_CONFIG_PRODUCTION", None),
@@ -37143,61 +37212,61 @@ mod tests {
     #[test]
     fn npm_install_no_save_skips_package_lock_file() {
         with_clean_npm_env(|| {
-        let project = test_dir("npm-install-no-save-skips-package-lock");
-        let tarball = write_npm_fixture_tarball(&project, "prod-pkg", "1.0.0");
-        fs::write(
-            project.join("package.json"),
-            r#"{
+            let project = test_dir("npm-install-no-save-skips-package-lock");
+            let tarball = write_npm_fixture_tarball(&project, "prod-pkg", "1.0.0");
+            fs::write(
+                project.join("package.json"),
+                r#"{
                 "name": "root",
                 "version": "1.0.0"
             }"#,
-        )
-        .unwrap();
+            )
+            .unwrap();
 
-        let status = run_npm_compat(
-            &project,
-            &args(&["install", tarball.to_str().unwrap(), "--no-save"]),
-        )
-        .unwrap();
+            let status = run_npm_compat(
+                &project,
+                &args(&["install", tarball.to_str().unwrap(), "--no-save"]),
+            )
+            .unwrap();
 
-        assert_eq!(status, ExitCode::SUCCESS);
-        assert!(project.join("node_modules/prod-pkg/index.js").exists());
-        assert!(!project.join("package-lock.json").exists());
-        let package_json = read_npm_pkg_json(&project.join("package.json")).unwrap();
-        assert!(package_json
-            .get("dependencies")
-            .and_then(serde_json::Value::as_object)
-            .is_none_or(|dependencies| !dependencies.contains_key("prod-pkg")));
+            assert_eq!(status, ExitCode::SUCCESS);
+            assert!(project.join("node_modules/prod-pkg/index.js").exists());
+            assert!(!project.join("package-lock.json").exists());
+            let package_json = read_npm_pkg_json(&project.join("package.json")).unwrap();
+            assert!(package_json
+                .get("dependencies")
+                .and_then(serde_json::Value::as_object)
+                .is_none_or(|dependencies| !dependencies.contains_key("prod-pkg")));
 
-        let _ = fs::remove_dir_all(project);
+            let _ = fs::remove_dir_all(project);
 
-        let project = test_dir("npm-install-save-false-lock-only");
-        let tarball = write_npm_fixture_tarball(&project, "prod-pkg", "1.0.0");
-        fs::write(
-            project.join("package.json"),
-            r#"{
+            let project = test_dir("npm-install-save-false-lock-only");
+            let tarball = write_npm_fixture_tarball(&project, "prod-pkg", "1.0.0");
+            fs::write(
+                project.join("package.json"),
+                r#"{
                 "name": "root",
                 "version": "1.0.0"
             }"#,
-        )
-        .unwrap();
+            )
+            .unwrap();
 
-        let status = run_npm_compat(
-            &project,
-            &args(&[
-                "install",
-                tarball.to_str().unwrap(),
-                "--save=false",
-                "--package-lock-only",
-            ]),
-        )
-        .unwrap();
+            let status = run_npm_compat(
+                &project,
+                &args(&[
+                    "install",
+                    tarball.to_str().unwrap(),
+                    "--save=false",
+                    "--package-lock-only",
+                ]),
+            )
+            .unwrap();
 
-        assert_eq!(status, ExitCode::SUCCESS);
-        assert!(!project.join("node_modules").exists());
-        assert!(!project.join("package-lock.json").exists());
+            assert_eq!(status, ExitCode::SUCCESS);
+            assert!(!project.join("node_modules").exists());
+            assert!(!project.join("package-lock.json").exists());
 
-        let _ = fs::remove_dir_all(project);
+            let _ = fs::remove_dir_all(project);
         });
     }
 

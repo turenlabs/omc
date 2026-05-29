@@ -8094,7 +8094,10 @@ fn locate_npm_entry_source(files: &BTreeMap<String, String>) -> Option<String> {
 
     let candidates = [
         normalize_archive_rel_path(&main),
-        format!("{}.js", normalize_archive_rel_path(&main).trim_end_matches('/')),
+        format!(
+            "{}.js",
+            normalize_archive_rel_path(&main).trim_end_matches('/')
+        ),
         format!(
             "{}/index.js",
             normalize_archive_rel_path(&main).trim_end_matches('/')
@@ -21271,7 +21274,10 @@ packages:
         let dir = tempfile::tempdir().unwrap();
         let bytes = npm_tgz_with_files(
             r#"{"name":"is-odd","version":"3.0.1","main":"lib/main.js"}"#,
-            &[("lib/main.js", "module.exports = function isOdd(n){return n%2===1;};")],
+            &[(
+                "lib/main.js",
+                "module.exports = function isOdd(n){return n%2===1;};",
+            )],
         );
         let archive = dir.path().join(".omc/cache/npm/is-odd.tgz");
         fs::create_dir_all(archive.parent().unwrap()).unwrap();
@@ -21308,7 +21314,8 @@ packages:
     #[test]
     fn reads_pypi_entry_source_from_init_py() {
         let dir = tempfile::tempdir().unwrap();
-        let bytes = python_sdist_for_test(&[("mathy/__init__.py", "def main(n):\n    return n+1\n")]);
+        let bytes =
+            python_sdist_for_test(&[("mathy/__init__.py", "def main(n):\n    return n+1\n")]);
         let archive = dir.path().join(".omc/cache/pypi/mathy.tar.gz");
         fs::create_dir_all(archive.parent().unwrap()).unwrap();
         fs::write(&archive, &bytes).unwrap();
@@ -21339,7 +21346,10 @@ packages:
         package.sha256 = sha256_hex(&bytes);
 
         let err = read_locked_package_entry_source(dir.path(), &package).unwrap_err();
-        assert!(matches!(err, OmcRegistryError::MissingEntrySource(_)), "got {err:?}");
+        assert!(
+            matches!(err, OmcRegistryError::MissingEntrySource(_)),
+            "got {err:?}"
+        );
     }
 
     fn npm_tgz_with_files(package_json: &str, files: &[(&str, &str)]) -> Vec<u8> {

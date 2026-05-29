@@ -164,6 +164,12 @@ pub struct Policy {
     pub allowed_capabilities: Vec<Capability>,
     pub allowed_flows: Vec<FlowRule>,
     allow_all_flows: bool,
+    /// When false (the shipped default), reads of sensitive files (SSH/cloud
+    /// credentials, `.env`, tokens, private keys, ...) are denied even under a
+    /// wildcard `fs.read:*` grant; only an explicit exact-path `fs.read:<path>`
+    /// grant opts a specific sensitive file in. Setting this true (an explicit
+    /// `--allow-sensitive`) lets wildcard grants cover sensitive files too.
+    allow_sensitive_reads: bool,
 }
 
 impl Policy {
@@ -172,6 +178,7 @@ impl Policy {
             allowed_capabilities: Vec::new(),
             allowed_flows: Vec::new(),
             allow_all_flows: false,
+            allow_sensitive_reads: false,
         }
     }
 
@@ -195,15 +202,42 @@ impl Policy {
         self
     }
 
+    /// Opt out of the shipped sensitive-file-read protection: a wildcard
+    /// `fs.read:*` grant then also covers sensitive files. Use sparingly.
+    pub fn allow_sensitive_reads(mut self) -> Self {
+        self.allow_sensitive_reads = true;
+        self
+    }
+
     pub fn require(&self, requested: Capability) -> Result<(), Trap> {
         if self.allows_capability(&requested) {
-            Ok(())
-        } else {
-            Err(Trap::denied(format!("capability {requested} not granted")))
+            return Ok(());
         }
+        // Give the sensitive-file case a self-explanatory denial so users know
+        // a wildcard grant is intentionally not enough and how to opt a file in.
+        if let Capability::FsRead(path) = &requested {
+            if !self.allow_sensitive_reads && is_sensitive_read_path(path) {
+                return Err(Trap::denied(format!(
+                    "reading sensitive file `{path}` is denied by default; \
+                     grant `fs.read:{path}` explicitly (an exact path, not `*`) \
+                     or pass --allow-sensitive to override"
+                )));
+            }
+        }
+        Err(Trap::denied(format!("capability {requested} not granted")))
     }
 
     fn allows_capability(&self, requested: &Capability) -> bool {
+        // Sensitive file reads are deny-by-default: a wildcard `fs.read:*` grant
+        // does NOT cover them. Only an explicit, exact-path `fs.read:<path>`
+        // grant (or the explicit `allow_sensitive_reads` override) admits one.
+        if let Capability::FsRead(path) = requested {
+            if !self.allow_sensitive_reads && is_sensitive_read_path(path) {
+                return self.allowed_capabilities.iter().any(|allowed| {
+                    matches!(allowed, Capability::FsRead(granted) if granted != "*" && granted == path)
+                });
+            }
+        }
         self.allowed_capabilities
             .iter()
             .any(|allowed| allowed.matches(requested))
@@ -405,6 +439,114 @@ impl CapabilityBroker for MemoryBroker {
     }
 }
 
+/// Classify a filesystem path as sensitive-to-read. OMC ships denying these by
+/// default: a wildcard `fs.read:*` grant (e.g. from `--allow-all-host`) does NOT
+/// cover them — a package must be granted the exact path to read one. The match
+/// is conservative and path-shape based (no glob dependency): it inspects the
+/// path's components, basename, and extension. It is intentionally
+/// over-inclusive — denial is the safe direction, and an explicit grant always
+/// overrides.
+pub fn is_sensitive_read_path(path: &str) -> bool {
+    // Normalize separators and split into non-empty components.
+    let normalized = path.replace('\\', "/");
+    let components: Vec<&str> = normalized
+        .split('/')
+        .filter(|segment| !segment.is_empty() && *segment != ".")
+        .collect();
+    let basename = components.last().copied().unwrap_or("");
+    let lower_basename = basename.to_ascii_lowercase();
+
+    // 1. Any path segment that names a secret-bearing directory.
+    const SENSITIVE_DIRS: &[&str] = &[
+        ".ssh",
+        ".aws",
+        ".gnupg",
+        ".gpg",
+        ".azure",
+        ".kube",
+        ".docker",
+        ".gcloud",
+        ".config", // broad on purpose for the credential dirs nested under it
+        "secrets",
+        ".secrets",
+        "keychains", // macOS ~/Library/Keychains
+    ];
+    for segment in &components {
+        let lower = segment.to_ascii_lowercase();
+        if SENSITIVE_DIRS.contains(&lower.as_str()) {
+            // `.config` alone is too broad to deny wholesale; only treat it as
+            // sensitive when a credential-ish child follows it.
+            if lower == ".config" {
+                continue;
+            }
+            return true;
+        }
+    }
+    // `.config/<cred>` (gcloud / credential stores) — deny that subtree.
+    if let Some(pos) = components
+        .iter()
+        .position(|segment| segment.eq_ignore_ascii_case(".config"))
+    {
+        if components[pos + 1..].iter().any(|segment| {
+            let lower = segment.to_ascii_lowercase();
+            lower == "gcloud" || lower.contains("credential") || lower.contains("secret")
+        }) {
+            return true;
+        }
+    }
+
+    // 2. Exact sensitive basenames (credentials, key material, token configs).
+    const SENSITIVE_NAMES: &[&str] = &[
+        ".npmrc",
+        ".pypirc",
+        ".netrc",
+        "_netrc",
+        ".git-credentials",
+        ".htpasswd",
+        ".dockercfg",
+        "credentials",
+        "id_rsa",
+        "id_dsa",
+        "id_ecdsa",
+        "id_ed25519",
+        "shadow",
+        "master.key",
+        "credentials.json",
+        "secrets.yaml",
+        "secrets.yml",
+    ];
+    if SENSITIVE_NAMES.contains(&lower_basename.as_str()) {
+        return true;
+    }
+
+    // 3. dotenv family: `.env`, `.env.local`, `.env.production`, ...
+    if lower_basename == ".env" || lower_basename.starts_with(".env.") {
+        return true;
+    }
+
+    // 4. Sensitive extensions (private keys, key/cred stores, ASC/GPG, password DBs).
+    const SENSITIVE_EXTENSIONS: &[&str] = &[
+        ".pem",
+        ".key",
+        ".p12",
+        ".pfx",
+        ".keystore",
+        ".jks",
+        ".asc",
+        ".gpg",
+        ".kdbx",
+        ".ppk",
+    ];
+    if let Some(dot) = lower_basename.rfind('.') {
+        let ext = &lower_basename[dot..];
+        if SENSITIVE_EXTENSIONS.contains(&ext) {
+            return true;
+        }
+    }
+
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -449,6 +591,84 @@ mod tests {
                 &Label::Env("NODE_INSPECTOR_IPC".to_owned()),
                 Sink::Network("www.w3.org".to_owned()),
             )
+            .unwrap();
+    }
+
+    #[test]
+    fn classifies_sensitive_read_paths() {
+        for sensitive in [
+            "/home/alice/.ssh/id_rsa",
+            "/home/alice/.ssh/known_hosts",
+            "~/.aws/credentials",
+            "/root/.gnupg/secring.gpg",
+            "project/.env",
+            "project/.env.production",
+            ".npmrc",
+            "/etc/shadow",
+            "certs/server.pem",
+            "certs/tls.key",
+            "id_ed25519",
+            "C:\\Users\\bob\\.ssh\\id_rsa",
+            "/home/alice/.config/gcloud/credentials.db",
+            "vault/secrets/token",
+        ] {
+            assert!(
+                is_sensitive_read_path(sensitive),
+                "expected `{sensitive}` to be sensitive"
+            );
+        }
+        for ordinary in [
+            "index.js",
+            "src/main.rs",
+            "package.json",
+            "data/users.csv",
+            "/var/www/public/style.css",
+            "README.md",
+            "lib/config.js", // ".config" must be a path SEGMENT, not a substring
+        ] {
+            assert!(
+                !is_sensitive_read_path(ordinary),
+                "expected `{ordinary}` to be ordinary"
+            );
+        }
+    }
+
+    #[test]
+    fn wildcard_grant_does_not_cover_sensitive_reads_by_default() {
+        // `--allow-all-host` style wildcard grant.
+        let policy = Policy::pure().allow_capability(Capability::FsRead("*".to_owned()));
+        // Ordinary file: allowed by the wildcard.
+        policy
+            .require(Capability::FsRead("src/index.js".to_owned()))
+            .unwrap();
+        // Sensitive file: denied DESPITE the wildcard.
+        let err = policy
+            .require(Capability::FsRead("/home/alice/.ssh/id_rsa".to_owned()))
+            .unwrap_err();
+        assert_eq!(err.code, TrapCode::Denied);
+        assert!(err.message.contains("sensitive"), "got: {}", err.message);
+    }
+
+    #[test]
+    fn explicit_exact_path_grant_opts_a_sensitive_file_in() {
+        // An exact-path grant admits exactly that sensitive file, nothing else.
+        let policy = Policy::pure().allow_capability(Capability::FsRead("/app/.env".to_owned()));
+        policy
+            .require(Capability::FsRead("/app/.env".to_owned()))
+            .unwrap();
+        // A different sensitive file is still denied.
+        assert!(policy
+            .require(Capability::FsRead("/app/.ssh/id_rsa".to_owned()))
+            .is_err());
+    }
+
+    #[test]
+    fn allow_sensitive_reads_override_lets_wildcard_cover_sensitive() {
+        let policy = Policy::pure()
+            .allow_capability(Capability::FsRead("*".to_owned()))
+            .allow_sensitive_reads();
+        policy
+            .require(Capability::FsRead("/home/alice/.ssh/id_rsa".to_owned()))
             .unwrap();
     }
 }

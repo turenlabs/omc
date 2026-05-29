@@ -311,7 +311,11 @@ def go():
     return subprocess.frobnicate('rm -rf /')
 ";
         let err = compile(src, &host_meta("p", "1.0.0")).unwrap_err();
-        assert!(err.message.contains("security-sensitive"), "{}", err.message);
+        assert!(
+            err.message.contains("security-sensitive"),
+            "{}",
+            err.message
+        );
     }
 
     #[test]
@@ -344,7 +348,9 @@ def classify(n):
     else:
         return 1
 ";
-        let module = compile(src, &pure_meta("classify", "1.0.0")).unwrap().module;
+        let module = compile(src, &pure_meta("classify", "1.0.0"))
+            .unwrap()
+            .module;
         omc_verify::verify_module(&module, &Policy::pure()).unwrap();
 
         let run = |n: i64| -> Value {
@@ -376,8 +382,8 @@ def sum_to(n):
 
         let mut cell = Cell::new(1, module, Policy::pure());
         let mut broker = MemoryBroker::new();
-        let result = run_cell(&mut cell, &mut broker, vec![Labeled::public(Value::Int(5))])
-            .unwrap();
+        let result =
+            run_cell(&mut cell, &mut broker, vec![Labeled::public(Value::Int(5))]).unwrap();
         assert_eq!(result.value, Value::Int(10)); // 0+1+2+3+4
     }
 
@@ -390,7 +396,9 @@ def helper(x):
 def main(x):
     return helper(x)
 ";
-        let module = compile(src, &pure_meta("siblings", "1.0.0")).unwrap().module;
+        let module = compile(src, &pure_meta("siblings", "1.0.0"))
+            .unwrap()
+            .module;
         omc_verify::verify_module(&module, &Policy::pure()).unwrap();
         // Entry is the FIRST function (helper); call main explicitly via id 1.
         let main = module.function(1).expect("main exists");
@@ -400,8 +408,8 @@ def main(x):
         let mut cell = Cell::new(1, module.clone(), Policy::pure());
         let mut broker = MemoryBroker::new();
         // run_cell runs the entry (helper); helper(4) = 5.
-        let result = run_cell(&mut cell, &mut broker, vec![Labeled::public(Value::Int(4))])
-            .unwrap();
+        let result =
+            run_cell(&mut cell, &mut broker, vec![Labeled::public(Value::Int(4))]).unwrap();
         assert_eq!(result.value, Value::Int(5));
     }
 
@@ -543,13 +551,21 @@ def f(xs):
         // float literal
         assert!(compile("def f():\n    return 1.5\n", &pure_meta("p", "1.0.0")).is_err());
         // lambda
-        assert!(compile("def f():\n    return lambda x: x\n", &pure_meta("p", "1.0.0")).is_err());
+        assert!(compile(
+            "def f():\n    return lambda x: x\n",
+            &pure_meta("p", "1.0.0")
+        )
+        .is_err());
     }
 
     #[test]
     fn lexer_rejects_mixed_tabs_and_spaces() {
         let src = "def f():\n \treturn 1\n";
         let err = compile(src, &pure_meta("p", "1.0.0")).unwrap_err();
-        assert!(err.message.contains("mixed tabs and spaces"), "{}", err.message);
+        assert!(
+            err.message.contains("mixed tabs and spaces"),
+            "{}",
+            err.message
+        );
     }
 }

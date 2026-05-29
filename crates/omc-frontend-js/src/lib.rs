@@ -202,9 +202,10 @@ mod tests {
 
         let entry = module.entry().unwrap();
         // The dangerous behavior is explicit: an EnvRead and an HttpRequest cap.
-        let env_read = entry.code.iter().any(
-            |op| matches!(op, Op::Cap(CapOp::EnvRead { name }) if name == "NPM_TOKEN"),
-        );
+        let env_read = entry
+            .code
+            .iter()
+            .any(|op| matches!(op, Op::Cap(CapOp::EnvRead { name }) if name == "NPM_TOKEN"));
         let http = entry.code.iter().any(|op| {
             matches!(op, Op::Cap(CapOp::HttpRequest { request })
                 if request.host == "evil.example.com")
@@ -229,11 +230,10 @@ mod tests {
         );
 
         // (3) Explicitly granting the flow too -> the module verifies.
-        let fully_granted = caps_only
-            .allow_flow(
-                LabelMatcher::Env("NPM_TOKEN".to_owned()),
-                Sink::Network("evil.example.com".to_owned()),
-            );
+        let fully_granted = caps_only.allow_flow(
+            LabelMatcher::Env("NPM_TOKEN".to_owned()),
+            Sink::Network("evil.example.com".to_owned()),
+        );
         verify_module(&module, &fully_granted).unwrap();
     }
 
@@ -243,9 +243,12 @@ mod tests {
         // the EnvRead capability is granted, runs in the VM, and the value comes
         // back labeled with its env taint.
         let src = "module.exports = function readEnv() { return process.env.HOME; };";
-        let module = compile(src, &meta("read-home", "1.0.0", BehaviorType::HostCapability))
-            .unwrap()
-            .module;
+        let module = compile(
+            src,
+            &meta("read-home", "1.0.0", BehaviorType::HostCapability),
+        )
+        .unwrap()
+        .module;
 
         let policy = Policy::pure().allow_capability(Capability::EnvRead("HOME".to_owned()));
         verify_module(&module, &policy).unwrap();
@@ -295,10 +298,7 @@ mod tests {
         let out = compile(src, &meta("uses-dep", "1.0.0", BehaviorType::Pure)).unwrap();
         let entry = out.module.entry().unwrap();
         // The single required package is interned at ImportId 0.
-        assert!(entry
-            .code
-            .iter()
-            .any(|op| matches!(op, Op::CallImport(0))));
+        assert!(entry.code.iter().any(|op| matches!(op, Op::CallImport(0))));
         assert_eq!(
             out.imports,
             vec![ImportSpec {
@@ -320,14 +320,8 @@ mod tests {
         let out = compile(src, &meta("combiner", "1.0.0", BehaviorType::Pure)).unwrap();
         let entry = out.module.entry().unwrap();
         // First-used package (is-odd) is id 0, second (left-pad) is id 1.
-        assert!(entry
-            .code
-            .iter()
-            .any(|op| matches!(op, Op::CallImport(0))));
-        assert!(entry
-            .code
-            .iter()
-            .any(|op| matches!(op, Op::CallImport(1))));
+        assert!(entry.code.iter().any(|op| matches!(op, Op::CallImport(0))));
+        assert!(entry.code.iter().any(|op| matches!(op, Op::CallImport(1))));
         assert_eq!(
             out.imports,
             vec![
@@ -353,10 +347,7 @@ mod tests {
          };";
         let out = compile(src, &meta("is-even", "1.0.0", BehaviorType::Pure)).unwrap();
         let entry = out.module.entry().unwrap();
-        assert!(entry
-            .code
-            .iter()
-            .any(|op| matches!(op, Op::CallImport(0))));
+        assert!(entry.code.iter().any(|op| matches!(op, Op::CallImport(0))));
         assert_eq!(
             out.imports,
             vec![ImportSpec {
@@ -403,25 +394,13 @@ mod tests {
         )
         .is_err());
         // Object literals are not in the subset.
-        assert!(compile(
-            "module.exports = function f() { return { a: 1 }; };",
-            &m
-        )
-        .is_err());
+        assert!(compile("module.exports = function f() { return { a: 1 }; };", &m).is_err());
         // Loose equality must fail closed rather than be treated as strict.
-        assert!(compile(
-            "module.exports = function f(n) { return n == 1; };",
-            &m
-        )
-        .is_err());
+        assert!(compile("module.exports = function f(n) { return n == 1; };", &m).is_err());
         // A bare exports.foo form is not the supported export shape.
         assert!(compile("exports.foo = function () {};", &m).is_err());
         // Floating point literals are out of the integer subset.
-        assert!(compile(
-            "module.exports = function f() { return 1.5; };",
-            &m
-        )
-        .is_err());
+        assert!(compile("module.exports = function f() { return 1.5; };", &m).is_err());
     }
 
     #[test]
