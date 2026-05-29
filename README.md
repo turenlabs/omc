@@ -100,6 +100,8 @@ illegal.
 Via Homebrew (installs `omc`; does not shadow your system `node`/`npm`/`pip`):
 
 ```bash
+# turenio/omc is private, so let Homebrew authenticate first:
+export HOMEBREW_GITHUB_API_TOKEN=ghp_...   # token with repo: read
 brew tap turenio/omc https://github.com/turenio/omc
 brew install omc
 omc --version

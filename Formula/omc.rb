@@ -6,6 +6,12 @@
 # or build the latest main:
 #   brew install --HEAD turenio/omc/omc
 #
+# NOTE: turenio/omc is currently a PRIVATE repo, so Homebrew must be able to
+# authenticate to fetch the source. Export a token with read access first:
+#   export HOMEBREW_GITHUB_API_TOKEN=ghp_...   # (repo: read)
+# Public distribution (no token) requires making the repo public or hosting the
+# tarballs on a public release channel.
+#
 # The release workflow keeps `url`/`sha256`/`version` below in sync with each
 # tagged release (see scripts/update-homebrew-formula.sh).
 class Omc < Formula
@@ -15,7 +21,7 @@ class Omc < Formula
   head "https://github.com/turenio/omc.git", branch: "main"
 
   url "https://github.com/turenio/omc/archive/refs/tags/v0.1.0.tar.gz"
-  sha256 "0000000000000000000000000000000000000000000000000000000000000000"
+  sha256 "66e04a4cd3ed6831c840688297e89aa5fac76994a839283011c0853d6688835a"
   version "0.1.0"
 
   depends_on "rust" => :build
