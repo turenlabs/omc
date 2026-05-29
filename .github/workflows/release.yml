@@ -49,10 +49,10 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: omc-${{ matrix.target }}
-          path: |
-            dist/*.tar.gz
-            dist/*.sha256
+          name: artifacts-${{ matrix.target }}
+          # The whole dist dir: the tarball (omc + shims), the standalone `omc`
+          # single binary, and their .sha256 sidecars.
+          path: dist/
 
   release:
     name: publish release
@@ -78,7 +78,14 @@ jobs:
         shell: bash
         run: |
           cd dist
-          sha256sum *.tar.gz > SHA256SUMS || shasum -a 256 *.tar.gz > SHA256SUMS
+          # Hash every distributable (tarballs + standalone binaries), excluding
+          # the per-file .sha256 sidecars and SHA256SUMS itself.
+          assets=$(ls | grep -vE '\.sha256$|^SHA256SUMS$')
+          if command -v sha256sum >/dev/null 2>&1; then
+            sha256sum $assets > SHA256SUMS
+          else
+            shasum -a 256 $assets > SHA256SUMS
+          fi
           cat SHA256SUMS
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
@@ -86,9 +93,9 @@ jobs:
           tag_name: ${{ steps.version.outputs.tag }}
           name: omc ${{ steps.version.outputs.tag }}
           generate_release_notes: true
-          files: |
-            dist/*.tar.gz
-            dist/SHA256SUMS
+          # Tarballs (omc + shims), standalone `omc-<target>` single binaries,
+          # their .sha256 sidecars, and the combined SHA256SUMS.
+          files: dist/*
 
   update-homebrew:
     name: update homebrew tap

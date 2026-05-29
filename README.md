@@ -115,9 +115,23 @@ PATH shadows the system tools):
 export PATH="$(brew --prefix omc)/libexec/shims:$PATH"
 ```
 
-Prebuilt tarballs for macOS (arm64/x86_64) and Linux (x86_64) are attached to
-each [GitHub Release](https://github.com/turenio/omc/releases). Release
-engineering lives in [docs/RELEASING.md](docs/RELEASING.md).
+### Download a single binary
+
+Every [GitHub Release](https://github.com/turenio/omc/releases) attaches a
+standalone `omc` binary per platform (`omc-<target>`) plus full tarballs (which
+also include the opt-in shims). To grab just the `omc` binary:
+
+```bash
+# pick your target: aarch64-apple-darwin | x86_64-apple-darwin | x86_64-unknown-linux-gnu
+curl -fsSL https://github.com/turenio/omc/releases/download/v0.1.0/omc-aarch64-apple-darwin -o omc
+chmod +x omc
+./omc --version
+```
+
+Verify it against the release `SHA256SUMS` (or the per-file `.sha256`). Each
+release also ships `omc-<version>-<target>.tar.gz` containing `omc` plus the
+`shims/` directory. Release engineering lives in
+[docs/RELEASING.md](docs/RELEASING.md).
 
 ### Shipped security default: sensitive files are deny-by-default
 
@@ -127,6 +141,127 @@ Reading sensitive files — `~/.ssh/*`, `.env`/`.env.*`, private keys
 or `--allow-all-host`**. A package must be granted the exact path
 (`fs.read:/path/to/file`) to read one, or you pass `--allow-sensitive` to lift
 the protection globally. See `is_sensitive_read_path` in `omc-cap`.
+
+## Quickstart
+
+OMC is a deny-by-default package manager. Packages are resolved, their source is
+profiled and verified, and an artifact is locked — **no install/postinstall
+scripts ever run**. Anything that wants host access (env, files, network,
+spawning processes) must be granted explicitly.
+
+> The examples below use the installed `omc` binary. To run from a checkout
+> instead, replace `omc` with `cargo run -p omc-cli --bin omc --`.
+
+### 1. Start a project
+
+```bash
+omc --project-dir myapp init --name myapp
+```
+
+This writes `omc.toml` (manifest + policy), `omc.lock`, and a `.omc/` store.
+
+### 2. Add dependencies (deny-by-default)
+
+```bash
+# npm and PyPI, by name
+omc --project-dir myapp add --npm is-odd@3.0.1 left-pad@1.3.0
+omc --project-dir myapp add --pypi requests==2.32.3
+```
+
+If a package only needs to compute (e.g. `is-odd`), it's accepted as `Pure`. If
+it wants host access it is **blocked** until you grant it. For example a package
+with a postinstall + network access:
+
+```bash
+omc --project-dir myapp add --npm esbuild@0.19.12          # blocked
+omc --project-dir myapp add --npm esbuild@0.19.12 --allow-all-host   # accepted, recorded
+```
+
+Fine-grained grants instead of `--allow-all-host`:
+
+```bash
+omc --project-dir myapp add --npm some-client@1.0.0 \
+  --allow http:api.example.com \
+  --allow env:API_TOKEN \
+  --allow-flow 'env:API_TOKEN -> network:api.example.com'
+```
+
+Even with `--allow-all-host`, reading **sensitive files** (`~/.ssh`, `.env`,
+keys, tokens, cloud creds) stays denied unless you grant the exact path
+(`--allow fs.read:/abs/path`) or pass `--allow-sensitive`.
+
+### 3. Install an existing project
+
+`omc install` reads your existing `package.json` / `requirements.txt` /
+`pyproject.toml` / lockfiles directly:
+
+```bash
+cd existing-project
+omc install                # full install
+omc install --omit-dev     # production
+omc install --locked       # offline, validate against omc.lock
+omc ci                     # clean lockfile-only install (for CI)
+```
+
+### 4. Run code (drop-in shims, opt-in)
+
+OMC ships `node`/`npm`/`npx`/`pip`/`pip3`/`python`/`python3`/`twine` shims that
+route through OMC's isolated runtime. After `brew install`, enable them:
+
+```bash
+export PATH="$(brew --prefix omc)/libexec/shims:$PATH"
+npm install            # behaves like npm, but via OMC (no install scripts)
+node -e "console.log(require('is-odd')(3))"
+pip install -r requirements.txt
+```
+
+Or call them through `omc` without touching PATH:
+
+```bash
+omc --project-dir myapp node -e "console.log(require('is-odd')(3))"
+omc --project-dir myapp python -c "import requests; print(requests.__version__)"
+omc --project-dir myapp script test     # run a package.json / Pipfile script
+```
+
+### 5. Run a package *in-cell* under policy (experimental)
+
+`exec-cell` lowers supported JS/Python source to OMC bytecode, verifies it, and
+runs it inside the sandboxed VM — package logic executes under the capability
+policy rather than on the host:
+
+```bash
+echo 'module.exports = function isOdd(n){ return n % 2 === 1; };' > isodd.js
+omc --project-dir myapp exec-cell isodd.js --arg 7          # -> result true
+```
+
+A package that tries to read a secret and post it is rejected by the verifier:
+
+```bash
+omc --project-dir myapp exec-cell leak.js --allow-all-host
+# denied: reading sensitive file `~/.ssh/id_rsa` is denied by default ...
+```
+
+(Unsupported source fails closed; add `--fallback` to defer to the host shim.)
+
+### 6. Inspect & manage
+
+```bash
+omc --project-dir myapp list            # locked packages (add --json)
+omc --project-dir myapp audit           # per-package verdicts + capabilities
+omc --project-dir myapp allow http:api.example.com env:API_TOKEN   # persist grants in omc.toml
+omc --project-dir myapp remove --npm left-pad
+```
+
+Persisted policy lives in `omc.toml`:
+
+```toml
+[policy]
+allow = ["http:api.example.com", "env:API_TOKEN"]
+allow-flow = ["env:API_TOKEN -> network:api.example.com"]
+```
+
+For the full command surface and supported manifest/lockfile formats, see the
+sections below.
 
 ## Package Manager Prototype
 

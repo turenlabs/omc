@@ -25,8 +25,10 @@ Bump it, commit, then tag.
    - builds `--release` binaries for `aarch64-apple-darwin`,
      `x86_64-apple-darwin`, and `x86_64-unknown-linux-gnu`;
    - packages each into `omc-<version>-<target>.tar.gz` (with `omc` at the root
-     and the shims under `shims/`) plus a `.sha256`;
-   - creates the GitHub Release with the tarballs and a `SHA256SUMS` file;
+     and the shims under `shims/`) AND a standalone `omc-<target>` single binary
+     for direct download, each with a `.sha256`;
+   - creates the GitHub Release with the tarballs, the standalone binaries, and a
+     combined `SHA256SUMS` file;
    - updates the Homebrew tap formula (only if configured — see below).
 
 You can also trigger it manually from the Actions tab (`workflow_dispatch`) with

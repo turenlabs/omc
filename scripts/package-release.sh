@@ -58,14 +58,24 @@ EOF
 
 tar -czf "dist/${STAGE}.tar.gz" -C dist "${STAGE}"
 
-# Checksum (prefer sha256sum, fall back to shasum on macOS runners).
-( cd dist
+# Also publish the bare `omc` binary as a standalone single-file download
+# (no shims), named by target so all platforms coexist in one release.
+SOLO="omc-${TARGET}"
+install -m 0755 "${BIN_DIR}/omc" "dist/${SOLO}"
+
+# Checksums (prefer sha256sum, fall back to shasum on macOS runners).
+checksum() {
   if command -v sha256sum >/dev/null 2>&1; then
-    sha256sum "${STAGE}.tar.gz" > "${STAGE}.tar.gz.sha256"
+    sha256sum "$1" > "$1.sha256"
   else
-    shasum -a 256 "${STAGE}.tar.gz" > "${STAGE}.tar.gz.sha256"
+    shasum -a 256 "$1" > "$1.sha256"
   fi
-)
+}
+( cd dist && checksum "${STAGE}.tar.gz" && checksum "${SOLO}" )
+
+# Keep only the distributable artifacts in dist/.
+rm -rf "${OUT}"
 
 echo "dist/${STAGE}.tar.gz"
-cat "dist/${STAGE}.tar.gz.sha256"
+echo "dist/${SOLO}"
+cat "dist/${SOLO}.sha256"
