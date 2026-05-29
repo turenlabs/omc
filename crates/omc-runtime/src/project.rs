@@ -512,6 +512,7 @@ mod tests {
             archive: rel,
             artifact: format!(".omc/artifacts/{name}.json"),
             sha256: sha256_hex(archive_bytes),
+            artifact_sha256: String::new(),
             behavior: Behavior::Pure,
             verdict: Verdict::Accepted,
             dependencies,
@@ -527,6 +528,7 @@ mod tests {
     fn write_lock(project_dir: &Path, packages: Vec<LockedPackage>) {
         let lock = OmcLock {
             version: 1,
+            signing_key: None,
             packages,
             local_sources: Vec::new(),
             python_vcs: Vec::new(),

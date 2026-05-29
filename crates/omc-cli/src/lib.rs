@@ -15529,12 +15529,7 @@ fn write_npm_shrinkwrap(project_dir: &Path) -> Result<(), OmcRegistryError> {
     let lock = if lockfile_path.exists() {
         read_lockfile(lockfile_path)?
     } else {
-        OmcLock {
-            version: 1,
-            packages: Vec::new(),
-            local_sources: Vec::new(),
-            python_vcs: Vec::new(),
-        }
+        OmcLock::new()
     };
     let shrinkwrap = npm_package_lock_json(&package, &lock);
     fs::write(
@@ -20133,6 +20128,7 @@ fn npm_local_locked_package(
             archive: String::new(),
             artifact: String::new(),
             sha256: String::new(),
+            artifact_sha256: String::new(),
             behavior: Behavior::HostCapability,
             verdict: Verdict::Accepted,
             dependencies: npm_package_dependency_specs(&manifest, "dependencies"),
@@ -42795,6 +42791,7 @@ version = "0.1.0"
             project.join("omc.lock"),
             toml::to_string_pretty(&OmcLock {
                 version: 1,
+                signing_key: None,
                 packages: vec![
                     locked_npm_package("left-pad", "1.1.0", vec!["npm:dep@1.0.0".to_owned()]),
                     locked_npm_package("dep", "1.0.0", Vec::new()),
@@ -47783,6 +47780,7 @@ version = "0.2.0"
         let bad = locked_pypi_package("bad", "1.0.0", Vec::new());
         let lock = OmcLock {
             version: 1,
+            signing_key: None,
             packages: vec![root, bad],
             local_sources: Vec::new(),
             python_vcs: Vec::new(),
@@ -49402,6 +49400,7 @@ resolved_commit = "0123456789abcdef0123456789abcdef01234567"
         sdist.sha256 = "b".repeat(64);
         let lock = OmcLock {
             version: 1,
+            signing_key: None,
             packages: vec![
                 locked_npm_package("left-pad", "1.3.0", Vec::new()),
                 sdist,
@@ -49447,6 +49446,7 @@ resolved_commit = "0123456789abcdef0123456789abcdef01234567"
         let scoped = locked_npm_package("@scope/tool", "2.1.0", Vec::new());
         let lock = OmcLock {
             version: 1,
+            signing_key: None,
             packages: vec![
                 locked_pypi_package("idna", "3.7", Vec::new()),
                 is_odd,
@@ -49501,6 +49501,7 @@ resolved_commit = "0123456789abcdef0123456789abcdef01234567"
         .unwrap();
         let lock = OmcLock {
             version: 1,
+            signing_key: None,
             packages: vec![locked_pypi_package("idna", "3.7", Vec::new())],
             local_sources: vec![
                 locked_local_source(Ecosystem::Npm, "local-pkg", "1.2.3", "vendor/local-pkg"),
@@ -49544,6 +49545,7 @@ resolved_commit = "0123456789abcdef0123456789abcdef01234567"
         let project = test_dir("pip-install-report-local-sources");
         let lock = OmcLock {
             version: 1,
+            signing_key: None,
             packages: vec![locked_pypi_package("idna", "3.7", Vec::new())],
             local_sources: vec![
                 locked_local_source(Ecosystem::Pypi, "local-py", "0.2.0", "vendor/local-py"),
@@ -49626,6 +49628,7 @@ resolved_commit = "0123456789abcdef0123456789abcdef01234567"
         .unwrap();
         let lock = OmcLock {
             version: 1,
+            signing_key: None,
             packages: vec![locked_npm_package("left-pad", "1.3.0", Vec::new())],
             local_sources: Vec::new(),
             python_vcs: Vec::new(),
@@ -49659,6 +49662,7 @@ resolved_commit = "0123456789abcdef0123456789abcdef01234567"
             archive: String::new(),
             artifact: String::new(),
             sha256: String::new(),
+            artifact_sha256: String::new(),
             behavior: Behavior::Pure,
             verdict: Verdict::Accepted,
             dependencies,
@@ -49679,6 +49683,7 @@ resolved_commit = "0123456789abcdef0123456789abcdef01234567"
             archive: String::new(),
             artifact: String::new(),
             sha256: "a".repeat(64),
+            artifact_sha256: String::new(),
             behavior: Behavior::Pure,
             verdict: Verdict::Accepted,
             dependencies,

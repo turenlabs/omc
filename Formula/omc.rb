@@ -20,9 +20,9 @@ class Omc < Formula
   license "Apache-2.0"
   head "https://github.com/turenio/omc.git", branch: "main"
 
-  url "https://github.com/turenio/omc/archive/refs/tags/v0.1.0.tar.gz"
-  sha256 "66e04a4cd3ed6831c840688297e89aa5fac76994a839283011c0853d6688835a"
-  version "0.1.0"
+  url "https://github.com/turenio/omc/archive/refs/tags/v0.2.0.tar.gz"
+  sha256 "0000000000000000000000000000000000000000000000000000000000000000"
+  version "0.2.0"
 
   depends_on "rust" => :build
 
