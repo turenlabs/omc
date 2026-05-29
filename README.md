@@ -27,13 +27,17 @@ That's the whole idea: **dependencies are behavior-typed artifacts, not trusted 
 
 ```
 # omc.policy
-default { allow time, random }          # baseline for every package
+default {
+  allow time, random                   # baseline for every package
+  min-age "14d"                         # ...and reject versions published < 14d ago
+}
 package "is-odd" { pure }                # zero host capabilities
 npm package "stripe" >=12.0.0 {         # ecosystem + version-scoped
   allow env "STRIPE_API_KEY"
   allow net "api.stripe.com"
   flow env "STRIPE_API_KEY" -> net "api.stripe.com"
 }
+package "trusted-internal" { min-age "0" }  # exempt from the age floor
 npm package "@acme/*" { allow net "*" }  # name globs
 ```
 
@@ -42,6 +46,25 @@ Each dependency is verified against *its* block (deny-by-default: no match means
 ```bash
 omc policy validate                      # parse omc.policy; OK or a located error
 omc policy check stripe@13.1.0           # show the effective compiled policy
+```
+
+### Package-age checks (supply-chain freshness)
+
+To block just-published malware, require a minimum **release age** — a version must have been published at least that long ago to install. Set it per-package in `omc.policy` (`min-age`), or project-wide in `omc.toml`:
+
+```toml
+[policy]
+min-release-age = "14d"     # 14d / 12h / 2w / 7 (days) / 0 (off)
+```
+
+### Global policy (`~/.omc/omc.toml`)
+
+OMC also reads a **global** user policy at `~/.omc/omc.toml` (override the dir with `$OMC_HOME`). Its `[policy]` grants are unioned under every project as a baseline, and its `min-release-age` is the fallback floor a project can override. Use it to set an org-wide freshness floor or default grants once:
+
+```toml
+# ~/.omc/omc.toml
+[policy]
+min-release-age = "7d"
 ```
 
 Full grammar and semantics: **[docs/REFERENCE.md → Policy DSL](docs/REFERENCE.md#policy-dsl-omcpolicy)**.

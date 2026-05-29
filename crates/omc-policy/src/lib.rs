@@ -22,6 +22,7 @@
 //!                      | "allow-sensitive"
 //!                      | ("allow"|"deny") cap ("," cap)*
 //!                      | "flow" flow_src "->" flow_sink
+//!                      | "min-age" STRING   # e.g. "14d","12h","2w","7"(days),"0"(off)
 //!   cap               := ("env"|"read"|"write"|"net"|"http"|"dns"|"spawn"|"exec") STRING
 //!                      | "eval" | "time" | "random"
 //!   flow_src          := ("env"|"file"|"read"|"secret") STRING | "any"
@@ -72,7 +73,7 @@ pub use ast::{
     Block, Cap, EcosystemQualifier, FlowSink, FlowSrc, PackageRule, PolicyDocument, Stmt,
     VersionConstraint, VersionOp,
 };
-pub use compile::{constraint_satisfied, glob_matches, Ecosystem};
+pub use compile::{constraint_satisfied, glob_matches, parse_duration_secs, Ecosystem};
 
 /// A policy parse error, carrying a 1-based line and column.
 ///
@@ -742,5 +743,76 @@ mod tests {
         // A document that is almost valid but has a typo must error, not yield
         // an empty (permissive-looking) document.
         assert!(parse(r#"package "p" { allwo net "x" }"#).is_err());
+    }
+
+    // ---- min-age ----------------------------------------------------------
+
+    #[test]
+    fn parse_duration_secs_units() {
+        assert_eq!(parse_duration_secs("0"), Some(0));
+        assert_eq!(parse_duration_secs("7"), Some(7 * 86_400)); // bare = days
+        assert_eq!(parse_duration_secs("14d"), Some(14 * 86_400));
+        assert_eq!(parse_duration_secs("12h"), Some(12 * 3_600));
+        assert_eq!(parse_duration_secs("2w"), Some(2 * 7 * 86_400));
+        assert_eq!(parse_duration_secs("30m"), Some(30 * 60));
+        assert_eq!(parse_duration_secs("45s"), Some(45));
+        assert_eq!(parse_duration_secs(" 3d "), Some(3 * 86_400));
+        for bad in ["", "d", "-1d", "1x", "1.5d", "abc", "1 2d"] {
+            assert!(
+                parse_duration_secs(bad).is_none(),
+                "{bad} should be invalid"
+            );
+        }
+    }
+
+    #[test]
+    fn min_age_default_and_package_override() {
+        let doc = parse(
+            r#"
+            default { min-age "14d" }
+            package "trusted-internal" { min-age "0" }
+            npm package "fresh-ok" { min-age "2h" }
+        "#,
+        )
+        .unwrap();
+        // Default applies to an unmatched package.
+        assert_eq!(
+            doc.min_age_for_name(Ecosystem::Npm, "left-pad"),
+            Some(14 * 86_400)
+        );
+        // A package block can relax to 0 (an explicit "no requirement" that
+        // overrides the default floor).
+        assert_eq!(
+            doc.min_age_for_name(Ecosystem::Npm, "trusted-internal"),
+            Some(0)
+        );
+        // ...or tighten/change it.
+        assert_eq!(
+            doc.min_age_for_name(Ecosystem::Npm, "fresh-ok"),
+            Some(2 * 3_600)
+        );
+        // A package the document never mentions and with no default => None.
+        let no_default = parse(r#"npm package "x" { min-age "1d" }"#).unwrap();
+        assert_eq!(no_default.min_age_for_name(Ecosystem::Npm, "y"), None);
+    }
+
+    #[test]
+    fn min_age_appears_in_explain() {
+        let doc = parse(r#"default { min-age "14d" }"#).unwrap();
+        let out = doc.explain_for(Ecosystem::Npm, "x", "1.0.0");
+        assert!(out.contains("min release age: 14d"), "{out}");
+        let none = parse(r#"package "x" { pure }"#).unwrap();
+        assert!(none
+            .explain_for(Ecosystem::Npm, "x", "1.0.0")
+            .contains("min release age: (none)"));
+    }
+
+    #[test]
+    fn malformed_min_age_fails_closed_at_parse() {
+        let e = err(r#"default { min-age "soon" }"#);
+        assert!(e.message.contains("min-age"), "{}", e.message);
+        assert!(parse(r#"default { min-age "1.5d" }"#).is_err());
+        // Missing the quoted duration is also an error.
+        assert!(parse(r#"default { min-age }"#).is_err());
     }
 }

@@ -258,8 +258,20 @@ impl<'a> Parser<'a> {
                 let to = self.parse_flow_sink()?;
                 Ok(Stmt::Flow { from, to })
             }
+            Some("min-age") => {
+                self.bump();
+                let raw = self.expect_string("for the `min-age` duration (e.g. \"14d\")")?;
+                // Validate the duration now so a malformed `min-age` fails at
+                // parse time (e.g. `omc policy validate`), never silently.
+                if crate::compile::parse_duration_secs(&raw).is_none() {
+                    return Err(self.error_here(format!(
+                        "invalid `min-age` duration `{raw}`; use e.g. \"14d\", \"12h\", \"2w\", or \"7\" (days)"
+                    )));
+                }
+                Ok(Stmt::MinAge(raw))
+            }
             Some(other) => Err(self.error_here(format!(
-                "unknown statement `{other}`; expected `pure`, `allow-sensitive`, `allow`, `deny`, or `flow`"
+                "unknown statement `{other}`; expected `pure`, `allow-sensitive`, `allow`, `deny`, `flow`, or `min-age`"
             ))),
             None => Err(self.error_here("expected a statement")),
         }

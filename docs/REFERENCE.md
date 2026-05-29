@@ -376,6 +376,55 @@ omc policy check <pkg>[@<ver>] [--npm|--pypi]   # print the effective compiled p
 are omitted. Scoped npm names keep their leading `@` (`omc policy check
 @acme/widget@2.0.0`).
 
+### Package-age checks (`min-age` / `min-release-age`)
+
+A supply-chain freshness gate: a package version must have been **published at
+least N ago** to be installed (defends against malware published moments before
+you install). It is enforced at version resolution — too-new versions are
+filtered out (the newest old-enough version is chosen), for both npm (via the
+registry `time` field) and PyPI (via `upload_time`).
+
+Durations are `Nd` (days), `Nh` (hours), `Nm` (minutes), `Nw` (weeks), `Ns`
+(seconds), or a bare `N` (days). `0` means no requirement. A malformed duration
+is a hard error (it never silently disables the floor).
+
+Three places set it, most-specific wins:
+
+1. **Per package** in `omc.policy`: a `min-age "<dur>"` statement in a `default`
+   or `package` block. A package block can tighten (`min-age "30d"`) or exempt
+   (`min-age "0"`) relative to the `default`. Note: `min-age` is evaluated by
+   package **name** — a version constraint on the block does not scope it, so put
+   `min-age` in `default` or name-only blocks.
+2. **Per project** in `omc.toml`: `[policy] min-release-age = "14d"`.
+3. **Globally** in `~/.omc/omc.toml` (see below).
+
+The effective age for a package is its `omc.policy` `min-age` if stated,
+otherwise the project floor, otherwise the global floor. It combines with an
+explicit `--before` / `--uploaded-prior-to` by taking the more restrictive
+cutoff.
+
+### Global policy (`~/.omc/omc.toml`)
+
+OMC reads a global user policy at `~/.omc/omc.toml` (override the directory with
+the `$OMC_HOME` environment variable; defaults to `$HOME/.omc`). It is an
+ordinary `omc.toml` whose `[policy]` table is applied as a baseline to **every**
+project:
+
+- `allow` / `allow-flow` grants are **unioned under** the project's grants (the
+  project adds to, and never loses, the global baseline).
+- `min-release-age` is the **fallback floor**, which a project's own
+  `min-release-age` (or an `omc.policy` `min-age`) overrides.
+
+A present-but-malformed global file is a hard error, exactly like a project
+`omc.toml`. When the file is absent, behaviour is exactly as before.
+
+```toml
+# ~/.omc/omc.toml — applies to every project on this machine
+[policy]
+allow = ["http:registry.npmjs.org"]
+min-release-age = "7d"
+```
+
 ## Package Manager Prototype
 
 The `omc` CLI is the first working slice of a PyPI/npm replacement:

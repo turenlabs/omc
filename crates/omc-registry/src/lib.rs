@@ -342,6 +342,16 @@ pub struct ManifestPolicy {
     pub allow: Vec<String>,
     #[serde(default, rename = "allow-flow")]
     pub allow_flow: Vec<String>,
+    /// Project-wide minimum release age (a supply-chain freshness floor): a
+    /// package version must have been published at least this long ago to be
+    /// installed. A duration like "14d"/"12h"/"2w"/"7"(days). Per-package
+    /// `min-age` rules in `omc.policy` layer on top of this. Optional.
+    #[serde(
+        default,
+        rename = "min-release-age",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub min_release_age: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -354,7 +364,7 @@ pub struct ManifestRegistries {
 
 impl ManifestPolicy {
     fn is_empty(&self) -> bool {
-        self.allow.is_empty() && self.allow_flow.is_empty()
+        self.allow.is_empty() && self.allow_flow.is_empty() && self.min_release_age.is_none()
     }
 }
 
@@ -754,6 +764,15 @@ pub struct LinkOptions {
     pub save_manifest_dependency: bool,
     pub save_dependency_kind: ManifestDependencyKind,
     pub enforce_local_source_verdicts: bool,
+    /// Project/global default minimum release age in seconds (a supply-chain
+    /// freshness floor): a package version younger than this is rejected at
+    /// resolution. Resolved from `omc.toml`/`~/.omc/omc.toml` `[policy]
+    /// min-release-age`. `omc.policy` per-package `min-age` rules layer on top
+    /// via `policy_document`. `None` = no project/global floor.
+    pub min_release_age_secs: Option<i64>,
+    /// The parsed `omc.policy` DSL document, when present, for per-package
+    /// `min-age` (and used elsewhere for the per-package capability policy).
+    pub policy_document: Option<omc_policy::PolicyDocument>,
 }
 
 impl LinkOptions {
@@ -807,6 +826,8 @@ impl LinkOptions {
             save_manifest_dependency: true,
             save_dependency_kind: ManifestDependencyKind::Production,
             enforce_local_source_verdicts: true,
+            min_release_age_secs: None,
+            policy_document: None,
         }
     }
 }
@@ -3607,7 +3628,114 @@ pub fn effective_package_policy(
     Ok(merge_dsl_policy(base, &dsl))
 }
 
+/// Resolve the global OMC home directory: `$OMC_HOME` when set (it points at the
+/// directory holding the global config — handy for tests/CI), otherwise
+/// `$HOME/.omc` (or `%USERPROFILE%\.omc` on Windows).
+fn global_omc_home() -> Option<PathBuf> {
+    if let Some(dir) = env::var_os("OMC_HOME") {
+        return Some(PathBuf::from(dir));
+    }
+    let home = env::var_os("HOME")
+        .or_else(|| env::var_os("USERPROFILE"))
+        .filter(|h| !h.is_empty())?;
+    Some(PathBuf::from(home).join(".omc"))
+}
+
+/// Load the optional global user manifest at `~/.omc/omc.toml`. Returns
+/// `Ok(None)` when absent; a present-but-malformed file is a hard error.
+fn load_global_manifest() -> Result<Option<OmcManifest>> {
+    let Some(path) = global_omc_home().map(|home| home.join("omc.toml")) else {
+        return Ok(None);
+    };
+    if !path.exists() {
+        return Ok(None);
+    }
+    Ok(Some(read_manifest(path)?))
+}
+
+/// Parse a `min-release-age` duration string into seconds. A present-but-invalid
+/// value fails closed (a typo never silently disables the freshness floor).
+fn parse_min_release_age(value: Option<&str>) -> Result<Option<i64>> {
+    match value {
+        None => Ok(None),
+        Some(raw) => omc_policy::parse_duration_secs(raw).map(Some).ok_or_else(|| {
+            OmcRegistryError::UnsupportedSpec(format!(
+                "invalid min-release-age `{raw}`; use e.g. \"14d\", \"12h\", \"2w\", or \"7\" (days)"
+            ))
+        }),
+    }
+}
+
+/// The effective minimum release age (seconds) for a package by name: the
+/// `omc.policy` DSL's `min-age` for the package (most specific, and able to
+/// relax to 0) when stated, otherwise the project/global `min-release-age`
+/// floor. `None`/`Some(0)` means no age requirement.
+fn effective_min_age_secs(options: &LinkOptions, ecosystem: Ecosystem, name: &str) -> Option<i64> {
+    let dsl = options
+        .policy_document
+        .as_ref()
+        .and_then(|doc| doc.min_age_for_name(policy_ecosystem(ecosystem), name));
+    dsl.or(options.min_release_age_secs)
+        .filter(|secs| *secs > 0)
+}
+
+/// The "published before" cutoff string to use when resolving an npm package:
+/// the earlier (more restrictive) of any explicit `--before`/`npm_before` and
+/// the `now - effective_min_age` freshness cutoff for this package.
+fn effective_npm_before(options: &LinkOptions, name: &str) -> Result<Option<String>> {
+    let explicit = options
+        .npm_before
+        .as_deref()
+        .map(parse_npm_before)
+        .transpose()?;
+    let age_cutoff = effective_min_age_secs(options, Ecosystem::Npm, name)
+        .map(|secs| Utc::now() - Duration::seconds(secs));
+    let cutoff = match (explicit, age_cutoff) {
+        (Some(a), Some(b)) => Some(a.min(b)),
+        (Some(a), None) => Some(a),
+        (None, Some(b)) => Some(b),
+        (None, None) => None,
+    };
+    Ok(cutoff.map(|dt| dt.to_rfc3339()))
+}
+
+/// The "uploaded prior to" cutoff string for resolving a PyPI package: the
+/// earlier of any explicit `--uploaded-prior-to` and the `now - min_age`
+/// freshness cutoff for this package. RFC3339, re-parseable by
+/// `parse_pypi_uploaded_prior_to`.
+fn effective_pypi_uploaded_prior_to(options: &LinkOptions, name: &str) -> Result<Option<String>> {
+    let explicit = options
+        .pypi_uploaded_prior_to
+        .as_deref()
+        .map(parse_pypi_uploaded_prior_to)
+        .transpose()?;
+    let age_cutoff = effective_min_age_secs(options, Ecosystem::Pypi, name)
+        .map(|secs| Utc::now() - Duration::seconds(secs));
+    let cutoff = match (explicit, age_cutoff) {
+        (Some(a), Some(b)) => Some(a.min(b)),
+        (Some(a), None) => Some(a),
+        (None, Some(b)) => Some(b),
+        (None, None) => None,
+    };
+    Ok(cutoff.map(|dt| dt.to_rfc3339()))
+}
+
 fn apply_manifest_config(manifest: &OmcManifest, options: &mut LinkOptions) -> Result<()> {
+    // Global user policy at `~/.omc/omc.toml` is a baseline applied to every
+    // project: its grants are unioned UNDER the project's, and its
+    // min-release-age is the fallback floor the project can override.
+    let global = load_global_manifest()?;
+    if let Some(global) = &global {
+        for grant in &global.policy.allow {
+            options
+                .allowed_capabilities
+                .push(parse_capability_grant(grant)?);
+        }
+        for flow in &global.policy.allow_flow {
+            options.allowed_flows.push(parse_flow_rule(flow)?);
+        }
+    }
+
     for grant in &manifest.policy.allow {
         options
             .allowed_capabilities
@@ -3616,6 +3744,25 @@ fn apply_manifest_config(manifest: &OmcManifest, options: &mut LinkOptions) -> R
     for flow in &manifest.policy.allow_flow {
         options.allowed_flows.push(parse_flow_rule(flow)?);
     }
+
+    // Minimum release age: the project value overrides the global one
+    // (most-specific wins). A present-but-malformed duration fails closed.
+    let project_age = parse_min_release_age(manifest.policy.min_release_age.as_deref())?;
+    let global_age = parse_min_release_age(
+        global
+            .as_ref()
+            .and_then(|g| g.policy.min_release_age.as_deref()),
+    )?;
+    if let Some(secs) = project_age.or(global_age) {
+        options.min_release_age_secs = Some(secs);
+    }
+
+    // The per-package `omc.policy` DSL (for per-package `min-age`, and the
+    // per-package capability policy applied at verify time).
+    if options.policy_document.is_none() {
+        options.policy_document = load_policy_document(&options.project_dir)?;
+    }
+
     let project_dir = options.project_dir.clone();
     for path in &manifest.npm_local_paths {
         options
@@ -10690,7 +10837,12 @@ fn resolve_npm(
         )?
         .ok_or_else(|| npm_offline_missing_lock_error(spec));
     }
-    if options.npm_before.is_none() {
+    // The effective "published before" cutoff for this package: any explicit
+    // --before plus the project/global/DSL minimum-release-age freshness floor.
+    let npm_before_owned = effective_npm_before(options, &install_name)?;
+    if npm_before_owned.is_none() {
+        // Only take the lockfile-tarball fast path when no time cutoff applies;
+        // a locked tarball bypasses the publish-time check.
         if let Some(resolved) = resolve_npm_lockfile_tarball(
             spec,
             &install_name,
@@ -10704,7 +10856,7 @@ fn resolve_npm(
     let npm_config = read_npm_config_for_options(&options.project_dir, options)?;
     let registry = npm_config.registry_for(&registry_name);
     let encoded = urlencoding::encode(&registry_name);
-    let npm_before = options.npm_before.as_deref();
+    let npm_before = npm_before_owned.as_deref();
     let version = match constrained_requirement.as_deref() {
         Some(requirement) if is_exact_npm_version(requirement) && npm_before.is_none() => {
             requirement.to_owned()
@@ -14372,6 +14524,17 @@ fn resolve_pypi(
     if spec.direct_url.is_some() {
         return resolve_pypi_direct_wheel(spec, options);
     }
+    // Tighten the effective "uploaded prior to" cutoff for this package with the
+    // project/global/DSL minimum-release-age floor, then resolve against it.
+    let effective_prior_to = effective_pypi_uploaded_prior_to(options, &spec.name)?;
+    let mut local_options;
+    let options = if effective_prior_to != options.pypi_uploaded_prior_to {
+        local_options = options.clone();
+        local_options.pypi_uploaded_prior_to = effective_prior_to;
+        &local_options
+    } else {
+        options
+    };
     let target_python = pypi_target_python(options);
     let wheel_compatibility = pypi_wheel_compatibility(options);
     let binary_mode = pypi_binary_mode_for_spec(options, spec);
@@ -19959,6 +20122,82 @@ mod tests {
     }
 
     #[test]
+    fn parses_min_release_age_durations() {
+        assert_eq!(parse_min_release_age(None).unwrap(), None);
+        assert_eq!(
+            parse_min_release_age(Some("14d")).unwrap(),
+            Some(14 * 86_400)
+        );
+        assert_eq!(
+            parse_min_release_age(Some("12h")).unwrap(),
+            Some(12 * 3_600)
+        );
+        assert_eq!(parse_min_release_age(Some("0")).unwrap(), Some(0));
+        // A malformed value fails closed (never silently disables the floor).
+        assert!(parse_min_release_age(Some("soon")).is_err());
+    }
+
+    #[test]
+    fn effective_min_age_layers_dsl_over_project() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut options = LinkOptions::new(dir.path());
+        // Project/global floor of 14 days.
+        options.min_release_age_secs = Some(14 * 86_400);
+        // No DSL => the project floor applies to any package.
+        assert_eq!(
+            effective_min_age_secs(&options, Ecosystem::Npm, "left-pad"),
+            Some(14 * 86_400)
+        );
+        // A DSL with a per-package override layers on top: `trusted` is exempted
+        // (explicit 0 => no requirement), `slow` is tightened to 30d.
+        options.policy_document = Some(
+            omc_policy::parse(
+                r#"
+                package "trusted" { min-age "0" }
+                package "slow" { min-age "30d" }
+            "#,
+            )
+            .unwrap(),
+        );
+        assert_eq!(
+            effective_min_age_secs(&options, Ecosystem::Npm, "left-pad"),
+            Some(14 * 86_400) // unmatched => project floor
+        );
+        assert_eq!(
+            effective_min_age_secs(&options, Ecosystem::Npm, "trusted"),
+            None
+        ); // exempted
+        assert_eq!(
+            effective_min_age_secs(&options, Ecosystem::Npm, "slow"),
+            Some(30 * 86_400)
+        );
+    }
+
+    #[test]
+    fn effective_npm_before_combines_age_and_explicit() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut options = LinkOptions::new(dir.path());
+        // No cutoff at all.
+        assert_eq!(effective_npm_before(&options, "x").unwrap(), None);
+
+        // A 7-day min-age yields a cutoff ~7 days ago.
+        options.min_release_age_secs = Some(7 * 86_400);
+        let before = effective_npm_before(&options, "x").unwrap().unwrap();
+        let parsed = parse_npm_before(&before).unwrap();
+        let expected = Utc::now() - Duration::days(7);
+        assert!(
+            (parsed - expected).num_seconds().abs() < 120,
+            "got {before}"
+        );
+
+        // An explicit far-past --before is more restrictive and wins.
+        options.npm_before = Some("2020-01-01T00:00:00Z".to_owned());
+        let before = effective_npm_before(&options, "x").unwrap().unwrap();
+        let parsed = parse_npm_before(&before).unwrap();
+        assert_eq!(parsed.format("%Y").to_string(), "2020");
+    }
+
+    #[test]
     fn parses_npm_alias_requirements() {
         let spec = PackageSpec::parse("npm:string-width-cjs@npm:string-width@^4.2.0").unwrap();
         assert_eq!(spec.name, "string-width-cjs");
@@ -21048,6 +21287,7 @@ version = "0.2.0"
             policy: ManifestPolicy {
                 allow: vec!["http:api.example.com".to_owned()],
                 allow_flow: Vec::new(),
+                min_release_age: None,
             },
             registries: ManifestRegistries::default(),
         };

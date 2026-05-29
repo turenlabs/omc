@@ -84,6 +84,9 @@ impl Accumulator {
                     self.flows.push(rule);
                 }
             }
+            // `min-age` gates version selection, not the capability set, so it
+            // is extracted separately by `min_age_for_name` and is a no-op here.
+            Stmt::MinAge(_) => {}
         }
     }
 
@@ -103,9 +106,10 @@ impl Accumulator {
 }
 
 impl PolicyDocument {
-    /// Compile the effective [`Policy`] for a concrete `(ecosystem, name,
-    /// version)` triple, applying the frozen semantics.
-    pub fn compile_for(&self, ecosystem: Ecosystem, name: &str, version: &str) -> Policy {
+    /// Accumulate the `default` baseline plus every matching `package` block for
+    /// a concrete triple, in source order. Shared by [`Self::compile_for`],
+    /// [`Self::min_age_for`], and [`Self::explain_for`].
+    fn accumulate(&self, ecosystem: Ecosystem, name: &str, version: &str) -> Accumulator {
         let mut acc = Accumulator::default();
         if let Some(default) = &self.default {
             acc.apply_block(default);
@@ -115,18 +119,64 @@ impl PolicyDocument {
                 acc.apply_block(&rule.block);
             }
         }
-        acc.into_policy()
+        acc
+    }
+
+    /// Compile the effective [`Policy`] for a concrete `(ecosystem, name,
+    /// version)` triple, applying the frozen semantics.
+    pub fn compile_for(&self, ecosystem: Ecosystem, name: &str, version: &str) -> Policy {
+        self.accumulate(ecosystem, name, version).into_policy()
+    }
+
+    /// The effective minimum release age (in seconds) the policy declares for a
+    /// package by **name**, or `None` if no `min-age` statement applies.
+    ///
+    /// Min-age gates *version selection*, so it is evaluated independently of any
+    /// concrete version: the `default` block plus every name/ecosystem-matching
+    /// `package` block contribute, in source order, with the last `min-age`
+    /// winning (a package block overrides the default). Version constraints on a
+    /// block do **not** scope its `min-age` — put `min-age` in `default` or
+    /// name-only blocks. `Some(0)` means an explicit "no requirement" (which
+    /// overrides a `default`/outer floor); `None` means unstated (so a caller can
+    /// fall back to project/global config).
+    pub fn min_age_for_name(&self, ecosystem: Ecosystem, name: &str) -> Option<i64> {
+        let mut min_age: Option<i64> = None;
+        let mut apply = |block: &Block| {
+            for stmt in &block.stmts {
+                if let Stmt::MinAge(duration) = stmt {
+                    if let Some(secs) = parse_duration_secs(duration) {
+                        min_age = Some(secs);
+                    }
+                }
+            }
+        };
+        if let Some(default) = &self.default {
+            apply(default);
+        }
+        for rule in &self.packages {
+            if ecosystem.matches_qualifier(rule.ecosystem) && glob_matches(&rule.name, name) {
+                apply(&rule.block);
+            }
+        }
+        min_age
     }
 
     /// Produce a human-readable summary of the effective capabilities and flows
     /// for a concrete triple. Intended for an `omc policy check` command.
     pub fn explain_for(&self, ecosystem: Ecosystem, name: &str, version: &str) -> String {
+        let min_age = self
+            .min_age_for_name(ecosystem, name)
+            .filter(|secs| *secs > 0);
         let policy = self.compile_for(ecosystem, name, version);
         let eco = match ecosystem {
             Ecosystem::Npm => "npm",
             Ecosystem::Pypi => "pypi",
         };
         let mut out = format!("effective policy for {eco}:{name}@{version}\n");
+        match min_age {
+            Some(secs) => out.push_str(&format!("  min release age: {}\n", humanize_secs(secs))),
+            None => out.push_str("  min release age: (none)\n"),
+        }
 
         if policy.allowed_capabilities.is_empty() {
             out.push_str("  capabilities: (none — pure)\n");
@@ -371,4 +421,53 @@ fn parse_component(part: Option<&str>) -> Option<u64> {
         return None;
     }
     part.parse::<u64>().ok()
+}
+
+// ---- duration parsing ------------------------------------------------------
+
+/// Parse a human duration string into seconds. Accepts a non-negative integer
+/// followed by an optional unit suffix: `s` (seconds), `m` (minutes), `h`
+/// (hours), `d` (days), `w` (weeks). A bare number (no suffix) is days. `"0"`
+/// (in any unit) parses to `0` (no requirement). Whitespace around the value is
+/// tolerated. Returns `None` for anything malformed (so callers fail closed).
+///
+/// Shared by the `min-age` DSL statement and the registry's `min-release-age`
+/// config so both parse identically.
+pub fn parse_duration_secs(s: &str) -> Option<i64> {
+    let s = s.trim();
+    if s.is_empty() {
+        return None;
+    }
+    let (digits, unit_secs): (&str, i64) = match s.as_bytes().last() {
+        Some(b's') => (&s[..s.len() - 1], 1),
+        Some(b'm') => (&s[..s.len() - 1], 60),
+        Some(b'h') => (&s[..s.len() - 1], 60 * 60),
+        Some(b'd') => (&s[..s.len() - 1], 60 * 60 * 24),
+        Some(b'w') => (&s[..s.len() - 1], 60 * 60 * 24 * 7),
+        // Bare number: interpret as days.
+        Some(b) if b.is_ascii_digit() => (s, 60 * 60 * 24),
+        _ => return None,
+    };
+    let digits = digits.trim();
+    if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    digits.parse::<i64>().ok()?.checked_mul(unit_secs)
+}
+
+/// Render a duration in seconds back to a compact human string for `explain`.
+/// Days are the canonical unit (so `2w` and `14d` both display as `14d`); we
+/// fall back to hours/minutes/seconds for sub-day durations.
+fn humanize_secs(secs: i64) -> String {
+    const DAY: i64 = 60 * 60 * 24;
+    const HOUR: i64 = 60 * 60;
+    if secs % DAY == 0 {
+        format!("{}d", secs / DAY)
+    } else if secs % HOUR == 0 {
+        format!("{}h", secs / HOUR)
+    } else if secs % 60 == 0 {
+        format!("{}m", secs / 60)
+    } else {
+        format!("{secs}s")
+    }
 }

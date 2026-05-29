@@ -61,6 +61,13 @@ pub enum Stmt {
     Deny(Vec<Cap>),
     /// `flow src -> sink` — add a single flow rule.
     Flow { from: FlowSrc, to: FlowSink },
+    /// `min-age "<duration>"` — require a package version to have been published
+    /// at least this long ago before it may be installed (a supply-chain
+    /// freshness gate against just-published malware). The string is a duration
+    /// like `"14d"`, `"12h"`, `"2w"`, or bare `"7"` (days); `"0"` clears the
+    /// requirement. Validated at parse time. A later block's `min-age` overrides
+    /// an earlier one (so a package block can tighten or relax the default).
+    MinAge(String),
 }
 
 /// The ecosystem qualifier on a `package` block.
