@@ -1,6 +1,19 @@
-use omc_cap::{CapabilityBroker, Policy, Trap};
-use omc_format::{CapOp, CellId, Function, Module, Op, TrapCode, Value};
+use omc_cap::{CapabilityBroker, Policy, Sink, Trap};
+use omc_format::{CapOp, CellId, Function, ImportId, Module, ModuleId, Op, TrapCode, Value};
 use omc_taint::{Label, Labeled};
+
+/// Resolves an `Op::CallImport(ImportId)` encountered in `module` to the target
+/// module + function it should dispatch to. The linker (`omc-linker`) builds a
+/// resolution table once, offline, over the closed lock graph and exposes it
+/// through this trait so the VM can dispatch cross-module calls without knowing
+/// anything about how resolution is computed. `run_cell` passes no resolver, so
+/// it keeps trapping on imports exactly as before; only `run_linked` dispatches.
+pub trait ImportResolver {
+    /// Resolve `(importing module id, import id)` to the callee module and the
+    /// function within it, or `None` if the import is unresolved (deny-by-default
+    /// — the VM then traps rather than guessing a target).
+    fn resolve(&self, module: &ModuleId, import: ImportId) -> Option<(Module, Function)>;
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Fuel(u64);
@@ -49,20 +62,51 @@ pub fn run_cell(
         .ok_or_else(|| Trap::new(TrapCode::InvalidFunction, "module has no entry function"))?
         .clone();
 
-    run_function(cell, broker, &function, args)
+    run_function(cell, broker, None, &function, args)
+}
+
+/// Run a cell's entry function with a linked import resolver so that
+/// `Op::CallImport(id)` dispatches into the resolved target module/function.
+///
+/// This is the multi-module driver: it shares the cell's fuel and policy across
+/// every imported function it calls, so a chain of package calls is still
+/// bounded by the single 10_000-unit budget and gated by the same policy. The
+/// single-cell `run_cell` is intentionally unchanged and keeps trapping on
+/// `CallImport`; only callers that have a linked program (via `omc-linker`) use
+/// this path.
+pub fn run_linked(
+    cell: &mut Cell,
+    broker: &mut dyn CapabilityBroker,
+    resolver: &dyn ImportResolver,
+    args: Vec<Labeled<Value>>,
+) -> Result<Labeled<Value>, Trap> {
+    let function = cell
+        .module
+        .entry()
+        .ok_or_else(|| Trap::new(TrapCode::InvalidFunction, "module has no entry function"))?
+        .clone();
+
+    run_function(cell, broker, Some(resolver), &function, args)
 }
 
 fn run_function(
     cell: &mut Cell,
     broker: &mut dyn CapabilityBroker,
+    resolver: Option<&dyn ImportResolver>,
     function: &Function,
     args: Vec<Labeled<Value>>,
 ) -> Result<Labeled<Value>, Trap> {
     let mut stack = Vec::<Labeled<Value>>::new();
     let mut locals = vec![Labeled::public(Value::Unit); function.locals as usize];
 
-    for op in &function.code {
+    let code = &function.code;
+    let mut pc = 0usize;
+    while pc < code.len() {
         cell.fuel.consume(1)?;
+
+        // Default: advance to the next instruction. Branch ops override this.
+        let mut next = pc + 1;
+        let op = &code[pc];
 
         match op {
             Op::Const(value) => stack.push(Labeled::public(value.clone())),
@@ -95,11 +139,72 @@ fn run_function(
                 let left = pop(&mut stack)?;
                 stack.push(sub(left, right)?);
             }
+            Op::Mul => {
+                let right = pop(&mut stack)?;
+                let left = pop(&mut stack)?;
+                stack.push(mul(left, right)?);
+            }
+            Op::Div => {
+                let right = pop(&mut stack)?;
+                let left = pop(&mut stack)?;
+                stack.push(div(left, right)?);
+            }
+            Op::Mod => {
+                let right = pop(&mut stack)?;
+                let left = pop(&mut stack)?;
+                stack.push(rem(left, right)?);
+            }
             Op::Eq => {
                 let right = pop(&mut stack)?;
                 let left = pop(&mut stack)?;
                 let label = left.label.join(right.label);
                 stack.push(Labeled::new(Value::Bool(left.value == right.value), label));
+            }
+            Op::Lt | Op::Gt | Op::Le | Op::Ge => {
+                let right = pop(&mut stack)?;
+                let left = pop(&mut stack)?;
+                stack.push(compare(op, left, right)?);
+            }
+            Op::Not => {
+                let value = pop(&mut stack)?;
+                match value.value {
+                    Value::Bool(boolean) => {
+                        stack.push(Labeled::new(Value::Bool(!boolean), value.label));
+                    }
+                    other => {
+                        return Err(Trap::type_error(format!(
+                            "not expected bool, got {}",
+                            other.type_name()
+                        )))
+                    }
+                }
+            }
+            Op::Index => {
+                let index = pop(&mut stack)?;
+                let container = pop(&mut stack)?;
+                stack.push(index_value(container, index)?);
+            }
+            Op::Jmp(offset) => {
+                next = branch_target(code.len(), pc, *offset)?;
+            }
+            Op::JmpIfFalse(offset) => {
+                let condition = pop(&mut stack)?;
+                match condition.value {
+                    Value::Bool(boolean) => {
+                        if !boolean {
+                            next = branch_target(code.len(), pc, *offset)?;
+                        }
+                    }
+                    other => {
+                        return Err(Trap::type_error(format!(
+                            "jmp_if_false expected bool, got {}",
+                            other.type_name()
+                        )))
+                    }
+                }
+            }
+            Op::Pop => {
+                pop(&mut stack)?;
             }
             Op::Len => {
                 let value = pop(&mut stack)?;
@@ -140,14 +245,38 @@ fn run_function(
                     call_args.push(pop(&mut stack)?);
                 }
                 call_args.reverse();
-                let result = run_function(cell, broker, &callee, call_args)?;
+                let result = run_function(cell, broker, resolver, &callee, call_args)?;
                 stack.push(result);
             }
-            Op::CallImport(_) => {
-                return Err(Trap::new(
-                    TrapCode::HostError,
-                    "imports must be linked through capability calls",
-                ))
+            Op::CallImport(id) => {
+                // Without a linked resolver, a single cell cannot dispatch a
+                // cross-module call: trap exactly as before (deny-by-default).
+                let resolver = resolver.ok_or_else(|| {
+                    Trap::new(
+                        TrapCode::HostError,
+                        "imports must be linked through a resolver",
+                    )
+                })?;
+                let (callee_module, callee) =
+                    resolver.resolve(&cell.module.id, *id).ok_or_else(|| {
+                        Trap::new(
+                            TrapCode::HostError,
+                            format!("unresolved import {id} in module {}", cell.module.id),
+                        )
+                    })?;
+                let mut call_args = Vec::new();
+                for _ in 0..callee.args {
+                    call_args.push(pop(&mut stack)?);
+                }
+                call_args.reverse();
+                // Run the callee against ITS OWN module so the callee's
+                // CallLocal/CallImport resolve in the callee's namespace. Swap
+                // cell.module for the duration, sharing fuel + policy + id, then
+                // restore so the importer's subsequent CallLocal still works.
+                let saved_module = std::mem::replace(&mut cell.module, callee_module);
+                let result = run_function(cell, broker, Some(resolver), &callee, call_args);
+                cell.module = saved_module;
+                stack.push(result?);
             }
             Op::Cap(cap) => {
                 let result = execute_cap(cell, broker, cap, &mut stack)?;
@@ -158,9 +287,29 @@ fn run_function(
                 return Err(Trap::new(code.clone(), "explicit OMC trap"));
             }
         }
+
+        pc = next;
     }
 
     Ok(Labeled::public(Value::Unit))
+}
+
+/// Resolve a relative branch into an absolute program-counter target.
+///
+/// The offset is relative to the instruction *after* the branch (so `0` is a
+/// fall-through). The verifier already proves the target is in
+/// `[0, code.len()]`, but the VM re-checks to stay sound against unverified
+/// input and traps `VerificationFailed` rather than risk a host panic.
+fn branch_target(code_len: usize, pc: usize, offset: i32) -> Result<usize, Trap> {
+    let base = (pc + 1) as i64;
+    let target = base + offset as i64;
+    if target < 0 || target > code_len as i64 {
+        return Err(Trap::new(
+            TrapCode::VerificationFailed,
+            format!("branch target {target} out of range [0, {code_len}]"),
+        ));
+    }
+    Ok(target as usize)
 }
 
 fn execute_cap(
@@ -191,14 +340,46 @@ fn execute_cap(
             };
             broker.http_request(cell.id, &cell.policy, request, body)
         }
-        CapOp::DnsLookup { host } => Ok(Labeled::new(
-            Value::String(host.clone()),
-            Label::Network(host.clone()),
-        )),
-        CapOp::TimeNow => Ok(Labeled::public(Value::Int(0))),
-        CapOp::RandomBytes { len } => Ok(Labeled::public(Value::Array(vec![Value::Int(0); *len]))),
-        CapOp::ProcSpawn { command, args } => {
-            broker.spawn_process(cell.id, &cell.policy, command, args)?;
+        CapOp::DnsLookup { host } => {
+            cell.policy.require_cap_op(cap)?;
+            Ok(Labeled::new(
+                Value::String(host.clone()),
+                Label::Network(host.clone()),
+            ))
+        }
+        CapOp::TimeNow => {
+            cell.policy.require_cap_op(cap)?;
+            Ok(Labeled::public(Value::Int(0)))
+        }
+        CapOp::RandomBytes { len } => {
+            cell.policy.require_cap_op(cap)?;
+            Ok(Labeled::public(Value::Array(vec![Value::Int(0); *len])))
+        }
+        CapOp::ProcSpawn {
+            command,
+            args,
+            args_from_stack,
+        } => {
+            // Dynamic argv values are pushed deepest-first, so the top of the
+            // stack is the LAST argument. Pop them, restore order, and check
+            // each label's flow to the process sink before spawning. A tainted
+            // argv (e.g. a secret) is refused by the broker's flow check.
+            let mut dynamic = Vec::with_capacity(*args_from_stack);
+            for _ in 0..*args_from_stack {
+                let value = pop(stack)?;
+                cell.policy
+                    .check_flows(&value.label, Sink::Process(command.clone()))?;
+                dynamic.push(value);
+            }
+            dynamic.reverse();
+            let mut all_args = args.clone();
+            for value in &dynamic {
+                all_args.push(match &value.value {
+                    Value::String(text) => text.clone(),
+                    other => format!("{other:?}"),
+                });
+            }
+            broker.spawn_process(cell.id, &cell.policy, command, &all_args)?;
             unreachable!("spawn_process returns Never on success")
         }
         CapOp::DynamicEval { .. } => Err(Trap::denied("dynamic eval denied by runtime")),
@@ -236,6 +417,126 @@ fn sub(left: Labeled<Value>, right: Labeled<Value>) -> Result<Labeled<Value>, Tr
             right.type_name()
         ))),
     }
+}
+
+fn mul(left: Labeled<Value>, right: Labeled<Value>) -> Result<Labeled<Value>, Trap> {
+    let label = left.label.join(right.label);
+    match (left.value, right.value) {
+        (Value::Int(left), Value::Int(right)) => {
+            Ok(Labeled::new(Value::Int(left.wrapping_mul(right)), label))
+        }
+        (left, right) => Err(Trap::type_error(format!(
+            "mul expected int*int, got {}*{}",
+            left.type_name(),
+            right.type_name()
+        ))),
+    }
+}
+
+fn div(left: Labeled<Value>, right: Labeled<Value>) -> Result<Labeled<Value>, Trap> {
+    let label = left.label.join(right.label);
+    match (left.value, right.value) {
+        (Value::Int(_), Value::Int(0)) => Err(Trap::new(
+            TrapCode::Explicit("div by zero".to_owned()),
+            "div by zero",
+        )),
+        (Value::Int(left), Value::Int(right)) => {
+            Ok(Labeled::new(Value::Int(left.wrapping_div(right)), label))
+        }
+        (left, right) => Err(Trap::type_error(format!(
+            "div expected int/int, got {}/{}",
+            left.type_name(),
+            right.type_name()
+        ))),
+    }
+}
+
+fn rem(left: Labeled<Value>, right: Labeled<Value>) -> Result<Labeled<Value>, Trap> {
+    let label = left.label.join(right.label);
+    match (left.value, right.value) {
+        (Value::Int(_), Value::Int(0)) => Err(Trap::new(
+            TrapCode::Explicit("div by zero".to_owned()),
+            "div by zero",
+        )),
+        (Value::Int(left), Value::Int(right)) => {
+            Ok(Labeled::new(Value::Int(left.wrapping_rem(right)), label))
+        }
+        (left, right) => Err(Trap::type_error(format!(
+            "mod expected int%int, got {}%{}",
+            left.type_name(),
+            right.type_name()
+        ))),
+    }
+}
+
+fn compare(op: &Op, left: Labeled<Value>, right: Labeled<Value>) -> Result<Labeled<Value>, Trap> {
+    let label = left.label.join(right.label);
+    let ordering = match (&left.value, &right.value) {
+        (Value::Int(left), Value::Int(right)) => left.cmp(right),
+        (Value::String(left), Value::String(right)) => left.cmp(right),
+        (left, right) => {
+            return Err(Trap::type_error(format!(
+                "comparison expected int+int or string+string, got {}+{}",
+                left.type_name(),
+                right.type_name()
+            )))
+        }
+    };
+    let result = match op {
+        Op::Lt => ordering.is_lt(),
+        Op::Gt => ordering.is_gt(),
+        Op::Le => ordering.is_le(),
+        Op::Ge => ordering.is_ge(),
+        other => {
+            return Err(Trap::type_error(format!("not a comparison op: {other:?}")));
+        }
+    };
+    Ok(Labeled::new(Value::Bool(result), label))
+}
+
+fn index_value(
+    container: Labeled<Value>,
+    index: Labeled<Value>,
+) -> Result<Labeled<Value>, Trap> {
+    let label = container.label.join(index.label);
+    match (container.value, index.value) {
+        (Value::Array(values), Value::Int(idx)) => {
+            let resolved = resolve_index(idx, values.len())?;
+            Ok(Labeled::new(values[resolved].clone(), label))
+        }
+        (Value::String(string), Value::Int(idx)) => {
+            let chars = string.chars().collect::<Vec<_>>();
+            let resolved = resolve_index(idx, chars.len())?;
+            Ok(Labeled::new(
+                Value::String(chars[resolved].to_string()),
+                label,
+            ))
+        }
+        (Value::Map(entries), Value::String(key)) => {
+            let value = entries
+                .into_iter()
+                .find(|(entry_key, _)| entry_key == &key)
+                .map(|(_, value)| value)
+                .unwrap_or(Value::Unit);
+            Ok(Labeled::new(value, label))
+        }
+        (container, index) => Err(Trap::type_error(format!(
+            "index expected array[int], string[int], or map[string], got {}[{}]",
+            container.type_name(),
+            index.type_name()
+        ))),
+    }
+}
+
+fn resolve_index(index: i64, len: usize) -> Result<usize, Trap> {
+    let signed_len = len as i64;
+    let resolved = if index < 0 { signed_len + index } else { index };
+    if resolved < 0 || resolved >= signed_len {
+        return Err(Trap::type_error(format!(
+            "index {index} out of bounds for length {len}"
+        )));
+    }
+    Ok(resolved as usize)
 }
 
 fn slice(
@@ -567,5 +868,234 @@ mod tests {
 
         let err = run_cell(&mut cell, &mut broker, vec![]).unwrap_err();
         assert!(err.message.contains("env:NPM_TOKEN may not flow"));
+    }
+
+    #[test]
+    fn runtime_gates_deterministic_capabilities_on_policy() {
+        let module = |op: CapOp| Module {
+            id: "test:cap".to_owned(),
+            package: "cap".to_owned(),
+            version: "0.0.0".to_owned(),
+            declared_behavior: BehaviorType::HostCapability,
+            functions: vec![Function::new(0, "cap", 0, vec![Op::Cap(op), Op::Return])],
+        };
+
+        // Deny-by-default: a Pure policy traps even the safe deterministic stubs,
+        // exactly like EnvRead/FsRead/HttpRequest.
+        for op in [
+            CapOp::TimeNow,
+            CapOp::RandomBytes { len: 4 },
+            CapOp::DnsLookup {
+                host: "example.com".to_owned(),
+            },
+        ] {
+            let mut cell = Cell::new(1, module(op.clone()), Policy::pure());
+            let mut broker = MemoryBroker::new();
+            let err = run_cell(&mut cell, &mut broker, vec![]).unwrap_err();
+            assert_eq!(err.code, TrapCode::Denied, "{op:?} should be denied");
+        }
+
+        // An explicit grant lets the capability through and returns its stub value.
+        let mut cell = Cell::new(
+            1,
+            module(CapOp::TimeNow),
+            Policy::pure().allow_capability(Capability::TimeNow),
+        );
+        let mut broker = MemoryBroker::new();
+        let result = run_cell(&mut cell, &mut broker, vec![]).unwrap();
+        assert_eq!(result.value, Value::Int(0));
+    }
+
+    fn run_pure(function: Function, args: Vec<Labeled<Value>>) -> Result<Labeled<Value>, Trap> {
+        let module = Module {
+            id: "test:phase2".to_owned(),
+            package: "phase2".to_owned(),
+            version: "0.0.0".to_owned(),
+            declared_behavior: BehaviorType::Pure,
+            functions: vec![function],
+        };
+        let mut cell = Cell::new(1, module, Policy::pure());
+        let mut broker = MemoryBroker::new();
+        run_cell(&mut cell, &mut broker, args)
+    }
+
+    #[test]
+    fn if_else_branches_select_correct_value() {
+        // fn(x) { if x < 10 { return x * 2 } else { return x - 1 } }
+        // code layout:
+        //  0 LoadArg(0)
+        //  1 Const(10)
+        //  2 Lt
+        //  3 JmpIfFalse(+3) -> 7
+        //  4 LoadArg(0)
+        //  5 Const(2)
+        //  6 Mul ; falls through to Return at 10 via Jmp
+        //  -- but we Return directly to keep it simple:
+        let function = Function::new(
+            0,
+            "branch",
+            1,
+            vec![
+                Op::LoadArg(0),         // 0
+                Op::Const(Value::Int(10)), // 1
+                Op::Lt,                 // 2
+                Op::JmpIfFalse(4),      // 3 -> jump to 8 (the else arm)
+                Op::LoadArg(0),         // 4
+                Op::Const(Value::Int(2)), // 5
+                Op::Mul,                // 6
+                Op::Return,             // 7
+                Op::LoadArg(0),         // 8 (else)
+                Op::Const(Value::Int(1)), // 9
+                Op::Sub,                // 10
+                Op::Return,             // 11
+            ],
+        );
+
+        let then = run_pure(function.clone(), vec![Labeled::public(Value::Int(3))]).unwrap();
+        assert_eq!(then.value, Value::Int(6));
+
+        let els = run_pure(function, vec![Labeled::public(Value::Int(20))]).unwrap();
+        assert_eq!(els.value, Value::Int(19));
+    }
+
+    #[test]
+    fn bounded_loop_sums_via_back_edge() {
+        // fn(n) { acc=0; i=0; while i < n { acc = acc + i; i = i + 1 } return acc }
+        // locals: 0=acc, 1=i
+        let function = Function::new(
+            0,
+            "sum",
+            1,
+            vec![
+                Op::Const(Value::Int(0)),  // 0
+                Op::StoreLocal(0),         // 1 acc=0
+                Op::Const(Value::Int(0)),  // 2
+                Op::StoreLocal(1),         // 3 i=0
+                // loop head @4
+                Op::LoadLocal(1),          // 4 i
+                Op::LoadArg(0),            // 5 n
+                Op::Lt,                    // 6 i<n
+                Op::JmpIfFalse(9),         // 7 -> exit @17
+                Op::LoadLocal(0),          // 8 acc
+                Op::LoadLocal(1),          // 9 i
+                Op::Add,                   // 10 acc+i
+                Op::StoreLocal(0),         // 11 acc=
+                Op::LoadLocal(1),          // 12 i
+                Op::Const(Value::Int(1)),  // 13
+                Op::Add,                   // 14 i+1
+                Op::StoreLocal(1),         // 15 i=
+                Op::Jmp(-13),              // 16 back-edge: (16+1)-13 = 4
+                // exit @17
+                Op::LoadLocal(0),          // 17 acc
+                Op::Return,                // 18
+            ],
+        )
+        .with_locals(2);
+
+        // sum 0..5 = 0+1+2+3+4 = 10
+        let result = run_pure(function, vec![Labeled::public(Value::Int(5))]).unwrap();
+        assert_eq!(result.value, Value::Int(10));
+    }
+
+    #[test]
+    fn loop_back_edge_is_fuel_bounded() {
+        // Infinite loop: while true {} — must trap FuelExhausted, never hang.
+        let function = Function::new(
+            0,
+            "spin",
+            0,
+            vec![
+                Op::Const(Value::Bool(true)), // 0
+                Op::JmpIfFalse(2),            // 1 -> 4 (never taken)
+                Op::Jmp(-3),                  // 2 back-edge: (2+1)-3 = 0
+                Op::Return,                   // 3
+            ],
+        );
+        let err = run_pure(function, vec![]).unwrap_err();
+        assert_eq!(err.code, TrapCode::FuelExhausted);
+    }
+
+    #[test]
+    fn arithmetic_ops_compute_and_join_labels() {
+        // (a * b) with a tainted should keep the taint label on the result.
+        let function = Function::new(
+            0,
+            "mul",
+            2,
+            vec![Op::LoadArg(0), Op::LoadArg(1), Op::Mul, Op::Return],
+        );
+        let result = run_pure(
+            function,
+            vec![
+                Labeled::new(Value::Int(6), Label::Env("SECRET".to_owned())),
+                Labeled::public(Value::Int(7)),
+            ],
+        )
+        .unwrap();
+        assert_eq!(result.value, Value::Int(42));
+        assert_eq!(result.label, Label::Env("SECRET".to_owned()));
+    }
+
+    #[test]
+    fn div_by_zero_traps_explicit() {
+        let function = Function::new(
+            0,
+            "div",
+            0,
+            vec![
+                Op::Const(Value::Int(1)),
+                Op::Const(Value::Int(0)),
+                Op::Div,
+                Op::Return,
+            ],
+        );
+        let err = run_pure(function, vec![]).unwrap_err();
+        assert_eq!(err.code, TrapCode::Explicit("div by zero".to_owned()));
+    }
+
+    #[test]
+    fn index_reads_array_string_and_map() {
+        let array_fn = Function::new(
+            0,
+            "idx",
+            1,
+            vec![
+                Op::LoadArg(0),
+                Op::Const(Value::Int(-1)),
+                Op::Index,
+                Op::Return,
+            ],
+        );
+        let result = run_pure(
+            array_fn,
+            vec![Labeled::public(Value::Array(vec![
+                Value::Int(10),
+                Value::Int(20),
+                Value::Int(30),
+            ]))],
+        )
+        .unwrap();
+        assert_eq!(result.value, Value::Int(30));
+
+        let map_fn = Function::new(
+            0,
+            "idx",
+            1,
+            vec![
+                Op::LoadArg(0),
+                Op::Const(Value::String("missing".to_owned())),
+                Op::Index,
+                Op::Return,
+            ],
+        );
+        let result = run_pure(
+            map_fn,
+            vec![Labeled::public(Value::Map(vec![(
+                "present".to_owned(),
+                Value::Int(1),
+            )]))],
+        )
+        .unwrap();
+        assert_eq!(result.value, Value::Unit);
     }
 }

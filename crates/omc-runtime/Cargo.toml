@@ -1,0 +1,18 @@
+[package]
+name = "omc-runtime"
+description = "End-to-end pipeline: lower -> verify -> link -> execute OSS Microcode under policy"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[dependencies]
+omc-cap = { path = "../omc-cap" }
+omc-format = { path = "../omc-format" }
+omc-linker = { path = "../omc-linker" }
+omc-taint = { path = "../omc-taint" }
+omc-verify = { path = "../omc-verify" }
+omc-vm = { path = "../omc-vm" }
+
+[dev-dependencies]
+omc-frontend-js = { path = "../omc-frontend-js" }
+omc-frontend-py = { path = "../omc-frontend-py" }

@@ -8802,7 +8802,7 @@ fn is_ignorable_archive_metadata_path(path: &str) -> bool {
         let Some(name) = component.as_os_str().to_str() else {
             return false;
         };
-        name == "__MACOSX" || name.starts_with("._")
+        name == "__MACOSX" || name == "pax_global_header" || name.starts_with("._")
     })
 }
 
@@ -9309,6 +9309,7 @@ fn remove_path_if_exists(path: &Path) -> Result<()> {
 fn create_command_link(source: &Path, target: &Path) -> Result<()> {
     fs::write(
         target,
+        // batou:ignore BATOU-RUST-AST-002 -- not SQL: format! builds a POSIX shell bin-shim; the interpolated path is shell-quoted via shell_single_quote
         format!(
             "#!/bin/sh\n# OMC npm bin shim\nNODE_OPTIONS='--preserve-symlinks --preserve-symlinks-main'\nexport NODE_OPTIONS\nexec {} \"$@\"\n",
             shell_single_quote(&source.to_string_lossy())
@@ -13440,10 +13441,12 @@ fn resolve_npm_direct_tarball(
     spec: &PackageSpec,
     options: &LinkOptions,
 ) -> Result<ResolvedPackage> {
-    let source_url = spec
+    let fallback_source_url = spec
         .direct_url
         .clone()
         .ok_or_else(|| OmcRegistryError::UnsupportedSpec(spec.requested()))?;
+    let source_url = locked_npm_direct_url_for_spec(spec, options)?.unwrap_or(fallback_source_url);
+    let source_url = npm_github_archive_url(&source_url)?.unwrap_or(source_url);
     let (local_path, filename) = npm_direct_tarball_source(&source_url, &spec.name)?;
     if options.npm_offline && local_path.is_none() {
         return Err(OmcRegistryError::UnsupportedSpec(format!(
@@ -13504,6 +13507,28 @@ fn resolve_npm_direct_tarball(
     })
 }
 
+fn locked_npm_direct_url_for_spec(
+    spec: &PackageSpec,
+    options: &LinkOptions,
+) -> Result<Option<String>> {
+    if spec.ecosystem != Ecosystem::Npm || spec.direct_url.is_none() {
+        return Ok(None);
+    }
+    let key = spec.constraint_key();
+    for candidate in [
+        options.npm_resolved.get(&key),
+        options.constraints.get(&key),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        if let Some(url) = npm_direct_tarball_url(candidate, &options.project_dir)? {
+            return Ok(Some(url));
+        }
+    }
+    Ok(None)
+}
+
 fn npm_direct_tarball_source(
     source_url: &str,
     package_name: &str,
@@ -13546,6 +13571,7 @@ fn resolve_npm_lockfile_tarball(
     let Some(source_url) = options.npm_resolved.get(&key) else {
         return Ok(None);
     };
+    let source_url = npm_github_archive_url(source_url)?.unwrap_or_else(|| source_url.to_owned());
     if version_requirement
         .map(|requirement| npm_version_satisfies(version, requirement))
         .unwrap_or(true)
@@ -13553,7 +13579,7 @@ fn resolve_npm_lockfile_tarball(
         return Ok(Some(npm_direct_tarball_package(
             install_name,
             version,
-            source_url,
+            &source_url,
         )?));
     }
     Ok(None)
@@ -17913,6 +17939,7 @@ fn cap_op_from_finding(finding: &CapabilityFinding) -> CapOp {
         CapabilityKind::ProcSpawn => CapOp::ProcSpawn {
             command: finding.target.clone(),
             args: Vec::new(),
+            args_from_stack: 0,
         },
         CapabilityKind::DynamicEval => CapOp::DynamicEval {
             source_from_stack: false,
@@ -19005,6 +19032,60 @@ mod tests {
         let error =
             PackageSpec::parse("npm:github-pkg @ github:turenio/omc#semver:^1.0.0").unwrap_err();
         assert!(error.to_string().contains("uses semver refs"));
+    }
+
+    #[test]
+    fn npm_direct_specs_prefer_locked_github_resolved_url() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut options = LinkOptions::new(dir.path());
+        options.npm_resolved.insert(
+            "npm:github-pkg".to_owned(),
+            "git+https://github.com/turenio/omc.git#v1.0.0".to_owned(),
+        );
+        let spec = PackageSpec::parse("npm:github-pkg @ github:turenio/omc#main").unwrap();
+
+        let source_url = locked_npm_direct_url_for_spec(&spec, &options)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(
+            source_url,
+            "https://github.com/turenio/omc/archive/v1.0.0.tar.gz"
+        );
+    }
+
+    #[test]
+    fn npm_lockfile_resolution_converts_github_resolved_url() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut options = LinkOptions::new(dir.path());
+        options
+            .constraints
+            .insert("npm:github-pkg".to_owned(), "1.2.3".to_owned());
+        options.npm_resolved.insert(
+            "npm:github-pkg".to_owned(),
+            "git+ssh://git@github.com/turenio/omc.git#v1.2.3".to_owned(),
+        );
+        let spec = PackageSpec::parse("npm:github-pkg@^1.0.0").unwrap();
+
+        let resolved = resolve_npm_lockfile_tarball(&spec, "github-pkg", Some("^1.0.0"), &options)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(
+            resolved.source_url,
+            "https://github.com/turenio/omc/archive/v1.2.3.tar.gz"
+        );
+        assert!(resolved.npm_direct_tarball);
+    }
+
+    #[test]
+    fn ignores_common_archive_metadata_paths() {
+        assert!(is_ignorable_archive_metadata_path("pax_global_header"));
+        assert!(is_ignorable_archive_metadata_path(
+            "package/__MACOSX/._metadata"
+        ));
+        assert!(is_ignorable_archive_metadata_path("package/._index.js"));
+        assert!(!is_ignorable_archive_metadata_path("package/index.js"));
     }
 
     #[test]

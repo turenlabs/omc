@@ -1,0 +1,13 @@
+[package]
+name = "omc-linker"
+description = "Links per-package OSS Microcode modules into a resolvable cell graph"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[dependencies]
+omc-cap = { path = "../omc-cap" }
+omc-format = { path = "../omc-format" }
+omc-taint = { path = "../omc-taint" }
+omc-verify = { path = "../omc-verify" }
+omc-vm = { path = "../omc-vm" }

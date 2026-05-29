@@ -316,8 +316,8 @@ For existing projects, `install` reads normal project files:
 ```text
 package.json       root/workspace dependencies, devDependencies, optionalDependencies, peers, bundleDependencies/bundledDependencies, overrides/resolutions, HTTPS/file tarball deps, GitHub npm deps, local file/link dirs; use --omit-dev for production installs
 .npmrc             global/project/user npm registry, scoped registry, and host-scoped auth token configuration; NPM_CONFIG_GLOBALCONFIG selects a custom global file, NPM_CONFIG_USERCONFIG selects a custom user file, and NPM_CONFIG_REGISTRY / npm_config_registry override the default registry
-package-lock.json  exact versions, resolved tarball URLs, integrity hashes, and verified local-source file entries for uniquely locked npm packages
-npm-shrinkwrap.json exact versions, resolved tarball URLs, integrity hashes, and verified local-source file entries for uniquely locked npm packages
+package-lock.json  exact versions, resolved tarball/GitHub URLs, integrity hashes, and verified local-source file entries for uniquely locked npm packages
+npm-shrinkwrap.json exact versions, resolved tarball/GitHub URLs, integrity hashes, and verified local-source file entries for uniquely locked npm packages
 yarn.lock          Yarn Classic exact versions, resolved tarball URLs, and integrity hashes for uniquely locked npm packages
 pnpm-lock.yaml     pnpm importer dependencies, exact versions, resolved tarball URLs, and integrity hashes
 pip.conf           PyPI index-url, extra-index-url, find-links, no-index, no-binary, and only-binary configuration
@@ -572,8 +572,8 @@ Supported now:
 - npm bundled dependency metadata so bundled packages are not resolved from the
   registry a second time
 - `package-lock.json`, `npm-shrinkwrap.json`, and Yarn Classic `yarn.lock`
-  exact-version constraints, resolved tarball URLs, and integrity verification
-  for uniquely locked npm packages
+  exact-version constraints, resolved tarball/GitHub URLs, and integrity
+  verification for uniquely locked npm packages
 - `pnpm-lock.yaml` importer dependency ingestion plus exact-version
   constraints, resolved tarball URLs, and integrity verification for uniquely
   locked npm packages

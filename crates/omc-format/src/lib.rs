@@ -124,7 +124,14 @@ pub enum CapOp {
     },
     ProcSpawn {
         command: String,
+        /// Statically-known, constant argv entries (no taint).
         args: Vec<String>,
+        /// Count of additional argv values supplied dynamically on the operand
+        /// stack (deepest-first). The VM pops exactly this many values and the
+        /// verifier checks each against `Sink::Process` so a tainted argv (e.g.
+        /// a secret passed as a spawn argument) is rejected like any other sink.
+        #[serde(default)]
+        args_from_stack: usize,
     },
     DynamicEval {
         source_from_stack: bool,
@@ -169,9 +176,21 @@ pub enum Op {
     LoadLocal(LocalId),
     Add,
     Sub,
+    Mul,
+    Div,
+    Mod,
     Eq,
+    Lt,
+    Gt,
+    Le,
+    Ge,
+    Not,
     Len,
     Slice,
+    Index,
+    Jmp(i32),
+    JmpIfFalse(i32),
+    Pop,
     JsonParse,
     JsonStringify,
     CallLocal(FunctionId),
@@ -195,7 +214,7 @@ pub enum TrapCode {
     VerificationFailed,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BehaviorType {
     Pure,
@@ -288,6 +307,54 @@ mod tests {
         assert!(json.contains("\"op\": \"cap\""));
         assert!(json.contains("\"cap\": \"env_read\""));
         assert!(json.contains("\"op\": \"json_stringify\""));
+
+        let decoded: Module = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded, module);
+    }
+
+    #[test]
+    fn round_trips_phase2_control_flow_and_arithmetic_ops() {
+        use super::{TrapCode, Value};
+
+        let module = Module {
+            id: "npm:is-odd@1.0.0".to_owned(),
+            package: "is-odd".to_owned(),
+            version: "1.0.0".to_owned(),
+            declared_behavior: BehaviorType::Pure,
+            functions: vec![Function::new(
+                0,
+                "is_odd",
+                1,
+                vec![
+                    Op::LoadArg(0),
+                    Op::Const(Value::Int(2)),
+                    Op::Mod,
+                    Op::Const(Value::Int(0)),
+                    Op::Gt,
+                    Op::JmpIfFalse(2),
+                    Op::Const(Value::Bool(true)),
+                    Op::Jmp(1),
+                    Op::Const(Value::Bool(false)),
+                    Op::Not,
+                    Op::Not,
+                    Op::Return,
+                    // Cover the remaining new ops so every variant serializes.
+                    Op::Mul,
+                    Op::Div,
+                    Op::Lt,
+                    Op::Le,
+                    Op::Ge,
+                    Op::Index,
+                    Op::Pop,
+                    Op::Trap(TrapCode::VerificationFailed),
+                ],
+            )],
+        };
+
+        let json = serde_json::to_string_pretty(&module).unwrap();
+        assert!(json.contains("\"op\": \"mod\""));
+        assert!(json.contains("\"op\": \"jmp_if_false\""));
+        assert!(json.contains("\"op\": \"index\""));
 
         let decoded: Module = serde_json::from_str(&json).unwrap();
         assert_eq!(decoded, module);

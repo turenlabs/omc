@@ -1,0 +1,15 @@
+[package]
+name = "omc-frontend-py"
+description = "Python subset front end that lowers package source into OSS Microcode modules"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[dependencies]
+omc-cap = { path = "../omc-cap" }
+omc-format = { path = "../omc-format" }
+omc-taint = { path = "../omc-taint" }
+omc-verify = { path = "../omc-verify" }
+
+[dev-dependencies]
+omc-vm = { path = "../omc-vm" }

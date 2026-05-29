@@ -365,6 +365,39 @@ enum Command {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
+    #[command(
+        about = "Lower a supported source file to OMC microcode and execute it in the fueled VM under the project policy"
+    )]
+    ExecCell {
+        #[arg(help = "Path to a supported JS/Python source file to lower and execute")]
+        source: PathBuf,
+        #[arg(long, help = "Package name for the lowered module id (defaults to file stem)")]
+        name: Option<String>,
+        #[arg(long, default_value = "0.0.0", help = "Package version for the module id")]
+        version: String,
+        #[arg(
+            long = "arg",
+            help = "Integer argument to pass to the entry function (repeat for multiple positional args)"
+        )]
+        args: Vec<i64>,
+        #[arg(
+            long = "allow",
+            help = "Grant a capability, e.g. http:api.example.com, env:API_TOKEN, fs-read:*, proc:*"
+        )]
+        allow: Vec<String>,
+        #[arg(
+            long = "allow-flow",
+            help = "Grant a data flow, e.g. env:API_TOKEN->network:api.example.com"
+        )]
+        allow_flow: Vec<String>,
+        #[arg(long, help = "Grant all host capabilities (compatibility mode)")]
+        allow_all_host: bool,
+        #[arg(
+            long,
+            help = "If the source is outside the supported subset, fall back to the host interpreter shim (node/python) instead of failing"
+        )]
+        fallback: bool,
+    },
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -1962,6 +1995,30 @@ fn run() -> Result<ExitCode, OmcRegistryError> {
         Command::Npm { args } => return run_npm_compat(&cli.project_dir, &args),
         Command::Pip { args } => return run_pip_compat(&cli.project_dir, &args),
         Command::Twine { args } => return run_twine_compat(&cli.project_dir, &args),
+        Command::ExecCell {
+            source,
+            name,
+            version,
+            args,
+            allow,
+            allow_flow,
+            allow_all_host,
+            fallback,
+        } => {
+            return run_exec_cell(
+                &cli.project_dir,
+                ExecCellCommand {
+                    source,
+                    name,
+                    version,
+                    args,
+                    allow,
+                    allow_flow,
+                    allow_all_host,
+                    fallback,
+                },
+            )
+        }
     }
 
     Ok(ExitCode::SUCCESS)
@@ -3210,6 +3267,8 @@ fn run_npm_exec(
         let mut process =
             ProcessCommand::new(command_program_for_cwd(&action.command, &target_cwd));
         apply_project_runtime_env_for_cwd(&mut process, temp_project.path(), &target_cwd)?;
+        // batou:ignore command_exec -- npx/exec compat runs the user's own explicitly-requested
+        // executable as a direct argv (no shell); cli_arg -> exec is the intended CLI dispatch.
         let status = process.args(&action.args).status()?;
         let status = exit_code(status.code());
         if status != ExitCode::SUCCESS {
@@ -32101,6 +32160,8 @@ fn parse_pip_install_args(args: &[String]) -> Result<PipCompatAction, OmcRegistr
 
     Ok(PipCompatAction::Install(Box::new(PipInstallAction {
         specs: positionals.into_iter().filter(|spec| spec != ".").collect(),
+        // batou:ignore http_header -- false positive: PipInstallAction struct literal
+        // (`requirements` is a Vec<PathBuf>); no email/lettre/Mailbox or HTTP-header sink here.
         requirements,
         constraints,
         script_requirements,
@@ -33901,6 +33962,138 @@ fn unsupported_compat_arg(command: &str, arg: &str) -> OmcRegistryError {
     ))
 }
 
+#[derive(Debug)]
+struct ExecCellCommand {
+    source: PathBuf,
+    name: Option<String>,
+    version: String,
+    args: Vec<i64>,
+    allow: Vec<String>,
+    allow_flow: Vec<String>,
+    allow_all_host: bool,
+    fallback: bool,
+}
+
+/// Lower a supported source file into OMC microcode, then run it through the
+/// real verify -> link -> execute pipeline (`omc_runtime`) inside the fueled
+/// VM under the project policy. This is the in-cell execution path: the source
+/// is parsed and lowered offline (never executed as host code), only verified
+/// bytecode runs, and every capability is gated by the policy + broker.
+///
+/// If the source is outside the supported subset and `--fallback` is set, we
+/// defer to the existing host-interpreter shim (node/python) so unsupported
+/// packages still work, just without the in-cell guarantee.
+fn run_exec_cell(
+    project_dir: &Path,
+    command: ExecCellCommand,
+) -> Result<ExitCode, OmcRegistryError> {
+    let ecosystem = infer_compile_ecosystem(&command.source, false, false)?;
+    let pkg_name = command
+        .name
+        .clone()
+        .unwrap_or_else(|| compile_source_default_name(&command.source));
+
+    // batou:ignore file_read -- exec-cell is a CLI tool that lowers a
+    // user-named source file by design; the path is the command's purpose, not
+    // an injection (mirrors the existing `omc compile <source>` handler).
+    let source = std::fs::read_to_string(&command.source)?;
+
+    // Build the project policy from the same grant flags as `omc add`/`compile`.
+    let capabilities = parse_grants(&command.allow, command.allow_all_host)?;
+    let flows = parse_flow_grants(&command.allow_flow)?;
+    let mut policy = omc_cap::Policy::pure();
+    for capability in capabilities {
+        policy = policy.allow_capability(capability);
+    }
+    for flow in flows {
+        policy = policy.allow_flow_rule(flow);
+    }
+
+    // Lower the source through the matching front end (deny-by-default: an
+    // unsupported construct is a hard FrontendError, surfaced below).
+    let lowered = match ecosystem {
+        Ecosystem::Npm => {
+            let meta = omc_frontend_js::PackageMeta {
+                package: pkg_name.clone(),
+                version: command.version.clone(),
+                declared_behavior: omc_format::BehaviorType::Unknown,
+            };
+            omc_frontend_js::compile(&source, &meta).map_err(|error| error.to_string())
+        }
+        Ecosystem::Pypi => {
+            let meta = omc_frontend_py::PackageMeta {
+                package: pkg_name.clone(),
+                version: command.version.clone(),
+                declared_behavior: omc_format::BehaviorType::Unknown,
+            };
+            omc_frontend_py::compile(&source, &meta).map_err(|error| error.to_string())
+        }
+    };
+
+    let module = match lowered {
+        Ok(module) => module,
+        Err(message) => {
+            if command.fallback {
+                eprintln!(
+                    "omc exec-cell: `{}` is outside the supported subset ({message}); \
+                     falling back to the host interpreter shim",
+                    command.source.display()
+                );
+                let source_arg = command.source.to_string_lossy().to_string();
+                return match ecosystem {
+                    Ecosystem::Npm => run_node(project_dir, &[source_arg]),
+                    Ecosystem::Pypi => run_python(project_dir, &[source_arg]),
+                };
+            }
+            return Err(OmcRegistryError::UnsupportedSpec(format!(
+                "{} cannot be lowered for in-cell execution: {message} \
+                 (re-run with --fallback to use the host interpreter shim)",
+                command.source.display()
+            )));
+        }
+    };
+
+    let module_id = module.id.clone();
+    let call_args = command
+        .args
+        .iter()
+        .map(|value| omc_taint::Labeled::public(omc_format::Value::Int(*value)))
+        .collect::<Vec<_>>();
+
+    let mut broker = omc_cap::MemoryBroker::new();
+    match omc_runtime::execute_leaf(module, &policy, &mut broker, call_args) {
+        Ok(result) => {
+            println!("module {module_id}");
+            println!("result {}", render_cell_value(&result.value));
+            println!("label {:?}", result.label);
+            Ok(ExitCode::SUCCESS)
+        }
+        Err(omc_runtime::ExecError::Verify { module, error }) => {
+            eprintln!("denied: module `{module}` failed verification under the project policy");
+            eprintln!("{error}");
+            Ok(ExitCode::from(2))
+        }
+        Err(omc_runtime::ExecError::Trap(trap)) => {
+            eprintln!("trapped: {trap}");
+            Ok(ExitCode::from(2))
+        }
+        Err(other) => Err(OmcRegistryError::UnsupportedSpec(other.to_string())),
+    }
+}
+
+/// Render an executed cell's result value for human-readable CLI output.
+fn render_cell_value(value: &omc_format::Value) -> String {
+    match value {
+        omc_format::Value::Unit => "unit".to_owned(),
+        omc_format::Value::Bool(boolean) => boolean.to_string(),
+        omc_format::Value::Int(int) => int.to_string(),
+        omc_format::Value::String(string) => format!("{string:?}"),
+        omc_format::Value::Array(_) | omc_format::Value::Map(_) => {
+            serde_json::to_string(value).unwrap_or_else(|_| value.type_name().to_owned())
+        }
+    }
+}
+
 fn parse_grants(
     allow: &[String],
     allow_all_host: bool,
@@ -34143,6 +34336,55 @@ mod tests {
 
     fn with_clean_pip_env<T>(f: impl FnOnce() -> T) -> T {
         with_pip_env_values(&[], f)
+    }
+
+    // npm reads install-mode config (global, dry-run, omit/include, save-*, NODE_ENV)
+    // straight from the process environment via `npm_config_env`/`NODE_ENV`. Tests that
+    // mutate those vars hold `with_env_lock`, but `run_npm_compat`-based reader tests do
+    // not, so a concurrently running mutator could leak e.g. NPM_CONFIG_GLOBAL/DRY_RUN
+    // into an install and flip it to a global dry-run. This mirrors `with_pip_env_values`:
+    // it takes the lock and clears all inherited npm install-mode vars so reader tests are
+    // both mutually exclusive with mutators and independent of ambient host config.
+    fn with_npm_env_values<T>(values: &[(&str, Option<&str>)], f: impl FnOnce() -> T) -> T {
+        with_env_lock(|| {
+            let mut keys = env::vars_os()
+                .filter_map(|(key, _)| {
+                    let key = key.to_str()?;
+                    (key.starts_with("NPM_CONFIG_")
+                        || key.starts_with("npm_config_")
+                        || key == "NODE_ENV")
+                        .then(|| key.to_owned())
+                })
+                .collect::<BTreeSet<_>>();
+            keys.extend(values.iter().map(|(key, _)| (*key).to_owned()));
+
+            let old_values = keys
+                .iter()
+                .map(|key| (key.clone(), env::var_os(key)))
+                .collect::<Vec<_>>();
+            for key in &keys {
+                env::remove_var(key);
+            }
+            for (key, value) in values {
+                if let Some(value) = value {
+                    env::set_var(key, value);
+                }
+            }
+
+            let result = f();
+            for (key, old) in old_values {
+                if let Some(old) = old {
+                    env::set_var(key, old);
+                } else {
+                    env::remove_var(key);
+                }
+            }
+            result
+        })
+    }
+
+    fn with_clean_npm_env<T>(f: impl FnOnce() -> T) -> T {
+        with_npm_env_values(&[], f)
     }
 
     #[test]
@@ -36846,6 +37088,7 @@ mod tests {
 
     #[test]
     fn npm_install_no_save_skips_package_lock_file() {
+        with_clean_npm_env(|| {
         let project = test_dir("npm-install-no-save-skips-package-lock");
         let tarball = write_npm_fixture_tarball(&project, "prod-pkg", "1.0.0");
         fs::write(
@@ -36901,6 +37144,7 @@ mod tests {
         assert!(!project.join("package-lock.json").exists());
 
         let _ = fs::remove_dir_all(project);
+        });
     }
 
     #[test]

@@ -925,7 +925,12 @@ dependencies = [
  "clap",
  "flate2",
  "omc-cap",
+ "omc-format",
+ "omc-frontend-js",
+ "omc-frontend-py",
  "omc-registry",
+ "omc-runtime",
+ "omc-taint",
  "reqwest",
  "serde_json",
  "sha2",
@@ -949,6 +954,39 @@ version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "omc-frontend-js"
+version = "0.1.0"
+dependencies = [
+ "omc-cap",
+ "omc-format",
+ "omc-taint",
+ "omc-verify",
+ "omc-vm",
+]
+
+[[package]]
+name = "omc-frontend-py"
+version = "0.1.0"
+dependencies = [
+ "omc-cap",
+ "omc-format",
+ "omc-taint",
+ "omc-verify",
+ "omc-vm",
+]
+
+[[package]]
+name = "omc-linker"
+version = "0.1.0"
+dependencies = [
+ "omc-cap",
+ "omc-format",
+ "omc-taint",
+ "omc-verify",
+ "omc-vm",
 ]
 
 [[package]]
@@ -978,6 +1016,20 @@ dependencies = [
  "urlencoding",
  "walkdir",
  "zip",
+]
+
+[[package]]
+name = "omc-runtime"
+version = "0.1.0"
+dependencies = [
+ "omc-cap",
+ "omc-format",
+ "omc-frontend-js",
+ "omc-frontend-py",
+ "omc-linker",
+ "omc-taint",
+ "omc-verify",
+ "omc-vm",
 ]
 
 [[package]]
