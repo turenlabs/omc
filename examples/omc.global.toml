@@ -1,0 +1,30 @@
+# Recommended global OMC policy — copy to ~/.omc/omc.toml
+# (override the directory with $OMC_HOME).
+#
+# OMC reads this file under EVERY project on the machine. Its [policy] grants are
+# unioned in as a baseline and its `min-release-age` is the fallback freshness
+# floor a project can override. Use it to set org-wide supply-chain defaults once.
+#
+# Why these defaults stop a Shai-Hulud-class worm:
+#   * OMC never runs install/postinstall scripts, so the worm's trigger never
+#     fires — a postinstall hook surfaces as a blocked `proc.spawn` capability.
+#   * `min-release-age` rejects a version until it has been public long enough for
+#     a malicious release to be caught and yanked. Most worm releases are pulled
+#     within hours; a 14-day floor sidesteps that entire window.
+#   * Deny-by-default means a freshly-compromised dependency that newly reads your
+#     env/credentials or opens a secret -> network flow is blocked until you
+#     explicitly grant it — the grant is the review checkpoint.
+#
+# See docs/SUPPLY-CHAIN.md for the full threat model and a CI recipe.
+
+[policy]
+# A version must have been published at least this long ago to install.
+# Accepts 14d / 12h / 2w / 7 (bare number = days) / 0 (disabled).
+min-release-age = "14d"
+
+# No baseline host grants: every package starts with ZERO capabilities and must
+# earn each one per-project (or per-package via omc.policy). `time` and `random`
+# are the only always-safe primitives; grant them globally if the churn of
+# allowing them per project is not worth it:
+#
+#   allow = ["time", "random"]

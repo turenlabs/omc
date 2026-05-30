@@ -38,6 +38,10 @@ class Omc < Formula
     %w[npm npx node pip pip3 python python3 twine].each do |shim|
       (libexec/"shims").install "target/release/#{shim}"
     end
+
+    # Recommended global policy (supply-chain freshness floor + deny-by-default).
+    # Copy to ~/.omc/omc.toml to apply it under every project. See caveats.
+    (share/"omc").install "examples/omc.global.toml"
   end
 
   def caveats
@@ -54,6 +58,15 @@ class Omc < Formula
       Reading sensitive files (.ssh, .env, private keys, .npmrc tokens, cloud
       credentials) is denied by default even under broad grants. Grant an exact
       `fs.read:<path>` to allow one file, or pass `--allow-sensitive` to override.
+
+      A recommended global policy (supply-chain freshness floor + deny-by-default)
+      is installed at:
+
+        #{opt_share}/omc/omc.global.toml
+
+      Apply it under every project by copying it into place:
+
+        mkdir -p ~/.omc && cp #{opt_share}/omc/omc.global.toml ~/.omc/omc.toml
     EOS
   end
 

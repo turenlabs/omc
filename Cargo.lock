@@ -910,7 +910,7 @@ dependencies = [
 
 [[package]]
 name = "omc-cap"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "omc-format",
  "omc-taint",
@@ -918,7 +918,7 @@ dependencies = [
 
 [[package]]
 name = "omc-cli"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "base64",
  "chrono",
@@ -943,7 +943,7 @@ dependencies = [
 
 [[package]]
 name = "omc-demo"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "omc-cap",
  "omc-verify",
@@ -951,7 +951,7 @@ dependencies = [
 
 [[package]]
 name = "omc-format"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -959,7 +959,7 @@ dependencies = [
 
 [[package]]
 name = "omc-frontend-js"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "omc-cap",
  "omc-format",
@@ -970,7 +970,7 @@ dependencies = [
 
 [[package]]
 name = "omc-frontend-py"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "omc-cap",
  "omc-format",
@@ -981,7 +981,7 @@ dependencies = [
 
 [[package]]
 name = "omc-linker"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "omc-cap",
  "omc-format",
@@ -992,14 +992,14 @@ dependencies = [
 
 [[package]]
 name = "omc-policy"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "omc-cap",
 ]
 
 [[package]]
 name = "omc-registry"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "base64",
  "chrono",
@@ -1029,7 +1029,7 @@ dependencies = [
 
 [[package]]
 name = "omc-runtime"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "flate2",
  "omc-cap",
@@ -1049,11 +1049,11 @@ dependencies = [
 
 [[package]]
 name = "omc-taint"
-version = "0.4.0"
+version = "0.5.0"
 
 [[package]]
 name = "omc-verify"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "omc-cap",
  "omc-format",
@@ -1062,7 +1062,7 @@ dependencies = [
 
 [[package]]
 name = "omc-vm"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "omc-cap",
  "omc-format",

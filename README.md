@@ -97,10 +97,29 @@ min-release-age = "7d"
 **Every field, statement, capability, flow, version operator, and the
 project/global config — see [docs/POLICY.md](docs/POLICY.md).**
 
+## Stopping supply-chain worms (Shai-Hulud)
+
+Worms like Shai-Hulud spread through one mechanic: **install-time code execution**
+— a `postinstall` hook (or `.pth` / `sitecustomize.py`) that runs the moment you
+install, harvests `~/.npmrc`/cloud creds/env, exfiltrates them, and republishes
+itself. OMC removes that mechanic: it **never runs install scripts** and never
+imports a package to install it — it compiles the source and computes the verdict
+by *reading* it. A lifecycle hook surfaces as a blocked `proc.spawn`; obfuscated
+triggers as `dynamic.eval`; reads of `~/.npmrc`/`~/.aws` stay blocked even under
+`fs.read:*`; and any secret → network **flow** is denied without an explicit
+grant. Add a `min-release-age` floor to skip the window where a malicious release
+is live but not yet yanked. Pinned by regression tests
+(`shai_hulud_worm_is_blocked_at_install`).
+
+**Threat model, CI recipe (`omc ci` + `omc audit`), and dev setup — see
+[docs/SUPPLY-CHAIN.md](docs/SUPPLY-CHAIN.md).** A recommended global config is in
+[`examples/omc.global.toml`](examples/omc.global.toml).
+
 ---
 
 - 📖 **[Quickstart & full reference →](docs/REFERENCE.md)**
 - 🛡️ **Policy DSL (`omc.policy`) — complete reference: [docs/POLICY.md](docs/POLICY.md)**
+- 🪱 **Supply-chain worm defense + CI/dev recipes: [docs/SUPPLY-CHAIN.md](docs/SUPPLY-CHAIN.md)**
 - 🤖 Agent skill: [SKILL.md](SKILL.md)
 - 🏗️ Architecture: [docs/oss-microcode-runtime.md](docs/oss-microcode-runtime.md)
 - 📦 Releasing: [docs/RELEASING.md](docs/RELEASING.md)
