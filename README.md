@@ -67,11 +67,14 @@ OMC also reads a **global** user policy at `~/.omc/omc.toml` (override the dir w
 min-release-age = "7d"
 ```
 
-Full grammar and semantics: **[docs/REFERENCE.md → Policy DSL](docs/REFERENCE.md#policy-dsl-omcpolicy)**.
+**Every field, statement, capability, flow, version operator, and the
+project/global config — see [docs/POLICY.md](docs/POLICY.md).**
 
 ---
 
 - 📖 **[Quickstart & full reference →](docs/REFERENCE.md)**
+- 🛡️ **Policy DSL (`omc.policy`) — complete reference: [docs/POLICY.md](docs/POLICY.md)**
+- 🤖 Agent skill: [SKILL.md](SKILL.md)
 - 🏗️ Architecture: [docs/oss-microcode-runtime.md](docs/oss-microcode-runtime.md)
 - 📦 Releasing: [docs/RELEASING.md](docs/RELEASING.md)
 
