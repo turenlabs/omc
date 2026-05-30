@@ -18598,11 +18598,24 @@ fn detect_opaque_capability_access(content: &str) -> BTreeSet<String> {
                 .to_owned(),
         );
     }
-    if contains_standalone_call(&lower, "__import__") {
-        evidence.insert("opaque `__import__(...)` dynamic import — cannot verify".to_owned());
+    // Dynamic imports: a clean literal import of an ORDINARY module (a lazy
+    // import of an optional dependency or a package submodule) is benign — the
+    // capabilities of whatever is imported are still detected at their own call
+    // sites. We fail closed only when the module is named by a non-literal
+    // expression (cannot resolve) or is a capability-bearing module that could be
+    // loaded dynamically to evade call-site detection.
+    if py_dynamic_import_is_opaque(content) {
+        evidence.insert(
+            "opaque dynamic import (computed target or capability module) — cannot verify"
+                .to_owned(),
+        );
     }
-    if py_uses_importlib_dynamic_import(&lower) {
-        evidence.insert("opaque `importlib` dynamic import — cannot verify".to_owned());
+    // importlib *loaders* pull code from an arbitrary spec/path — always opaque.
+    if py_uses_importlib_loader(&lower) {
+        evidence.insert(
+            "opaque `importlib` loader (module_from_spec / SourceFileLoader) — cannot verify"
+                .to_owned(),
+        );
     }
     if contains_standalone_call(&lower, "compile") {
         evidence.insert("`compile(...)` builds code objects at runtime — cannot verify".to_owned());
@@ -18660,16 +18673,102 @@ fn py_getattr_on_capability_root(lower: &str) -> bool {
     false
 }
 
-/// True if importlib is used to import a module dynamically (`import_module`,
-/// `__import__`, `SourceFileLoader`, `util.module_from_spec`). A bare
+/// True if importlib is used as a *loader* that pulls code from an arbitrary
+/// spec/path (`module_from_spec`, `SourceFileLoader`, `spec_from_file_location`).
+/// These are always opaque — we cannot see what code they load. Plain
 /// `import importlib.metadata` for reading package metadata is not flagged.
-fn py_uses_importlib_dynamic_import(lower: &str) -> bool {
-    lower.contains("importlib.import_module")
-        || lower.contains("importlib.__import__")
-        || lower.contains("import_module(")
-        || lower.contains("module_from_spec")
+fn py_uses_importlib_loader(lower: &str) -> bool {
+    lower.contains("module_from_spec")
         || lower.contains("sourcefileloader")
         || lower.contains("spec_from_file_location")
+}
+
+/// Capability-bearing modules that, if loaded via a *literal* dynamic import,
+/// stay opaque (fail closed) — they expose process/exec/FFI/socket/code-loading
+/// surfaces, so a dynamic import is a way to obtain them while dodging call-site
+/// detection of the dangerous call. Importing an ORDINARY module literally (a
+/// lazy import of an optional dependency or a package submodule) is benign.
+const PY_SENSITIVE_IMPORT_MODULES: &[&str] = &[
+    "os",
+    "nt",
+    "subprocess",
+    "_posixsubprocess",
+    "sys",
+    "ctypes",
+    "socket",
+    "multiprocessing",
+    "pty",
+    "runpy",
+    "code",
+    "builtins",
+    "marshal",
+    "pickle",
+    "popen2",
+    "commands",
+    "msvcrt",
+    "_winapi",
+];
+
+/// True if a module name (possibly dotted / relative) has a sensitive top-level
+/// component per `PY_SENSITIVE_IMPORT_MODULES`.
+fn py_module_is_sensitive(module: &str) -> bool {
+    let top = module
+        .trim()
+        .trim_start_matches('.')
+        .split('.')
+        .next()
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    PY_SENSITIVE_IMPORT_MODULES.contains(&top.as_str())
+}
+
+/// Classify Python dynamic-import calls — `__import__(...)`,
+/// `importlib.import_module(...)`, and bare `import_module(...)`. Returns true if
+/// ANY such call is OPAQUE: its module argument is not a clean string literal
+/// (a variable, an f-string, or a concatenation like `"." + x`), or it names a
+/// capability-bearing module (`PY_SENSITIVE_IMPORT_MODULES`). A plain literal
+/// import of an ordinary module is benign and does NOT trip this — the
+/// capabilities of whatever it imports are still detected at their own call
+/// sites, so a lazy `import_module("idna.idnadata")` is no riskier than a static
+/// `import idna.idnadata`.
+fn py_dynamic_import_is_opaque(content: &str) -> bool {
+    for marker in ["__import__", "import_module"] {
+        let mut offset = 0;
+        while let Some(index) = content[offset..].find(marker) {
+            let start = offset + index;
+            let after = start + marker.len();
+            offset = after;
+            // Reject `xyzimport_module` but ALLOW a leading `.` so
+            // `importlib.import_module` still matches.
+            let preceded_by_ident = start > 0
+                && content[..start]
+                    .chars()
+                    .next_back()
+                    .is_some_and(is_identifier_char);
+            if preceded_by_ident {
+                continue;
+            }
+            let rest = content[after..].trim_start();
+            let Some(args) = rest.strip_prefix('(') else {
+                continue;
+            };
+            let arg = args.trim_start();
+            match parse_quoted_literal(arg) {
+                Some((module, consumed)) => {
+                    // The literal must be the WHOLE first argument; a trailing
+                    // `+` (concatenation) or other expression makes it computed.
+                    let tail = arg[consumed..].trim_start();
+                    let clean_literal = tail.starts_with(',') || tail.starts_with(')');
+                    if !clean_literal || py_module_is_sensitive(&module) {
+                        return true;
+                    }
+                    // benign: a clean literal import of an ordinary module
+                }
+                None => return true, // computed / non-literal module target
+            }
+        }
+    }
+    false
 }
 
 /// True if `content` (lowercased) contains `<root>[` where `root` stands as a
@@ -18704,10 +18803,35 @@ fn py_has_computed_access_on(lower: &str, root: &str) -> bool {
     lower.contains(&needle)
 }
 
-/// dynamic `import(` call form. Excludes static `import x from 'y'` and
-/// `import 'side-effect'` (those have no `(` directly after `import`).
+/// dynamic `import(` call form (JS/TS). Excludes static `import x from 'y'` and
+/// `import 'side-effect'` (no `(` directly after `import`), AND Python's grouped
+/// import statement `from <module> import (a, b)` — a parenthesized import LIST,
+/// not a dynamic-import call. A JS dynamic `import(...)` is an expression and is
+/// never preceded by `from` within the same statement, so a `from ` earlier in
+/// the statement (since the last newline / `;`) marks the Python form.
 fn js_has_dynamic_import(lower: &str) -> bool {
-    contains_standalone_call(lower, "import")
+    let mut offset = 0;
+    while let Some(index) = lower[offset..].find("import") {
+        let start = offset + index;
+        let after = start + "import".len();
+        offset = after;
+        let standalone = is_identifier_boundary(lower, start)
+            && lower[after..]
+                .chars()
+                .next()
+                .is_none_or(|ch| !is_identifier_char(ch));
+        if standalone && lower[after..].trim_start().starts_with('(') {
+            let stmt_start = lower[..start]
+                .rfind(|ch| ch == '\n' || ch == ';')
+                .map(|i| i + 1)
+                .unwrap_or(0);
+            // `from <mod> import (...)` is a Python grouped import, not a call.
+            if !lower[stmt_start..start].contains("from ") {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 /// Detect `alias = require;` (require assigned without an immediate call), which
@@ -19988,6 +20112,71 @@ mod redteam_capability_evasion {
             r.artifact.capabilities
         );
         assert_eq!(r.artifact.verdict, Verdict::Accepted);
+    }
+
+    // PRECISION: a clean literal import of an ORDINARY module — a lazy import of
+    // an optional dependency or a package submodule — and Python's grouped import
+    // statement `from x import (a, b)` must stay Pure/Accepted. Before this, the
+    // grouped import tripped the JS dynamic-`import(` detector and every literal
+    // dynamic import was treated as opaque, blocking pure libraries like idna.
+    #[test]
+    fn benign_python_dynamic_imports_stay_pure() {
+        for src in [
+            // grouped import list (the idna/attrs false positive)
+            "from . import (\n    intranges,\n    package_data,\n)\n",
+            "from idna import (core, idnadata)\n",
+            // literal lazy import of an ordinary module / package submodule
+            "import importlib\nm = importlib.import_module(\"idna.idnadata\")\n",
+            "m = __import__(\"json\")\n",
+            "from importlib import import_module\nx = import_module('collections.abc')\n",
+            // relative literal submodule import
+            "import importlib\nm = importlib.import_module(\".tables\", __name__)\n",
+        ] {
+            let r = profile_py(src);
+            assert_eq!(
+                r.artifact.behavior,
+                Behavior::Pure,
+                "benign literal/grouped import must stay Pure: {src:?} -> caps {:?}",
+                r.artifact.capabilities
+            );
+            assert_eq!(r.artifact.verdict, Verdict::Accepted, "{src:?}");
+        }
+    }
+
+    // SECURITY GUARD: the precision must NOT open a hole. A dynamic import whose
+    // target is a capability-bearing module (even as a literal), or is computed
+    // (variable / f-string / concatenation), must still fail closed — that is how
+    // an attacker would load os/subprocess opaquely to dodge call-site detection.
+    #[test]
+    fn dangerous_or_computed_python_imports_fail_closed() {
+        for src in [
+            // literal import of a capability module
+            "import importlib\nm = importlib.import_module(\"subprocess\")\n",
+            "m = __import__(\"os\")\n",
+            "x = __import__(\"ctypes\")\n",
+            "import importlib\nm = importlib.import_module(\"socket\")\n",
+            // computed module name (variable / concat / f-string)
+            "import importlib\nm = importlib.import_module(modname)\n",
+            "m = __import__(\".\" + sub)\n",
+            "import importlib\nm = importlib.import_module(f\"pkg.{name}\")\n",
+            // importlib file/spec loaders are always opaque
+            "import importlib.util as u\ns = u.spec_from_file_location('m', path)\n",
+        ] {
+            let r = profile_py(src);
+            assert_eq!(
+                r.artifact.verdict,
+                Verdict::Blocked,
+                "dangerous/computed import must fail closed: {src:?} -> caps {:?}",
+                r.artifact.capabilities
+            );
+            assert!(
+                r.artifact
+                    .capabilities
+                    .iter()
+                    .any(|c| c.kind == CapabilityKind::DynamicEval),
+                "must emit DynamicEval: {src:?}"
+            );
+        }
     }
 }
 
