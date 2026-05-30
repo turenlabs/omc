@@ -21,6 +21,33 @@ omc add --npm esbuild@0.19.12 --allow http:registry.npmjs.org   # ✓ allowed + 
 
 That's the whole idea: **dependencies are behavior-typed artifacts, not trusted code.**
 
+## Using what you install
+
+Installed packages work normally — you just run them through OMC, which uses the
+project's own isolated install tree (`node_modules` / `.omc/python/site-packages`):
+
+```bash
+omc add --pypi requests==2.32.3 --allow-all-host   # grant it (requests does network)
+omc python -c "import requests; print(requests.get('https://example.com').status_code)"
+
+omc add --npm is-odd@3.0.1
+omc node -e "console.log(require('is-odd')(3))"
+```
+
+The `omc node` / `omc python` shims (and the drop-in `node`/`npm`/`pip`/`python`
+binaries, opt-in on `PATH`) run your **real** interpreter with an isolated import
+path. So `import requests` and `requests.get(...)` behave exactly like normal —
+**OMC's enforcement happens at install time** (resolution, source profiling,
+capability/flow/age verdicts, no install scripts), not as a runtime sandbox
+around host-run code. Grants are recorded in `omc.lock`, so what each dependency
+is allowed to do is auditable.
+
+> Scope today: pure-Python wheels/sdists and npm packages. Packages that need a
+> **native build** (C extensions like `numpy`/`cryptography` from source) aren't
+> built yet — a sandboxed build chain with secure defaults is the natural next
+> step. Capability-gated *execution* (running package logic inside the verified
+> VM, not just the host) is the experimental `omc exec-cell` path.
+
 ## Per-package policy (`omc.policy`)
 
 `omc.toml`'s `[policy]` block is one flat allow-list for the whole project. Drop an optional **`omc.policy`** file next to it to scope grants to *individual* packages — a `default` baseline plus `package` blocks that `allow`/`deny` capabilities, declare `flow`s, mark a package `pure`, or lift the sensitive-read guard:

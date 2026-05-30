@@ -223,6 +223,25 @@ omc --project-dir myapp python -c "import requests; print(requests.__version__)"
 omc --project-dir myapp script test     # run a package.json / Pipfile script
 ```
 
+**Installed packages behave normally.** The shims run your **real**
+`node`/`python` with an isolated import path pointed at the project's
+`node_modules` / `.omc/python/site-packages` (ambient user/global site-packages
+and `NODE_PATH`/`NODE_OPTIONS`/`PYTHONSTARTUP` are stripped). `import requests`
+and `requests.get(...)` work exactly as usual.
+
+**Where the enforcement is.** OMC gates packages at **install time** —
+resolution, source profiling, capability/flow/age verdicts, and *never* running
+install/postinstall scripts — and records the granted capabilities in
+`omc.lock`. The shim path does **not** sandbox host-run code at runtime; that is
+the job of the experimental in-cell path below.
+
+**Build boundary.** Only pure-Python wheels/sdists and npm packages are installed
+today. Packages requiring a **native build** (C extensions such as `numpy` or
+`cryptography` from source) are not built — native build isolation and an
+extension policy are future work (a sandboxed build chain with secure defaults
+is the natural next step). `*.pth`/`sitecustomize.py` startup hooks are excluded
+from installs.
+
 ### 5. Run a package *in-cell* under policy (experimental)
 
 `exec-cell` lowers supported JS/Python source to OMC bytecode, verifies it, and
