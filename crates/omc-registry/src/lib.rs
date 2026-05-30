@@ -51,8 +51,14 @@ pub enum OmcRegistryError {
     UnsupportedRequirement(String),
     #[error("package version was not found: {0}")]
     PackageNotFound(String),
-    #[error("blocked package `{spec}`; use --record-blocked to keep the artifact and lock entry")]
-    BlockedPackage { spec: String },
+    #[error("blocked package `{spec}`")]
+    BlockedPackage {
+        spec: String,
+        /// Pre-rendered, plain-language explanation + the exact minimal grant
+        /// (advisory text only; never grants anything). `None` for aggregate
+        /// blocks that have no single-package finding context.
+        guidance: Option<String>,
+    },
     #[error("registry response did not include a downloadable artifact for {0}")]
     MissingArtifact(String),
     #[error("registry response did not include a compatible PyPI archive for {0}")]
@@ -1693,6 +1699,12 @@ fn compile_local_source_artifacts(options: &LinkOptions, locked: bool) -> Result
                     input.version,
                     input.source_path.display()
                 ),
+                guidance: Some(render_block_guidance(
+                    input.ecosystem,
+                    &input.name,
+                    &input.version,
+                    &report.artifact.verifier_findings,
+                )),
             });
         }
         let artifact_path = if locked {
@@ -3458,6 +3470,12 @@ fn link_package_inner(
     if locked.verdict == Verdict::Blocked && !options.record_blocked {
         return Err(OmcRegistryError::BlockedPackage {
             spec: spec.requested(),
+            guidance: Some(render_block_guidance(
+                locked.ecosystem,
+                &locked.name,
+                &locked.version,
+                &locked.verifier_findings,
+            )),
         });
     }
 
@@ -10070,6 +10088,290 @@ fn parse_flow_sink(value: &str) -> Result<Sink> {
         "process" | "proc" | "proc.spawn" | "proc-spawn" => Ok(Sink::Process(target)),
         _ => Err(OmcRegistryError::UnsupportedSpec(value.to_owned())),
     }
+}
+
+/// One blocked verifier finding, reduced to everything the CLI needs to explain
+/// it and offer an EXACT, minimal grant. The raw machine token is always carried
+/// verbatim (`raw`) so the audit trail is never replaced, only annotated.
+#[derive(Debug, Clone)]
+pub struct GrantNeed {
+    /// The raw machine token, e.g. `env:NPM_TOKEN may not flow to network:evil.com`.
+    pub raw: String,
+    /// Consequence-first plain English describing what granting this permits.
+    pub human: String,
+    /// An exfiltration/backdoor warning for dangerous shapes (secret->sink,
+    /// proc-spawn, eval, fs-write, sensitive read); `None` for benign reads.
+    pub risk: Option<String>,
+    /// The exact one-run CLI flag, e.g. `--allow-flow env:NPM_TOKEN->network:evil.com`.
+    pub cli_flag: String,
+    /// The equivalent `omc.policy` statement, e.g. `flow env "NPM_TOKEN" -> net "evil.com"`.
+    pub policy_stmt: String,
+    /// True for the deny-by-default classes that must never be one-keystroke
+    /// granted (flows, proc-spawn, eval, fs-write, sensitive read).
+    pub dangerous: bool,
+}
+
+/// Strip the `<function>[<instruction>]: ` prefix off a verifier finding.
+fn finding_message(finding: &str) -> &str {
+    finding.split_once("]: ").map(|(_, m)| m).unwrap_or(finding)
+}
+
+/// Render a `<kind>:<target>` capability token as its `omc.policy` `allow` clause.
+fn dsl_allow_clause(token: &str) -> Option<String> {
+    match token {
+        "dynamic.eval" | "dynamic-eval" | "eval" => return Some("allow eval".to_owned()),
+        "time.now" | "time" => return Some("allow time".to_owned()),
+        "random.bytes" | "random" => return Some("allow random".to_owned()),
+        _ => {}
+    }
+    let (kind, target) = token.split_once(':')?;
+    let keyword = match kind {
+        "env" | "env.read" | "env-read" => "env",
+        "fs.read" | "fs-read" => "read",
+        "fs.write" | "fs-write" => "write",
+        "http" | "network" => "net",
+        "dns" => "dns",
+        "proc" | "proc.spawn" | "proc-spawn" => "spawn",
+        _ => return None,
+    };
+    Some(format!("allow {keyword} {target:?}"))
+}
+
+/// Render a flow source token (`env:X` / `file:X` / `secret:X` / `*`) as its DSL form.
+fn dsl_flow_src(token: &str) -> Option<String> {
+    if token == "*" || token == "any" {
+        return Some("any".to_owned());
+    }
+    let (kind, target) = token.split_once(':')?;
+    let keyword = match kind {
+        "env" | "env.read" | "env-read" => "env",
+        "file" | "fs.read" | "fs-read" => "file",
+        "secret" => "secret",
+        _ => return None,
+    };
+    Some(format!("{keyword} {target:?}"))
+}
+
+/// Render a flow sink token (`network:Y` / `process:Y` / `file:Y` / `eval`) as its DSL form.
+fn dsl_flow_sink(token: &str) -> Option<String> {
+    if matches!(token, "eval" | "dynamic_eval" | "dynamic.eval") {
+        return Some("eval".to_owned());
+    }
+    let (kind, target) = token.split_once(':')?;
+    let keyword = match kind {
+        "network" | "http" => "net",
+        "process" | "proc" | "proc.spawn" | "proc-spawn" => "spawn",
+        "file" | "fs.write" | "fs-write" => "write",
+        _ => return None,
+    };
+    Some(format!("{keyword} {target:?}"))
+}
+
+/// Plain-English description of a flow source token (for the human line).
+fn describe_flow_src(token: &str) -> String {
+    match token.split_once(':') {
+        Some(("env" | "env.read" | "env-read", "*")) => "your environment variables".to_owned(),
+        Some(("env" | "env.read" | "env-read", t)) => {
+            format!("the value of environment variable {t}")
+        }
+        Some(("file" | "fs.read" | "fs-read", "*")) => "files it reads".to_owned(),
+        Some(("file" | "fs.read" | "fs-read", t)) => format!("the contents of file {t}"),
+        Some(("secret", t)) => format!("the secret {t}"),
+        _ => "a secret it read".to_owned(),
+    }
+}
+
+/// Plain-English description of a flow sink token (for the human line).
+fn describe_flow_sink(token: &str) -> String {
+    if matches!(token, "eval" | "dynamic_eval" | "dynamic.eval") {
+        return "dynamically evaluated code".to_owned();
+    }
+    match token.split_once(':') {
+        Some(("network" | "http", "*")) => "the network (any host)".to_owned(),
+        Some(("network" | "http", t)) => format!("the network host {t}"),
+        Some(("process" | "proc" | "proc.spawn" | "proc-spawn", _)) => {
+            "a spawned process".to_owned()
+        }
+        Some(("file" | "fs.write" | "fs-write", _)) => "a file it writes".to_owned(),
+        _ => "an external sink".to_owned(),
+    }
+}
+
+/// (human phrase, risk line, dangerous?) for a capability token.
+fn describe_capability_token(token: &str) -> (String, Option<String>, bool) {
+    match token {
+        "dynamic.eval" | "dynamic-eval" | "eval" => (
+            "run dynamically generated or loaded code (eval / exec / dynamic import)".to_owned(),
+            Some("can hide arbitrary behavior from static analysis".to_owned()),
+            true,
+        ),
+        "time.now" | "time" => ("read the current time".to_owned(), None, false),
+        "random.bytes" | "random" => ("read secure random bytes".to_owned(), None, false),
+        _ => {
+            let (kind, target) = match token.split_once(':') {
+                Some(kt) => kt,
+                None => return (token.to_owned(), None, true),
+            };
+            match kind {
+                "proc" | "proc.spawn" | "proc-spawn" => {
+                    let human = if let Some(script) = target.strip_prefix("npm-script:") {
+                        format!("run the npm lifecycle script `{script}` during install")
+                    } else if target == "*" {
+                        "spawn arbitrary processes".to_owned()
+                    } else {
+                        format!("spawn the process `{target}`")
+                    };
+                    (
+                        human,
+                        Some("install-time / arbitrary code execution".to_owned()),
+                        true,
+                    )
+                }
+                "fs.write" | "fs-write" => (
+                    if target == "*" {
+                        "write arbitrary files".to_owned()
+                    } else {
+                        format!("write the file {target}")
+                    },
+                    Some("could install a persistent backdoor".to_owned()),
+                    true,
+                ),
+                "env" | "env.read" | "env-read" => {
+                    (format!("read environment variable {target}"), None, false)
+                }
+                "fs.read" | "fs-read" => (
+                    format!("read the file {target}"),
+                    Some(
+                        "reading a sensitive file (keys/credentials) stays blocked even here"
+                            .to_owned(),
+                    ),
+                    true,
+                ),
+                "http" | "network" => (
+                    if target == "*" {
+                        "make network requests to any host".to_owned()
+                    } else {
+                        format!("make network requests to {target}")
+                    },
+                    None,
+                    false,
+                ),
+                "dns" => (format!("resolve DNS for {target}"), None, false),
+                _ => (token.to_owned(), None, true),
+            }
+        }
+    }
+}
+
+/// Parse one verifier finding into a [`GrantNeed`] with a minimal grant. Returns
+/// `None` only if the finding shape is unrecognized (the caller still shows the
+/// raw line so nothing is silently dropped).
+fn parse_block_finding(finding: &str) -> Option<GrantNeed> {
+    let message = finding_message(finding);
+
+    // Flow: `<source> may not flow to <sink>`.
+    if let Some((src, sink)) = message.split_once(" may not flow to ") {
+        let (src, sink) = (src.trim(), sink.trim());
+        let human = format!(
+            "send {} to {}",
+            describe_flow_src(src),
+            describe_flow_sink(sink)
+        );
+        let risk = Some(
+            "this is the shape used to exfiltrate credentials/data — only allow it if you trust this package"
+                .to_owned(),
+        );
+        let cli_flag = format!("--allow-flow {src}->{sink}");
+        let policy_stmt = match (dsl_flow_src(src), dsl_flow_sink(sink)) {
+            (Some(s), Some(d)) => format!("flow {s} -> {d}"),
+            _ => return None,
+        };
+        return Some(GrantNeed {
+            raw: message.to_owned(),
+            human,
+            risk,
+            cli_flag,
+            policy_stmt,
+            dangerous: true,
+        });
+    }
+
+    // Capability: `capability <kind>:<target> not granted`.
+    let token = message
+        .strip_prefix("capability ")
+        .and_then(|s| s.strip_suffix(" not granted"))?
+        .trim();
+    let policy_stmt = dsl_allow_clause(token)?;
+    let (human, risk, dangerous) = describe_capability_token(token);
+    Some(GrantNeed {
+        raw: message.to_owned(),
+        human,
+        risk,
+        cli_flag: format!("--allow {token}"),
+        policy_stmt,
+        dangerous,
+    })
+}
+
+/// Build the actionable, plain-language guidance shown when a package is blocked:
+/// what it wants to do (human + raw token + risk), the exact one-run `--allow`
+/// command, and a per-package, version-pinned `omc.policy` block to persist it.
+/// All output is advisory text — it never grants anything.
+fn render_block_guidance(
+    ecosystem: Ecosystem,
+    name: &str,
+    version: &str,
+    findings: &[String],
+) -> String {
+    let mut needs: Vec<GrantNeed> = Vec::new();
+    let mut unknown: Vec<String> = Vec::new();
+    for finding in findings {
+        match parse_block_finding(finding) {
+            Some(need) if !needs.iter().any(|n| n.cli_flag == need.cli_flag) => needs.push(need),
+            Some(_) => {}
+            None => {
+                let raw = finding_message(finding).to_owned();
+                if !unknown.contains(&raw) {
+                    unknown.push(raw);
+                }
+            }
+        }
+    }
+
+    let mut out = String::new();
+    out.push_str(&format!("  {name} was blocked. It wants to:\n"));
+    for need in &needs {
+        let marker = if need.dangerous { "!" } else { " " };
+        out.push_str(&format!("    {marker} {}   ({})\n", need.human, need.raw));
+        if let Some(risk) = &need.risk {
+            out.push_str(&format!("      \u{2514} {risk}\n"));
+        }
+    }
+    for raw in &unknown {
+        out.push_str(&format!("    ! {raw}\n"));
+    }
+
+    if needs.is_empty() {
+        return out;
+    }
+
+    let flags: Vec<&str> = needs.iter().map(|n| n.cli_flag.as_str()).collect();
+    out.push_str("\n  To allow it for THIS run only:\n");
+    out.push_str(&format!(
+        "      omc add {ecosystem}:{name}@{version} \\\n        {}\n",
+        flags.join(" \\\n        ")
+    ));
+    out.push_str(&format!(
+        "\n  To persist it (scoped to {name} {version} only), add to omc.policy:\n"
+    ));
+    out.push_str(&format!(
+        "      {ecosystem} package {name:?} =={version} {{\n"
+    ));
+    for need in &needs {
+        out.push_str(&format!("        {}\n", need.policy_stmt));
+    }
+    out.push_str("      }\n");
+    out
 }
 
 #[derive(Debug, Clone)]
@@ -22962,6 +23264,86 @@ packages:
             root.versions["3.0.0"].engines.as_ref().unwrap()["node"],
             ">=18"
         );
+    }
+
+    #[test]
+    fn block_guidance_maps_flow_finding_to_minimal_grant() {
+        let need =
+            parse_block_finding("send[8]: env:NPM_TOKEN may not flow to network:evil.com").unwrap();
+        assert!(need.dangerous);
+        assert_eq!(
+            need.cli_flag,
+            "--allow-flow env:NPM_TOKEN->network:evil.com"
+        );
+        assert_eq!(
+            need.policy_stmt,
+            "flow env \"NPM_TOKEN\" -> net \"evil.com\""
+        );
+        assert!(
+            need.raw
+                .contains("env:NPM_TOKEN may not flow to network:evil.com"),
+            "raw machine token must be preserved verbatim"
+        );
+        assert!(need.risk.is_some(), "secret->sink must carry a risk line");
+    }
+
+    #[test]
+    fn block_guidance_maps_capability_findings() {
+        for (finding, flag, stmt, dangerous) in [
+            (
+                "p[3]: capability dynamic.eval not granted",
+                "--allow dynamic.eval",
+                "allow eval",
+                true,
+            ),
+            (
+                "p[0]: capability proc.spawn:* not granted",
+                "--allow proc.spawn:*",
+                "allow spawn \"*\"",
+                true,
+            ),
+            (
+                "p[0]: capability fs.write:* not granted",
+                "--allow fs.write:*",
+                "allow write \"*\"",
+                true,
+            ),
+            (
+                "p[1]: capability env.read:TOKEN not granted",
+                "--allow env.read:TOKEN",
+                "allow env \"TOKEN\"",
+                false,
+            ),
+        ] {
+            let need = parse_block_finding(finding).unwrap();
+            assert_eq!(need.cli_flag, flag, "{finding}");
+            assert_eq!(need.policy_stmt, stmt, "{finding}");
+            assert_eq!(need.dangerous, dangerous, "{finding}");
+        }
+    }
+
+    // The rendered `omc.policy` block must actually PARSE with the real DSL parser
+    // and pin the exact version — guards against grammar drift (the `=` vs `==`
+    // bug class) so a copy-pasted suggestion is never a parse error.
+    #[test]
+    fn rendered_policy_block_parses_and_pins_version() {
+        let findings = vec![
+            "main[1]: env:NPM_TOKEN may not flow to network:evil.com".to_owned(),
+            "main[3]: capability dynamic.eval not granted".to_owned(),
+            "main[4]: capability proc.spawn:npm-script:postinstall not granted".to_owned(),
+        ];
+        let g = render_block_guidance(Ecosystem::Npm, "shady", "1.2.3", &findings);
+        // raw tokens always shown; one-run command present.
+        assert!(g.contains("env:NPM_TOKEN may not flow to network:evil.com"));
+        assert!(g.contains("omc add npm:shady@1.2.3"));
+        assert!(g.contains("--allow-flow env:NPM_TOKEN->network:evil.com"));
+
+        // Extract the omc.policy block and parse it with the real parser.
+        let start = g.find("npm package").expect("policy block present");
+        let block = &g[start..];
+        let block = &block[..=block.rfind('}').unwrap()];
+        assert!(block.contains("==1.2.3"), "version must be pinned with ==");
+        omc_policy::parse(block).expect("rendered policy block must parse cleanly");
     }
 
     #[test]

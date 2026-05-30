@@ -1635,8 +1635,15 @@ struct DirectCompatInvocation {
 pub fn omc_main() -> ExitCode {
     match run_entry() {
         Ok(code) => code,
-        Err(OmcRegistryError::BlockedPackage { spec }) => {
+        Err(OmcRegistryError::BlockedPackage { spec, guidance }) => {
+            // Findings + the exact minimal grant go to STDERR (stdout stays clean
+            // for piping). This is advisory only; the package is NOT installed and
+            // the exit code stays 2 — the deny-by-default contract is unchanged.
             eprintln!("blocked: {spec}");
+            if let Some(guidance) = guidance {
+                eprintln!();
+                eprint!("{guidance}");
+            }
             ExitCode::from(2)
         }
         Err(error) => {
@@ -1857,8 +1864,8 @@ fn run() -> Result<ExitCode, OmcRegistryError> {
             for spec in &specs {
                 match add_package_graph(spec, &options) {
                     Ok(reports) => all_reports.extend(reports),
-                    Err(OmcRegistryError::BlockedPackage { spec }) => {
-                        return Err(OmcRegistryError::BlockedPackage { spec });
+                    Err(OmcRegistryError::BlockedPackage { spec, guidance }) => {
+                        return Err(OmcRegistryError::BlockedPackage { spec, guidance });
                     }
                     Err(error) => return Err(error),
                 }
@@ -10274,6 +10281,7 @@ fn print_audit_report(project_dir: &Path, json: bool) -> Result<ExitCode, OmcReg
     if blocked > 0 {
         return Err(OmcRegistryError::BlockedPackage {
             spec: format!("{blocked} locked package(s)"),
+            guidance: None,
         });
     }
 
