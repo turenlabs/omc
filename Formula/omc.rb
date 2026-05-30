@@ -21,7 +21,7 @@ class Omc < Formula
   head "https://github.com/turenio/omc.git", branch: "main"
 
   url "https://github.com/turenio/omc/archive/refs/tags/v0.4.0.tar.gz"
-  sha256 "0000000000000000000000000000000000000000000000000000000000000000"
+  sha256 "0831bd1f2c8679ddc01f146f8738cd628e30147d4ba4893727cb7128df9badf4"
   version "0.4.0"
 
   depends_on "rust" => :build
