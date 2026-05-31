@@ -53,6 +53,9 @@ use lockfile::{
     locked_package_key, locked_reachable_package_keys, prune_lockfile, sync_python_vcs_lockfile,
 };
 
+pub(crate) mod http_client;
+use http_client::{artifact_path_for, cache_archive, download_artifact, write_artifact};
+
 pub(crate) const LOCKFILE: &str = "omc.lock";
 pub(crate) const MANIFEST: &str = "omc.toml";
 /// Optional per-package capability policy DSL, layered on top of the flat
@@ -9814,7 +9817,7 @@ impl NpmConfig {
     }
 }
 
-fn read_npm_config(project_dir: &Path) -> Result<NpmConfig> {
+pub(crate) fn read_npm_config(project_dir: &Path) -> Result<NpmConfig> {
     read_npm_config_with_overrides(project_dir, None, None)
 }
 
@@ -10089,7 +10092,7 @@ fn npm_registry_package_version_url(registry: &str, encoded: &str, version: &str
     format!("{}{encoded}/{version}", ensure_trailing_slash(registry))
 }
 
-fn npm_get(client: &Client, url: &str, config: &NpmConfig) -> reqwest::blocking::RequestBuilder {
+pub(crate) fn npm_get(client: &Client, url: &str, config: &NpmConfig) -> reqwest::blocking::RequestBuilder {
     let request = client.get(url);
     if let Some(token) = config.auth_token_for_url(url) {
         request.bearer_auth(token)
@@ -16802,91 +16805,6 @@ fn platform_system() -> &'static str {
     }
 }
 
-fn download_artifact(
-    client: &Client,
-    package: &ResolvedPackage,
-    project_dir: &Path,
-) -> Result<Vec<u8>> {
-    if let Some(path) = &package.local_path {
-        return Ok(fs::read(path)?);
-    }
-    let source_url = package
-        .download_url
-        .as_deref()
-        .unwrap_or(&package.source_url);
-    let config = if package.ecosystem == Ecosystem::Npm {
-        Some(read_npm_config(project_dir)?)
-    } else {
-        None
-    };
-    let request = if let Some(config) = config.as_ref() {
-        npm_get(client, source_url, config)
-    } else {
-        client.get(source_url)
-    };
-    Ok(request.send()?.error_for_status()?.bytes()?.to_vec())
-}
-
-fn cache_archive(
-    project_dir: &Path,
-    package: &ResolvedPackage,
-    sha256: &str,
-    bytes: &[u8],
-) -> Result<PathBuf> {
-    let cache_dir = project_dir
-        .join(".omc")
-        .join("cache")
-        .join(package.ecosystem.to_string())
-        .join(safe_name(&package.name))
-        .join(&package.version);
-    fs::create_dir_all(&cache_dir)?;
-
-    let extension = archive_extension(&package.filename);
-    let archive_path = cache_dir.join(format!("{sha256}.{extension}"));
-    if !archive_path.exists() {
-        fs::write(&archive_path, bytes)?;
-    }
-    Ok(archive_path)
-}
-
-fn write_artifact(
-    project_dir: &Path,
-    package: &ResolvedPackage,
-    artifact: &OmcArtifact,
-) -> Result<PathBuf> {
-    let artifact_path = artifact_path_for(
-        project_dir,
-        package.ecosystem,
-        &package.name,
-        &package.version,
-    );
-    let artifact_dir = artifact_path.parent().ok_or_else(|| {
-        OmcRegistryError::UnsupportedInstallArtifact(format!(
-            "artifact path `{}` has no parent",
-            artifact_path.display()
-        ))
-    })?;
-    fs::create_dir_all(artifact_dir)?;
-
-    fs::write(&artifact_path, serde_json::to_string_pretty(artifact)?)?;
-    Ok(artifact_path)
-}
-
-fn artifact_path_for(
-    project_dir: &Path,
-    ecosystem: Ecosystem,
-    name: &str,
-    version: &str,
-) -> PathBuf {
-    project_dir
-        .join(".omc")
-        .join("artifacts")
-        .join(ecosystem.to_string())
-        .join(safe_name(name))
-        .join(version)
-        .join("omc.json")
-}
-
 fn sign_artifact(project_dir: &Path, artifact: &mut OmcArtifact) -> Result<()> {
     artifact.signature = None;
     let payload = serde_json::to_vec(artifact)?;
@@ -18527,19 +18445,7 @@ fn npm_integrity_digest(algorithm: &str, bytes: &[u8]) -> Option<Vec<u8>> {
     }
 }
 
-fn archive_extension(filename: &str) -> &'static str {
-    if filename.ends_with(".tar.gz") || filename.ends_with(".tgz") {
-        "tgz"
-    } else if filename.ends_with(".whl") {
-        "whl"
-    } else if filename.ends_with(".zip") {
-        "zip"
-    } else {
-        "archive"
-    }
-}
-
-fn safe_name(name: &str) -> String {
+pub(crate) fn safe_name(name: &str) -> String {
     name.replace('/', "__")
 }
 
