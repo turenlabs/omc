@@ -56,6 +56,13 @@ use lockfile::{
 pub(crate) mod http_client;
 use http_client::{artifact_path_for, cache_archive, download_artifact, write_artifact};
 
+pub(crate) mod npm_resolve;
+use npm_resolve::{
+    NpmPackageManifest, NpmPeerDependencyMeta, NpmRoot, NpmSearchResponse, NpmStringList, NpmVersion,
+};
+#[cfg(test)]
+use npm_resolve::NpmDist;
+
 pub(crate) const LOCKFILE: &str = "omc.lock";
 pub(crate) const MANIFEST: &str = "omc.toml";
 /// Optional per-package capability policy DSL, layered on top of the flat
@@ -18914,173 +18921,6 @@ struct PythonEntryPoint {
     name: String,
     module: String,
     function: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct NpmRoot {
-    #[serde(rename = "dist-tags")]
-    dist_tags: NpmDistTags,
-    #[serde(default)]
-    time: BTreeMap<String, String>,
-    versions: BTreeMap<String, NpmVersion>,
-}
-
-#[derive(Debug, Deserialize)]
-struct NpmDistTags {
-    latest: String,
-    #[serde(flatten)]
-    tags: BTreeMap<String, String>,
-}
-
-impl NpmDistTags {
-    fn get(&self, tag: &str) -> Option<&str> {
-        if tag == "latest" {
-            Some(&self.latest)
-        } else {
-            self.tags.get(tag).map(String::as_str)
-        }
-    }
-}
-
-#[derive(Debug, Deserialize)]
-struct NpmVersion {
-    version: String,
-    dist: NpmDist,
-    #[serde(default)]
-    os: Option<NpmStringList>,
-    #[serde(default)]
-    cpu: Option<NpmStringList>,
-    #[serde(default)]
-    libc: Option<NpmStringList>,
-    #[serde(default, deserialize_with = "deserialize_lenient_engines")]
-    engines: Option<BTreeMap<String, String>>,
-    #[serde(default)]
-    scripts: Option<BTreeMap<String, String>>,
-    #[serde(default)]
-    dependencies: Option<BTreeMap<String, String>>,
-    #[serde(default, rename = "optionalDependencies")]
-    optional_dependencies: Option<BTreeMap<String, String>>,
-    #[serde(default, rename = "bundleDependencies")]
-    bundle_dependencies: Option<NpmStringList>,
-    #[serde(default, rename = "bundledDependencies")]
-    bundled_dependencies: Option<NpmStringList>,
-    #[serde(default, rename = "peerDependencies")]
-    peer_dependencies: Option<BTreeMap<String, String>>,
-    #[serde(default, rename = "peerDependenciesMeta")]
-    peer_dependencies_meta: Option<BTreeMap<String, NpmPeerDependencyMeta>>,
-}
-
-#[derive(Debug, Deserialize)]
-struct NpmSearchResponse {
-    #[serde(default)]
-    objects: Vec<NpmSearchObject>,
-}
-
-#[derive(Debug, Deserialize)]
-struct NpmSearchObject {
-    package: NpmSearchPackage,
-}
-
-#[derive(Debug, Deserialize)]
-struct NpmPackageManifest {
-    #[serde(default)]
-    name: Option<String>,
-    version: String,
-    #[serde(default)]
-    os: Option<NpmStringList>,
-    #[serde(default)]
-    cpu: Option<NpmStringList>,
-    #[serde(default)]
-    libc: Option<NpmStringList>,
-    #[serde(default, deserialize_with = "deserialize_lenient_engines")]
-    engines: Option<BTreeMap<String, String>>,
-    #[serde(default)]
-    scripts: Option<BTreeMap<String, String>>,
-    #[serde(default)]
-    dependencies: Option<BTreeMap<String, String>>,
-    #[serde(default, rename = "optionalDependencies")]
-    optional_dependencies: Option<BTreeMap<String, String>>,
-    #[serde(default, rename = "bundleDependencies")]
-    bundle_dependencies: Option<NpmStringList>,
-    #[serde(default, rename = "bundledDependencies")]
-    bundled_dependencies: Option<NpmStringList>,
-    #[serde(default, rename = "peerDependencies")]
-    peer_dependencies: Option<BTreeMap<String, String>>,
-    #[serde(default, rename = "peerDependenciesMeta")]
-    peer_dependencies_meta: Option<BTreeMap<String, NpmPeerDependencyMeta>>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(untagged)]
-enum NpmStringList {
-    One(String),
-    Many(Vec<String>),
-    Bool(bool),
-}
-
-impl NpmStringList {
-    fn values(&self) -> Vec<String> {
-        match self {
-            Self::One(value) => vec![value.clone()],
-            Self::Many(values) => values.clone(),
-            Self::Bool(_) => Vec::new(),
-        }
-    }
-
-    fn bool_value(&self) -> Option<bool> {
-        match self {
-            Self::Bool(value) => Some(*value),
-            _ => None,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Default, Deserialize)]
-struct NpmPeerDependencyMeta {
-    #[serde(default)]
-    optional: bool,
-}
-
-/// Leniently parse an npm `engines` field. The modern form is an object
-/// (`{"node": ">=18"}`), but ancient package versions on the registry use an
-/// array (`["node", "rhino"]`, e.g. early lodash) or a bare string
-/// (`">=0.10.40"`, e.g. early qs). A single legacy version with one of those
-/// shapes must NOT fail deserialization of the whole packument — that would make
-/// the package (every version of it) uninstallable. We keep the object form and
-/// treat the legacy array/string/bool/null forms as "no engine constraint".
-fn deserialize_lenient_engines<'de, D>(
-    deserializer: D,
-) -> std::result::Result<Option<BTreeMap<String, String>>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    let value = <serde_json::Value as serde::Deserialize>::deserialize(deserializer)?;
-    Ok(match value {
-        serde_json::Value::Object(map) => {
-            let engines = map
-                .into_iter()
-                .map(|(key, val)| {
-                    let rendered = match val {
-                        serde_json::Value::String(s) => s,
-                        other => other.to_string(),
-                    };
-                    (key, rendered)
-                })
-                .collect();
-            Some(engines)
-        }
-        // Legacy array/string/bool, or explicit null: no usable constraint.
-        _ => None,
-    })
-}
-
-#[derive(Debug, Deserialize)]
-struct NpmDist {
-    tarball: String,
-    #[serde(default)]
-    shasum: Option<String>,
-    #[serde(default)]
-    integrity: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
