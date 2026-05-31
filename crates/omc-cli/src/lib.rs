@@ -36,7 +36,7 @@ use omc_registry::{
     remove_npm_team_user, revoke_npm_access, revoke_npm_token, revoke_npm_trust,
     set_npm_access_mfa, set_npm_access_status, set_npm_org_user, set_npm_profile_property,
     unpublish_npm_package, upload_pypi_distribution, write_global_package_trust, Behavior,
-    Ecosystem, InstallReport, LinkOptions, LinkReport, LockedLocalSource,
+    Ecosystem, InstallReport, LinkOptions, LockedLocalSource,
     LockedPackage, LockedPythonVcsDependency, ManifestDependencyKind, NpmAccessMapResult,
     NpmAccessMutationResult, NpmAccessStatusResult, NpmAccessToken, NpmDeprecateResult,
     NpmDistTagMutationResult, NpmOrgListResult, NpmOrgMutationResult, NpmOwnerListResult,
@@ -54,6 +54,7 @@ use sha2::{Digest, Sha256, Sha384, Sha512};
 pub(crate) mod args;
 pub(crate) mod compile;
 pub(crate) mod direct_compat;
+pub(crate) mod install;
 pub(crate) mod manifest;
 pub(crate) mod parse;
 pub(crate) mod policy;
@@ -74,9 +75,11 @@ use manifest::{
 use direct_compat::{discover_direct_compat_project_dir_from, DirectCompatInvocation};
 use parse::{npm_next_version, parse_npm_archive_references, parse_pip_archive_references};
 use render::{
-    behavior_label, pip_install_report_json, print_audit_report, print_install_report,
-    print_link_reports, print_npm_install_json_report, verdict_label,
+    behavior_label, print_audit_report, print_install_report, print_link_reports,
+    print_npm_install_json_report, verdict_label,
 };
+#[cfg(test)]
+use render::pip_install_report_json;
 use temp_project::TempOmcProject;
 
 use crate::args::*;
@@ -427,130 +430,12 @@ fn run() -> Result<ExitCode, OmcRegistryError> {
     Ok(ExitCode::SUCCESS)
 }
 
-fn install_options(
-    project_dir: &Path,
-    policy: CliPolicyArgs<'_>,
-    extra: Vec<String>,
-    requirements: Vec<PathBuf>,
-    constraints: Vec<PathBuf>,
-    omit: DependencyOmit,
-) -> Result<LinkOptions, OmcRegistryError> {
-    let mut options = LinkOptions::new(project_dir);
-    apply_cli_policy_options(
-        &mut options,
-        policy.allow,
-        policy.allow_flow,
-        policy.allow_all_host,
-    )?;
-    options.project_extras = extra
-        .into_iter()
-        .map(|extra| normalize_extra(&extra))
-        .collect();
-    options.requirement_files = requirements
-        .into_iter()
-        .map(|path| absolutize_path(project_dir, path))
-        .collect();
-    options.constraint_files = constraints
-        .into_iter()
-        .map(|path| absolutize_path(project_dir, path))
-        .collect();
-    apply_dependency_omit_flags(&mut options, omit.dev, omit.optional, omit.peer);
-    Ok(options)
-}
-
-#[derive(Debug, Clone, Copy)]
-struct DependencyOmit {
-    dev: bool,
-    optional: bool,
-    peer: bool,
-}
-
-fn apply_dependency_omit_flags(
-    options: &mut LinkOptions,
-    omit_dev: bool,
-    omit_optional: bool,
-    omit_peer: bool,
-) {
-    options.include_dev_dependencies = !omit_dev;
-    options.include_optional_dependencies = !omit_optional;
-    options.include_peer_dependencies = !omit_peer;
-}
-
-fn npm_lock_options_including_omitted(options: &LinkOptions) -> LinkOptions {
-    let mut lock_options = options.clone();
-    lock_options.include_dev_dependencies = true;
-    lock_options.include_optional_dependencies = true;
-    lock_options.include_peer_dependencies = true;
-    lock_options
-}
-
-fn lock_npm_project_including_omitted(
-    options: &LinkOptions,
-) -> Result<Vec<LinkReport>, OmcRegistryError> {
-    let lock_options = npm_lock_options_including_omitted(options);
-    lock_project(&lock_options)
-}
-
-fn install_npm_project_with_complete_lock(
-    options: &LinkOptions,
-) -> Result<InstallReport, OmcRegistryError> {
-    if options.include_dev_dependencies
-        && options.include_optional_dependencies
-        && options.include_peer_dependencies
-    {
-        return install_project(options);
-    }
-
-    let lock_options = npm_lock_options_including_omitted(options);
-    lock_project(&lock_options)?;
-    install_locked_project(options)
-}
-
-fn apply_pip_compatibility_target(options: &mut LinkOptions, target: PipCompatibilityTarget) {
-    options.pypi_target_platforms = target.platforms;
-    options.pypi_target_python = target.python_version;
-    options.pypi_target_implementation = target.implementation;
-    options.pypi_target_abis = target.abis;
-}
-
-fn write_pip_install_report(
-    project_dir: &Path,
-    report_path: Option<&Path>,
-    install: &InstallReport,
-) -> Result<(), OmcRegistryError> {
-    write_pip_install_report_from(project_dir, project_dir, report_path, install)
-}
-
-fn write_pip_install_report_from(
-    lock_project_dir: &Path,
-    output_project_dir: &Path,
-    report_path: Option<&Path>,
-    install: &InstallReport,
-) -> Result<(), OmcRegistryError> {
-    let Some(report_path) = report_path else {
-        return Ok(());
-    };
-    let report = pip_install_report_json(lock_project_dir, install)?;
-    let report = serde_json::to_string_pretty(&report)?;
-    if pip_install_report_to_stdout(Some(report_path)) {
-        println!("{report}");
-    } else {
-        let report_path = absolutize_path(output_project_dir, report_path.to_path_buf());
-        if let Some(parent) = report_path.parent() {
-            fs::create_dir_all(parent)?;
-        }
-        fs::write(report_path, format!("{report}\n"))?;
-    }
-    Ok(())
-}
-
-fn pip_install_report_to_stdout(report_path: Option<&Path>) -> bool {
-    report_path == Some(Path::new("-"))
-}
-
-fn locked_packages_from_reports(reports: &[LinkReport]) -> Vec<LockedPackage> {
-    reports.iter().map(|report| report.locked.clone()).collect()
-}
+use crate::install::{
+    apply_dependency_omit_flags, apply_pip_compatibility_target,
+    install_npm_project_with_complete_lock, install_options, lock_npm_project_including_omitted,
+    locked_packages_from_reports, npm_lock_options_including_omitted, pip_install_report_to_stdout,
+    write_pip_install_report, write_pip_install_report_from, DependencyOmit,
+};
 
 fn run_pip_lock(project_dir: &Path, action: PipLockAction) -> Result<ExitCode, OmcRegistryError> {
     let PipInstallAction {
@@ -31939,7 +31824,7 @@ pub(crate) fn parse_flow_grants(
         .collect()
 }
 
-fn normalize_extra(extra: &str) -> String {
+pub(crate) fn normalize_extra(extra: &str) -> String {
     extra.trim().replace('_', "-").to_ascii_lowercase()
 }
 
