@@ -39,6 +39,7 @@ pub(crate) mod parse;
 pub(crate) mod pip_compat;
 pub(crate) mod pip_config_cli;
 pub(crate) mod pip_cli;
+pub(crate) mod pip_parse;
 pub(crate) mod policy;
 pub(crate) mod policy_args;
 pub(crate) mod render;
@@ -83,6 +84,7 @@ use script::{package_script_lifecycle_order, run_package_script_with_npm_command
 use crate::args::*;
 
 pub(crate) use crate::pip_cli::*;
+pub(crate) use crate::pip_parse::*;
 
 pub(crate) use npm_query_cli::{
     npm_view_field_value,
