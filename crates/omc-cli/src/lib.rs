@@ -30,7 +30,7 @@ use omc_registry::{
     read_npm_package_metadata_with_userconfig, read_npm_package_owners,
     read_npm_ping_with_userconfig, read_npm_profile, read_npm_search, read_npm_stars,
     read_npm_team_users, read_npm_teams, read_npm_token_list, read_npm_trust, read_npm_whoami,
-    read_npm_workspace_packages, read_package_scripts, read_pip_config_snapshot,
+    read_npm_workspace_packages, read_pip_config_snapshot,
     read_pypi_available_versions, read_requirements_files, read_script_requirement_files,
     remove_locked_packages, remove_manifest_dependency, remove_npm_dist_tag, remove_npm_org_user,
     remove_npm_team_user, revoke_npm_access, revoke_npm_token, revoke_npm_trust,
@@ -60,6 +60,7 @@ pub(crate) mod parse;
 pub(crate) mod policy;
 pub(crate) mod policy_args;
 pub(crate) mod render;
+pub(crate) mod script;
 pub(crate) mod temp_project;
 
 use compile::{compile_source_default_name, infer_compile_ecosystem, print_compile_source};
@@ -81,6 +82,11 @@ use render::{
 #[cfg(test)]
 use render::pip_install_report_json;
 use temp_project::TempOmcProject;
+use script::{
+    print_npm_run_list, run_package_script, run_package_script_with_npm_command_for_workspaces,
+};
+#[cfg(test)]
+use script::{package_script_lifecycle_order, run_package_script_with_npm_command};
 
 use crate::args::*;
 use crate::policy::run_policy_command;
@@ -770,109 +776,14 @@ fn is_twine_module(module: &str) -> bool {
     matches!(module, "twine" | "twine.__main__")
 }
 
-fn run_package_script(
-    project_dir: &Path,
-    name: &str,
-    args: &[String],
-) -> Result<ExitCode, OmcRegistryError> {
-    run_package_script_with_npm_command(project_dir, "run-script", name, args, false)
-}
-
-fn run_package_script_with_npm_command(
-    project_dir: &Path,
-    npm_command: &str,
-    name: &str,
-    args: &[String],
-    if_present: bool,
-) -> Result<ExitCode, OmcRegistryError> {
-    run_package_script_in_dir(
-        project_dir,
-        project_dir,
-        npm_command,
-        name,
-        args,
-        if_present,
-    )
-}
-
-fn run_package_script_with_npm_command_for_workspaces(
-    project_dir: &Path,
-    npm_command: &str,
-    name: &str,
-    args: &[String],
-    if_present: bool,
-    targets: NpmScriptTargets<'_>,
-) -> Result<ExitCode, OmcRegistryError> {
-    let script_dirs = npm_script_target_dirs(
-        project_dir,
-        targets.workspaces,
-        targets.all_workspaces,
-        targets.include_workspace_root,
-    )?;
-    for script_dir in script_dirs {
-        let status = run_package_script_in_dir(
-            project_dir,
-            &script_dir,
-            npm_command,
-            name,
-            args,
-            if_present,
-        )?;
-        if status != ExitCode::SUCCESS {
-            return Ok(status);
-        }
-    }
-    Ok(ExitCode::SUCCESS)
-}
-
 #[derive(Debug, Clone, Copy)]
-struct NpmScriptTargets<'a> {
-    workspaces: &'a [String],
-    all_workspaces: bool,
-    include_workspace_root: bool,
+pub(crate) struct NpmScriptTargets<'a> {
+    pub(crate) workspaces: &'a [String],
+    pub(crate) all_workspaces: bool,
+    pub(crate) include_workspace_root: bool,
 }
 
-fn run_package_script_in_dir(
-    project_dir: &Path,
-    script_dir: &Path,
-    npm_command: &str,
-    name: &str,
-    args: &[String],
-    if_present: bool,
-) -> Result<ExitCode, OmcRegistryError> {
-    let script_dir = script_dir.to_path_buf();
-    let scripts = read_package_scripts(&script_dir)?;
-    if if_present && !scripts.contains_key(name) {
-        return Ok(ExitCode::SUCCESS);
-    }
-    let lifecycle = package_script_lifecycle_order(&scripts, name)?;
-
-    for lifecycle_name in lifecycle {
-        let script = scripts.get(&lifecycle_name).ok_or_else(|| {
-            OmcRegistryError::UnsupportedSpec(format!("missing project script `{lifecycle_name}`"))
-        })?;
-        let script_args = if lifecycle_name == name {
-            args
-        } else {
-            &[] as &[String]
-        };
-        let status = run_single_package_script(
-            project_dir,
-            &script_dir,
-            npm_command,
-            &lifecycle_name,
-            script,
-            script_args,
-        )?;
-        if status != ExitCode::SUCCESS {
-            return Ok(status);
-        }
-    }
-
-    Ok(ExitCode::SUCCESS)
-}
-
-fn npm_script_target_dirs(
+pub(crate) fn npm_script_target_dirs(
     project_dir: &Path,
     workspaces: &[String],
     all_workspaces: bool,
@@ -938,139 +849,6 @@ fn select_npm_workspace(
         format!("npm workspace `{selector}` was not found; available workspaces: {available}")
     };
     Err(OmcRegistryError::UnsupportedSpec(detail))
-}
-
-fn print_npm_run_list(
-    project_dir: &Path,
-    action: NpmRunListAction,
-) -> Result<(), OmcRegistryError> {
-    let script_dirs = npm_script_target_dirs(
-        project_dir,
-        &action.workspaces,
-        action.all_workspaces,
-        action.include_workspace_root,
-    )?;
-    let workspace_mode =
-        !action.workspaces.is_empty() || action.all_workspaces || action.include_workspace_root;
-    let mut entries = Vec::new();
-    for script_dir in script_dirs {
-        let scripts = read_package_scripts(&script_dir)?;
-        let label = npm_run_list_label(project_dir, &script_dir)?;
-        entries.push((label, scripts));
-    }
-
-    if action.json {
-        if workspace_mode {
-            let value = entries.into_iter().collect::<BTreeMap<_, _>>();
-            println!("{}", serde_json::to_string_pretty(&value)?);
-        } else {
-            let scripts = entries
-                .into_iter()
-                .next()
-                .map(|(_, scripts)| scripts)
-                .unwrap_or_default();
-            println!("{}", serde_json::to_string_pretty(&scripts)?);
-        }
-    } else {
-        for (index, (label, scripts)) in entries.iter().enumerate() {
-            if index > 0 {
-                println!();
-            }
-            print_npm_run_text_list(label, scripts);
-        }
-    }
-
-    Ok(())
-}
-
-fn npm_run_list_label(project_dir: &Path, script_dir: &Path) -> Result<String, OmcRegistryError> {
-    let package_json = script_dir.join("package.json");
-    if package_json.exists() {
-        let package = read_npm_pkg_json(&package_json)?;
-        if let Some(name) = package.get("name").and_then(serde_json::Value::as_str) {
-            return Ok(name.to_owned());
-        }
-    }
-    if script_dir == project_dir {
-        return Ok("undefined".to_owned());
-    }
-    Ok(script_dir
-        .strip_prefix(project_dir)
-        .unwrap_or(script_dir)
-        .to_string_lossy()
-        .into_owned())
-}
-
-fn print_npm_run_text_list(label: &str, scripts: &BTreeMap<String, String>) {
-    let lifecycle = ["test", "start", "stop", "restart"];
-    let lifecycle_scripts = lifecycle
-        .iter()
-        .filter_map(|name| scripts.get(*name).map(|script| (*name, script)))
-        .collect::<Vec<_>>();
-    if !lifecycle_scripts.is_empty() {
-        println!("Lifecycle scripts included in {label}:");
-        for (name, script) in lifecycle_scripts {
-            println!("  {name}");
-            println!("    {script}");
-        }
-    }
-
-    let available = scripts
-        .iter()
-        .filter(|(name, _)| !lifecycle.contains(&name.as_str()))
-        .collect::<Vec<_>>();
-    if !available.is_empty() {
-        println!("available via `npm run`:");
-        for (name, script) in available {
-            println!("  {name}");
-            println!("    {script}");
-        }
-    }
-    if scripts.is_empty() {
-        println!("No scripts found in {label}");
-    }
-}
-
-fn package_script_lifecycle_order(
-    scripts: &BTreeMap<String, String>,
-    name: &str,
-) -> Result<Vec<String>, OmcRegistryError> {
-    if !scripts.contains_key(name) {
-        let available = scripts.keys().cloned().collect::<Vec<_>>().join(", ");
-        let detail = if available.is_empty() {
-            format!("missing project script `{name}`")
-        } else {
-            format!("missing project script `{name}`; available scripts: {available}")
-        };
-        return Err(OmcRegistryError::UnsupportedSpec(detail));
-    }
-
-    let mut lifecycle = Vec::new();
-    let pre = format!("pre{name}");
-    if scripts.contains_key(&pre) {
-        lifecycle.push(pre);
-    }
-    lifecycle.push(name.to_owned());
-    let post = format!("post{name}");
-    if scripts.contains_key(&post) {
-        lifecycle.push(post);
-    }
-    Ok(lifecycle)
-}
-
-fn run_single_package_script(
-    project_dir: &Path,
-    script_dir: &Path,
-    npm_command: &str,
-    name: &str,
-    script: &str,
-    args: &[String],
-) -> Result<ExitCode, OmcRegistryError> {
-    let mut command = package_script_command(script);
-    apply_project_runtime_env_for_cwd(&mut command, project_dir, script_dir)?;
-    apply_npm_lifecycle_env(&mut command, script_dir, npm_command, name, script)?;
-    let status = command.args(args).status()?;
-    Ok(exit_code(status.code()))
 }
 
 fn run_project_command(
@@ -15498,7 +15276,7 @@ fn npm_pack_result_json(result: NpmPackResult) -> serde_json::Value {
     })
 }
 
-fn read_npm_pkg_json(path: &Path) -> Result<serde_json::Value, OmcRegistryError> {
+pub(crate) fn read_npm_pkg_json(path: &Path) -> Result<serde_json::Value, OmcRegistryError> {
     if !path.exists() {
         return Err(OmcRegistryError::UnsupportedSpec(format!(
             "{} does not exist",
@@ -20897,7 +20675,7 @@ fn apply_pip_environment_defaults_for_project(options: &mut LinkOptions, project
     apply_pypi_environment_defaults(options, override_index);
 }
 
-fn apply_project_runtime_env_for_cwd(
+pub(crate) fn apply_project_runtime_env_for_cwd(
     command: &mut ProcessCommand,
     project_dir: &Path,
     cwd: &Path,
@@ -20923,7 +20701,7 @@ fn apply_project_runtime_env_for_cwd(
     Ok(())
 }
 
-fn apply_npm_lifecycle_env(
+pub(crate) fn apply_npm_lifecycle_env(
     command: &mut ProcessCommand,
     project_dir: &Path,
     npm_command: &str,
@@ -21294,7 +21072,7 @@ fn dedup_paths(paths: &mut Vec<PathBuf>) {
 }
 
 #[cfg(unix)]
-fn package_script_command(script: &str) -> ProcessCommand {
+pub(crate) fn package_script_command(script: &str) -> ProcessCommand {
     let mut command = ProcessCommand::new("sh");
     command
         .arg("-c")
@@ -21304,13 +21082,13 @@ fn package_script_command(script: &str) -> ProcessCommand {
 }
 
 #[cfg(not(unix))]
-fn package_script_command(script: &str) -> ProcessCommand {
+pub(crate) fn package_script_command(script: &str) -> ProcessCommand {
     let mut command = ProcessCommand::new("cmd");
     command.arg("/C").arg(script);
     command
 }
 
-fn exit_code(code: Option<i32>) -> ExitCode {
+pub(crate) fn exit_code(code: Option<i32>) -> ExitCode {
     code.and_then(|code| u8::try_from(code).ok())
         .map(ExitCode::from)
         .unwrap_or(ExitCode::FAILURE)
