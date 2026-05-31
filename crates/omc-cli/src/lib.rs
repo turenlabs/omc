@@ -16,7 +16,7 @@ use omc_registry::{
     add_manifest_npm_local_paths, add_manifest_policy_flows, add_manifest_policy_grants,
     add_npm_dist_tag, add_npm_team_user, add_package_graph, apply_pypi_binary_option,
     apply_pypi_environment_defaults, apply_pypi_release_control, check_pypi_distribution,
-    compare_npm_versions, compare_pypi_versions, compile_source_path, create_npm_team,
+    compare_npm_versions, compare_pypi_versions, create_npm_team,
     create_npm_token, create_npm_trust, deprecate_npm_package, destroy_npm_team,
     download_npm_package_tarball, grant_npm_access, init_project, install_locked_packages,
     install_locked_packages_with_python_target, install_locked_project, install_project,
@@ -36,7 +36,7 @@ use omc_registry::{
     remove_npm_team_user, revoke_npm_access, revoke_npm_token, revoke_npm_trust,
     set_npm_access_mfa, set_npm_access_status, set_npm_org_user, set_npm_profile_property,
     unpublish_npm_package, upload_pypi_distribution, write_global_package_trust, Behavior,
-    CompileSourceOptions, Ecosystem, InstallReport, LinkOptions, LinkReport, LockedLocalSource,
+    Ecosystem, InstallReport, LinkOptions, LinkReport, LockedLocalSource,
     LockedPackage, LockedPythonVcsDependency, ManifestDependencyKind, NpmAccessMapResult,
     NpmAccessMutationResult, NpmAccessStatusResult, NpmAccessToken, NpmDeprecateResult,
     NpmDistTagMutationResult, NpmOrgListResult, NpmOrgMutationResult, NpmOwnerListResult,
@@ -52,6 +52,7 @@ use omc_registry::{
 use sha2::{Digest, Sha256, Sha384, Sha512};
 
 pub(crate) mod args;
+pub(crate) mod compile;
 pub(crate) mod direct_compat;
 pub(crate) mod manifest;
 pub(crate) mod parse;
@@ -59,6 +60,8 @@ pub(crate) mod policy;
 pub(crate) mod policy_args;
 pub(crate) mod render;
 pub(crate) mod temp_project;
+
+use compile::{compile_source_default_name, infer_compile_ecosystem, print_compile_source};
 
 use direct_compat::{
     direct_compat_mode, npx_compat_args, parse_direct_compat_invocation, DirectCompatMode,
@@ -460,107 +463,6 @@ struct DependencyOmit {
     dev: bool,
     optional: bool,
     peer: bool,
-}
-
-fn print_compile_source(
-    project_dir: &Path,
-    command: CompileCommand,
-) -> Result<(), OmcRegistryError> {
-    let ecosystem = infer_compile_ecosystem(&command.source, command.npm, command.pypi)?;
-    let name = command
-        .name
-        .unwrap_or_else(|| compile_source_default_name(&command.source));
-    let report = compile_source_path(CompileSourceOptions {
-        project_dir: project_dir.to_path_buf(),
-        source_path: command.source,
-        ecosystem,
-        name,
-        version: command.version,
-        allowed_capabilities: parse_grants(&command.allow, command.allow_all_host)?,
-        allowed_flows: parse_flow_grants(&command.allow_flow)?,
-        write_artifact: command.store,
-    })?;
-
-    if let Some(output) = command.output {
-        if let Some(parent) = output
-            .parent()
-            .filter(|parent| !parent.as_os_str().is_empty())
-        {
-            fs::create_dir_all(parent)?;
-        }
-        fs::write(&output, serde_json::to_string_pretty(&report.artifact)?)?;
-        println!("{}", output.display());
-    } else if let Some(artifact_path) = report.artifact_path {
-        println!("{}", artifact_path.display());
-    } else {
-        println!("{}", serde_json::to_string_pretty(&report.artifact)?);
-    }
-
-    Ok(())
-}
-
-fn infer_compile_ecosystem(
-    source: &Path,
-    npm: bool,
-    pypi: bool,
-) -> Result<Ecosystem, OmcRegistryError> {
-    match (npm, pypi) {
-        (true, false) => return Ok(Ecosystem::Npm),
-        (false, true) => return Ok(Ecosystem::Pypi),
-        (true, true) => {
-            return Err(OmcRegistryError::UnsupportedSpec(
-                "omc compile cannot combine --npm and --pypi".to_owned(),
-            ));
-        }
-        (false, false) => {}
-    }
-
-    if source.is_dir() {
-        if source.join("package.json").exists() {
-            return Ok(Ecosystem::Npm);
-        }
-        if source.join("pyproject.toml").exists()
-            || source.join("setup.cfg").exists()
-            || source.join("setup.py").exists()
-        {
-            return Ok(Ecosystem::Pypi);
-        }
-    }
-
-    let lower_name = source
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or_default()
-        .to_ascii_lowercase();
-    if lower_name.ends_with(".whl") {
-        return Ok(Ecosystem::Pypi);
-    }
-    match source.extension().and_then(|extension| extension.to_str()) {
-        Some("js" | "mjs" | "cjs" | "ts" | "tsx" | "jsx") => Ok(Ecosystem::Npm),
-        Some("py") => Ok(Ecosystem::Pypi),
-        _ => Err(OmcRegistryError::UnsupportedSpec(
-            "omc compile needs --npm or --pypi when the source ecosystem cannot be inferred"
-                .to_owned(),
-        )),
-    }
-}
-
-fn compile_source_default_name(source: &Path) -> String {
-    let name = source
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or("local-source");
-    let name = name
-        .strip_suffix(".tar.gz")
-        .or_else(|| name.strip_suffix(".tgz"))
-        .or_else(|| name.strip_suffix(".whl"))
-        .or_else(|| name.strip_suffix(".zip"))
-        .unwrap_or(name);
-    name.trim()
-        .is_empty()
-        .then_some("local-source")
-        .unwrap_or(name)
-        .to_owned()
 }
 
 fn apply_dependency_omit_flags(
