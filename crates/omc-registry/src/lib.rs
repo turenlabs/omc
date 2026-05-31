@@ -30,6 +30,12 @@ use walkdir::{DirEntry, WalkDir};
 mod error;
 pub use error::{OmcRegistryError, Result};
 
+pub(crate) mod manifest;
+pub use manifest::{
+    add_manifest_npm_local_paths, add_manifest_policy_flows, add_manifest_policy_grants,
+    init_project, read_manifest, write_global_package_trust,
+};
+
 pub(crate) mod types;
 pub use types::{
     ArtifactPackage, ArtifactSignature, Behavior, CapabilityFinding, CapabilityKind,
@@ -41,8 +47,8 @@ pub use types::{
 };
 use types::{parse_npm_spec, GlobalConfig};
 
-const LOCKFILE: &str = "omc.lock";
-const MANIFEST: &str = "omc.toml";
+pub(crate) const LOCKFILE: &str = "omc.lock";
+pub(crate) const MANIFEST: &str = "omc.toml";
 /// Optional per-package capability policy DSL, layered on top of the flat
 /// `[policy]` grants in `omc.toml`. When absent, behaviour is exactly as before.
 const POLICY_FILE: &str = "omc.policy";
@@ -278,31 +284,6 @@ struct PackageDependency {
     spec: PackageSpec,
     optional: bool,
     peer: bool,
-}
-
-pub fn init_project(project_dir: impl AsRef<Path>, name: Option<&str>) -> Result<PathBuf> {
-    let project_dir = project_dir.as_ref();
-    fs::create_dir_all(project_dir.join(".omc"))?;
-
-    let manifest_path = project_dir.join(MANIFEST);
-    if !manifest_path.exists() {
-        let project_name = name.map(str::to_owned).unwrap_or_else(|| {
-            project_dir
-                .file_name()
-                .and_then(|name| name.to_str())
-                .unwrap_or("omc-project")
-                .to_owned()
-        });
-        let manifest = OmcManifest::new(project_name);
-        fs::write(&manifest_path, toml::to_string_pretty(&manifest)?)?;
-    }
-
-    let lockfile_path = project_dir.join(LOCKFILE);
-    if !lockfile_path.exists() {
-        fs::write(&lockfile_path, toml::to_string_pretty(&OmcLock::new())?)?;
-    }
-
-    Ok(manifest_path)
 }
 
 pub fn link_package(spec: &PackageSpec, options: &LinkOptions) -> Result<LinkReport> {
@@ -574,111 +555,6 @@ fn pypi_requirement_label(spec: &PackageSpec) -> String {
     } else {
         name
     }
-}
-
-pub fn add_manifest_npm_local_paths(
-    project_dir: impl AsRef<Path>,
-    paths: &[PathBuf],
-    kind: ManifestDependencyKind,
-) -> Result<Vec<String>> {
-    let project_dir = project_dir.as_ref();
-    init_project(project_dir, None)?;
-
-    let manifest_path = project_dir.join(MANIFEST);
-    let mut manifest = read_manifest(&manifest_path)?;
-    for path in paths {
-        let path = path.to_string_lossy();
-        manifest
-            .npm_local_paths
-            .retain(|existing| existing != &path);
-        manifest
-            .npm_dev_local_paths
-            .retain(|existing| existing != &path);
-        manifest
-            .npm_optional_local_paths
-            .retain(|existing| existing != &path);
-        manifest
-            .npm_peer_local_paths
-            .retain(|existing| existing != &path);
-    }
-    let target = manifest_npm_local_paths_mut(&mut manifest, kind);
-    let mut existing = target.iter().cloned().collect::<BTreeSet<_>>();
-    let mut added = Vec::new();
-    for path in paths {
-        let path = path.to_string_lossy().into_owned();
-        if existing.insert(path.clone()) {
-            added.push(path);
-        }
-    }
-    *target = existing.into_iter().collect();
-    fs::write(&manifest_path, toml::to_string_pretty(&manifest)?)?;
-    Ok(added)
-}
-
-fn manifest_npm_local_paths_mut(
-    manifest: &mut OmcManifest,
-    kind: ManifestDependencyKind,
-) -> &mut Vec<String> {
-    match kind {
-        ManifestDependencyKind::Production => &mut manifest.npm_local_paths,
-        ManifestDependencyKind::Dev => &mut manifest.npm_dev_local_paths,
-        ManifestDependencyKind::Optional => &mut manifest.npm_optional_local_paths,
-        ManifestDependencyKind::Peer => &mut manifest.npm_peer_local_paths,
-    }
-}
-
-pub fn add_manifest_policy_grants(
-    project_dir: impl AsRef<Path>,
-    grants: &[String],
-) -> Result<Vec<String>> {
-    let project_dir = project_dir.as_ref();
-    init_project(project_dir, None)?;
-
-    let manifest_path = project_dir.join(MANIFEST);
-    let mut manifest = read_manifest(&manifest_path)?;
-    let mut existing = manifest
-        .policy
-        .allow
-        .iter()
-        .cloned()
-        .collect::<BTreeSet<_>>();
-    let mut added = Vec::new();
-    for grant in grants {
-        let normalized = parse_capability_grant(grant)?.to_string();
-        if existing.insert(normalized.clone()) {
-            added.push(normalized);
-        }
-    }
-    manifest.policy.allow = existing.into_iter().collect();
-    fs::write(&manifest_path, toml::to_string_pretty(&manifest)?)?;
-    Ok(added)
-}
-
-pub fn add_manifest_policy_flows(
-    project_dir: impl AsRef<Path>,
-    flows: &[String],
-) -> Result<Vec<String>> {
-    let project_dir = project_dir.as_ref();
-    init_project(project_dir, None)?;
-
-    let manifest_path = project_dir.join(MANIFEST);
-    let mut manifest = read_manifest(&manifest_path)?;
-    let mut existing = manifest
-        .policy
-        .allow_flow
-        .iter()
-        .cloned()
-        .collect::<BTreeSet<_>>();
-    let mut added = Vec::new();
-    for flow in flows {
-        let normalized = parse_flow_rule(flow)?.to_string();
-        if existing.insert(normalized.clone()) {
-            added.push(normalized);
-        }
-    }
-    manifest.policy.allow_flow = existing.into_iter().collect();
-    fs::write(&manifest_path, toml::to_string_pretty(&manifest)?)?;
-    Ok(added)
 }
 
 pub fn install_project(options: &LinkOptions) -> Result<InstallReport> {
@@ -2726,14 +2602,6 @@ pub fn read_lockfile(path: impl AsRef<Path>) -> Result<OmcLock> {
     Ok(toml::from_str(&fs::read_to_string(path)?)?)
 }
 
-pub fn read_manifest(path: impl AsRef<Path>) -> Result<OmcManifest> {
-    let path = path.as_ref();
-    if !path.exists() {
-        return Ok(OmcManifest::new("omc-project"));
-    }
-    Ok(toml::from_str(&fs::read_to_string(path)?)?)
-}
-
 fn options_with_manifest_policy(options: &LinkOptions) -> Result<LinkOptions> {
     let mut options = options.clone();
     let manifest = read_manifest(options.project_dir.join(MANIFEST))?;
@@ -2894,7 +2762,7 @@ fn allow_benign_runtime_capabilities(policy: Policy) -> Policy {
 /// Resolve the global OMC home directory: `$OMC_HOME` when set (it points at the
 /// directory holding the global config — handy for tests/CI), otherwise
 /// `$HOME/.omc` (or `%USERPROFILE%\.omc` on Windows).
-fn global_omc_home() -> Option<PathBuf> {
+pub(crate) fn global_omc_home() -> Option<PathBuf> {
     if let Some(dir) = env::var_os("OMC_HOME") {
         return Some(PathBuf::from(dir));
     }
@@ -9317,7 +9185,7 @@ fn finding_message(finding: &str) -> &str {
 }
 
 /// Render a `<kind>:<target>` capability token as its `omc.policy` `allow` clause.
-fn dsl_allow_clause(token: &str) -> Option<String> {
+pub(crate) fn dsl_allow_clause(token: &str) -> Option<String> {
     match token {
         "dynamic.eval" | "dynamic-eval" | "eval" => return Some("allow eval".to_owned()),
         "time.now" | "time" => return Some("allow time".to_owned()),
@@ -9338,7 +9206,7 @@ fn dsl_allow_clause(token: &str) -> Option<String> {
 }
 
 /// Render a flow source token (`env:X` / `file:X` / `secret:X` / `*`) as its DSL form.
-fn dsl_flow_src(token: &str) -> Option<String> {
+pub(crate) fn dsl_flow_src(token: &str) -> Option<String> {
     if token == "*" || token == "any" {
         return Some("any".to_owned());
     }
@@ -9353,7 +9221,7 @@ fn dsl_flow_src(token: &str) -> Option<String> {
 }
 
 /// Render a flow sink token (`network:Y` / `process:Y` / `file:Y` / `eval`) as its DSL form.
-fn dsl_flow_sink(token: &str) -> Option<String> {
+pub(crate) fn dsl_flow_sink(token: &str) -> Option<String> {
     if matches!(token, "eval" | "dynamic_eval" | "dynamic.eval") {
         return Some("eval".to_owned());
     }
@@ -9583,71 +9451,6 @@ fn render_block_guidance(
 
 /// Sanitize a package name into a safe `policy.d` file stem (scoped names like
 /// `@scope/pkg` become `@scope_pkg`).
-fn sanitize_policy_filename(name: &str) -> String {
-    name.chars()
-        .map(|ch| {
-            if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.' | '@') {
-                ch
-            } else {
-                '_'
-            }
-        })
-        .collect()
-}
-
-/// Persist a per-package, version-pinned trust block to the global drop-in dir
-/// `$OMC_HOME/policy.d/<name>.omc.policy` (default `~/.omc/policy.d/`). Grants and
-/// flows are validated and rendered as an `omc.policy` package block; the file is
-/// overwritten (re-trusting a package updates its pin). Returns the written path.
-pub fn write_global_package_trust(
-    ecosystem: Ecosystem,
-    name: &str,
-    version: &str,
-    grants: &[String],
-    flows: &[String],
-) -> Result<PathBuf> {
-    // Validate every grant/flow up front so we never write a malformed file.
-    for grant in grants {
-        parse_capability_grant(grant)?;
-    }
-    for flow in flows {
-        parse_flow_rule(flow)?;
-    }
-
-    let mut block = String::new();
-    block.push_str("# Written by `omc trust`: a per-package, version-pinned grant.\n");
-    block.push_str("# Delete this file to revoke. Applies to this exact version only.\n");
-    block.push_str(&format!("{ecosystem} package {name:?} =={version} {{\n"));
-    for grant in grants {
-        if let Some(stmt) = dsl_allow_clause(grant) {
-            block.push_str(&format!("  {stmt}\n"));
-        }
-    }
-    for flow in flows {
-        if let Some((src, sink)) = flow.split_once("->") {
-            if let (Some(s), Some(d)) = (dsl_flow_src(src.trim()), dsl_flow_sink(sink.trim())) {
-                block.push_str(&format!("  flow {s} -> {d}\n"));
-            }
-        }
-    }
-    block.push_str("}\n");
-
-    // The rendered block must parse with the real DSL (defense in depth).
-    omc_policy::parse(&block)?;
-
-    let dir = global_omc_home()
-        .ok_or_else(|| {
-            OmcRegistryError::UnsupportedSpec(
-                "cannot resolve home directory for ~/.omc/policy.d".to_owned(),
-            )
-        })?
-        .join("policy.d");
-    fs::create_dir_all(&dir)?;
-    let path = dir.join(format!("{}.omc.policy", sanitize_policy_filename(name)));
-    fs::write(&path, block)?;
-    Ok(path)
-}
-
 #[derive(Debug, Clone)]
 struct NpmConfig {
     registry: String,
