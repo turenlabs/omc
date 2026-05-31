@@ -47,6 +47,12 @@ pub use types::{
 };
 use types::{parse_npm_spec, GlobalConfig};
 
+pub(crate) mod lockfile;
+pub use lockfile::read_lockfile;
+use lockfile::{
+    locked_package_key, locked_reachable_package_keys, prune_lockfile, sync_python_vcs_lockfile,
+};
+
 pub(crate) const LOCKFILE: &str = "omc.lock";
 pub(crate) const MANIFEST: &str = "omc.toml";
 /// Optional per-package capability policy DSL, layered on top of the flat
@@ -1774,89 +1780,14 @@ fn read_python_source_requirements(
     Ok(requirements)
 }
 
-fn locked_reachable_package_keys(
-    lock: &OmcLock,
-    specs: &[PackageSpec],
-    options: &LinkOptions,
-) -> Result<BTreeSet<String>> {
-    let mut retained = BTreeSet::new();
-    for spec in specs {
-        let package = find_locked_package_for_spec(
-            lock,
-            spec,
-            &options.constraints,
-            &options.npm_overrides,
-            &options.hashes,
-        )
-        .ok_or_else(|| OmcRegistryError::LockfileOutOfDate(spec.requested()))?;
-        collect_locked_dependencies(lock, package, options, &mut retained)?;
-    }
-    Ok(retained)
-}
-
-fn collect_locked_dependencies(
-    lock: &OmcLock,
+pub(crate) fn should_follow_locked_dependencies(
     package: &LockedPackage,
     options: &LinkOptions,
-    retained: &mut BTreeSet<String>,
-) -> Result<()> {
-    if !retained.insert(locked_package_key(package)) {
-        return Ok(());
-    }
-
-    if !should_follow_locked_dependencies(package, options) {
-        return Ok(());
-    }
-
-    for dependency in &package.dependencies {
-        let spec = PackageSpec::parse(dependency)?;
-        let dependency = find_locked_package_for_spec(
-            lock,
-            &spec,
-            &BTreeMap::new(),
-            &options.npm_overrides,
-            &BTreeMap::new(),
-        )
-        .ok_or_else(|| OmcRegistryError::LockfileOutOfDate(spec.requested()))?;
-        collect_locked_dependencies(lock, dependency, options, retained)?;
-    }
-    if options.include_optional_dependencies {
-        for dependency in &package.optional_dependencies {
-            let spec = PackageSpec::parse(dependency)?;
-            if let Some(dependency) = find_locked_package_for_spec(
-                lock,
-                &spec,
-                &BTreeMap::new(),
-                &options.npm_overrides,
-                &BTreeMap::new(),
-            ) {
-                collect_locked_dependencies(lock, dependency, options, retained)?;
-            }
-        }
-    }
-    if options.include_peer_dependencies {
-        for dependency in &package.peer_dependencies {
-            let spec = PackageSpec::parse(dependency)?;
-            let dependency = find_locked_package_for_spec(
-                lock,
-                &spec,
-                &BTreeMap::new(),
-                &options.npm_overrides,
-                &BTreeMap::new(),
-            )
-            .ok_or_else(|| OmcRegistryError::LockfileOutOfDate(spec.requested()))?;
-            collect_locked_dependencies(lock, dependency, options, retained)?;
-        }
-    }
-
-    Ok(())
-}
-
-fn should_follow_locked_dependencies(package: &LockedPackage, options: &LinkOptions) -> bool {
+) -> bool {
     package.ecosystem != Ecosystem::Pypi || options.pypi_include_dependencies
 }
 
-fn find_locked_package_for_spec<'a>(
+pub(crate) fn find_locked_package_for_spec<'a>(
     lock: &'a OmcLock,
     spec: &PackageSpec,
     constraints: &BTreeMap<String, String>,
@@ -2592,14 +2523,6 @@ fn manifest_spec_for_locked_root(spec: &PackageSpec, locked: &LockedPackage) -> 
     let mut spec = spec.clone();
     spec.name = locked.name.clone();
     spec
-}
-
-pub fn read_lockfile(path: impl AsRef<Path>) -> Result<OmcLock> {
-    let path = path.as_ref();
-    if !path.exists() {
-        return Ok(OmcLock::new());
-    }
-    Ok(toml::from_str(&fs::read_to_string(path)?)?)
 }
 
 fn options_with_manifest_policy(options: &LinkOptions) -> Result<LinkOptions> {
@@ -3550,34 +3473,6 @@ fn dedupe_pypi_find_links(options: &mut LinkOptions) {
 fn dedupe_paths(paths: &mut Vec<PathBuf>) {
     let mut seen = BTreeSet::new();
     paths.retain(|path| seen.insert(path.clone()));
-}
-
-fn prune_lockfile(project_dir: &Path, retained: &BTreeSet<String>) -> Result<usize> {
-    let lockfile = project_dir.join(LOCKFILE);
-    let mut lock = read_lockfile(&lockfile)?;
-    let before = lock.packages.len();
-    lock.packages
-        .retain(|package| retained.contains(&locked_package_key(package)));
-    let removed = before.saturating_sub(lock.packages.len());
-    if removed > 0 || before == 0 {
-        fs::write(lockfile, toml::to_string_pretty(&lock)?)?;
-    }
-    Ok(removed)
-}
-
-fn sync_python_vcs_lockfile(
-    project_dir: &Path,
-    dependencies: Vec<LockedPythonVcsDependency>,
-) -> Result<()> {
-    let lockfile = project_dir.join(LOCKFILE);
-    let mut lock = read_lockfile(&lockfile)?;
-    lock.replace_python_vcs(dependencies);
-    fs::write(lockfile, toml::to_string_pretty(&lock)?)?;
-    Ok(())
-}
-
-fn locked_package_key(package: &LockedPackage) -> String {
-    format!("{}:{}@{}", package.ecosystem, package.name, package.version)
 }
 
 fn locked_package_name_key(package: &LockedPackage) -> (Ecosystem, String) {
