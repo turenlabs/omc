@@ -20,7 +20,7 @@ use omc_cap::{Capability, Policy};
 use omc_cap::{FlowRule, LabelMatcher, Sink};
 use omc_verify::verify_module;
 #[cfg(test)]
-use omc_format::{CapOp, Function, HttpRequest, Op};
+use omc_format::{CapOp, Op};
 use reqwest::blocking::Client;
 use reqwest::header::{ACCEPT, CONTENT_TYPE};
 use semver::Version;
@@ -83,10 +83,7 @@ use npm_config::{
     read_npm_config, read_npm_config_for_options, strip_npmrc_comment, NpmConfig,
 };
 #[cfg(test)]
-use npm_config::{
-    apply_npm_environment_values, parse_npmrc_content, read_npm_user_config, read_npmrc_into,
-    NpmAuthToken,
-};
+use npm_config::{apply_npm_environment_values, parse_npmrc_content, read_npm_user_config};
 
 pub(crate) mod npm_metadata;
 pub use npm_metadata::{

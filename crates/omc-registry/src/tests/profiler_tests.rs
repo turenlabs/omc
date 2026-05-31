@@ -1,7 +1,6 @@
 //! `profiler` domain tests, extracted from the original monolithic tests.rs.
 
 use super::*;
-use crate::*;
 
 #[test]
 fn profiler_turns_host_access_into_capabilities() {

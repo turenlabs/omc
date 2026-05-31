@@ -1,8 +1,6 @@
 //! Manifest spec helpers — parse/normalize package specs and dependency kinds
 //! for init/add/remove operations against `omc.toml`.
 
-use crate::*;
-
 use omc_registry::{Ecosystem, ManifestDependencyKind, OmcRegistryError, PackageSpec};
 
 pub(crate) fn parse_package_specs(

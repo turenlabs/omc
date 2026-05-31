@@ -1,7 +1,6 @@
 //! `policy` domain tests, extracted from the original monolithic tests.rs.
 
 use super::*;
-use crate::*;
 
 #[test]
 fn adds_manifest_policy_grants() {

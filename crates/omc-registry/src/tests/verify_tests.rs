@@ -1,7 +1,6 @@
 //! `verify` domain tests, extracted from the original monolithic tests.rs.
 
 use super::*;
-use crate::*;
 
 #[test]
 fn shai_hulud_worm_is_blocked_at_install() {

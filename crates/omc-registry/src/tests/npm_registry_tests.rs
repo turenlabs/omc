@@ -1,7 +1,6 @@
 //! `npm_registry` domain tests, extracted from the original monolithic tests.rs.
 
 use super::*;
-use crate::*;
 
 #[test]
 fn parses_npm_search_response_packages() {

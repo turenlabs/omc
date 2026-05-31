@@ -1,7 +1,6 @@
 //! `pypi_publish` domain tests, extracted from the original monolithic tests.rs.
 
 use super::*;
-use crate::*;
 
 #[test]
 fn uploads_pypi_wheel_with_basic_auth_and_metadata() {

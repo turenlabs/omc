@@ -2,7 +2,7 @@
 
 use crate::*;
 
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use omc_registry::{NpmDistTagMutationResult, OmcRegistryError};

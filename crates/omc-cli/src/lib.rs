@@ -15,9 +15,11 @@ use flate2::Compression;
 use clap::Parser;
 use omc_cap::Capability;
 use omc_registry::{
-    add_manifest_npm_local_paths, add_npm_dist_tag, add_package_graph, apply_pypi_binary_option, apply_pypi_environment_defaults, apply_pypi_release_control, check_pypi_distribution, compare_npm_versions, compare_pypi_versions, deprecate_npm_package, download_npm_package_tarball, install_locked_packages, install_locked_project, install_project, install_python_project_local_import_paths, lock_project, parse_capability_grant, parse_flow_rule, parse_npm_direct_archive_reference, parse_pypi_direct_archive_reference, parse_pypi_vcs_requirement, prune_locked_package_versions, publish_npm_package, pypi_marker_applies, read_constraint_files, read_lockfile, read_manifest, read_npm_config_snapshot_with_globalconfig, read_npm_package_metadata, read_npm_package_metadata_with_userconfig, read_npm_search, read_npm_workspace_packages, read_pip_config_snapshot, read_pypi_available_versions, read_requirements_files, read_script_requirement_files, remove_locked_packages, remove_manifest_dependency, remove_npm_dist_tag, unpublish_npm_package, upload_pypi_distribution, Behavior, Ecosystem, InstallReport, LinkOptions, LockedLocalSource, LockedPackage, LockedPythonVcsDependency, ManifestDependencyKind, NpmDeprecateResult, NpmDistTagMutationResult, NpmPackageTarball, NpmProvenanceBundle, NpmPublishPackage, NpmPublishResult, NpmSearchPackage, NpmTokenCreateOptions, NpmUnpublishResult, NpmWorkspacePackage, OmcLock, OmcRegistryError, PackageSpec, ProjectRequirements, PypiAvailableVersionsOptions, PypiBinaryMode, PypiCheckIssue, PypiReleaseControl, PypiReleaseControls, PypiUploadOptions, PypiUploadResult, PypiUploadSignature, PythonLocalRequirement, PythonVcsRequirement, Verdict,
+    add_manifest_npm_local_paths, add_npm_dist_tag, add_package_graph, apply_pypi_binary_option, apply_pypi_environment_defaults, apply_pypi_release_control, compare_npm_versions, compare_pypi_versions, deprecate_npm_package, download_npm_package_tarball, install_locked_packages, install_locked_project, install_project, install_python_project_local_import_paths, lock_project, parse_capability_grant, parse_flow_rule, parse_npm_direct_archive_reference, parse_pypi_direct_archive_reference, parse_pypi_vcs_requirement, prune_locked_package_versions, publish_npm_package, pypi_marker_applies, read_constraint_files, read_lockfile, read_manifest, read_npm_config_snapshot_with_globalconfig, read_npm_package_metadata, read_npm_package_metadata_with_userconfig, read_npm_search, read_npm_workspace_packages, read_pip_config_snapshot, read_pypi_available_versions, read_requirements_files, read_script_requirement_files, remove_locked_packages, remove_manifest_dependency, remove_npm_dist_tag, unpublish_npm_package, Behavior, Ecosystem, InstallReport, LinkOptions, LockedLocalSource, LockedPackage, ManifestDependencyKind, NpmDeprecateResult, NpmPackageTarball, NpmProvenanceBundle, NpmPublishPackage, NpmPublishResult, NpmSearchPackage, NpmTokenCreateOptions, NpmUnpublishResult, NpmWorkspacePackage, OmcLock, OmcRegistryError, PackageSpec, ProjectRequirements, PypiAvailableVersionsOptions, PypiBinaryMode, PypiReleaseControl, PypiReleaseControls, PythonLocalRequirement, PythonVcsRequirement, Verdict,
 };
-use sha2::{Digest, Sha256, Sha384, Sha512};
+#[cfg(test)]
+use omc_registry::{LockedPythonVcsDependency, PypiCheckIssue};
+use sha2::{Digest, Sha256};
 
 pub(crate) mod args;
 pub(crate) mod compile;
@@ -65,10 +67,12 @@ use temp_project::TempOmcProject;
 use shim::command_program_for_cwd;
 #[cfg(test)]
 use shim::{python_pip_module_args, python_twine_module_args};
+use crate::twine_compat::run_twine_compat_with_cwd;
+#[cfg(test)]
 use crate::twine_compat::{
     absolutize_twine_upload_action_paths, parse_twine_compat_action, print_twine_check,
-    resolve_twine_upload_settings, run_twine_compat_with_cwd,
-    twine_attestation_path, twine_upload_attestations_json, twine_upload_inputs,
+    resolve_twine_upload_settings, twine_attestation_path, twine_upload_attestations_json,
+    twine_upload_inputs,
 };
 use script::{
     print_npm_run_list, run_package_script_with_npm_command_for_workspaces,
@@ -81,22 +85,7 @@ use crate::args::*;
 pub(crate) use crate::pip_cli::*;
 
 pub(crate) use npm_query_cli::{
-    NpmDiffFile,
-    NpmFundPackage,
-    NpmFundReport,
-    NpmOutdatedPackage,
-    NpmQueryItem,
-    collect_npm_fund_report,
-    normalize_npm_funding,
-    npm_diff_changed_files,
-    npm_diff_file_patch,
-    npm_diff_package_tarball,
-    npm_fund_report_json,
-    npm_funding_urls,
-    npm_query_items,
-    npm_query_selector_matches,
     npm_view_field_value,
-    npm_view_metadata_value,
     parse_npm_audit_args,
     parse_npm_diff_args,
     parse_npm_fund_args,
@@ -110,6 +99,20 @@ pub(crate) use npm_query_cli::{
     print_npm_query,
     print_npm_search,
     print_npm_view,
+};
+#[cfg(test)]
+pub(crate) use npm_query_cli::{
+    NpmQueryItem,
+    collect_npm_fund_report,
+    normalize_npm_funding,
+    npm_diff_changed_files,
+    npm_diff_file_patch,
+    npm_diff_package_tarball,
+    npm_fund_report_json,
+    npm_funding_urls,
+    npm_query_items,
+    npm_query_selector_matches,
+    npm_view_metadata_value,
 };
 use crate::npm_compat::NpmLinkAction;
 pub(crate) use crate::npm_account::{
@@ -143,7 +146,9 @@ use crate::npm_compat::{
     npm_link_store_entry, npm_link_target_from_path, npm_package_json_requirement_for_link_root,
     npm_read_link_store_entry, npm_write_link_store_entry,
 };
-use crate::npm_exec::{npm_exec_direct_package_arg, npm_exec_target_cwds, run_npm_exec};
+use crate::npm_exec::{npm_exec_direct_package_arg, run_npm_exec};
+#[cfg(test)]
+use crate::npm_exec::npm_exec_target_cwds;
 pub(crate) use crate::npm_publish_cli::{
     absolutize_npm_deprecate_action_paths, absolutize_npm_pack_action_paths,
     absolutize_npm_publish_action_paths, absolutize_npm_unpublish_action_paths,
@@ -191,10 +196,12 @@ use crate::install::{
     write_pip_install_report,
 };
 use crate::pip_compat::{
-    parse_pip_compat_action, pip_rooted_project_path, pip_user_install_local_paths_file,
+    parse_pip_compat_action, pip_user_install_local_paths_file,
     pip_user_paths, run_pip_install_dry_run, run_pip_install_prefix, run_pip_install_root,
     run_pip_install_target, run_pip_install_user, run_pip_uninstall_user,
 };
+#[cfg(test)]
+use crate::pip_compat::pip_rooted_project_path;
 
 fn pylock_toml_from_omc_lock(lock: &OmcLock) -> String {
     let mut packages = lock

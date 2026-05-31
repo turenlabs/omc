@@ -1,7 +1,6 @@
 //! `lockfile` domain tests, extracted from the original monolithic tests.rs.
 
 use super::*;
-use crate::*;
 
 #[test]
 fn npm_direct_specs_prefer_locked_github_resolved_url() {

@@ -1,7 +1,6 @@
 //! `pypi_install` domain tests, extracted from the original monolithic tests.rs.
 
 use super::*;
-use crate::*;
 
 #[test]
 fn installs_explicit_requirement_files() {
