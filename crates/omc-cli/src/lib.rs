@@ -61,6 +61,7 @@ pub(crate) mod policy;
 pub(crate) mod policy_args;
 pub(crate) mod render;
 pub(crate) mod script;
+pub(crate) mod shim;
 pub(crate) mod temp_project;
 
 use compile::{compile_source_default_name, infer_compile_ecosystem, print_compile_source};
@@ -82,6 +83,12 @@ use render::{
 #[cfg(test)]
 use render::pip_install_report_json;
 use temp_project::TempOmcProject;
+use shim::{
+    command_has_path_separator, command_program_for_cwd, host_python_program, run_node,
+    run_node_in_cwd, run_project_command, run_project_command_in_cwd, run_python, run_python_in_cwd,
+};
+#[cfg(test)]
+use shim::{python_pip_module_args, python_twine_module_args};
 use script::{
     print_npm_run_list, run_package_script, run_package_script_with_npm_command_for_workspaces,
 };
@@ -672,110 +679,6 @@ fn toml_string(value: &str) -> String {
     toml::Value::String(value.to_owned()).to_string()
 }
 
-fn run_node(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRegistryError> {
-    run_node_in_cwd(project_dir, project_dir, args)
-}
-
-fn run_node_in_cwd(
-    project_dir: &Path,
-    cwd: &Path,
-    args: &[String],
-) -> Result<ExitCode, OmcRegistryError> {
-    let mut command = ProcessCommand::new(host_node_program()?);
-    apply_project_runtime_env_for_cwd(&mut command, project_dir, cwd)?;
-    let status = command.args(args).status()?;
-    Ok(exit_code(status.code()))
-}
-
-fn host_node_program() -> Result<PathBuf, OmcRegistryError> {
-    host_program("OMC_HOST_NODE", &["node"], "host node")
-}
-
-fn run_python(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRegistryError> {
-    run_python_in_cwd(project_dir, project_dir, args)
-}
-
-fn run_python_in_cwd(
-    project_dir: &Path,
-    cwd: &Path,
-    args: &[String],
-) -> Result<ExitCode, OmcRegistryError> {
-    if let Some(pip_args) = python_pip_module_args(args) {
-        return run_pip_compat_with_cwd(project_dir, pip_args, cwd);
-    }
-    if let Some(twine_args) = python_twine_module_args(args) {
-        return run_twine_compat_with_cwd(project_dir, twine_args, cwd);
-    }
-
-    let mut command = ProcessCommand::new(host_python_program()?);
-    apply_project_runtime_env_for_cwd(&mut command, project_dir, cwd)?;
-    let status = command.arg("-S").args(args).status()?;
-    Ok(exit_code(status.code()))
-}
-
-fn host_python_program() -> Result<PathBuf, OmcRegistryError> {
-    host_program("OMC_HOST_PYTHON", &["python3", "python"], "host python3")
-}
-
-fn host_program(
-    override_var: &str,
-    programs: &[&str],
-    description: &str,
-) -> Result<PathBuf, OmcRegistryError> {
-    if let Some(path) = env::var_os(override_var) {
-        return Ok(PathBuf::from(path));
-    }
-
-    programs
-        .iter()
-        .find_map(|program| find_program_outside_current_exe_dir(program))
-        .ok_or_else(|| {
-            OmcRegistryError::UnsupportedSpec(format!(
-                "could not find a {description} outside the OMC shim directory; set {override_var}"
-            ))
-        })
-}
-
-fn python_pip_module_args(args: &[String]) -> Option<&[String]> {
-    python_module_args(args, is_pip_module)
-}
-
-fn python_twine_module_args(args: &[String]) -> Option<&[String]> {
-    python_module_args(args, is_twine_module)
-}
-
-fn python_module_args(args: &[String], is_module: impl Fn(&str) -> bool) -> Option<&[String]> {
-    let mut index = 0;
-    while index < args.len() {
-        let arg = args[index].as_str();
-        if arg == "-m" {
-            let module = args.get(index + 1)?;
-            return is_module(module).then_some(&args[index + 2..]);
-        }
-        if let Some(module) = arg.strip_prefix("-m") {
-            if !module.is_empty() {
-                return is_module(module).then_some(&args[index + 1..]);
-            }
-        }
-
-        match arg {
-            "-S" | "-s" | "-E" | "-I" | "-B" | "-u" | "-q" | "-O" | "-OO" => index += 1,
-            "-W" | "-X" => index += 2,
-            _ if arg.starts_with("-W") || arg.starts_with("-X") => index += 1,
-            _ => return None,
-        }
-    }
-    None
-}
-
-fn is_pip_module(module: &str) -> bool {
-    matches!(module, "pip" | "pip3" | "pip.__main__")
-}
-
-fn is_twine_module(module: &str) -> bool {
-    matches!(module, "twine" | "twine.__main__")
-}
-
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct NpmScriptTargets<'a> {
     pub(crate) workspaces: &'a [String],
@@ -849,39 +752,6 @@ fn select_npm_workspace(
         format!("npm workspace `{selector}` was not found; available workspaces: {available}")
     };
     Err(OmcRegistryError::UnsupportedSpec(detail))
-}
-
-fn run_project_command(
-    project_dir: &Path,
-    command: &str,
-    args: &[String],
-) -> Result<ExitCode, OmcRegistryError> {
-    run_project_command_in_cwd(project_dir, project_dir, command, args)
-}
-
-fn run_project_command_in_cwd(
-    project_dir: &Path,
-    cwd: &Path,
-    command: &str,
-    args: &[String],
-) -> Result<ExitCode, OmcRegistryError> {
-    let mut process = ProcessCommand::new(command_program_for_cwd(command, cwd));
-    apply_project_runtime_env_for_cwd(&mut process, project_dir, cwd)?;
-    let status = process.args(args).status()?;
-    Ok(exit_code(status.code()))
-}
-
-fn command_program_for_cwd(command: &str, cwd: &Path) -> PathBuf {
-    let path = Path::new(command);
-    if path.is_relative() && command_has_path_separator(command) {
-        cwd.join(path)
-    } else {
-        path.to_path_buf()
-    }
-}
-
-fn command_has_path_separator(command: &str) -> bool {
-    command.contains('/') || command.contains('\\')
 }
 
 fn run_npm_exec(
