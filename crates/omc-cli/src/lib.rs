@@ -52,11 +52,17 @@ use omc_registry::{
 use sha2::{Digest, Sha256, Sha384, Sha512};
 
 pub(crate) mod args;
+pub(crate) mod direct_compat;
 pub(crate) mod parse;
 pub(crate) mod policy_args;
 pub(crate) mod render;
 pub(crate) mod temp_project;
 
+use direct_compat::{
+    direct_compat_mode, npx_compat_args, parse_direct_compat_invocation, DirectCompatMode,
+};
+#[cfg(test)]
+use direct_compat::{discover_direct_compat_project_dir_from, DirectCompatInvocation};
 use parse::{npm_next_version, parse_npm_archive_references, parse_pip_archive_references};
 use render::{
     behavior_label, pip_install_report_json, print_audit_report, print_install_report,
@@ -83,23 +89,6 @@ const NPM_PROFILE_WRITABLE_KEYS: &[&str] = &[
     "email", "password", "fullname", "homepage", "freenode", "twitter", "github",
 ];
 const DEFAULT_NPM_SAVE_PREFIX: &str = "^";
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum DirectCompatMode {
-    Node,
-    Npm,
-    Npx,
-    Pip,
-    Python,
-    Twine,
-}
-
-#[derive(Debug, PartialEq, Eq)]
-struct DirectCompatInvocation {
-    project_dir: PathBuf,
-    cwd: PathBuf,
-    args: Vec<String>,
-}
 
 pub fn omc_main() -> ExitCode {
     match run_entry() {
@@ -154,154 +143,6 @@ fn run_entry() -> Result<ExitCode, OmcRegistryError> {
     }
 
     run()
-}
-
-fn direct_compat_mode(program: Option<&std::ffi::OsStr>) -> Option<DirectCompatMode> {
-    let name = Path::new(program?)
-        .file_stem()
-        .and_then(|name| name.to_str())?;
-    match name {
-        "node" => Some(DirectCompatMode::Node),
-        "npm" => Some(DirectCompatMode::Npm),
-        "npx" => Some(DirectCompatMode::Npx),
-        "pip" | "pip3" => Some(DirectCompatMode::Pip),
-        "python" | "python3" => Some(DirectCompatMode::Python),
-        "twine" => Some(DirectCompatMode::Twine),
-        _ => None,
-    }
-}
-
-fn npx_compat_args(args: Vec<String>) -> Vec<String> {
-    if args
-        .first()
-        .is_some_and(|arg| matches!(arg.as_str(), "--version" | "-v"))
-    {
-        return vec![args[0].clone()];
-    }
-    let mut compat_args = Vec::with_capacity(args.len() + 1);
-    compat_args.push("npx".to_owned());
-    compat_args.extend(args);
-    compat_args
-}
-
-fn parse_direct_compat_invocation<I>(
-    mode: DirectCompatMode,
-    args: I,
-) -> Result<DirectCompatInvocation, OmcRegistryError>
-where
-    I: IntoIterator<Item = OsString>,
-{
-    let cwd = env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    let env_project_dir = env::var_os("OMC_PROJECT_DIR").map(PathBuf::from);
-    let mut project_dir = env_project_dir
-        .clone()
-        .unwrap_or_else(|| PathBuf::from("."));
-    let mut explicit_project_dir = env_project_dir.is_some();
-    let mut compat_args = Vec::new();
-    let mut args = args.into_iter();
-    while let Some(arg) = args.next() {
-        let arg = os_arg_to_string(arg)?;
-        if arg == "--omc-project-dir"
-            || arg == "--project-dir"
-            || (direct_compat_uses_npm_prefix(mode) && arg == "--prefix")
-        {
-            let Some(path) = args.next() else {
-                return Err(OmcRegistryError::UnsupportedSpec(format!(
-                    "{arg} needs a path"
-                )));
-            };
-            project_dir = PathBuf::from(os_arg_to_string(path)?);
-            explicit_project_dir = true;
-        } else if let Some(path) = arg.strip_prefix("--omc-project-dir=") {
-            project_dir = PathBuf::from(path);
-            explicit_project_dir = true;
-        } else if let Some(path) = arg.strip_prefix("--project-dir=") {
-            project_dir = PathBuf::from(path);
-            explicit_project_dir = true;
-        } else if let Some(path) = direct_compat_uses_npm_prefix(mode)
-            .then(|| arg.strip_prefix("--prefix="))
-            .flatten()
-        {
-            project_dir = PathBuf::from(path);
-            explicit_project_dir = true;
-        } else {
-            compat_args.push(arg);
-            compat_args.extend(
-                args.map(os_arg_to_string)
-                    .collect::<Result<Vec<_>, OmcRegistryError>>()?,
-            );
-            break;
-        }
-    }
-    if !explicit_project_dir {
-        project_dir = discover_direct_compat_project_dir(mode, &project_dir);
-    }
-    Ok(DirectCompatInvocation {
-        project_dir,
-        cwd,
-        args: compat_args,
-    })
-}
-
-fn discover_direct_compat_project_dir(mode: DirectCompatMode, start: &Path) -> PathBuf {
-    let start = absolute_project_dir(start);
-    discover_direct_compat_project_dir_from(mode, &start).unwrap_or(start)
-}
-
-fn discover_direct_compat_project_dir_from(
-    mode: DirectCompatMode,
-    start: &Path,
-) -> Option<PathBuf> {
-    for dir in start.ancestors() {
-        if direct_compat_project_markers(mode)
-            .iter()
-            .any(|marker| dir.join(marker).exists())
-        {
-            return Some(dir.to_path_buf());
-        }
-    }
-    None
-}
-
-fn direct_compat_project_markers(mode: DirectCompatMode) -> &'static [&'static str] {
-    match mode {
-        DirectCompatMode::Node | DirectCompatMode::Npm | DirectCompatMode::Npx => &[
-            "omc.toml",
-            "omc.lock",
-            "package.json",
-            "package-lock.json",
-            "npm-shrinkwrap.json",
-            "pnpm-lock.yaml",
-            "yarn.lock",
-            "node_modules",
-        ],
-        DirectCompatMode::Pip | DirectCompatMode::Python | DirectCompatMode::Twine => &[
-            "omc.toml",
-            "omc.lock",
-            "pyproject.toml",
-            "setup.cfg",
-            "setup.py",
-            "requirements.txt",
-            "Pipfile",
-            "poetry.lock",
-            "uv.lock",
-            "pylock.toml",
-            ".pypirc",
-        ],
-    }
-}
-
-fn direct_compat_uses_npm_prefix(mode: DirectCompatMode) -> bool {
-    matches!(mode, DirectCompatMode::Npm | DirectCompatMode::Npx)
-}
-
-fn os_arg_to_string(arg: OsString) -> Result<String, OmcRegistryError> {
-    arg.into_string().map_err(|arg| {
-        OmcRegistryError::UnsupportedSpec(format!(
-            "argument is not valid UTF-8: {}",
-            arg.to_string_lossy()
-        ))
-    })
 }
 
 fn run() -> Result<ExitCode, OmcRegistryError> {
