@@ -94,6 +94,21 @@ OMC also reads a **global** user policy at `~/.omc/omc.toml` (override the dir w
 min-release-age = "7d"
 ```
 
+### Trusting a package everywhere (`~/.omc/policy.d/` + `omc trust`)
+
+When a package is blocked, the message prints the exact grant. To persist it as a
+**per-package, version-pinned** trust that applies in every project, run:
+
+```bash
+omc trust pypi:requests@2.32.5 --allow-flow 'env:*->network:*' --allow dynamic.eval
+```
+
+This writes a drop-in `~/.omc/policy.d/requests.omc.policy` (a directory of
+per-package `omc.policy` blocks). Each block grants **only** its exact
+package+version, so a trust decision never leaks to other packages or to
+transitive dependencies — unlike a flat project-wide grant. Delete the file to
+revoke. Hand-authored files in `~/.omc/policy.d/` work too.
+
 **Every field, statement, capability, flow, version operator, and the
 project/global config — see [docs/POLICY.md](docs/POLICY.md).**
 
