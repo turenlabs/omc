@@ -11,6 +11,8 @@ use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
 
+use crate::npm_compat::NpmLinkAction;
+
 #[derive(Debug, Parser)]
 #[command(name = "omc")]
 #[command(about = "OMC package-manager prototype")]
