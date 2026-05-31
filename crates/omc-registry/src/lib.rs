@@ -3656,11 +3656,53 @@ pub fn effective_package_policy(
     name: &str,
     version: &str,
 ) -> Result<Policy> {
-    let Some(document) = load_policy_document(project_dir)? else {
-        return Ok(base);
+    let eco = policy_ecosystem(ecosystem);
+    let mut policy = base;
+    // Project `omc.policy` (committable, project-scoped).
+    if let Some(document) = load_policy_document(project_dir)? {
+        policy = merge_dsl_policy(policy, &document.compile_for(eco, name, version));
+    }
+    // Global drop-in trust store `~/.omc/policy.d/*.omc.policy` (personal,
+    // per-package, version-pinned). Each block only grants for its exact package,
+    // so it composes as a baseline under every project without leaking to other
+    // packages or transitive dependencies.
+    for document in load_global_policy_documents()? {
+        policy = merge_dsl_policy(policy, &document.compile_for(eco, name, version));
+    }
+    Ok(policy)
+}
+
+/// Load every drop-in per-package policy from the global trust directory
+/// `$OMC_HOME/policy.d/` (default `~/.omc/policy.d/`). Each `*.omc.policy` /
+/// `*.policy` file is parsed independently (a parse error in any file fails
+/// closed); files are read in sorted order for determinism. Missing dir → empty.
+fn load_global_policy_documents() -> Result<Vec<omc_policy::PolicyDocument>> {
+    let Some(dir) = global_omc_home().map(|home| home.join("policy.d")) else {
+        return Ok(Vec::new());
     };
-    let dsl = document.compile_for(policy_ecosystem(ecosystem), name, version);
-    Ok(merge_dsl_policy(base, &dsl))
+    if !dir.is_dir() {
+        return Ok(Vec::new());
+    }
+    let mut paths: Vec<PathBuf> = Vec::new();
+    for entry in fs::read_dir(&dir)? {
+        let path = entry?.path();
+        let is_policy = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.ends_with(".omc.policy") || name.ends_with(".policy"));
+        if path.is_file() && is_policy {
+            paths.push(path);
+        }
+    }
+    paths.sort();
+    let mut documents = Vec::new();
+    for path in paths {
+        // batou:ignore file_read -- drop-in policy files in the operator's own
+        // $OMC_HOME/policy.d trust dir; reading them is the explicit purpose.
+        let source = fs::read_to_string(&path)?;
+        documents.push(omc_policy::parse(&source)?);
+    }
+    Ok(documents)
 }
 
 /// Auto-accept a package's BENIGN runtime capabilities at the install gate.
@@ -10362,7 +10404,14 @@ fn render_block_guidance(
         flags.join(" \\\n        ")
     ));
     out.push_str(&format!(
-        "\n  To persist it (scoped to {name} {version} only), add to omc.policy:\n"
+        "\n  To trust {name} {version} everywhere (writes ~/.omc/policy.d/):\n"
+    ));
+    out.push_str(&format!(
+        "      omc trust {ecosystem}:{name}@{version} {}\n",
+        flags.join(" ")
+    ));
+    out.push_str(&format!(
+        "\n  ...or add this version-pinned block to ./omc.policy (project) or\n  ~/.omc/policy.d/{name}.omc.policy (personal, applies everywhere):\n"
     ));
     out.push_str(&format!(
         "      {ecosystem} package {name:?} =={version} {{\n"
@@ -10372,6 +10421,73 @@ fn render_block_guidance(
     }
     out.push_str("      }\n");
     out
+}
+
+/// Sanitize a package name into a safe `policy.d` file stem (scoped names like
+/// `@scope/pkg` become `@scope_pkg`).
+fn sanitize_policy_filename(name: &str) -> String {
+    name.chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.' | '@') {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
+/// Persist a per-package, version-pinned trust block to the global drop-in dir
+/// `$OMC_HOME/policy.d/<name>.omc.policy` (default `~/.omc/policy.d/`). Grants and
+/// flows are validated and rendered as an `omc.policy` package block; the file is
+/// overwritten (re-trusting a package updates its pin). Returns the written path.
+pub fn write_global_package_trust(
+    ecosystem: Ecosystem,
+    name: &str,
+    version: &str,
+    grants: &[String],
+    flows: &[String],
+) -> Result<PathBuf> {
+    // Validate every grant/flow up front so we never write a malformed file.
+    for grant in grants {
+        parse_capability_grant(grant)?;
+    }
+    for flow in flows {
+        parse_flow_rule(flow)?;
+    }
+
+    let mut block = String::new();
+    block.push_str("# Written by `omc trust`: a per-package, version-pinned grant.\n");
+    block.push_str("# Delete this file to revoke. Applies to this exact version only.\n");
+    block.push_str(&format!("{ecosystem} package {name:?} =={version} {{\n"));
+    for grant in grants {
+        if let Some(stmt) = dsl_allow_clause(grant) {
+            block.push_str(&format!("  {stmt}\n"));
+        }
+    }
+    for flow in flows {
+        if let Some((src, sink)) = flow.split_once("->") {
+            if let (Some(s), Some(d)) = (dsl_flow_src(src.trim()), dsl_flow_sink(sink.trim())) {
+                block.push_str(&format!("  flow {s} -> {d}\n"));
+            }
+        }
+    }
+    block.push_str("}\n");
+
+    // The rendered block must parse with the real DSL (defense in depth).
+    omc_policy::parse(&block)?;
+
+    let dir = global_omc_home()
+        .ok_or_else(|| {
+            OmcRegistryError::UnsupportedSpec(
+                "cannot resolve home directory for ~/.omc/policy.d".to_owned(),
+            )
+        })?
+        .join("policy.d");
+    fs::create_dir_all(&dir)?;
+    let path = dir.join(format!("{}.omc.policy", sanitize_policy_filename(name)));
+    fs::write(&path, block)?;
+    Ok(path)
 }
 
 #[derive(Debug, Clone)]
@@ -20486,6 +20602,10 @@ mod redteam_capability_evasion {
 mod tests {
     use super::*;
 
+    /// Serializes the (process-global) `OMC_HOME` env var across every test that
+    /// mutates it, since cargo runs tests in parallel threads.
+    static OMC_HOME_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     fn has_spec(specs: &[PackageSpec], name: &str, requirement: &str) -> bool {
         specs
             .iter()
@@ -23207,16 +23327,12 @@ packages:
     // global baseline (no `[project]` required) and surface its freshness floor.
     #[test]
     fn shipped_global_config_loads_from_omc_home() {
-        // `load_global_manifest` reads the process-global $OMC_HOME; serialize the
-        // env mutation so a future env-touching test can't observe a half-set var.
-        static OMC_HOME_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
         let raw = include_str!("../../../examples/omc.global.toml");
         let home = tempfile::tempdir().unwrap();
         fs::write(home.path().join("omc.toml"), raw).unwrap();
 
         let global = {
-            let _guard = OMC_HOME_TEST_LOCK.lock().unwrap();
+            let _guard = OMC_HOME_ENV_LOCK.lock().unwrap();
             env::set_var("OMC_HOME", home.path());
             let loaded = load_global_manifest();
             env::remove_var("OMC_HOME");
@@ -23225,6 +23341,81 @@ packages:
         .unwrap()
         .expect("global config present at $OMC_HOME must load");
         assert_eq!(global.policy.min_release_age.as_deref(), Some("14d"));
+    }
+
+    // A pinned trust block grants ONLY its exact package + version — never a
+    // different version, never another package. (Pure pin semantics, no env.)
+    #[test]
+    fn pinned_trust_block_grants_only_matching_version() {
+        let doc = omc_policy::parse("npm package \"widget\" ==1.0.0 { allow eval }").unwrap();
+        let hit = doc.compile_for(omc_policy::Ecosystem::Npm, "widget", "1.0.0");
+        let miss_ver = doc.compile_for(omc_policy::Ecosystem::Npm, "widget", "2.0.0");
+        let miss_pkg = doc.compile_for(omc_policy::Ecosystem::Npm, "gadget", "1.0.0");
+        assert!(hit.allowed_capabilities.contains(&Capability::DynamicEval));
+        assert!(!miss_ver
+            .allowed_capabilities
+            .contains(&Capability::DynamicEval));
+        assert!(!miss_pkg
+            .allowed_capabilities
+            .contains(&Capability::DynamicEval));
+    }
+
+    // End-to-end: `omc trust` writes a per-package pinned block to
+    // $OMC_HOME/policy.d/, the loader picks it up, and effective_package_policy
+    // grants it for that exact package+version — but NOT a different version.
+    #[test]
+    fn global_trust_roundtrips_through_policy_d() {
+        let home = tempfile::tempdir().unwrap();
+        let (granted, other_version, file_ok) = {
+            let _guard = OMC_HOME_ENV_LOCK.lock().unwrap();
+            env::set_var("OMC_HOME", home.path());
+            let path = write_global_package_trust(
+                Ecosystem::Pypi,
+                "requests",
+                "2.32.5",
+                &["dynamic.eval".to_owned()],
+                &["env:*->network:*".to_owned()],
+            )
+            .unwrap();
+            let file_ok = path.exists()
+                && omc_policy::parse(&fs::read_to_string(&path).unwrap()).is_ok()
+                && fs::read_to_string(&path).unwrap().contains("==2.32.5");
+            let granted = effective_package_policy(
+                home.path(),
+                Policy::pure(),
+                Ecosystem::Pypi,
+                "requests",
+                "2.32.5",
+            )
+            .unwrap();
+            let other_version = effective_package_policy(
+                home.path(),
+                Policy::pure(),
+                Ecosystem::Pypi,
+                "requests",
+                "2.30.0",
+            )
+            .unwrap();
+            env::remove_var("OMC_HOME");
+            (granted, other_version, file_ok)
+        };
+        assert!(file_ok, "trust file must exist, parse, and pin the version");
+        assert!(
+            granted
+                .allowed_capabilities
+                .contains(&Capability::DynamicEval),
+            "trusted version must receive the grant"
+        );
+        assert!(
+            !granted.allowed_flows.is_empty(),
+            "trusted version must receive the flow grant"
+        );
+        assert!(
+            !other_version
+                .allowed_capabilities
+                .contains(&Capability::DynamicEval),
+            "an untrusted version must NOT inherit the grant"
+        );
     }
 
     // REGRESSION: a packument must still deserialize when ANY version uses a

@@ -35,13 +35,13 @@ use omc_registry::{
     remove_locked_packages, remove_manifest_dependency, remove_npm_dist_tag, remove_npm_org_user,
     remove_npm_team_user, revoke_npm_access, revoke_npm_token, revoke_npm_trust,
     set_npm_access_mfa, set_npm_access_status, set_npm_org_user, set_npm_profile_property,
-    unpublish_npm_package, upload_pypi_distribution, Behavior, CompileSourceOptions, Ecosystem,
-    InstallReport, LinkOptions, LinkReport, LockedLocalSource, LockedPackage,
-    LockedPythonVcsDependency, ManifestDependencyKind, NpmAccessMapResult, NpmAccessMutationResult,
-    NpmAccessStatusResult, NpmAccessToken, NpmDeprecateResult, NpmDistTagMutationResult,
-    NpmOrgListResult, NpmOrgMutationResult, NpmOwnerListResult, NpmOwnerMutationResult,
-    NpmPackageTarball, NpmPingResult, NpmProfileMutationResult, NpmProfileResult,
-    NpmProvenanceBundle, NpmPublishPackage, NpmPublishResult, NpmSearchPackage,
+    unpublish_npm_package, upload_pypi_distribution, write_global_package_trust, Behavior,
+    CompileSourceOptions, Ecosystem, InstallReport, LinkOptions, LinkReport, LockedLocalSource,
+    LockedPackage, LockedPythonVcsDependency, ManifestDependencyKind, NpmAccessMapResult,
+    NpmAccessMutationResult, NpmAccessStatusResult, NpmAccessToken, NpmDeprecateResult,
+    NpmDistTagMutationResult, NpmOrgListResult, NpmOrgMutationResult, NpmOwnerListResult,
+    NpmOwnerMutationResult, NpmPackageTarball, NpmPingResult, NpmProfileMutationResult,
+    NpmProfileResult, NpmProvenanceBundle, NpmPublishPackage, NpmPublishResult, NpmSearchPackage,
     NpmStarMutationResult, NpmStarsResult, NpmTeamListResult, NpmTeamMutationResult,
     NpmTokenCreateOptions, NpmTokenCreateResult, NpmTokenListResult, NpmTokenRevokeResult,
     NpmUnpublishResult, NpmWhoamiResult, NpmWorkspacePackage, OmcLock, OmcRegistryError,
@@ -222,6 +222,20 @@ enum Command {
         flows: Vec<String>,
         #[arg(help = "Capability grants such as http:api.example.com or env:API_TOKEN")]
         grants: Vec<String>,
+    },
+    #[command(
+        about = "Trust a package: write a version-pinned grant to ~/.omc/policy.d/ (applies everywhere)"
+    )]
+    Trust {
+        #[arg(help = "Package spec to trust, e.g. npm:lodash@4.18.1 or pypi:requests@2.32.5")]
+        spec: String,
+        #[arg(
+            long = "allow",
+            help = "Capability grant, e.g. dynamic.eval, fs.write:*, env:TOKEN"
+        )]
+        allow: Vec<String>,
+        #[arg(long = "allow-flow", help = "Data-flow grant, e.g. env:*->network:*")]
+        allow_flow: Vec<String>,
     },
     #[command(about = "Resolve omc.toml dependencies and install locked packages")]
     Install {
@@ -1942,6 +1956,33 @@ fn run() -> Result<ExitCode, OmcRegistryError> {
                     println!("allowed flow {flow}");
                 }
             }
+        }
+        Command::Trust {
+            spec,
+            allow,
+            allow_flow,
+        } => {
+            if allow.is_empty() && allow_flow.is_empty() {
+                return Err(OmcRegistryError::UnsupportedSpec(
+                    "at least one --allow or --allow-flow is required".to_owned(),
+                ));
+            }
+            let parsed = PackageSpec::parse(&spec)?;
+            let version = parsed.version.as_deref().ok_or_else(|| {
+                OmcRegistryError::UnsupportedSpec(format!(
+                    "pin an exact version to trust, e.g. {}:{}@<version>",
+                    parsed.ecosystem, parsed.name
+                ))
+            })?;
+            let path = write_global_package_trust(
+                parsed.ecosystem,
+                &parsed.name,
+                version,
+                &allow,
+                &allow_flow,
+            )?;
+            println!("trusted {spec}");
+            println!("  wrote {}", path.display());
         }
         Command::Install {
             allow,
