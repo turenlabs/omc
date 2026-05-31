@@ -52,8 +52,10 @@ use omc_registry::{
 use sha2::{Digest, Sha256, Sha384, Sha512};
 
 pub(crate) mod args;
+pub(crate) mod policy_args;
 
 use crate::args::*;
+use crate::policy_args::{apply_cli_policy_options, CliPolicyArgs};
 
 const NPM_PROFILE_KNOWN_KEYS: &[&str] = &[
     "name",
@@ -653,24 +655,6 @@ struct DependencyOmit {
     optional: bool,
     peer: bool,
 }
-
-#[derive(Clone, Copy)]
-struct CliPolicyArgs<'a> {
-    allow: &'a [String],
-    allow_flow: &'a [String],
-    allow_all_host: bool,
-}
-
-impl<'a> CliPolicyArgs<'a> {
-    fn new(allow: &'a [String], allow_flow: &'a [String], allow_all_host: bool) -> Self {
-        Self {
-            allow,
-            allow_flow,
-            allow_all_host,
-        }
-    }
-}
-
 
 fn print_compile_source(
     project_dir: &Path,
@@ -32770,7 +32754,7 @@ fn render_cell_value(value: &omc_format::Value) -> String {
     }
 }
 
-fn parse_grants(
+pub(crate) fn parse_grants(
     allow: &[String],
     allow_all_host: bool,
 ) -> Result<Vec<Capability>, OmcRegistryError> {
@@ -32796,22 +32780,13 @@ fn parse_grants(
     Ok(grants)
 }
 
-fn parse_flow_grants(allow_flow: &[String]) -> Result<Vec<omc_cap::FlowRule>, OmcRegistryError> {
+pub(crate) fn parse_flow_grants(
+    allow_flow: &[String],
+) -> Result<Vec<omc_cap::FlowRule>, OmcRegistryError> {
     allow_flow
         .iter()
         .map(|flow| parse_flow_rule(flow))
         .collect()
-}
-
-fn apply_cli_policy_options(
-    options: &mut LinkOptions,
-    allow: &[String],
-    allow_flow: &[String],
-    allow_all_host: bool,
-) -> Result<(), OmcRegistryError> {
-    options.allowed_capabilities = parse_grants(allow, allow_all_host)?;
-    options.allowed_flows = parse_flow_grants(allow_flow)?;
-    Ok(())
 }
 
 fn parse_package_specs(
