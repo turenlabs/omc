@@ -53,6 +53,7 @@ use sha2::{Digest, Sha256, Sha384, Sha512};
 
 pub(crate) mod args;
 pub(crate) mod direct_compat;
+pub(crate) mod manifest;
 pub(crate) mod parse;
 pub(crate) mod policy;
 pub(crate) mod policy_args;
@@ -61,6 +62,10 @@ pub(crate) mod temp_project;
 
 use direct_compat::{
     direct_compat_mode, npx_compat_args, parse_direct_compat_invocation, DirectCompatMode,
+};
+use manifest::{
+    dependency_kind_from_booleans, ecosystem_hint, parse_package_spec, parse_package_specs,
+    package_spec_has_ecosystem_prefix,
 };
 #[cfg(test)]
 use direct_compat::{discover_direct_compat_project_dir_from, DirectCompatInvocation};
@@ -32030,59 +32035,6 @@ pub(crate) fn parse_flow_grants(
         .iter()
         .map(|flow| parse_flow_rule(flow))
         .collect()
-}
-
-fn parse_package_specs(
-    specs: &[String],
-    ecosystem_hint: Option<Ecosystem>,
-) -> Result<Vec<PackageSpec>, OmcRegistryError> {
-    specs
-        .iter()
-        .map(|spec| parse_package_spec(spec, ecosystem_hint))
-        .collect::<Result<Vec<_>, _>>()
-}
-
-fn parse_package_spec(
-    spec: &str,
-    ecosystem_hint: Option<Ecosystem>,
-) -> Result<PackageSpec, OmcRegistryError> {
-    if package_spec_has_ecosystem_prefix(spec) {
-        return PackageSpec::parse(spec);
-    }
-
-    let Some(ecosystem) = ecosystem_hint else {
-        return PackageSpec::parse(spec);
-    };
-
-    PackageSpec::parse(&format!("{ecosystem}:{spec}"))
-}
-
-fn package_spec_has_ecosystem_prefix(spec: &str) -> bool {
-    spec.split_once(':')
-        .map(|(prefix, _)| matches!(prefix, "npm" | "pypi" | "py" | "python"))
-        .unwrap_or(false)
-}
-
-fn ecosystem_hint(npm: bool, pypi: bool) -> Option<Ecosystem> {
-    if npm {
-        Some(Ecosystem::Npm)
-    } else if pypi {
-        Some(Ecosystem::Pypi)
-    } else {
-        None
-    }
-}
-
-fn dependency_kind_from_booleans(dev: bool, optional: bool, peer: bool) -> ManifestDependencyKind {
-    if dev {
-        ManifestDependencyKind::Dev
-    } else if optional {
-        ManifestDependencyKind::Optional
-    } else if peer {
-        ManifestDependencyKind::Peer
-    } else {
-        ManifestDependencyKind::Production
-    }
 }
 
 fn normalize_extra(extra: &str) -> String {
