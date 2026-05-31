@@ -2731,7 +2731,7 @@ fn npm_install_json_report_includes_npm_compatible_counts_and_omc_details() {
         python_bin_dir: project.join(".omc/python/bin"),
     };
 
-    let report = npm_install_json_report(
+    let report = render::npm_install_json_report(
         &project,
         &[],
         Some(&install),
