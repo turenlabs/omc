@@ -27,8 +27,7 @@ use reqwest::header::{ACCEPT, CONTENT_TYPE};
 use reqwest::{Certificate, Identity};
 use semver::Version;
 use serde::{Deserialize, Serialize};
-use sha1::Sha1;
-use sha2::{Digest, Sha256, Sha512};
+use sha2::{Digest, Sha512};
 use tar::Archive;
 use walkdir::{DirEntry, WalkDir};
 
@@ -187,6 +186,12 @@ use policy_bridge::parse_block_finding;
 pub(crate) mod link_install;
 pub use link_install::{add_package_graph, link_package, remove_manifest_dependency};
 use link_install::{default_public_capabilities, options_with_manifest_policy, resolve_package_graph};
+
+pub(crate) mod util;
+use util::{
+    checked_join, relative_path, safe_name, sha1_hex, sha256_hex, strip_first_path_component,
+    verify_npm_integrity,
+};
 // Re-exported for the `#[cfg(test)]` sibling modules which reach these through
 // `use super::*`.
 #[cfg(test)]
@@ -6983,26 +6988,6 @@ pub(crate) fn make_executable(_path: &Path) -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn strip_first_path_component(path: &Path) -> Option<PathBuf> {
-    let mut components = path.components();
-    components.next()?;
-    let stripped = components.as_path();
-    (!stripped.as_os_str().is_empty()).then(|| stripped.to_path_buf())
-}
-
-pub(crate) fn checked_join(base: &Path, relative: &Path) -> Result<PathBuf> {
-    if relative.is_absolute()
-        || relative
-            .components()
-            .any(|component| matches!(component, std::path::Component::ParentDir))
-    {
-        return Err(OmcRegistryError::UnsafeArchivePath(
-            relative.display().to_string(),
-        ));
-    }
-    Ok(base.join(relative))
-}
-
 /// Sanitize a package name into a safe `policy.d` file stem (scoped names like
 /// `@scope/pkg` become `@scope_pkg`).
 #[derive(Debug, Clone)]
@@ -10471,84 +10456,6 @@ fn pypi_suffix_numeric_value(rest: &str) -> u64 {
 
 
 
-
-fn sha256_hex(bytes: &[u8]) -> String {
-    let mut digest = Sha256::new();
-    digest.update(bytes);
-    hex::encode(digest.finalize())
-}
-
-fn sha1_hex(bytes: &[u8]) -> String {
-    let mut digest = Sha1::new();
-    digest.update(bytes);
-    hex::encode(digest.finalize())
-}
-
-fn verify_npm_integrity(name: &str, integrity: &str, bytes: &[u8]) -> Result<()> {
-    let mut saw_supported = false;
-    for token in integrity.split_whitespace() {
-        let Some((algorithm, expected_b64)) = token.split_once('-') else {
-            return Err(OmcRegistryError::UnsupportedSpec(format!(
-                "malformed npm integrity for {name}"
-            )));
-        };
-        let expected_b64 = expected_b64.split('?').next().unwrap_or(expected_b64);
-        let expected = STANDARD.decode(expected_b64).map_err(|_| {
-            OmcRegistryError::UnsupportedSpec(format!("malformed npm integrity for {name}"))
-        })?;
-        let Some(actual) = npm_integrity_digest(algorithm, bytes) else {
-            continue;
-        };
-        saw_supported = true;
-        if expected != actual {
-            return Err(OmcRegistryError::DigestMismatch {
-                name: name.to_owned(),
-                expected: format!("{algorithm}-{expected_b64}"),
-                actual: format!("{algorithm}-{}", STANDARD.encode(actual)),
-            });
-        }
-    }
-
-    if !saw_supported {
-        return Err(OmcRegistryError::UnsupportedSpec(format!(
-            "unsupported npm integrity digest for {name}"
-        )));
-    }
-
-    Ok(())
-}
-
-fn npm_integrity_digest(algorithm: &str, bytes: &[u8]) -> Option<Vec<u8>> {
-    match algorithm {
-        "sha1" => {
-            let mut digest = Sha1::new();
-            digest.update(bytes);
-            Some(digest.finalize().to_vec())
-        }
-        "sha256" => {
-            let mut digest = Sha256::new();
-            digest.update(bytes);
-            Some(digest.finalize().to_vec())
-        }
-        "sha512" => {
-            let mut digest = Sha512::new();
-            digest.update(bytes);
-            Some(digest.finalize().to_vec())
-        }
-        _ => None,
-    }
-}
-
-pub(crate) fn safe_name(name: &str) -> String {
-    name.replace('/', "__")
-}
-
-fn relative_path(base: &Path, path: &Path) -> String {
-    path.strip_prefix(base)
-        .unwrap_or(path)
-        .to_string_lossy()
-        .replace('\\', "/")
-}
 
 #[derive(Debug, Clone, Deserialize)]
 struct ProjectPackageJson {
