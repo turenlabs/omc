@@ -54,6 +54,7 @@ use sha2::{Digest, Sha256, Sha384, Sha512};
 pub(crate) mod args;
 pub(crate) mod direct_compat;
 pub(crate) mod parse;
+pub(crate) mod policy;
 pub(crate) mod policy_args;
 pub(crate) mod render;
 pub(crate) mod temp_project;
@@ -71,6 +72,7 @@ use render::{
 use temp_project::TempOmcProject;
 
 use crate::args::*;
+use crate::policy::run_policy_command;
 use crate::policy_args::{apply_cli_policy_options, CliPolicyArgs};
 
 const NPM_PROFILE_KNOWN_KEYS: &[&str] = &[
@@ -415,58 +417,6 @@ fn run() -> Result<ExitCode, OmcRegistryError> {
     }
 
     Ok(ExitCode::SUCCESS)
-}
-
-/// Dispatch `omc policy <check|validate>`.
-fn run_policy_command(
-    project_dir: &Path,
-    action: PolicyCommand,
-) -> Result<ExitCode, OmcRegistryError> {
-    match action {
-        PolicyCommand::Validate => {
-            match omc_registry::load_policy_document(project_dir)? {
-                Some(_) => println!("omc.policy OK"),
-                None => println!(
-                    "no omc.policy in {} (deny-by-default)",
-                    project_dir.display()
-                ),
-            }
-            Ok(ExitCode::SUCCESS)
-        }
-        PolicyCommand::Check { npm, pypi, package } => {
-            // Parse NAME or NAME@VERSION; a leading `@scope/name` keeps its first
-            // `@`, so only split on an `@` that is not at index 0.
-            let (name, version) = match package
-                .char_indices()
-                .find(|&(idx, ch)| ch == '@' && idx > 0)
-            {
-                Some((idx, _)) => (&package[..idx], &package[idx + 1..]),
-                None => (package.as_str(), "0.0.0"),
-            };
-            let ecosystem = match (npm, pypi) {
-                (false, true) => omc_policy::Ecosystem::Pypi,
-                // npm is the default when neither flag is given.
-                _ => omc_policy::Ecosystem::Npm,
-            };
-            match omc_registry::load_policy_document(project_dir)? {
-                Some(document) => {
-                    print!("{}", document.explain_for(ecosystem, name, version));
-                }
-                None => {
-                    let eco = match ecosystem {
-                        omc_policy::Ecosystem::Npm => "npm",
-                        omc_policy::Ecosystem::Pypi => "pypi",
-                    };
-                    println!(
-                        "no omc.policy in {}; {eco}:{name}@{version} gets the deny-by-default policy \
-                         (only omc.toml [policy] / CLI grants apply)",
-                        project_dir.display()
-                    );
-                }
-            }
-            Ok(ExitCode::SUCCESS)
-        }
-    }
 }
 
 fn install_options(
