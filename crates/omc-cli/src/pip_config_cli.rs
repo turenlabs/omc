@@ -10,7 +10,10 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-pub(crate) fn print_pip_config(project_dir: &Path, action: PipConfigAction) -> Result<(), OmcRegistryError> {
+pub(crate) fn print_pip_config(
+    project_dir: &Path,
+    action: PipConfigAction,
+) -> Result<(), OmcRegistryError> {
     match action {
         PipConfigAction::Set {
             assignments,
@@ -121,7 +124,9 @@ pub(crate) fn pip_config_debug_report(
     Ok(output)
 }
 
-pub(crate) fn pip_config_values(project_dir: &Path) -> Result<BTreeMap<String, String>, OmcRegistryError> {
+pub(crate) fn pip_config_values(
+    project_dir: &Path,
+) -> Result<BTreeMap<String, String>, OmcRegistryError> {
     let snapshot = read_pip_config_snapshot(project_dir)?;
     let mut values = BTreeMap::from([
         ("global.index-url".to_owned(), snapshot.index_url),

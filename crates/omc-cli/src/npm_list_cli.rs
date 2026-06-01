@@ -11,7 +11,10 @@ use crate::args::*;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
-pub(crate) fn npm_help_search_text(query: &[String], long: bool) -> Result<String, OmcRegistryError> {
+pub(crate) fn npm_help_search_text(
+    query: &[String],
+    long: bool,
+) -> Result<String, OmcRegistryError> {
     let terms = query
         .iter()
         .map(|term| term.trim())
@@ -563,7 +566,6 @@ pub(crate) struct NpmSbomRoot {
     pub(crate) description: Option<String>,
 }
 
-
 pub(crate) fn npm_sbom_context(
     project_dir: &Path,
     sbom_type: NpmSbomType,
@@ -1059,7 +1061,9 @@ pub(crate) fn npm_dependency_name(dependency: &str) -> Option<String> {
     (spec.ecosystem == Ecosystem::Npm).then_some(spec.name)
 }
 
-pub(crate) fn npm_dependency_graph_from_omc_lock(lock: OmcLock) -> BTreeMap<String, BTreeSet<String>> {
+pub(crate) fn npm_dependency_graph_from_omc_lock(
+    lock: OmcLock,
+) -> BTreeMap<String, BTreeSet<String>> {
     lock.packages
         .into_iter()
         .filter(|package| package.ecosystem == Ecosystem::Npm)
@@ -1302,7 +1306,6 @@ pub(crate) fn npm_list_short_all_flag_value(arg: &str) -> Option<bool> {
         .all(|ch| matches!(ch, 'a' | 'l'))
         .then(|| rest.contains('a'))
 }
-
 
 pub(crate) fn npm_list_ignored_equals_flag(arg: &str) -> bool {
     [

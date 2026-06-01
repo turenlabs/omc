@@ -885,7 +885,10 @@ pub(crate) fn npm_link_store_entry(name: &str) -> Result<PathBuf, OmcRegistryErr
     }
 }
 
-pub(crate) fn npm_write_link_store_entry(entry: &Path, target: &Path) -> Result<(), OmcRegistryError> {
+pub(crate) fn npm_write_link_store_entry(
+    entry: &Path,
+    target: &Path,
+) -> Result<(), OmcRegistryError> {
     if let Some(parent) = entry.parent() {
         fs::create_dir_all(parent)?;
     }
@@ -1219,7 +1222,10 @@ fn npm_project_has_npm_lockfile(project_dir: &Path) -> bool {
         .any(|name| project_dir.join(name).exists())
 }
 
-pub(crate) fn run_npm_compat(project_dir: &Path, args: &[String]) -> Result<ExitCode, OmcRegistryError> {
+pub(crate) fn run_npm_compat(
+    project_dir: &Path,
+    args: &[String],
+) -> Result<ExitCode, OmcRegistryError> {
     run_npm_compat_with_cwd(project_dir, args, project_dir)
 }
 

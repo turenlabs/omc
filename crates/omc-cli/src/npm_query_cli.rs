@@ -70,8 +70,10 @@ pub(crate) fn print_npm_view(
     Ok(())
 }
 
-
-pub(crate) fn print_npm_search(project_dir: &Path, action: NpmSearchAction) -> Result<(), OmcRegistryError> {
+pub(crate) fn print_npm_search(
+    project_dir: &Path,
+    action: NpmSearchAction,
+) -> Result<(), OmcRegistryError> {
     let packages = read_npm_search(
         project_dir,
         &action.query,
@@ -121,18 +123,6 @@ pub(crate) fn print_npm_search(project_dir: &Path, action: NpmSearchAction) -> R
     Ok(())
 }
 
-
-
-
-
-
-
-
-
-
-
-
-
 fn npm_search_short_date(package: &NpmSearchPackage) -> &str {
     package
         .date
@@ -140,7 +130,6 @@ fn npm_search_short_date(package: &NpmSearchPackage) -> &str {
         .and_then(|date| date.get(..10))
         .unwrap_or("unknown")
 }
-
 
 fn npm_search_publisher_suffix(package: &NpmSearchPackage) -> String {
     package
@@ -151,16 +140,13 @@ fn npm_search_publisher_suffix(package: &NpmSearchPackage) -> String {
         .unwrap_or_default()
 }
 
-
 fn npm_search_usernames(users: &[omc_registry::NpmSearchUser]) -> Vec<String> {
     users.iter().filter_map(npm_search_username).collect()
 }
 
-
 fn npm_search_username(user: &omc_registry::NpmSearchUser) -> Option<String> {
     user.username.clone().or_else(|| user.email.clone())
 }
-
 
 fn npm_search_package_url(package: &NpmSearchPackage) -> String {
     package
@@ -169,7 +155,6 @@ fn npm_search_package_url(package: &NpmSearchPackage) -> String {
         .cloned()
         .unwrap_or_else(|| format!("https://npm.im/{}", package.name))
 }
-
 
 #[derive(Debug)]
 pub(crate) struct NpmOutdatedPackage {
@@ -180,7 +165,6 @@ pub(crate) struct NpmOutdatedPackage {
     location: PathBuf,
     dependent: String,
 }
-
 
 pub(crate) fn print_npm_outdated(
     project_dir: &Path,
@@ -263,7 +247,6 @@ pub(crate) fn print_npm_outdated(
     }
 }
 
-
 pub(crate) fn npm_view_field_value(
     metadata: &omc_registry::NpmPackageMetadata,
     field: &str,
@@ -272,15 +255,15 @@ pub(crate) fn npm_view_field_value(
     npm_view_select_value(&npm_view_metadata_value(metadata), &tokens, String::new())
 }
 
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum NpmViewSelectorToken {
     Field(String),
     Index(usize),
 }
 
-
-pub(crate) fn npm_view_metadata_value(metadata: &omc_registry::NpmPackageMetadata) -> serde_json::Value {
+pub(crate) fn npm_view_metadata_value(
+    metadata: &omc_registry::NpmPackageMetadata,
+) -> serde_json::Value {
     let mut object = serde_json::Map::new();
     if let serde_json::Value::Object(root) = &metadata.root {
         object.extend(root.clone());
@@ -306,7 +289,6 @@ pub(crate) fn npm_view_metadata_value(metadata: &omc_registry::NpmPackageMetadat
     serde_json::Value::Object(object)
 }
 
-
 fn npm_view_selector_tokens(field: &str) -> Option<Vec<NpmViewSelectorToken>> {
     if field.trim().is_empty() {
         return None;
@@ -321,7 +303,6 @@ fn npm_view_selector_tokens(field: &str) -> Option<Vec<NpmViewSelectorToken>> {
     }
     Some(tokens)
 }
-
 
 fn npm_view_selector_segment_tokens(
     mut segment: &str,
@@ -355,7 +336,6 @@ fn npm_view_selector_segment_tokens(
     }
 }
 
-
 fn npm_view_bracket_token(raw: &str) -> Option<NpmViewSelectorToken> {
     let value = raw
         .strip_prefix('"')
@@ -373,7 +353,6 @@ fn npm_view_bracket_token(raw: &str) -> Option<NpmViewSelectorToken> {
     }
     Some(NpmViewSelectorToken::Field(value.to_owned()))
 }
-
 
 fn npm_view_select_value(
     value: &serde_json::Value,
@@ -411,7 +390,6 @@ fn npm_view_select_value(
     }
 }
 
-
 fn npm_view_append_field(path: &str, field: &str) -> String {
     if path.is_empty() {
         field.to_owned()
@@ -419,7 +397,6 @@ fn npm_view_append_field(path: &str, field: &str) -> String {
         format!("{path}.{field}")
     }
 }
-
 
 fn npm_view_selector_suffix(tokens: &[NpmViewSelectorToken]) -> String {
     let mut suffix = String::new();
@@ -435,7 +412,6 @@ fn npm_view_selector_suffix(tokens: &[NpmViewSelectorToken]) -> String {
     suffix
 }
 
-
 fn npm_view_text_value(value: &serde_json::Value) -> String {
     match value {
         serde_json::Value::Null => "undefined".to_owned(),
@@ -446,8 +422,10 @@ fn npm_view_text_value(value: &serde_json::Value) -> String {
     }
 }
 
-
-pub(crate) fn print_npm_fund(project_dir: &Path, action: NpmFundAction) -> Result<(), OmcRegistryError> {
+pub(crate) fn print_npm_fund(
+    project_dir: &Path,
+    action: NpmFundAction,
+) -> Result<(), OmcRegistryError> {
     let report = collect_npm_fund_report(project_dir, &action)?;
     if action.json {
         println!(
@@ -460,13 +438,11 @@ pub(crate) fn print_npm_fund(project_dir: &Path, action: NpmFundAction) -> Resul
     Ok(())
 }
 
-
 #[derive(Debug, Clone)]
 pub(crate) struct NpmFundReport {
     pub(crate) root: Option<NpmFundPackage>,
     pub(crate) dependencies: Vec<NpmFundPackage>,
 }
-
 
 #[derive(Debug, Clone)]
 pub(crate) struct NpmFundPackage {
@@ -476,7 +452,6 @@ pub(crate) struct NpmFundPackage {
     urls: Vec<String>,
 }
 
-
 impl NpmFundPackage {
     pub(crate) fn id(&self) -> String {
         match self.version.as_deref() {
@@ -485,7 +460,6 @@ impl NpmFundPackage {
         }
     }
 }
-
 
 pub(crate) fn collect_npm_fund_report(
     project_dir: &Path,
@@ -538,7 +512,6 @@ pub(crate) fn collect_npm_fund_report(
     })
 }
 
-
 fn insert_npm_fund_dependency(
     dependencies: &mut BTreeMap<String, NpmFundPackage>,
     package: NpmFundPackage,
@@ -553,11 +526,9 @@ fn insert_npm_fund_dependency(
     dependencies.entry(package.name.clone()).or_insert(package);
 }
 
-
 fn npm_fund_package_from_dir(dir: &Path) -> Result<NpmFundPackage, OmcRegistryError> {
     npm_fund_package_from_package_json(&dir.join("package.json"))
 }
-
 
 fn npm_fund_package_from_package_json(
     package_json: &Path,
@@ -578,7 +549,6 @@ fn npm_fund_package_from_package_json(
         urls,
     })
 }
-
 
 fn npm_fund_installed_package_jsons(project_dir: &Path) -> Result<Vec<PathBuf>, OmcRegistryError> {
     let node_modules = project_dir.join("node_modules");
@@ -617,7 +587,6 @@ fn npm_fund_installed_package_jsons(project_dir: &Path) -> Result<Vec<PathBuf>, 
     Ok(package_jsons)
 }
 
-
 pub(crate) fn normalize_npm_funding(value: &serde_json::Value) -> Option<serde_json::Value> {
     match value {
         serde_json::Value::String(url) => npm_funding_url_value(url),
@@ -643,7 +612,6 @@ pub(crate) fn normalize_npm_funding(value: &serde_json::Value) -> Option<serde_j
     }
 }
 
-
 fn npm_funding_url_value(url: &str) -> Option<serde_json::Value> {
     let url = url.trim();
     if url.is_empty() {
@@ -652,7 +620,6 @@ fn npm_funding_url_value(url: &str) -> Option<serde_json::Value> {
     Some(serde_json::json!({ "url": url }))
 }
 
-
 pub(crate) fn npm_funding_urls(value: &serde_json::Value) -> Vec<String> {
     let mut urls = Vec::new();
     collect_npm_funding_urls(value, &mut urls);
@@ -660,7 +627,6 @@ pub(crate) fn npm_funding_urls(value: &serde_json::Value) -> Vec<String> {
     urls.dedup();
     urls
 }
-
 
 pub(crate) fn npm_fund_report_json(report: &NpmFundReport) -> serde_json::Value {
     let mut dependencies = serde_json::Map::new();
@@ -698,7 +664,6 @@ pub(crate) fn npm_fund_report_json(report: &NpmFundReport) -> serde_json::Value 
     serde_json::Value::Object(object)
 }
 
-
 fn npm_fund_package_json(package: &NpmFundPackage, include_name: bool) -> serde_json::Value {
     let mut object = serde_json::Map::new();
     if include_name {
@@ -718,7 +683,6 @@ fn npm_fund_package_json(package: &NpmFundPackage, include_name: bool) -> serde_
     }
     serde_json::Value::Object(object)
 }
-
 
 fn print_npm_fund_text(report: &NpmFundReport, package_filter: Option<&str>) {
     let package_filter = package_filter.map(npm_fund_filter_name);
@@ -771,18 +735,18 @@ fn print_npm_fund_text(report: &NpmFundReport, package_filter: Option<&str>) {
     }
 }
 
-
 fn npm_fund_filter_name(spec: &str) -> String {
     npm_package_name_from_spec(spec)
 }
-
 
 fn npm_fund_package_matches(package: &NpmFundPackage, filter: &str) -> bool {
     package.name == filter || package.id() == filter
 }
 
-
-pub(crate) fn print_npm_diff(project_dir: &Path, action: NpmDiffAction) -> Result<(), OmcRegistryError> {
+pub(crate) fn print_npm_diff(
+    project_dir: &Path,
+    action: NpmDiffAction,
+) -> Result<(), OmcRegistryError> {
     let left = npm_diff_package_tarball(project_dir, &action.specs[0], &action)?;
     let right = npm_diff_package_tarball(project_dir, &action.specs[1], &action)?;
     let files = npm_diff_changed_files(&left, &right, &action)?;
@@ -797,7 +761,6 @@ pub(crate) fn print_npm_diff(project_dir: &Path, action: NpmDiffAction) -> Resul
     }
     Ok(())
 }
-
 
 pub(crate) fn npm_diff_package_tarball(
     project_dir: &Path,
@@ -831,7 +794,6 @@ pub(crate) fn npm_diff_package_tarball(
     )
 }
 
-
 fn npm_diff_local_package_tarball(root: &Path) -> Result<NpmPackageTarball, OmcRegistryError> {
     let (pack, manifest, bytes) = npm_pack_package_for_publish(root)?;
     Ok(NpmPackageTarball {
@@ -847,14 +809,12 @@ fn npm_diff_local_package_tarball(root: &Path) -> Result<NpmPackageTarball, OmcR
     })
 }
 
-
 fn npm_diff_direct_tarball(spec: &PackageSpec) -> Result<NpmPackageTarball, OmcRegistryError> {
     let Some(url) = spec.direct_url.as_deref() else {
         return Err(OmcRegistryError::UnsupportedSpec(spec.requested()));
     };
     npm_diff_tarball_from_url(url)
 }
-
 
 fn npm_diff_tarball_from_url(url: &str) -> Result<NpmPackageTarball, OmcRegistryError> {
     let parsed =
@@ -881,7 +841,6 @@ fn npm_diff_tarball_from_url(url: &str) -> Result<NpmPackageTarball, OmcRegistry
     npm_diff_tarball_from_bytes(bytes)
 }
 
-
 fn npm_diff_tarball_from_bytes(bytes: Vec<u8>) -> Result<NpmPackageTarball, OmcRegistryError> {
     let manifest = npm_manifest_from_tarball(&bytes)?;
     let name = npm_package_json_name(&manifest)?;
@@ -899,14 +858,12 @@ fn npm_diff_tarball_from_bytes(bytes: Vec<u8>) -> Result<NpmPackageTarball, OmcR
     })
 }
 
-
 #[derive(Debug)]
 pub(crate) struct NpmDiffFile {
     pub(crate) path: String,
     before: Option<Vec<u8>>,
     after: Option<Vec<u8>>,
 }
-
 
 pub(crate) fn npm_diff_changed_files(
     left: &NpmPackageTarball,
@@ -936,7 +893,6 @@ pub(crate) fn npm_diff_changed_files(
     Ok(changed)
 }
 
-
 fn npm_diff_tarball_files(bytes: &[u8]) -> Result<BTreeMap<String, Vec<u8>>, OmcRegistryError> {
     let decoder = flate2::read::GzDecoder::new(std::io::Cursor::new(bytes));
     let mut archive = tar::Archive::new(decoder);
@@ -961,7 +917,6 @@ fn npm_diff_tarball_files(bytes: &[u8]) -> Result<BTreeMap<String, Vec<u8>>, Omc
     Ok(files)
 }
 
-
 fn npm_diff_path_selected(path: &str, filters: &[String]) -> bool {
     filters.is_empty()
         || filters.iter().any(|filter| {
@@ -972,7 +927,6 @@ fn npm_diff_path_selected(path: &str, filters: &[String]) -> bool {
             !filter.is_empty() && (path == filter || path.starts_with(&format!("{filter}/")))
         })
 }
-
 
 fn npm_diff_bytes_equal(
     before: Option<&[u8]>,
@@ -992,7 +946,6 @@ fn npm_diff_bytes_equal(
         _ => false,
     }
 }
-
 
 pub(crate) fn npm_diff_file_patch(
     left: &NpmPackageTarball,
@@ -1076,7 +1029,6 @@ pub(crate) fn npm_diff_file_patch(
     Ok(output)
 }
 
-
 fn npm_diff_added_hunk(bytes: &[u8], action: &NpmDiffAction) -> String {
     let Some(text) = npm_diff_text(bytes, action.text) else {
         return "Binary files /dev/null and added file differ\n".to_owned();
@@ -1090,7 +1042,6 @@ fn npm_diff_added_hunk(bytes: &[u8], action: &NpmDiffAction) -> String {
     }
     output
 }
-
 
 fn npm_diff_removed_hunk(bytes: &[u8], action: &NpmDiffAction) -> String {
     let Some(text) = npm_diff_text(bytes, action.text) else {
@@ -1106,7 +1057,6 @@ fn npm_diff_removed_hunk(bytes: &[u8], action: &NpmDiffAction) -> String {
     output
 }
 
-
 fn npm_diff_prefixed_path(path: &str, prefix: &str, no_prefix: bool) -> String {
     if no_prefix {
         path.to_owned()
@@ -1114,7 +1064,6 @@ fn npm_diff_prefixed_path(path: &str, prefix: &str, no_prefix: bool) -> String {
         format!("{prefix}{path}")
     }
 }
-
 
 fn npm_diff_text(bytes: &[u8], force_text: bool) -> Option<String> {
     if force_text {
@@ -1124,16 +1073,13 @@ fn npm_diff_text(bytes: &[u8], force_text: bool) -> Option<String> {
     }
 }
 
-
 fn npm_diff_lines(text: &str) -> Vec<&str> {
     text.lines().collect()
 }
 
-
 fn npm_diff_strip_all_space(text: &str) -> String {
     text.chars().filter(|ch| !ch.is_whitespace()).collect()
 }
-
 
 #[derive(Debug, Clone, Default)]
 struct NpmQueryKinds {
@@ -1144,7 +1090,6 @@ struct NpmQueryKinds {
     peer: bool,
     workspace: bool,
 }
-
 
 #[derive(Debug, Clone)]
 pub(crate) struct NpmQueryItem {
@@ -1159,7 +1104,6 @@ pub(crate) struct NpmQueryItem {
     to: Vec<String>,
     kinds: NpmQueryKinds,
 }
-
 
 pub(crate) fn print_npm_query(
     project_dir: &Path,
@@ -1187,7 +1131,6 @@ pub(crate) fn print_npm_query(
     }
     Ok(ExitCode::SUCCESS)
 }
-
 
 pub(crate) fn npm_query_items(
     project_dir: &Path,
@@ -1257,7 +1200,6 @@ pub(crate) fn npm_query_items(
     Ok(items)
 }
 
-
 fn npm_query_target_dirs(
     project_dir: &Path,
     action: &NpmQueryAction,
@@ -1272,7 +1214,6 @@ fn npm_query_target_dirs(
         action.include_workspace_root,
     )
 }
-
 
 fn npm_query_workspace_packages(
     project_dir: &Path,
@@ -1293,7 +1234,6 @@ fn npm_query_workspace_packages(
         .filter(|workspace| target_dirs.contains(&absolute_project_dir(&workspace.path)))
         .collect())
 }
-
 
 fn npm_query_dependency_kinds(
     project_dir: &Path,
@@ -1331,7 +1271,6 @@ fn npm_query_dependency_kinds(
     Ok(kinds)
 }
 
-
 fn npm_query_collect_package_json_kinds(
     dir: &Path,
     kinds: &mut BTreeMap<String, NpmQueryKinds>,
@@ -1356,7 +1295,6 @@ fn npm_query_collect_package_json_kinds(
     Ok(())
 }
 
-
 fn npm_query_mark_dependency_field(
     package: &serde_json::Value,
     field: &str,
@@ -1372,7 +1310,6 @@ fn npm_query_mark_dependency_field(
         mark(entry);
     }
 }
-
 
 fn npm_query_mark_transitive_kinds(
     kinds: &mut BTreeMap<String, NpmQueryKinds>,
@@ -1410,7 +1347,6 @@ fn npm_query_mark_transitive_kinds(
     }
 }
 
-
 fn npm_query_merge_kinds(target: &mut NpmQueryKinds, source: &NpmQueryKinds) -> bool {
     let before = (
         target.prod,
@@ -1433,7 +1369,6 @@ fn npm_query_merge_kinds(target: &mut NpmQueryKinds, source: &NpmQueryKinds) -> 
             target.workspace,
         )
 }
-
 
 fn npm_query_locked_item(
     project_dir: &Path,
@@ -1483,7 +1418,6 @@ fn npm_query_locked_item(
     })
 }
 
-
 fn npm_query_workspace_item(
     project_dir: &Path,
     workspace: NpmWorkspacePackage,
@@ -1532,11 +1466,9 @@ fn npm_query_workspace_item(
     }))
 }
 
-
 fn npm_query_installed_manifest(package_dir: &Path) -> Option<serde_json::Value> {
     read_npm_pkg_json(&package_dir.join("package.json")).ok()
 }
-
 
 fn npm_query_manifest_dependency_locations(manifest: &serde_json::Value) -> Vec<String> {
     ["dependencies", "optionalDependencies", "peerDependencies"]
@@ -1549,7 +1481,6 @@ fn npm_query_manifest_dependency_locations(manifest: &serde_json::Value) -> Vec<
         .collect()
 }
 
-
 fn npm_query_parent_locations(name: &str, packages: &[LockedPackage]) -> Vec<String> {
     packages
         .iter()
@@ -1557,7 +1488,6 @@ fn npm_query_parent_locations(name: &str, packages: &[LockedPackage]) -> Vec<Str
         .map(|package| npm_node_modules_path(&package.name))
         .collect()
 }
-
 
 fn npm_query_item_json(item: &NpmQueryItem) -> serde_json::Value {
     let mut value = item.package.clone();
@@ -1622,7 +1552,6 @@ fn npm_query_item_json(item: &NpmQueryItem) -> serde_json::Value {
     value
 }
 
-
 pub(crate) fn npm_query_selector_matches(
     item: &NpmQueryItem,
     selector: &str,
@@ -1634,7 +1563,6 @@ pub(crate) fn npm_query_selector_matches(
     }
     Ok(false)
 }
-
 
 fn npm_query_selector_parts(selector: &str) -> Vec<&str> {
     let mut parts = Vec::new();
@@ -1664,7 +1592,6 @@ fn npm_query_selector_parts(selector: &str) -> Vec<&str> {
     parts
 }
 
-
 fn npm_query_single_selector_matches(
     item: &NpmQueryItem,
     selector: &str,
@@ -1683,7 +1610,6 @@ fn npm_query_single_selector_matches(
     let selector = if selector.is_empty() { "*" } else { selector };
     npm_query_compound_selector_matches(item, selector)
 }
-
 
 fn npm_query_compound_selector_matches(
     item: &NpmQueryItem,
@@ -1742,7 +1668,6 @@ fn npm_query_compound_selector_matches(
     Ok(true)
 }
 
-
 fn npm_query_take_token(value: &str) -> (&str, &str) {
     let end = value
         .char_indices()
@@ -1750,7 +1675,6 @@ fn npm_query_take_token(value: &str) -> (&str, &str) {
         .unwrap_or(value.len());
     (&value[..end], &value[end..])
 }
-
 
 fn npm_query_take_function<'a>(
     value: &'a str,
@@ -1772,7 +1696,6 @@ fn npm_query_take_function<'a>(
     Err(npm_query_unsupported(selector))
 }
 
-
 fn npm_query_class_matches(item: &NpmQueryItem, class: &str) -> Result<bool, OmcRegistryError> {
     match class {
         "prod" => Ok(item.kinds.prod || !item.kinds.dev),
@@ -1783,7 +1706,6 @@ fn npm_query_class_matches(item: &NpmQueryItem, class: &str) -> Result<bool, Omc
         _ => Err(npm_query_unsupported(&format!(".{class}"))),
     }
 }
-
 
 fn npm_query_id_matches(item: &NpmQueryItem, id: &str) -> bool {
     if item.name == id {
@@ -1802,7 +1724,6 @@ fn npm_query_id_matches(item: &NpmQueryItem, id: &str) -> bool {
     false
 }
 
-
 fn npm_query_attr_selector_matches(
     item: &NpmQueryItem,
     selector: &str,
@@ -1820,7 +1741,6 @@ fn npm_query_attr_selector_matches(
         .unwrap_or(false))
 }
 
-
 fn npm_query_parse_attr_selector(selector: &str) -> Option<(&str, &str, String)> {
     for op in ["^=", "$=", "*=", "="] {
         if let Some((field, value)) = selector.split_once(op) {
@@ -1834,11 +1754,9 @@ fn npm_query_parse_attr_selector(selector: &str) -> Option<(&str, &str, String)>
     None
 }
 
-
 fn npm_query_unquote(value: &str) -> String {
     value.trim_matches('"').trim_matches('\'').trim().to_owned()
 }
-
 
 fn npm_query_manifest_string<'a>(package: &'a serde_json::Value, field: &str) -> Option<&'a str> {
     package.get(field).and_then(|value| match value {
@@ -1847,7 +1765,6 @@ fn npm_query_manifest_string<'a>(package: &'a serde_json::Value, field: &str) ->
         _ => None,
     })
 }
-
 
 fn npm_query_attr_value_matches(actual: &str, op: &str, expected: &str) -> bool {
     match op {
@@ -1858,7 +1775,6 @@ fn npm_query_attr_value_matches(actual: &str, op: &str, expected: &str) -> bool 
         _ => false,
     }
 }
-
 
 fn npm_query_attr_function_matches(
     item: &NpmQueryItem,
@@ -1884,13 +1800,11 @@ fn npm_query_attr_function_matches(
         .unwrap_or(false))
 }
 
-
 fn npm_query_unsupported(selector: &str) -> OmcRegistryError {
     OmcRegistryError::UnsupportedSpec(format!(
         "unsupported npm query selector `{selector}`; OMC currently supports common package, class, attribute, :not, :empty, :has(*), and :attr selectors"
     ))
 }
-
 
 pub(crate) fn parse_npm_audit_args(args: &[String]) -> Result<NpmCompatAction, OmcRegistryError> {
     let mut json = false;
@@ -1923,7 +1837,6 @@ pub(crate) fn parse_npm_audit_args(args: &[String]) -> Result<NpmCompatAction, O
 
     Ok(NpmCompatAction::Audit { json })
 }
-
 
 pub(crate) fn parse_npm_fund_args(args: &[String]) -> Result<NpmCompatAction, OmcRegistryError> {
     let mut json = false;
@@ -2001,7 +1914,6 @@ pub(crate) fn parse_npm_fund_args(args: &[String]) -> Result<NpmCompatAction, Om
     })
 }
 
-
 fn npm_fund_equals_value_flag(arg: &str) -> bool {
     [
         "--which=",
@@ -2012,7 +1924,6 @@ fn npm_fund_equals_value_flag(arg: &str) -> bool {
     .iter()
     .any(|prefix| arg.starts_with(prefix))
 }
-
 
 pub(crate) fn parse_npm_diff_args(args: &[String]) -> Result<NpmCompatAction, OmcRegistryError> {
     let mut specs = Vec::new();
@@ -2122,13 +2033,11 @@ pub(crate) fn parse_npm_diff_args(args: &[String]) -> Result<NpmCompatAction, Om
     })
 }
 
-
 fn parse_npm_diff_unified(value: &str) -> Result<usize, OmcRegistryError> {
     value.parse::<usize>().map_err(|_| {
         OmcRegistryError::UnsupportedSpec(format!("invalid npm diff unified context `{value}`"))
     })
 }
-
 
 fn npm_diff_ignored_equals_flag(arg: &str) -> bool {
     [
@@ -2144,7 +2053,6 @@ fn npm_diff_ignored_equals_flag(arg: &str) -> bool {
     .any(|prefix| arg.starts_with(prefix))
 }
 
-
 fn npm_diff_flag_value(
     args: &[String],
     index: usize,
@@ -2154,7 +2062,6 @@ fn npm_diff_flag_value(
         .cloned()
         .ok_or_else(|| OmcRegistryError::UnsupportedSpec(format!("{flag} needs a value")))
 }
-
 
 pub(crate) fn parse_npm_search_args(args: &[String]) -> Result<NpmCompatAction, OmcRegistryError> {
     let mut json = false;
@@ -2240,7 +2147,6 @@ pub(crate) fn parse_npm_search_args(args: &[String]) -> Result<NpmCompatAction, 
     })
 }
 
-
 fn parse_npm_search_limit(value: &str) -> Result<usize, OmcRegistryError> {
     value
         .parse::<usize>()
@@ -2251,7 +2157,6 @@ fn parse_npm_search_limit(value: &str) -> Result<usize, OmcRegistryError> {
             OmcRegistryError::UnsupportedSpec(format!("invalid npm search limit `{value}`"))
         })
 }
-
 
 fn npm_search_ignored_equals_flag(arg: &str) -> bool {
     [
@@ -2265,65 +2170,9 @@ fn npm_search_ignored_equals_flag(arg: &str) -> bool {
     .any(|prefix| arg.starts_with(prefix))
 }
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-pub(crate) fn parse_npm_outdated_args(args: &[String]) -> Result<NpmCompatAction, OmcRegistryError> {
+pub(crate) fn parse_npm_outdated_args(
+    args: &[String],
+) -> Result<NpmCompatAction, OmcRegistryError> {
     let mut json = false;
     let mut parseable = false;
     let mut filtered = Vec::new();
@@ -2379,7 +2228,6 @@ pub(crate) fn parse_npm_outdated_args(args: &[String]) -> Result<NpmCompatAction
     })
 }
 
-
 fn npm_outdated_equals_value_flag(arg: &str) -> bool {
     [
         "--depth=",
@@ -2391,7 +2239,6 @@ fn npm_outdated_equals_value_flag(arg: &str) -> bool {
     .iter()
     .any(|prefix| arg.starts_with(prefix))
 }
-
 
 pub(crate) fn parse_npm_view_args(args: &[String]) -> Result<NpmCompatAction, OmcRegistryError> {
     let mut json = false;
@@ -2436,20 +2283,17 @@ pub(crate) fn parse_npm_view_args(args: &[String]) -> Result<NpmCompatAction, Om
     })
 }
 
-
 fn npm_view_equals_value_flag(arg: &str) -> bool {
     ["--userconfig=", "--loglevel="]
         .iter()
         .any(|prefix| arg.starts_with(prefix))
 }
 
-
 fn npm_audit_equals_value_flag(arg: &str) -> bool {
     ["--audit-level=", "--audit-levels="]
         .iter()
         .any(|prefix| arg.starts_with(prefix))
 }
-
 
 pub(crate) fn parse_npm_query_args(args: &[String]) -> Result<NpmCompatAction, OmcRegistryError> {
     let mut selector = None;
@@ -2532,13 +2376,11 @@ pub(crate) fn parse_npm_query_args(args: &[String]) -> Result<NpmCompatAction, O
     })
 }
 
-
 fn parse_npm_query_expected_count(value: &str) -> Result<usize, OmcRegistryError> {
     value.parse::<usize>().map_err(|_| {
         OmcRegistryError::UnsupportedSpec(format!("invalid npm query expected count `{value}`"))
     })
 }
-
 
 fn npm_query_flag_value(
     args: &[String],
@@ -2550,10 +2392,8 @@ fn npm_query_flag_value(
         .ok_or_else(|| OmcRegistryError::UnsupportedSpec(format!("{flag} needs a value")))
 }
 
-
 fn npm_query_ignored_equals_flag(arg: &str) -> bool {
     ["--loglevel=", "--cache=", "--parseable="]
         .iter()
         .any(|prefix| arg.starts_with(prefix))
 }
-

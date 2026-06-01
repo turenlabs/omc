@@ -338,6 +338,10 @@ pub(crate) fn npm_registry_package_url(registry: &str, encoded: &str) -> String 
     format!("{}{}", ensure_trailing_slash(registry), encoded)
 }
 
-pub(crate) fn npm_registry_package_version_url(registry: &str, encoded: &str, version: &str) -> String {
+pub(crate) fn npm_registry_package_version_url(
+    registry: &str,
+    encoded: &str,
+    version: &str,
+) -> String {
     format!("{}{encoded}/{version}", ensure_trailing_slash(registry))
 }

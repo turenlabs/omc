@@ -11,9 +11,7 @@ use std::fs;
 use std::path::Path;
 
 use omc_cap::{Capability, Policy};
-use omc_format::{
-    BehaviorType, CapOp, Function, HttpRequest, Module, Op, Value, VirtualPath,
-};
+use omc_format::{BehaviorType, CapOp, Function, HttpRequest, Module, Op, Value, VirtualPath};
 use omc_verify::{verify_module, VerifyFinding};
 
 pub(crate) fn grants_all_host_capabilities(capabilities: &[Capability]) -> bool {
@@ -170,9 +168,10 @@ fn file_url_from_path(path: &Path, description: &str) -> Result<String> {
         })
 }
 
-
-
-pub(crate) fn module_from_profile(package: &ResolvedPackage, capabilities: &[CapabilityFinding]) -> Module {
+pub(crate) fn module_from_profile(
+    package: &ResolvedPackage,
+    capabilities: &[CapabilityFinding],
+) -> Module {
     let capabilities = unique_capability_findings(capabilities);
     let behavior = if capabilities.is_empty() {
         BehaviorType::Pure

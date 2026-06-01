@@ -41,7 +41,10 @@ pub(crate) fn npm_global_bin_dir_from_prefix(prefix: &Path) -> PathBuf {
     prefix.join("bin")
 }
 
-pub(crate) fn sync_npm_global_bins(prefix: &Path, global_project_dir: &Path) -> Result<(), OmcRegistryError> {
+pub(crate) fn sync_npm_global_bins(
+    prefix: &Path,
+    global_project_dir: &Path,
+) -> Result<(), OmcRegistryError> {
     let source_bin = global_project_dir.join("node_modules").join(".bin");
     let target_bin = npm_global_bin_dir_from_prefix(prefix);
     fs::create_dir_all(&target_bin)?;
@@ -1296,4 +1299,3 @@ fn npm_location_is_global(value: &str) -> Result<bool, OmcRegistryError> {
         ))),
     }
 }
-

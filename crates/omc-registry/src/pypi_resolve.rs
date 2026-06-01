@@ -160,7 +160,9 @@ fn parse_pypi_project_requirement(
     Ok(Some(PypiProjectRequirement::Spec(spec, BTreeSet::new())))
 }
 
-pub(crate) fn pypi_direct_file_url_local_directory(direct_url: Option<&str>) -> Result<Option<PathBuf>> {
+pub(crate) fn pypi_direct_file_url_local_directory(
+    direct_url: Option<&str>,
+) -> Result<Option<PathBuf>> {
     let Some(direct_url) = direct_url else {
         return Ok(None);
     };
@@ -398,7 +400,10 @@ fn looks_like_local_path_requirement(value: &str) -> bool {
         || path.contains('\\')
 }
 
-pub(crate) fn pypi_direct_reference_applies(requirement: &str, active_extras: &BTreeSet<String>) -> bool {
+pub(crate) fn pypi_direct_reference_applies(
+    requirement: &str,
+    active_extras: &BTreeSet<String>,
+) -> bool {
     let mut parts = requirement.splitn(2, ';');
     let requirement = parts.next().unwrap_or_default().trim();
     if let Some(marker) = parts.next() {

@@ -359,7 +359,10 @@ pub(crate) fn python_sdist_import_top_level_targets(source: &Path) -> Result<BTr
     Ok(targets)
 }
 
-pub(crate) fn remove_existing_python_targets(site_packages: &Path, targets: &BTreeSet<String>) -> Result<()> {
+pub(crate) fn remove_existing_python_targets(
+    site_packages: &Path,
+    targets: &BTreeSet<String>,
+) -> Result<()> {
     for target in targets {
         let output = checked_join(site_packages, Path::new(target))?;
         remove_path_if_exists(&output)?;
@@ -381,7 +384,10 @@ pub(crate) fn existing_top_level_targets(site_packages: &Path) -> Result<BTreeSe
     Ok(paths)
 }
 
-pub(crate) fn wheel_path_has_existing_target(path: &Path, existing_top_level: &BTreeSet<String>) -> bool {
+pub(crate) fn wheel_path_has_existing_target(
+    path: &Path,
+    existing_top_level: &BTreeSet<String>,
+) -> bool {
     let Some(top_level) = top_level_archive_component(path) else {
         return false;
     };
@@ -391,7 +397,10 @@ pub(crate) fn wheel_path_has_existing_target(path: &Path, existing_top_level: &B
     existing_top_level.contains(top_level)
 }
 
-pub(crate) fn sdist_path_has_existing_target(path: &Path, existing_top_level: &BTreeSet<String>) -> bool {
+pub(crate) fn sdist_path_has_existing_target(
+    path: &Path,
+    existing_top_level: &BTreeSet<String>,
+) -> bool {
     let Some(top_level) = top_level_archive_component(path) else {
         return false;
     };

@@ -1,5 +1,5 @@
-use crate::*;
 use super::*;
+use crate::*;
 
 #[test]
 fn detects_direct_compat_binaries() {

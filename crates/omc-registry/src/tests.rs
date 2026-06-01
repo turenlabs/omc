@@ -1,6 +1,5 @@
 //! `tests` unit tests — extracted verbatim from lib.rs.
 
-
 use super::*;
 
 /// Serializes the (process-global) `OMC_HOME` env var across every test that
@@ -512,11 +511,11 @@ fn signed_lock_for_test(project_dir: &Path, mut packages: Vec<LockedPackage>) ->
 // Per-domain test modules (extracted from the original monolithic tests.rs).
 mod config_tests;
 mod lockfile_tests;
-mod npm_tests;
 mod npm_registry_tests;
+mod npm_tests;
 mod policy_tests;
 mod profiler_tests;
-mod pypi_tests;
 mod pypi_install_tests;
 mod pypi_publish_tests;
+mod pypi_tests;
 mod verify_tests;

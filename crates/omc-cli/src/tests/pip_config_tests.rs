@@ -1,5 +1,5 @@
-use crate::*;
 use super::*;
+use crate::*;
 
 #[test]
 fn pip_config_file_defaults_behave_like_command_flags() {

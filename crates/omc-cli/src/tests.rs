@@ -21,10 +21,6 @@ fn test_dir(name: &str) -> PathBuf {
     dir
 }
 
-
-
-
-
 fn pypi_sdist_for_test(root: &str, files: &[(&str, &str)]) -> Vec<u8> {
     let encoder = GzEncoder::new(Vec::new(), Compression::default());
     let mut archive = tar::Builder::new(encoder);
@@ -212,34 +208,6 @@ fn with_npm_config_overrides<T>(values: &[(&str, Option<&str>)], f: impl FnOnce(
     result
 }
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 fn write_npm_fixture_tarball(project: &Path, name: &str, version: &str) -> PathBuf {
     let source = project.join(format!("source-{name}"));
     fs::create_dir_all(&source).unwrap();
@@ -258,152 +226,6 @@ fn write_npm_fixture_tarball(project: &Path, name: &str, version: &str) -> PathB
     write_npm_pack_tarball(&tarball, &files).unwrap();
     tarball
 }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 fn locked_pypi_package(name: &str, version: &str, dependencies: Vec<String>) -> LockedPackage {
     LockedPackage {
@@ -482,13 +304,13 @@ fn temp_test_dir() -> PathBuf {
     path
 }
 
-mod policy_tests;
-mod parse_npm_tests;
-mod parse_pip_tests;
+mod misc_tests;
+mod npm_compat_tests;
 mod npm_config_tests;
 mod npm_install_tests;
-mod npm_compat_tests;
-mod pip_config_tests;
+mod parse_npm_tests;
+mod parse_pip_tests;
 mod pip_compat_tests;
+mod pip_config_tests;
+mod policy_tests;
 mod twine_tests;
-mod misc_tests;

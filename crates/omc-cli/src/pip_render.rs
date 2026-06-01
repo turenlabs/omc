@@ -13,7 +13,6 @@ use omc_registry::{
     read_lockfile, Ecosystem, LockedPythonVcsDependency, OmcRegistryError, PypiCheckIssue,
 };
 
-
 pub(crate) fn print_pip_help(topic: Option<&str>) {
     print!("{}", pip_help_text(topic));
 }
@@ -89,7 +88,9 @@ pub(crate) fn print_pip_index_versions(
     Ok(())
 }
 
-pub(crate) fn print_pip_search_deprecated(query: Vec<String>) -> Result<ExitCode, OmcRegistryError> {
+pub(crate) fn print_pip_search_deprecated(
+    query: Vec<String>,
+) -> Result<ExitCode, OmcRegistryError> {
     if query.is_empty() {
         return Err(OmcRegistryError::UnsupportedSpec(
             "pip search needs at least one search term".to_owned(),
@@ -288,7 +289,9 @@ pub(crate) fn print_pip_freeze_output(output: PipFreezeOutput) {
 }
 
 #[cfg(test)]
-pub(crate) fn pip_freeze_local_path_requirements(project_dir: &Path) -> Result<Vec<String>, OmcRegistryError> {
+pub(crate) fn pip_freeze_local_path_requirements(
+    project_dir: &Path,
+) -> Result<Vec<String>, OmcRegistryError> {
     let local_paths_file = project_dir.join(".omc").join("python").join("local-paths");
     Ok(
         pip_freeze_local_path_entries_from_file(local_paths_file, &BTreeSet::new())?
@@ -502,7 +505,10 @@ pub(crate) fn print_locked_pip_inspect(project_dir: &Path) -> Result<(), OmcRegi
     Ok(())
 }
 
-pub(crate) fn print_pip_path_inspect(project_dir: &Path, paths: &[PathBuf]) -> Result<(), OmcRegistryError> {
+pub(crate) fn print_pip_path_inspect(
+    project_dir: &Path,
+    paths: &[PathBuf],
+) -> Result<(), OmcRegistryError> {
     let installed = pip_path_inspect_entries(project_dir, paths)?;
     let value = serde_json::json!({
         "version": "1",
@@ -869,7 +875,9 @@ pub(crate) fn print_pip_path_check(
     print_pip_check_issues(issues)
 }
 
-pub(crate) fn print_pip_check_issues(issues: Vec<PypiCheckIssue>) -> Result<ExitCode, OmcRegistryError> {
+pub(crate) fn print_pip_check_issues(
+    issues: Vec<PypiCheckIssue>,
+) -> Result<ExitCode, OmcRegistryError> {
     if issues.is_empty() {
         println!("No broken requirements found.");
         return Ok(ExitCode::SUCCESS);

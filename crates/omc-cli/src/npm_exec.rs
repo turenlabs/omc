@@ -13,7 +13,9 @@ use crate::args::NpmExecAction;
 use crate::manifest::parse_package_specs;
 use crate::parse::parse_npm_archive_references;
 use crate::policy_args::apply_cli_policy_options;
-use crate::shim::{command_has_path_separator, command_program_for_cwd, run_project_command_in_cwd};
+use crate::shim::{
+    command_has_path_separator, command_program_for_cwd, run_project_command_in_cwd,
+};
 use crate::temp_project::TempOmcProject;
 
 pub(crate) fn run_npm_exec(

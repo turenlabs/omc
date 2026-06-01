@@ -1574,7 +1574,6 @@ pub(crate) struct TwinePypirc {
     pub(crate) sections: BTreeMap<String, BTreeMap<String, String>>,
 }
 
-
 #[derive(Debug)]
 pub(crate) struct CompileCommand {
     pub(crate) npm: bool,

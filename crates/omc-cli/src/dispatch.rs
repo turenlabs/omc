@@ -9,7 +9,7 @@ use omc_registry::{
     write_global_package_trust, LinkOptions, OmcRegistryError, PackageSpec,
 };
 
-use crate::args::{Cli, CompileCommand, Command};
+use crate::args::{Cli, Command, CompileCommand};
 use crate::compile::print_compile_source;
 use crate::direct_compat::{
     direct_compat_mode, npx_compat_args, parse_direct_compat_invocation, DirectCompatMode,

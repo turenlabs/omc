@@ -14,11 +14,13 @@ use sha2::{Digest, Sha256, Sha384, Sha512};
 use omc_registry::{
     add_package_graph, install_locked_packages, install_project, read_constraint_files,
     read_lockfile, read_requirements_files, read_script_requirement_files, Ecosystem, LinkOptions,
-    LockedPackage, OmcLock, OmcRegistryError, PackageSpec,
-    PypiCheckIssue, PythonLocalRequirement,
+    LockedPackage, OmcLock, OmcRegistryError, PackageSpec, PypiCheckIssue, PythonLocalRequirement,
 };
 
-pub(crate) fn run_pip_lock(project_dir: &Path, action: PipLockAction) -> Result<ExitCode, OmcRegistryError> {
+pub(crate) fn run_pip_lock(
+    project_dir: &Path,
+    action: PipLockAction,
+) -> Result<ExitCode, OmcRegistryError> {
     let PipInstallAction {
         specs,
         requirements,
@@ -211,7 +213,9 @@ pub(crate) fn pip_args_with_config_defaults(
 }
 
 #[cfg(test)]
-pub(crate) fn pip_args_with_environment_defaults(args: &[String]) -> Result<Vec<String>, OmcRegistryError> {
+pub(crate) fn pip_args_with_environment_defaults(
+    args: &[String],
+) -> Result<Vec<String>, OmcRegistryError> {
     if pip_isolated_requested(args) {
         return Ok(args.to_vec());
     }
@@ -1210,7 +1214,10 @@ pub(crate) fn absolutize_pip_install_action_paths(base_dir: &Path, action: &mut 
         .map(|path| absolutize_path(base_dir, path));
 }
 
-pub(crate) fn absolutize_pip_download_action_paths(base_dir: &Path, action: &mut PipDownloadAction) {
+pub(crate) fn absolutize_pip_download_action_paths(
+    base_dir: &Path,
+    action: &mut PipDownloadAction,
+) {
     action.requirements = absolutize_paths(base_dir, std::mem::take(&mut action.requirements));
     action.constraints = absolutize_paths(base_dir, std::mem::take(&mut action.constraints));
     action.archive_references =
@@ -1221,7 +1228,10 @@ pub(crate) fn absolutize_pip_download_action_paths(base_dir: &Path, action: &mut
     action.destination = absolutize_path(base_dir, std::mem::take(&mut action.destination));
 }
 
-pub(crate) fn absolutize_pip_archive_references(base_dir: &Path, references: Vec<String>) -> Vec<String> {
+pub(crate) fn absolutize_pip_archive_references(
+    base_dir: &Path,
+    references: Vec<String>,
+) -> Vec<String> {
     references
         .into_iter()
         .map(|reference| {
@@ -1441,7 +1451,11 @@ pub(crate) fn pip_completion_words_from_env() -> Vec<String> {
         .collect()
 }
 
-pub(crate) fn pip_completion_suggestions(project_dir: &Path, words: &[String], cword: usize) -> Vec<String> {
+pub(crate) fn pip_completion_suggestions(
+    project_dir: &Path,
+    words: &[String],
+    cword: usize,
+) -> Vec<String> {
     let original_len = words.len();
     let words = completion_words_without_program(words, &["pip", "pip3"]);
     let adjusted_cword = if words.len() != original_len {
@@ -2094,7 +2108,10 @@ pub(crate) fn pip_installed_list_json_output(
     Ok(serde_json::to_string(&packages)?)
 }
 
-pub(crate) fn pip_columns_list_output(packages: &[InstalledPythonPackage], verbose: bool) -> Option<String> {
+pub(crate) fn pip_columns_list_output(
+    packages: &[InstalledPythonPackage],
+    verbose: bool,
+) -> Option<String> {
     if packages.is_empty() {
         return None;
     }
@@ -2264,7 +2281,9 @@ pub(crate) fn append_pip_project_editables(
     Ok(())
 }
 
-pub(crate) fn pip_not_required_packages(packages: Vec<InstalledPythonPackage>) -> Vec<InstalledPythonPackage> {
+pub(crate) fn pip_not_required_packages(
+    packages: Vec<InstalledPythonPackage>,
+) -> Vec<InstalledPythonPackage> {
     let required = packages
         .iter()
         .flat_map(|package| package.dependencies.iter())
@@ -2397,7 +2416,11 @@ pub(crate) struct PipOutdatedOptions<'a> {
     pub(crate) allow_prereleases: bool,
 }
 
-pub(crate) fn pip_version_status_matches(latest_version: &str, current_version: &str, uptodate: bool) -> bool {
+pub(crate) fn pip_version_status_matches(
+    latest_version: &str,
+    current_version: &str,
+    uptodate: bool,
+) -> bool {
     let latest_is_newer = compare_pypi_versions(latest_version, current_version).is_gt();
     if uptodate {
         !latest_is_newer
@@ -2530,7 +2553,9 @@ pub(crate) fn pip_check_installed_packages(
     Ok(pip_check_installed_package_set(&packages))
 }
 
-pub(crate) fn pip_check_installed_package_set(packages: &[InstalledPythonPackage]) -> Vec<PypiCheckIssue> {
+pub(crate) fn pip_check_installed_package_set(
+    packages: &[InstalledPythonPackage],
+) -> Vec<PypiCheckIssue> {
     let mut issues = Vec::new();
     for package in packages {
         for dependency in &package.dependencies {
@@ -2693,7 +2718,10 @@ pub(crate) fn pip_dependency_names(package: &LockedPackage) -> Vec<String> {
         .collect()
 }
 
-pub(crate) fn pip_required_by_names(package: &LockedPackage, packages: &[LockedPackage]) -> Vec<String> {
+pub(crate) fn pip_required_by_names(
+    package: &LockedPackage,
+    packages: &[LockedPackage],
+) -> Vec<String> {
     pip_required_by_package_name(&package.name, packages)
 }
 
@@ -2766,7 +2794,9 @@ pub(crate) fn pip_installed_files(
     pip_installed_files_from_dist_info(&dist_info)
 }
 
-pub(crate) fn pip_installed_files_from_dist_info(dist_info: &Path) -> Result<Vec<String>, OmcRegistryError> {
+pub(crate) fn pip_installed_files_from_dist_info(
+    dist_info: &Path,
+) -> Result<Vec<String>, OmcRegistryError> {
     let record = dist_info.join("RECORD");
     if !record.exists() {
         return Ok(Vec::new());
@@ -2783,7 +2813,9 @@ pub(crate) fn pip_installed_files_from_dist_info(dist_info: &Path) -> Result<Vec
     Ok(files)
 }
 
-pub(crate) fn pip_editable_project_files(import_path: &Path) -> Result<Vec<String>, OmcRegistryError> {
+pub(crate) fn pip_editable_project_files(
+    import_path: &Path,
+) -> Result<Vec<String>, OmcRegistryError> {
     if !import_path.is_dir() {
         return Ok(Vec::new());
     }
@@ -2838,7 +2870,10 @@ pub(crate) fn normalize_pip_compat_find_links(project_dir: &Path, source: String
         .into_owned()
 }
 
-pub(crate) fn apply_pip_environment_defaults_for_project(options: &mut LinkOptions, project_dir: &Path) {
+pub(crate) fn apply_pip_environment_defaults_for_project(
+    options: &mut LinkOptions,
+    project_dir: &Path,
+) {
     options.pypi_environment_base_dir = Some(project_dir.to_path_buf());
     let override_index = options.pypi_index_url.is_none();
     apply_pypi_environment_defaults(options, override_index);
@@ -2895,4 +2930,3 @@ pub(crate) fn pip_uninstall_local_path_specs(
     }
     Ok(specs)
 }
-

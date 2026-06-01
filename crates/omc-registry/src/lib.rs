@@ -18,9 +18,9 @@ use flate2::read::GzDecoder;
 use omc_cap::{Capability, Policy};
 #[cfg(test)]
 use omc_cap::{FlowRule, LabelMatcher, Sink};
-use omc_verify::verify_module;
 #[cfg(test)]
 use omc_format::{CapOp, Op};
+use omc_verify::verify_module;
 use reqwest::blocking::Client;
 use reqwest::header::{ACCEPT, CONTENT_TYPE};
 #[cfg(test)]
@@ -29,7 +29,6 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha512};
 use tar::Archive;
 use walkdir::{DirEntry, WalkDir};
-
 
 mod error;
 pub use error::{OmcRegistryError, Result};
@@ -41,15 +40,15 @@ pub use manifest::{
 };
 
 pub(crate) mod types;
+use types::{parse_npm_spec, GlobalConfig};
 pub use types::{
     ArtifactPackage, ArtifactSignature, Behavior, CapabilityFinding, CapabilityKind,
     CompileSourceOptions, CompileSourceReport, Ecosystem, InstallReport, LinkOptions, LinkReport,
     LockedLocalSource, LockedPackage, LockedPythonVcsDependency, ManifestDependencyKind,
-    ManifestPolicy, ManifestRegistries, OmcArtifact, OmcLock, OmcManifest, PackageSpec, ProjectInfo,
-    ProjectRequirements, PypiBinaryMode, PypiCheckIssue, PypiReleaseControl, PypiReleaseControls,
-    PythonLocalRequirement, PythonVcsRequirement, Verdict,
+    ManifestPolicy, ManifestRegistries, OmcArtifact, OmcLock, OmcManifest, PackageSpec,
+    ProjectInfo, ProjectRequirements, PypiBinaryMode, PypiCheckIssue, PypiReleaseControl,
+    PypiReleaseControls, PythonLocalRequirement, PythonVcsRequirement, Verdict,
 };
-use types::{parse_npm_spec, GlobalConfig};
 
 pub(crate) mod lockfile;
 pub use lockfile::read_lockfile;
@@ -61,30 +60,32 @@ pub(crate) mod http_client;
 use http_client::{artifact_path_for, cache_archive, download_artifact, write_artifact};
 
 pub(crate) mod npm_resolve;
-use npm_resolve::{
-    NpmPackageManifest, NpmPeerDependencyMeta, NpmRoot, NpmSearchResponse, NpmStringList, NpmVersion,
-};
 #[cfg(test)]
 use npm_resolve::NpmDist;
+use npm_resolve::{
+    NpmPackageManifest, NpmPeerDependencyMeta, NpmRoot, NpmSearchResponse, NpmStringList,
+    NpmVersion,
+};
 
 pub(crate) mod npm_install;
-use npm_install::{
-    collect_npm_local_dependency_links, install_nested_npm_dependencies, install_npm_direct_local_links,
-    install_npm_package, install_npm_project_links, npm_project_package_jsons,
-};
 #[cfg(test)]
 use npm_install::install_npm_package_to;
+use npm_install::{
+    collect_npm_local_dependency_links, install_nested_npm_dependencies,
+    install_npm_direct_local_links, install_npm_package, install_npm_project_links,
+    npm_project_package_jsons,
+};
 
 pub(crate) mod npm_config;
-pub use npm_config::{
-    read_npm_config_snapshot, read_npm_config_snapshot_with_globalconfig, NpmConfigSnapshot,
-};
+#[cfg(test)]
+use npm_config::{apply_npm_environment_values, parse_npmrc_content, read_npm_user_config};
 use npm_config::{
     ensure_trailing_slash, npm_registry_package_url, npm_registry_package_version_url,
     read_npm_config, read_npm_config_for_options, strip_npmrc_comment, NpmConfig,
 };
-#[cfg(test)]
-use npm_config::{apply_npm_environment_values, parse_npmrc_content, read_npm_user_config};
+pub use npm_config::{
+    read_npm_config_snapshot, read_npm_config_snapshot_with_globalconfig, NpmConfigSnapshot,
+};
 
 pub(crate) mod npm_metadata;
 pub use npm_metadata::{
@@ -96,36 +97,33 @@ pub use npm_metadata::{
     read_npm_package_owners, read_npm_ping, read_npm_ping_with_userconfig, read_npm_profile,
     read_npm_stars, read_npm_team_users, read_npm_teams, read_npm_token_list, read_npm_trust,
     read_npm_whoami, remove_npm_dist_tag, remove_npm_org_user, remove_npm_team_user,
-    revoke_npm_access, revoke_npm_token, revoke_npm_trust, set_npm_access_mfa, set_npm_access_status,
-    set_npm_org_user, set_npm_profile_property, unpublish_npm_package,
+    revoke_npm_access, revoke_npm_token, revoke_npm_trust, set_npm_access_mfa,
+    set_npm_access_status, set_npm_org_user, set_npm_profile_property, unpublish_npm_package,
 };
 
 pub(crate) mod npm_github;
-pub use npm_github::parse_npm_direct_archive_reference;
-use npm_github::{
-    is_npm_tarball_path, npm_direct_tarball_url, npm_github_archive_url, npm_github_dependency_parts,
-    npm_offline_missing_lock_error, resolve_npm_direct_tarball, resolve_npm_lockfile_tarball,
-    resolve_npm_offline_locked_package,
-};
 #[cfg(test)]
 use npm_github::locked_npm_direct_url_for_spec;
+pub use npm_github::parse_npm_direct_archive_reference;
+use npm_github::{
+    is_npm_tarball_path, npm_direct_tarball_url, npm_github_archive_url,
+    npm_github_dependency_parts, npm_offline_missing_lock_error, resolve_npm_direct_tarball,
+    resolve_npm_lockfile_tarball, resolve_npm_offline_locked_package,
+};
 
 pub(crate) mod npm_manifest;
 pub use npm_manifest::compare_npm_versions;
+#[cfg(test)]
+use npm_manifest::{current_npm_os, npm_engine_requirement_satisfied, npm_string_list_allows};
 pub(crate) use npm_manifest::{
     is_exact_npm_version, npm_manifest_engine_compatible, npm_manifest_from_tgz,
     npm_manifest_platform_compatible, npm_manifest_runtime_dependencies, npm_platform_compatible,
     npm_runtime_dependencies, npm_version_engine_compatible, npm_version_satisfies,
     parse_partial_npm_version, required_peer_dependencies,
 };
-#[cfg(test)]
-use npm_manifest::{current_npm_os, npm_engine_requirement_satisfied, npm_string_list_allows};
 
 pub(crate) mod pypi_resolve;
-pub use pypi_resolve::{parse_pypi_vcs_requirement, pypi_marker_applies};
 pub(crate) use pypi_resolve::parse_pypi_name_and_extras;
-#[cfg(test)]
-use pypi_resolve::{evaluate_pypi_marker, PypiMarkerEnvironment};
 use pypi_resolve::{
     collect_pypi_project_requirement, is_pypi_archive_filename, normalize_pypi_extra,
     normalize_pypi_find_links_source, normalize_pypi_name, normalize_pypi_simple_index_url,
@@ -133,18 +131,21 @@ use pypi_resolve::{
     parse_pypi_local_archive_requirement, parse_pypi_requirement,
     parse_pypi_requirement_with_extras, parse_python_vcs_requirement, python_vcs_table_reference,
 };
+#[cfg(test)]
+use pypi_resolve::{evaluate_pypi_marker, PypiMarkerEnvironment};
+pub use pypi_resolve::{parse_pypi_vcs_requirement, pypi_marker_applies};
 
 pub(crate) mod pypi_requirements;
 pub(crate) use pypi_requirements::*;
 
 pub(crate) mod pypi_config;
-pub use pypi_config::{read_pip_config_snapshot, PipConfigSnapshot};
 use pypi_config::{
     apply_pip_config_files, dedupe_pypi_extra_index_urls, env_truthy, pypi_index_url_values,
     pypi_path_values,
 };
 #[cfg(test)]
 use pypi_config::{parse_pip_config_content, read_pip_config, PipConfig};
+pub use pypi_config::{read_pip_config_snapshot, PipConfigSnapshot};
 pub(crate) mod pypi_install;
 use pypi_install::{
     folded_metadata_lines, install_pypi_package, install_python_entry_point_scripts,
@@ -171,14 +172,14 @@ use profiler::{hash_profiled_directory, profile_archive, profile_source_director
 use profiler::{ArchiveProfile, SourceProfiler};
 
 pub(crate) mod signature;
-pub use signature::verify_artifact_signature;
-use signature::{artifact_payload_sha256, ensure_lock_signing_key, sign_artifact};
-#[cfg(test)]
-use signature::project_signing_public_key;
 #[cfg(test)]
 use ed25519_dalek::{Signer, SigningKey};
 #[cfg(test)]
 use rand_core::OsRng;
+#[cfg(test)]
+use signature::project_signing_public_key;
+pub use signature::verify_artifact_signature;
+use signature::{artifact_payload_sha256, ensure_lock_signing_key, sign_artifact};
 
 pub(crate) mod verify;
 pub use verify::compile_source_path;
@@ -189,13 +190,13 @@ pub use verify::compile_source_path;
 use verify::{grants_all_host_capabilities, module_from_profile};
 
 pub(crate) mod policy_bridge;
-pub use policy_bridge::{
-    effective_package_policy, load_policy_document, parse_capability_grant, parse_flow_rule,
-    GrantNeed,
-};
 pub(crate) use policy_bridge::{
     allow_benign_runtime_capabilities, dsl_allow_clause, dsl_flow_sink, dsl_flow_src,
     render_block_guidance,
+};
+pub use policy_bridge::{
+    effective_package_policy, load_policy_document, parse_capability_grant, parse_flow_rule,
+    GrantNeed,
 };
 // Only the `#[cfg(test)]` sibling modules reach this through `use super::*`.
 #[cfg(test)]
@@ -203,7 +204,9 @@ use policy_bridge::parse_block_finding;
 
 pub(crate) mod link_install;
 pub use link_install::{add_package_graph, link_package, remove_manifest_dependency};
-use link_install::{default_public_capabilities, options_with_manifest_policy, resolve_package_graph};
+use link_install::{
+    default_public_capabilities, options_with_manifest_policy, resolve_package_graph,
+};
 
 pub(crate) mod util;
 use util::{
@@ -237,8 +240,8 @@ pub(crate) use python_parse::*;
 
 pub(crate) mod project_discovery;
 pub use project_discovery::{
-    discover_project_requirements, discover_project_requirements_with_extras, discover_project_specs,
-    read_package_scripts,
+    discover_project_requirements, discover_project_requirements_with_extras,
+    discover_project_specs, read_package_scripts,
 };
 pub(crate) use project_discovery::{
     discover_project_requirements_with_options, discover_project_requirements_with_selection,
@@ -261,9 +264,6 @@ const NPM_DIRECT_TARBALL_PLACEHOLDER: &str = "__omc_direct_tarball__";
 const NPM_PROFILE_WRITABLE_KEYS: &[&str] = &[
     "email", "password", "fullname", "homepage", "freenode", "twitter", "github",
 ];
-
-
-
 
 #[derive(Debug, Clone, Copy)]
 struct DependencySelection {
@@ -290,8 +290,6 @@ impl DependencySelection {
     }
 }
 
-
-
 pub fn apply_pypi_binary_option(
     all: &mut Option<PypiBinaryMode>,
     packages: &mut BTreeMap<String, PypiBinaryMode>,
@@ -317,7 +315,6 @@ pub fn apply_pypi_binary_option(
         }
     }
 }
-
 
 pub fn apply_pypi_release_control(control: &mut PypiReleaseControl, value: &str) {
     for raw in value.split(',') {
@@ -1377,7 +1374,6 @@ pub fn parse_pypi_direct_archive_reference(
     parse_pypi_direct_archive_url_reference(reference)
 }
 
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NpmWorkspacePackage {
     pub name: Option<String>,
@@ -1417,7 +1413,6 @@ pub(crate) fn policy_ecosystem(ecosystem: Ecosystem) -> omc_policy::Ecosystem {
         Ecosystem::Pypi => omc_policy::Ecosystem::Pypi,
     }
 }
-
 
 /// Resolve the global OMC home directory: `$OMC_HOME` when set (it points at the
 /// directory holding the global config — handy for tests/CI), otherwise
@@ -1890,7 +1885,6 @@ fn insert_pypi_available_candidate_versions(
     Ok(())
 }
 
-
 fn dedupe_pypi_find_links(options: &mut LinkOptions) {
     let mut seen = BTreeSet::new();
     options
@@ -2168,7 +2162,6 @@ fn npm_local_protocol_path(
         base_dir.join(path)
     }))
 }
-
 
 fn workspace_package_json_paths(root: &Path, workspaces: &ProjectWorkspaces) -> Vec<PathBuf> {
     let mut includes = Vec::new();
@@ -2848,7 +2841,6 @@ fn push_project_pypi_index_url(requirements: &mut ProjectRequirements, index_url
     requirements.pypi_extra_index_urls.push(index_url);
 }
 
-
 fn read_uv_lock_requirements(
     path: &Path,
     include_dev_dependencies: bool,
@@ -3002,7 +2994,6 @@ fn collect_pylock_dist_hash(
         .or_default()
         .insert(hash);
 }
-
 
 fn read_poetry_dependencies(
     dependencies: &BTreeMap<String, PoetryDependency>,
@@ -3816,7 +3807,6 @@ fn enforce_artifact_trust_anchor(
     Ok(())
 }
 
-
 pub(crate) fn is_safe_script_name(name: &str) -> bool {
     !name.is_empty()
         && !name.contains('/')
@@ -4268,7 +4258,11 @@ pub struct NpmSearchUser {
     pub username: Option<String>,
 }
 
-pub(crate) fn npm_get(client: &Client, url: &str, config: &NpmConfig) -> reqwest::blocking::RequestBuilder {
+pub(crate) fn npm_get(
+    client: &Client,
+    url: &str,
+    config: &NpmConfig,
+) -> reqwest::blocking::RequestBuilder {
     let request = client.get(url);
     if let Some(token) = config.auth_token_for_url(url) {
         request.bearer_auth(token)
@@ -4557,7 +4551,6 @@ pub fn read_npm_search(
         .map(|object| object.package)
         .collect())
 }
-
 
 fn npm_registry_name_and_requirement(spec: &PackageSpec) -> Result<(String, Option<String>)> {
     let Some(requirement) = spec.version.as_deref() else {
@@ -6324,9 +6317,6 @@ fn pypi_suffix_numeric_value(rest: &str) -> u64 {
         .collect::<String>();
     digits.parse().unwrap_or(0)
 }
-
-
-
 
 #[derive(Debug, Clone, Deserialize)]
 struct ProjectPackageJson {

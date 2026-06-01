@@ -7,9 +7,7 @@ use crate::*;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
-use omc_registry::{
-    OmcRegistryError, PypiBinaryMode, PypiReleaseControls, PythonLocalRequirement,
-};
+use omc_registry::{OmcRegistryError, PypiBinaryMode, PypiReleaseControls, PythonLocalRequirement};
 
 pub(crate) fn parse_pip_help_request(args: &[String]) -> Option<PipCompatAction> {
     let command = args.first()?;
@@ -40,7 +38,9 @@ pub(crate) fn pip_help_flag(arg: &str) -> bool {
     matches!(arg, "--help" | "-h")
 }
 
-pub(crate) fn parse_pip_completion_args(args: &[String]) -> Result<PipCompatAction, OmcRegistryError> {
+pub(crate) fn parse_pip_completion_args(
+    args: &[String],
+) -> Result<PipCompatAction, OmcRegistryError> {
     let mut shell = None;
     let mut index = 0;
     while index < args.len() {
@@ -249,7 +249,9 @@ pub(crate) struct PipIndexArgs {
     positionals: Vec<String>,
 }
 
-pub(crate) fn parse_pip_index_common_args(args: &[String]) -> Result<PipIndexArgs, OmcRegistryError> {
+pub(crate) fn parse_pip_index_common_args(
+    args: &[String],
+) -> Result<PipIndexArgs, OmcRegistryError> {
     let mut parsed = PipIndexArgs {
         index_url: None,
         extra_index_urls: Vec::new(),
@@ -548,7 +550,9 @@ pub(crate) struct PipConfigArgs {
     positionals: Vec<String>,
 }
 
-pub(crate) fn parse_pip_config_common_args(args: &[String]) -> Result<PipConfigArgs, OmcRegistryError> {
+pub(crate) fn parse_pip_config_common_args(
+    args: &[String],
+) -> Result<PipConfigArgs, OmcRegistryError> {
     let mut editor = None;
     let mut json = false;
     let mut location = PipConfigLocation::Auto;
@@ -619,7 +623,10 @@ pub(crate) fn parse_pip_config_assignments(
     pip_config_assignment(&positionals[0], &positionals[1]).map(|assignment| vec![assignment])
 }
 
-pub(crate) fn pip_config_assignment(key: &str, value: &str) -> Result<(String, String), OmcRegistryError> {
+pub(crate) fn pip_config_assignment(
+    key: &str,
+    value: &str,
+) -> Result<(String, String), OmcRegistryError> {
     let key = key.trim();
     if key.is_empty() {
         return Err(OmcRegistryError::UnsupportedSpec(
@@ -629,7 +636,9 @@ pub(crate) fn pip_config_assignment(key: &str, value: &str) -> Result<(String, S
     Ok((key.to_owned(), value.trim().to_owned()))
 }
 
-pub(crate) fn parse_pip_uninstall_args(args: &[String]) -> Result<PipCompatAction, OmcRegistryError> {
+pub(crate) fn parse_pip_uninstall_args(
+    args: &[String],
+) -> Result<PipCompatAction, OmcRegistryError> {
     let expanded_short_clusters = expand_pip_uninstall_short_clusters(args);
     let args = expanded_short_clusters.as_slice();
     let mut requirements = Vec::new();
@@ -885,7 +894,9 @@ pub(crate) fn parse_pip_cache_args(args: &[String]) -> Result<PipCompatAction, O
     Ok(PipCompatAction::Cache { action, cache_dir })
 }
 
-pub(crate) fn parse_pip_cache_list_format(value: &str) -> Result<PipCacheListFormat, OmcRegistryError> {
+pub(crate) fn parse_pip_cache_list_format(
+    value: &str,
+) -> Result<PipCacheListFormat, OmcRegistryError> {
     match value {
         "human" => Ok(PipCacheListFormat::Human),
         "abspath" => Ok(PipCacheListFormat::Abspath),
@@ -1498,7 +1509,9 @@ pub(crate) fn expand_pip_freeze_short_clusters(args: &[String]) -> Vec<String> {
         .collect()
 }
 
-pub(crate) fn parse_pip_download_args(args: &[String]) -> Result<PipCompatAction, OmcRegistryError> {
+pub(crate) fn parse_pip_download_args(
+    args: &[String],
+) -> Result<PipCompatAction, OmcRegistryError> {
     parse_pip_artifact_args(args, PipArtifactCommand::Download)
 }
 
@@ -1815,7 +1828,10 @@ pub(crate) fn parse_pip_artifact_args(
 }
 // batou:ignore-end http_header
 
-pub(crate) fn expand_pip_artifact_short_clusters(args: &[String], command: PipArtifactCommand) -> Vec<String> {
+pub(crate) fn expand_pip_artifact_short_clusters(
+    args: &[String],
+    command: PipArtifactCommand,
+) -> Vec<String> {
     let value_flags = match command {
         PipArtifactCommand::Download => &['r', 'c', 'd', 'i', 'f'][..],
         PipArtifactCommand::Wheel => &['r', 'c', 'w', 'i', 'f', 'e', 'C'][..],

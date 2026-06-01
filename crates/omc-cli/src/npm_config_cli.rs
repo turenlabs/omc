@@ -64,7 +64,10 @@ pub(crate) fn read_npm_config_lines(path: &Path) -> Result<Vec<String>, OmcRegis
         .collect())
 }
 
-pub(crate) fn write_npm_config_lines(path: &Path, lines: &[String]) -> Result<(), OmcRegistryError> {
+pub(crate) fn write_npm_config_lines(
+    path: &Path,
+    lines: &[String],
+) -> Result<(), OmcRegistryError> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }

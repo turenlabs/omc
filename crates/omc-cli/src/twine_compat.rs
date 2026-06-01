@@ -53,7 +53,10 @@ fn absolutize_twine_check_action_paths(base_dir: &Path, action: &mut TwineCheckA
     action.paths = absolutize_paths(base_dir, std::mem::take(&mut action.paths));
 }
 
-pub(crate) fn absolutize_twine_upload_action_paths(base_dir: &Path, action: &mut TwineUploadAction) {
+pub(crate) fn absolutize_twine_upload_action_paths(
+    base_dir: &Path,
+    action: &mut TwineUploadAction,
+) {
     action.paths = absolutize_paths(base_dir, std::mem::take(&mut action.paths));
     action.config_file = action
         .config_file

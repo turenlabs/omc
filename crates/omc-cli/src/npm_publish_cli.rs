@@ -39,15 +39,24 @@ pub(crate) fn absolutize_npm_publish_action_paths(base_dir: &Path, action: &mut 
     }
 }
 
-pub(crate) fn absolutize_npm_unpublish_action_paths(base_dir: &Path, action: &mut NpmUnpublishAction) {
+pub(crate) fn absolutize_npm_unpublish_action_paths(
+    base_dir: &Path,
+    action: &mut NpmUnpublishAction,
+) {
     absolutize_optional_path(base_dir, &mut action.userconfig);
 }
 
-pub(crate) fn absolutize_npm_deprecate_action_paths(base_dir: &Path, action: &mut NpmDeprecateAction) {
+pub(crate) fn absolutize_npm_deprecate_action_paths(
+    base_dir: &Path,
+    action: &mut NpmDeprecateAction,
+) {
     absolutize_optional_path(base_dir, &mut action.userconfig);
 }
 
-pub(crate) fn print_npm_pack(project_dir: &Path, action: NpmPackAction) -> Result<(), OmcRegistryError> {
+pub(crate) fn print_npm_pack(
+    project_dir: &Path,
+    action: NpmPackAction,
+) -> Result<(), OmcRegistryError> {
     let destination = absolutize_path(project_dir, action.destination);
     if !action.dry_run {
         fs::create_dir_all(&destination)?;
@@ -91,7 +100,10 @@ pub(crate) fn print_npm_pack(project_dir: &Path, action: NpmPackAction) -> Resul
     Ok(())
 }
 
-pub(crate) fn print_npm_publish(project_dir: &Path, action: NpmPublishAction) -> Result<(), OmcRegistryError> {
+pub(crate) fn print_npm_publish(
+    project_dir: &Path,
+    action: NpmPublishAction,
+) -> Result<(), OmcRegistryError> {
     let mut outputs = Vec::new();
     for source in npm_publish_sources(project_dir, &action)? {
         let mut prepared = prepare_npm_publish_package(&source)?;
@@ -850,7 +862,9 @@ pub(crate) struct NpmPackSourceFile {
     size: u64,
 }
 
-pub(crate) fn collect_npm_pack_files(root: &Path) -> Result<Vec<NpmPackSourceFile>, OmcRegistryError> {
+pub(crate) fn collect_npm_pack_files(
+    root: &Path,
+) -> Result<Vec<NpmPackSourceFile>, OmcRegistryError> {
     let mut files = Vec::new();
     collect_npm_pack_files_recursive(root, root, &mut files)?;
     files.sort_by(|left, right| left.archive_path.cmp(&right.archive_path));
@@ -1184,7 +1198,9 @@ pub(crate) fn parse_npm_publish_args(args: &[String]) -> Result<NpmCompatAction,
     })
 }
 
-pub(crate) fn parse_npm_unpublish_args(args: &[String]) -> Result<NpmCompatAction, OmcRegistryError> {
+pub(crate) fn parse_npm_unpublish_args(
+    args: &[String],
+) -> Result<NpmCompatAction, OmcRegistryError> {
     let mut spec = None;
     let mut dry_run = false;
     let mut force = false;

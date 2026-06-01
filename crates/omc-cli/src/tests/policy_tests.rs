@@ -1,5 +1,5 @@
-use crate::*;
 use super::*;
+use crate::*;
 
 #[test]
 fn policy_validate_reports_ok_for_a_well_formed_file() {

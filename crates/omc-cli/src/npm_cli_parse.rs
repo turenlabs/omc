@@ -19,7 +19,11 @@ pub(crate) fn append_npm_save_location_default_args_from_env(args: &mut Vec<Stri
     append_npm_save_location_default_arg_from_env(args, "save-peer", "--save-peer");
 }
 
-pub(crate) fn append_npm_save_location_default_arg_from_env(args: &mut Vec<String>, key: &str, flag: &str) {
+pub(crate) fn append_npm_save_location_default_arg_from_env(
+    args: &mut Vec<String>,
+    key: &str,
+    flag: &str,
+) {
     if npm_config_env(key)
         .map(|value| config_bool(&value))
         .unwrap_or(false)
@@ -28,7 +32,12 @@ pub(crate) fn append_npm_save_location_default_arg_from_env(args: &mut Vec<Strin
     }
 }
 
-pub(crate) fn append_npm_bool_default_arg(args: &mut Vec<String>, key: &str, true_arg: &str, false_arg: &str) {
+pub(crate) fn append_npm_bool_default_arg(
+    args: &mut Vec<String>,
+    key: &str,
+    true_arg: &str,
+    false_arg: &str,
+) {
     if let Some(value) = npm_config_env(key) {
         if config_bool(&value) {
             args.push(true_arg.to_owned());
@@ -38,7 +47,10 @@ pub(crate) fn append_npm_bool_default_arg(args: &mut Vec<String>, key: &str, tru
     }
 }
 
-pub(crate) fn parse_npm_cli_config_defaults_content(content: &str, values: &mut BTreeMap<String, String>) {
+pub(crate) fn parse_npm_cli_config_defaults_content(
+    content: &str,
+    values: &mut BTreeMap<String, String>,
+) {
     for raw_line in content.lines() {
         let line = strip_npm_config_comment(raw_line).trim();
         if line.is_empty() {
@@ -58,7 +70,10 @@ pub(crate) fn parse_npm_cli_config_defaults_content(content: &str, values: &mut 
     }
 }
 
-pub(crate) fn append_npm_default_args_from_config(values: &BTreeMap<String, String>, args: &mut Vec<String>) {
+pub(crate) fn append_npm_default_args_from_config(
+    values: &BTreeMap<String, String>,
+    args: &mut Vec<String>,
+) {
     if values
         .get("production")
         .map(|value| config_bool(value))
@@ -256,7 +271,10 @@ pub(crate) fn absolutize_npm_diff_action_paths(
     Ok(())
 }
 
-pub(crate) fn absolutize_npm_diff_spec(base_dir: &Path, spec: String) -> Result<String, OmcRegistryError> {
+pub(crate) fn absolutize_npm_diff_spec(
+    base_dir: &Path,
+    spec: String,
+) -> Result<String, OmcRegistryError> {
     if is_npm_local_directory_arg(&spec) {
         let path = absolutize_path(base_dir, npm_local_path_arg(&spec)?);
         return Ok(path.display().to_string());
@@ -399,7 +417,10 @@ pub(crate) fn print_npm_config(
     Ok(())
 }
 
-pub(crate) fn absolutize_npm_archive_references(base_dir: &Path, references: Vec<String>) -> Vec<String> {
+pub(crate) fn absolutize_npm_archive_references(
+    base_dir: &Path,
+    references: Vec<String>,
+) -> Vec<String> {
     references
         .into_iter()
         .map(|reference| absolutize_npm_archive_reference(base_dir, &reference))
@@ -525,7 +546,10 @@ pub(crate) fn print_npm_dist_tag_mutation(result: &NpmDistTagMutationResult, add
     }
 }
 
-pub(crate) fn print_npm_sbom(project_dir: &Path, action: NpmSbomAction) -> Result<(), OmcRegistryError> {
+pub(crate) fn print_npm_sbom(
+    project_dir: &Path,
+    action: NpmSbomAction,
+) -> Result<(), OmcRegistryError> {
     let context = npm_sbom_context(project_dir, action.sbom_type)?;
     let value = match action.format {
         NpmSbomFormat::CycloneDx => npm_cyclonedx_sbom(&context),
@@ -613,7 +637,10 @@ pub(crate) fn print_npm_explain(
     }
 }
 
-pub(crate) fn print_npm_version(project_dir: &Path, action: NpmVersionAction) -> Result<(), OmcRegistryError> {
+pub(crate) fn print_npm_version(
+    project_dir: &Path,
+    action: NpmVersionAction,
+) -> Result<(), OmcRegistryError> {
     let package_json = project_dir.join("package.json");
     let mut package = read_npm_pkg_json(&package_json)?;
     let current = npm_package_json_version(&package)?;
@@ -728,7 +755,10 @@ pub(crate) fn print_npm_cache(
     Ok(())
 }
 
-pub(crate) fn print_npm_doctor(project_dir: &Path, action: NpmDoctorAction) -> Result<(), OmcRegistryError> {
+pub(crate) fn print_npm_doctor(
+    project_dir: &Path,
+    action: NpmDoctorAction,
+) -> Result<(), OmcRegistryError> {
     print!("{}", npm_doctor_report(project_dir, &action)?);
     Ok(())
 }
@@ -760,7 +790,10 @@ pub(crate) fn collect_npm_funding_urls(value: &serde_json::Value, urls: &mut Vec
     }
 }
 
-pub(crate) fn print_npm_init(project_dir: &Path, action: NpmInitAction) -> Result<(), OmcRegistryError> {
+pub(crate) fn print_npm_init(
+    project_dir: &Path,
+    action: NpmInitAction,
+) -> Result<(), OmcRegistryError> {
     let package_json = project_dir.join("package.json");
     let mut package = if package_json.exists() {
         read_npm_pkg_json(&package_json)?
@@ -820,7 +853,10 @@ pub(crate) fn print_npm_init(project_dir: &Path, action: NpmInitAction) -> Resul
     Ok(())
 }
 
-pub(crate) fn print_npm_pkg(project_dir: &Path, action: NpmPkgAction) -> Result<(), OmcRegistryError> {
+pub(crate) fn print_npm_pkg(
+    project_dir: &Path,
+    action: NpmPkgAction,
+) -> Result<(), OmcRegistryError> {
     let package_json = project_dir.join("package.json");
     let mut package = read_npm_pkg_json(&package_json)?;
     match action {
@@ -948,7 +984,10 @@ pub(crate) fn collect_npm_dependency_closure(
     }
 }
 
-pub(crate) fn print_npm_list(project_dir: &Path, action: &NpmListAction) -> Result<(), OmcRegistryError> {
+pub(crate) fn print_npm_list(
+    project_dir: &Path,
+    action: &NpmListAction,
+) -> Result<(), OmcRegistryError> {
     if action.json {
         println!(
             "{}",
@@ -991,7 +1030,10 @@ pub(crate) fn collect_npm_package_json_local_package_paths(
     Ok(())
 }
 
-pub(crate) fn collect_npm_package_bin_env(package: &serde_json::Value, vars: &mut BTreeMap<String, String>) {
+pub(crate) fn collect_npm_package_bin_env(
+    package: &serde_json::Value,
+    vars: &mut BTreeMap<String, String>,
+) {
     let Some(bin) = package.get("bin") else {
         return;
     };
@@ -1032,7 +1074,9 @@ pub(crate) fn collect_npm_package_config_env(
     }
 }
 
-pub(crate) fn parse_npm_compat_action(args: &[String]) -> Result<NpmCompatAction, OmcRegistryError> {
+pub(crate) fn parse_npm_compat_action(
+    args: &[String],
+) -> Result<NpmCompatAction, OmcRegistryError> {
     let normalized = normalize_npm_global_args(args)?;
     let args = normalized.as_slice();
     if let Some(action) = parse_npm_help_request(args) {
@@ -1333,7 +1377,10 @@ pub(crate) fn parse_npm_help_request(args: &[String]) -> Option<NpmCompatAction>
     None
 }
 
-pub(crate) fn parse_npm_path_args(command: &str, args: &[String]) -> Result<bool, OmcRegistryError> {
+pub(crate) fn parse_npm_path_args(
+    command: &str,
+    args: &[String],
+) -> Result<bool, OmcRegistryError> {
     let mut global = false;
     let mut index = 0;
     while index < args.len() {
@@ -1478,7 +1525,9 @@ pub(crate) fn parse_npm_rebuild_args(args: &[String]) -> Result<NpmCompatAction,
     })
 }
 
-pub(crate) fn parse_npm_completion_args(args: &[String]) -> Result<NpmCompatAction, OmcRegistryError> {
+pub(crate) fn parse_npm_completion_args(
+    args: &[String],
+) -> Result<NpmCompatAction, OmcRegistryError> {
     if args.is_empty() {
         return Ok(NpmCompatAction::Completion { words: None });
     }
@@ -1515,7 +1564,9 @@ pub(crate) fn parse_npm_completion_args(args: &[String]) -> Result<NpmCompatActi
     }
 }
 
-pub(crate) fn parse_npm_help_search_args(args: &[String]) -> Result<NpmCompatAction, OmcRegistryError> {
+pub(crate) fn parse_npm_help_search_args(
+    args: &[String],
+) -> Result<NpmCompatAction, OmcRegistryError> {
     let mut long = false;
     let mut query = Vec::new();
     let mut index = 0;
@@ -2295,7 +2346,9 @@ pub(crate) fn parse_npm_pkg_args(args: &[String]) -> Result<NpmCompatAction, Omc
     Ok(NpmCompatAction::Pkg { action })
 }
 
-pub(crate) fn parse_npm_shrinkwrap_args(args: &[String]) -> Result<NpmCompatAction, OmcRegistryError> {
+pub(crate) fn parse_npm_shrinkwrap_args(
+    args: &[String],
+) -> Result<NpmCompatAction, OmcRegistryError> {
     let CommonCompatFlags {
         workspaces,
         all_workspaces,
@@ -2310,7 +2363,9 @@ pub(crate) fn parse_npm_shrinkwrap_args(args: &[String]) -> Result<NpmCompatActi
     Ok(NpmCompatAction::Shrinkwrap)
 }
 
-pub(crate) fn parse_npm_dist_tag_args(args: &[String]) -> Result<NpmCompatAction, OmcRegistryError> {
+pub(crate) fn parse_npm_dist_tag_args(
+    args: &[String],
+) -> Result<NpmCompatAction, OmcRegistryError> {
     let mut positionals = Vec::new();
     let mut npm_registry = None;
     let mut userconfig = None;
@@ -2744,7 +2799,9 @@ pub(crate) fn parse_npm_metadata_url_args(
     })
 }
 
-pub(crate) fn parse_npm_config_get_args(args: &[String]) -> Result<NpmCompatAction, OmcRegistryError> {
+pub(crate) fn parse_npm_config_get_args(
+    args: &[String],
+) -> Result<NpmCompatAction, OmcRegistryError> {
     let NpmConfigArgs {
         json,
         location,
@@ -2771,7 +2828,9 @@ pub(crate) fn parse_npm_config_get_args(args: &[String]) -> Result<NpmCompatActi
     })
 }
 
-pub(crate) fn parse_npm_config_set_args(args: &[String]) -> Result<NpmCompatAction, OmcRegistryError> {
+pub(crate) fn parse_npm_config_set_args(
+    args: &[String],
+) -> Result<NpmCompatAction, OmcRegistryError> {
     let NpmConfigArgs {
         location,
         npm_registry,
@@ -2821,7 +2880,9 @@ pub(crate) fn parse_npm_config_assignments(
     npm_config_assignment(&positionals[0], &positionals[1]).map(|assignment| vec![assignment])
 }
 
-pub(crate) fn parse_npm_config_common_args(args: &[String]) -> Result<NpmConfigArgs, OmcRegistryError> {
+pub(crate) fn parse_npm_config_common_args(
+    args: &[String],
+) -> Result<NpmConfigArgs, OmcRegistryError> {
     let mut editor = None;
     let mut json = false;
     let mut location = NpmConfigLocation::User;
@@ -2898,7 +2959,9 @@ pub(crate) fn parse_npm_config_common_args(args: &[String]) -> Result<NpmConfigA
     })
 }
 
-pub(crate) fn parse_npm_config_location(value: &str) -> Result<NpmConfigLocation, OmcRegistryError> {
+pub(crate) fn parse_npm_config_location(
+    value: &str,
+) -> Result<NpmConfigLocation, OmcRegistryError> {
     match value {
         "user" => Ok(NpmConfigLocation::User),
         "project" => Ok(NpmConfigLocation::Project),

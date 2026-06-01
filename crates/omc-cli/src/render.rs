@@ -7,8 +7,8 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use omc_registry::{
-    read_lockfile, Behavior, Ecosystem, InstallReport, LinkReport, LockedLocalSource, LockedPackage,
-    OmcRegistryError, Verdict,
+    read_lockfile, Behavior, Ecosystem, InstallReport, LinkReport, LockedLocalSource,
+    LockedPackage, OmcRegistryError, Verdict,
 };
 
 pub(crate) fn print_install_report(install: &InstallReport) {

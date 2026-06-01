@@ -193,7 +193,9 @@ pub(crate) fn read_pip_local_wheel_metadata(
     )))
 }
 
-pub(crate) fn parse_pip_local_setup_cfg(content: &str) -> BTreeMap<String, BTreeMap<String, Vec<String>>> {
+pub(crate) fn parse_pip_local_setup_cfg(
+    content: &str,
+) -> BTreeMap<String, BTreeMap<String, Vec<String>>> {
     let mut sections = BTreeMap::<String, BTreeMap<String, Vec<String>>>::new();
     let mut section = String::new();
     let mut key = None::<String>;
@@ -465,7 +467,9 @@ pub(crate) fn pip_local_wheel_pinned_requirement(
     format!("{name}=={}", metadata.version)
 }
 
-pub(crate) fn pip_local_wheel_entry_points_content(entry_points: &[PipLocalWheelEntryPoint]) -> String {
+pub(crate) fn pip_local_wheel_entry_points_content(
+    entry_points: &[PipLocalWheelEntryPoint],
+) -> String {
     let mut by_group = BTreeMap::<String, Vec<&PipLocalWheelEntryPoint>>::new();
     for entry in entry_points {
         by_group.entry(entry.group.clone()).or_default().push(entry);
@@ -491,7 +495,10 @@ pub(crate) fn pip_cache_dir(project_dir: &Path) -> PathBuf {
     project_dir.join(".omc").join("cache").join("pypi")
 }
 
-pub(crate) fn pip_cache_arg_or_env(invocation_cwd: &Path, cache_dir: Option<PathBuf>) -> Option<PathBuf> {
+pub(crate) fn pip_cache_arg_or_env(
+    invocation_cwd: &Path,
+    cache_dir: Option<PathBuf>,
+) -> Option<PathBuf> {
     cache_dir
         .or_else(pip_cache_dir_env)
         .map(|path| absolutize_path(invocation_cwd, path))

@@ -45,7 +45,11 @@ pub struct PackageSpec {
 }
 
 impl PackageSpec {
-    pub(crate) fn new(ecosystem: Ecosystem, name: impl Into<String>, version: Option<String>) -> Self {
+    pub(crate) fn new(
+        ecosystem: Ecosystem,
+        name: impl Into<String>,
+        version: Option<String>,
+    ) -> Self {
         Self {
             ecosystem,
             name: name.into(),

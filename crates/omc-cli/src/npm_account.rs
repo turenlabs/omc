@@ -4,9 +4,9 @@
 use crate::*;
 
 use std::collections::BTreeSet;
+use std::env;
 use std::net::Ipv4Addr;
 use std::path::{Path, PathBuf};
-use std::env;
 
 use omc_registry::{
     add_npm_team_user, create_npm_team, create_npm_token, create_npm_trust, destroy_npm_team,
@@ -14,14 +14,14 @@ use omc_registry::{
     read_npm_access_collaborators, read_npm_access_packages, read_npm_access_status,
     read_npm_org_users, read_npm_package_owners, read_npm_ping_with_userconfig, read_npm_profile,
     read_npm_stars, read_npm_team_users, read_npm_teams, read_npm_token_list, read_npm_trust,
-    read_npm_whoami, remove_npm_org_user, remove_npm_team_user, revoke_npm_access, revoke_npm_token,
-    revoke_npm_trust, set_npm_access_mfa, set_npm_access_status, set_npm_org_user,
-    set_npm_profile_property, Ecosystem, NpmAccessMapResult, NpmAccessMutationResult,
-    NpmAccessStatusResult, NpmAccessToken, NpmOrgListResult, NpmOrgMutationResult,
-    NpmOwnerListResult, NpmOwnerMutationResult, NpmPingResult, NpmProfileMutationResult,
-    NpmProfileResult, NpmStarMutationResult, NpmStarsResult, NpmTeamListResult,
-    NpmTeamMutationResult, NpmTokenCreateOptions, NpmTokenCreateResult, NpmTokenListResult,
-    NpmTokenRevokeResult, NpmWhoamiResult, OmcRegistryError,
+    read_npm_whoami, remove_npm_org_user, remove_npm_team_user, revoke_npm_access,
+    revoke_npm_token, revoke_npm_trust, set_npm_access_mfa, set_npm_access_status,
+    set_npm_org_user, set_npm_profile_property, Ecosystem, NpmAccessMapResult,
+    NpmAccessMutationResult, NpmAccessStatusResult, NpmAccessToken, NpmOrgListResult,
+    NpmOrgMutationResult, NpmOwnerListResult, NpmOwnerMutationResult, NpmPingResult,
+    NpmProfileMutationResult, NpmProfileResult, NpmStarMutationResult, NpmStarsResult,
+    NpmTeamListResult, NpmTeamMutationResult, NpmTokenCreateOptions, NpmTokenCreateResult,
+    NpmTokenListResult, NpmTokenRevokeResult, NpmWhoamiResult, OmcRegistryError,
 };
 
 use crate::args::*;
@@ -116,7 +116,10 @@ pub(crate) fn absolutize_npm_team_action_paths(base_dir: &Path, action: &mut Npm
     }
 }
 
-pub(crate) fn print_npm_star(project_dir: &Path, action: NpmStarAction) -> Result<(), OmcRegistryError> {
+pub(crate) fn print_npm_star(
+    project_dir: &Path,
+    action: NpmStarAction,
+) -> Result<(), OmcRegistryError> {
     match action {
         NpmStarAction::Mutate {
             specs,
@@ -237,7 +240,10 @@ fn npm_whoami_json(whoami: &NpmWhoamiResult) -> serde_json::Value {
     })
 }
 
-pub(crate) fn print_npm_login(project_dir: &Path, action: NpmLoginAction) -> Result<(), OmcRegistryError> {
+pub(crate) fn print_npm_login(
+    project_dir: &Path,
+    action: NpmLoginAction,
+) -> Result<(), OmcRegistryError> {
     let token = npm_login_token(action.token.as_deref())?;
     let target = npm_auth_target(
         project_dir,
@@ -300,7 +306,10 @@ fn write_npm_login_credentials(
     Ok(written)
 }
 
-pub(crate) fn print_npm_logout(project_dir: &Path, action: NpmLogoutAction) -> Result<(), OmcRegistryError> {
+pub(crate) fn print_npm_logout(
+    project_dir: &Path,
+    action: NpmLogoutAction,
+) -> Result<(), OmcRegistryError> {
     let target = npm_auth_target(
         project_dir,
         action.npm_registry.as_deref(),
@@ -378,7 +387,10 @@ fn npm_logout_auth_keys(registry: &str, scope: Option<&str>) -> BTreeSet<String>
     keys
 }
 
-pub(crate) fn print_npm_token(project_dir: &Path, action: NpmTokenAction) -> Result<(), OmcRegistryError> {
+pub(crate) fn print_npm_token(
+    project_dir: &Path,
+    action: NpmTokenAction,
+) -> Result<(), OmcRegistryError> {
     match action {
         NpmTokenAction::List {
             json,
@@ -459,7 +471,10 @@ pub(crate) fn print_npm_token(project_dir: &Path, action: NpmTokenAction) -> Res
     Ok(())
 }
 
-pub(crate) fn print_npm_trust(project_dir: &Path, action: NpmTrustAction) -> Result<(), OmcRegistryError> {
+pub(crate) fn print_npm_trust(
+    project_dir: &Path,
+    action: NpmTrustAction,
+) -> Result<(), OmcRegistryError> {
     match action {
         NpmTrustAction::List {
             package,
@@ -807,7 +822,10 @@ fn npm_trust_provider_name(provider: NpmTrustProvider) -> &'static str {
     }
 }
 
-pub(crate) fn print_npm_profile(project_dir: &Path, action: NpmProfileAction) -> Result<(), OmcRegistryError> {
+pub(crate) fn print_npm_profile(
+    project_dir: &Path,
+    action: NpmProfileAction,
+) -> Result<(), OmcRegistryError> {
     match action {
         NpmProfileAction::Get {
             keys,
@@ -1013,7 +1031,10 @@ fn npm_profile_display_value(value: &serde_json::Value) -> String {
     }
 }
 
-pub(crate) fn print_npm_access(project_dir: &Path, action: NpmAccessAction) -> Result<(), OmcRegistryError> {
+pub(crate) fn print_npm_access(
+    project_dir: &Path,
+    action: NpmAccessAction,
+) -> Result<(), OmcRegistryError> {
     match action {
         NpmAccessAction::ListPackages {
             owner,
@@ -1216,7 +1237,10 @@ fn npm_access_package_arg(
     npm_package_json_name(&package)
 }
 
-pub(crate) fn print_npm_org(project_dir: &Path, action: NpmOrgAction) -> Result<(), OmcRegistryError> {
+pub(crate) fn print_npm_org(
+    project_dir: &Path,
+    action: NpmOrgAction,
+) -> Result<(), OmcRegistryError> {
     match action {
         NpmOrgAction::Set {
             org,
@@ -1377,7 +1401,10 @@ fn print_npm_org_mutation(
     Ok(())
 }
 
-pub(crate) fn print_npm_team(project_dir: &Path, action: NpmTeamAction) -> Result<(), OmcRegistryError> {
+pub(crate) fn print_npm_team(
+    project_dir: &Path,
+    action: NpmTeamAction,
+) -> Result<(), OmcRegistryError> {
     match action {
         NpmTeamAction::Create {
             scope_team,
@@ -1580,7 +1607,10 @@ fn print_npm_team_mutation(
     Ok(())
 }
 
-pub(crate) fn print_npm_owner(project_dir: &Path, action: NpmOwnerAction) -> Result<(), OmcRegistryError> {
+pub(crate) fn print_npm_owner(
+    project_dir: &Path,
+    action: NpmOwnerAction,
+) -> Result<(), OmcRegistryError> {
     match action {
         NpmOwnerAction::List {
             spec,

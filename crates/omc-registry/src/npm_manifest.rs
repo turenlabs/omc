@@ -200,7 +200,10 @@ pub(crate) fn npm_platform_compatible(version_doc: &NpmVersion) -> bool {
     )
 }
 
-pub(crate) fn npm_version_engine_compatible(version_doc: &NpmVersion, options: &LinkOptions) -> bool {
+pub(crate) fn npm_version_engine_compatible(
+    version_doc: &NpmVersion,
+    options: &LinkOptions,
+) -> bool {
     npm_engine_compatible(version_doc.engines.as_ref(), options.npm_engine_strict)
 }
 

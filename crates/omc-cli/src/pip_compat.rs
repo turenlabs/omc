@@ -1269,7 +1269,9 @@ fn sync_pip_user_script_local_paths(paths: &PipUserPaths) -> Result<(), OmcRegis
     Ok(())
 }
 
-pub(crate) fn pip_user_install_local_paths_file(paths: &PipUserPaths) -> Result<PathBuf, OmcRegistryError> {
+pub(crate) fn pip_user_install_local_paths_file(
+    paths: &PipUserPaths,
+) -> Result<PathBuf, OmcRegistryError> {
     if paths
         .site_packages
         .file_name()
@@ -1361,7 +1363,9 @@ fn rewrite_pip_dry_run_install_paths(
         .unwrap_or_else(|| install.python_site_packages.join("bin"));
 }
 
-pub(crate) fn parse_pip_compat_action(args: &[String]) -> Result<PipCompatAction, OmcRegistryError> {
+pub(crate) fn parse_pip_compat_action(
+    args: &[String],
+) -> Result<PipCompatAction, OmcRegistryError> {
     let normalized = normalize_pip_global_args(args)?;
     let args = normalized.as_slice();
     if let Some(action) = parse_pip_help_request(args) {

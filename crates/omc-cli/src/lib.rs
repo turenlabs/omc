@@ -8,14 +8,31 @@ use std::{env, ffi::OsString, fs};
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use chrono::{Duration, SecondsFormat, Utc};
 #[cfg(test)]
+use clap::Parser;
+#[cfg(test)]
 use flate2::write::GzEncoder;
 #[cfg(test)]
 use flate2::Compression;
-#[cfg(test)]
-use clap::Parser;
 use omc_cap::Capability;
 use omc_registry::{
-    add_manifest_npm_local_paths, add_npm_dist_tag, add_package_graph, apply_pypi_binary_option, apply_pypi_environment_defaults, apply_pypi_release_control, compare_npm_versions, compare_pypi_versions, deprecate_npm_package, download_npm_package_tarball, install_locked_packages, install_locked_project, install_project, install_python_project_local_import_paths, lock_project, parse_capability_grant, parse_flow_rule, parse_npm_direct_archive_reference, parse_pypi_direct_archive_reference, parse_pypi_vcs_requirement, prune_locked_package_versions, publish_npm_package, pypi_marker_applies, read_constraint_files, read_lockfile, read_manifest, read_npm_config_snapshot_with_globalconfig, read_npm_package_metadata, read_npm_package_metadata_with_userconfig, read_npm_search, read_npm_workspace_packages, read_pip_config_snapshot, read_pypi_available_versions, read_requirements_files, read_script_requirement_files, remove_locked_packages, remove_manifest_dependency, remove_npm_dist_tag, unpublish_npm_package, Behavior, Ecosystem, InstallReport, LinkOptions, LockedLocalSource, LockedPackage, ManifestDependencyKind, NpmDeprecateResult, NpmPackageTarball, NpmProvenanceBundle, NpmPublishPackage, NpmPublishResult, NpmSearchPackage, NpmTokenCreateOptions, NpmUnpublishResult, NpmWorkspacePackage, OmcLock, OmcRegistryError, PackageSpec, ProjectRequirements, PypiAvailableVersionsOptions, PypiBinaryMode, PypiReleaseControl, PypiReleaseControls, PythonLocalRequirement, PythonVcsRequirement, Verdict,
+    add_manifest_npm_local_paths, add_npm_dist_tag, add_package_graph, apply_pypi_binary_option,
+    apply_pypi_environment_defaults, apply_pypi_release_control, compare_npm_versions,
+    compare_pypi_versions, deprecate_npm_package, download_npm_package_tarball,
+    install_locked_packages, install_locked_project, install_project,
+    install_python_project_local_import_paths, lock_project, parse_capability_grant,
+    parse_flow_rule, parse_npm_direct_archive_reference, parse_pypi_direct_archive_reference,
+    parse_pypi_vcs_requirement, prune_locked_package_versions, publish_npm_package,
+    pypi_marker_applies, read_constraint_files, read_lockfile, read_manifest,
+    read_npm_config_snapshot_with_globalconfig, read_npm_package_metadata,
+    read_npm_package_metadata_with_userconfig, read_npm_search, read_npm_workspace_packages,
+    read_pip_config_snapshot, read_pypi_available_versions, read_requirements_files,
+    read_script_requirement_files, remove_locked_packages, remove_manifest_dependency,
+    remove_npm_dist_tag, unpublish_npm_package, Behavior, Ecosystem, InstallReport, LinkOptions,
+    LockedLocalSource, LockedPackage, ManifestDependencyKind, NpmDeprecateResult,
+    NpmPackageTarball, NpmProvenanceBundle, NpmPublishPackage, NpmPublishResult, NpmSearchPackage,
+    NpmTokenCreateOptions, NpmUnpublishResult, NpmWorkspacePackage, OmcLock, OmcRegistryError,
+    PackageSpec, ProjectRequirements, PypiAvailableVersionsOptions, PypiBinaryMode,
+    PypiReleaseControl, PypiReleaseControls, PythonLocalRequirement, PythonVcsRequirement, Verdict,
 };
 #[cfg(test)]
 use omc_registry::{LockedPythonVcsDependency, PypiCheckIssue};
@@ -38,9 +55,9 @@ pub(crate) mod npm_list_cli;
 pub(crate) mod npm_publish_cli;
 pub(crate) mod npm_query_cli;
 pub(crate) mod parse;
+pub(crate) mod pip_cli;
 pub(crate) mod pip_compat;
 pub(crate) mod pip_config_cli;
-pub(crate) mod pip_cli;
 pub(crate) mod pip_local;
 pub(crate) mod pip_parse;
 pub(crate) mod pip_render;
@@ -63,33 +80,16 @@ pub(crate) use npm_list_cli::{
     npm_list_json_tree, npm_list_short_all_flag_value, npm_package_name_from_spec,
     npm_pkg_ignored_equals_flag, npm_sbom_context, npm_sbom_ignored_equals_flag, npm_spdx_sbom,
 };
-#[cfg(test)]
-pub(crate) use npm_list_cli::{NpmSbomContext, NpmSbomRoot};
 use npm_list_cli::{
     npm_dependency_graph_from_omc_lock, npm_dependency_graph_from_package_lock,
     npm_package_relative_path,
 };
+#[cfg(test)]
+pub(crate) use npm_list_cli::{NpmSbomContext, NpmSbomRoot};
 
 #[cfg(test)]
 use compile::{compile_source_default_name, infer_compile_ecosystem};
 
-use manifest::{
-    parse_package_spec, parse_package_specs, package_spec_has_ecosystem_prefix,
-};
-#[cfg(test)]
-use direct_compat::{discover_direct_compat_project_dir_from, DirectCompatInvocation};
-use parse::{npm_next_version, parse_npm_archive_references, parse_pip_archive_references};
-use npm_cli_parse::*;
-use render::{
-    behavior_label, print_audit_report, print_install_report, print_link_reports,
-    print_npm_install_json_report, verdict_label,
-};
-#[cfg(test)]
-use render::pip_install_report_json;
-use temp_project::TempOmcProject;
-use shim::command_program_for_cwd;
-#[cfg(test)]
-use shim::{python_pip_module_args, python_twine_module_args};
 use crate::twine_compat::run_twine_compat_with_cwd;
 #[cfg(test)]
 use crate::twine_compat::{
@@ -97,50 +97,36 @@ use crate::twine_compat::{
     resolve_twine_upload_settings, twine_attestation_path, twine_upload_attestations_json,
     twine_upload_inputs,
 };
-use script::{
-    print_npm_run_list, run_package_script_with_npm_command_for_workspaces,
+#[cfg(test)]
+use direct_compat::{discover_direct_compat_project_dir_from, DirectCompatInvocation};
+use manifest::{package_spec_has_ecosystem_prefix, parse_package_spec, parse_package_specs};
+use npm_cli_parse::*;
+use parse::{npm_next_version, parse_npm_archive_references, parse_pip_archive_references};
+#[cfg(test)]
+use render::pip_install_report_json;
+use render::{
+    behavior_label, print_audit_report, print_install_report, print_link_reports,
+    print_npm_install_json_report, verdict_label,
 };
 #[cfg(test)]
 use script::{package_script_lifecycle_order, run_package_script_with_npm_command};
+use script::{print_npm_run_list, run_package_script_with_npm_command_for_workspaces};
+use shim::command_program_for_cwd;
+#[cfg(test)]
+use shim::{python_pip_module_args, python_twine_module_args};
+use temp_project::TempOmcProject;
 
 use crate::args::*;
 
 pub(crate) use crate::pip_cli::*;
 pub(crate) use crate::pip_local::*;
-pub(crate) use crate::pip_render::*;
 pub(crate) use crate::pip_parse::*;
+pub(crate) use crate::pip_render::*;
 
-pub(crate) use npm_query_cli::{
-    npm_view_field_value,
-    parse_npm_audit_args,
-    parse_npm_diff_args,
-    parse_npm_fund_args,
-    parse_npm_outdated_args,
-    parse_npm_query_args,
-    parse_npm_search_args,
-    parse_npm_view_args,
-    print_npm_diff,
-    print_npm_fund,
-    print_npm_outdated,
-    print_npm_query,
-    print_npm_search,
-    print_npm_view,
-};
 #[cfg(test)]
-pub(crate) use npm_query_cli::{
-    NpmQueryItem,
-    collect_npm_fund_report,
-    normalize_npm_funding,
-    npm_diff_changed_files,
-    npm_diff_file_patch,
-    npm_diff_package_tarball,
-    npm_fund_report_json,
-    npm_funding_urls,
-    npm_query_items,
-    npm_query_selector_matches,
-    npm_view_metadata_value,
+use crate::direct_compat::{
+    direct_compat_mode, npx_compat_args, parse_direct_compat_invocation, DirectCompatMode,
 };
-use crate::npm_compat::NpmLinkAction;
 pub(crate) use crate::npm_account::{
     absolutize_npm_access_action_paths, absolutize_npm_login_action_paths,
     absolutize_npm_logout_action_paths, absolutize_npm_org_action_paths,
@@ -154,27 +140,21 @@ pub(crate) use crate::npm_account::{
     print_npm_ping, print_npm_profile, print_npm_star, print_npm_team, print_npm_token,
     print_npm_trust, print_npm_whoami,
 };
-pub(crate) use crate::npm_config_cli::{
-    npm_config_editor, npm_config_line_key, npm_config_write_path, read_npm_config_lines,
-    run_npm_config_edit, strip_npm_config_comment, upsert_npm_config_line, write_npm_config_lines,
-};
-use crate::pip_config_cli::{
-    pip_config_values, print_pip_config, run_pip_config_edit, strip_pip_config_comment,
-};
-#[cfg(not(test))]
-use crate::pip_config_cli::pip_global_config_default_path;
-#[cfg(test)]
-use crate::pip_config_cli::{
-    pip_config_debug_report, pip_config_list_value, pip_config_value_for_key, pip_config_write_path,
-};
+use crate::npm_compat::NpmLinkAction;
 #[cfg(test)]
 use crate::npm_compat::{
     npm_link_store_entry, npm_link_target_from_path, npm_package_json_requirement_for_link_root,
     npm_read_link_store_entry, npm_write_link_store_entry,
 };
-use crate::npm_exec::{npm_exec_direct_package_arg, run_npm_exec};
+#[cfg(test)]
+use crate::npm_compat::{run_npm_compat, run_npm_compat_with_cwd};
+pub(crate) use crate::npm_config_cli::{
+    npm_config_editor, npm_config_line_key, npm_config_write_path, read_npm_config_lines,
+    run_npm_config_edit, strip_npm_config_comment, upsert_npm_config_line, write_npm_config_lines,
+};
 #[cfg(test)]
 use crate::npm_exec::npm_exec_target_cwds;
+use crate::npm_exec::{npm_exec_direct_package_arg, run_npm_exec};
 pub(crate) use crate::npm_publish_cli::{
     absolutize_npm_deprecate_action_paths, absolutize_npm_pack_action_paths,
     absolutize_npm_publish_action_paths, absolutize_npm_unpublish_action_paths,
@@ -184,17 +164,32 @@ pub(crate) use crate::npm_publish_cli::{
 };
 #[cfg(test)]
 use crate::npm_publish_cli::{collect_npm_pack_files, sha512_hex, write_npm_pack_tarball};
-use crate::policy_args::{apply_cli_policy_options, CliPolicyArgs};
+#[cfg(not(test))]
+use crate::pip_config_cli::pip_global_config_default_path;
 #[cfg(test)]
-use crate::direct_compat::{
-    direct_compat_mode, npx_compat_args, parse_direct_compat_invocation, DirectCompatMode,
+use crate::pip_config_cli::{
+    pip_config_debug_report, pip_config_list_value, pip_config_value_for_key, pip_config_write_path,
+};
+use crate::pip_config_cli::{
+    pip_config_values, print_pip_config, run_pip_config_edit, strip_pip_config_comment,
 };
 #[cfg(test)]
-use crate::npm_compat::{run_npm_compat, run_npm_compat_with_cwd};
-#[cfg(test)]
 use crate::policy::run_policy_command;
+use crate::policy_args::{apply_cli_policy_options, CliPolicyArgs};
 #[cfg(test)]
 use crate::shim::run_python;
+#[cfg(test)]
+pub(crate) use npm_query_cli::{
+    collect_npm_fund_report, normalize_npm_funding, npm_diff_changed_files, npm_diff_file_patch,
+    npm_diff_package_tarball, npm_fund_report_json, npm_funding_urls, npm_query_items,
+    npm_query_selector_matches, npm_view_metadata_value, NpmQueryItem,
+};
+pub(crate) use npm_query_cli::{
+    npm_view_field_value, parse_npm_audit_args, parse_npm_diff_args, parse_npm_fund_args,
+    parse_npm_outdated_args, parse_npm_query_args, parse_npm_search_args, parse_npm_view_args,
+    print_npm_diff, print_npm_fund, print_npm_outdated, print_npm_query, print_npm_search,
+    print_npm_view,
+};
 
 const NPM_PROFILE_KNOWN_KEYS: &[&str] = &[
     "name",
@@ -221,13 +216,13 @@ use crate::install::{
     locked_packages_from_reports, npm_lock_options_including_omitted, pip_install_report_to_stdout,
     write_pip_install_report,
 };
-use crate::pip_compat::{
-    parse_pip_compat_action, pip_user_install_local_paths_file,
-    pip_user_paths, run_pip_install_dry_run, run_pip_install_prefix, run_pip_install_root,
-    run_pip_install_target, run_pip_install_user, run_pip_uninstall_user,
-};
 #[cfg(test)]
 use crate::pip_compat::pip_rooted_project_path;
+use crate::pip_compat::{
+    parse_pip_compat_action, pip_user_install_local_paths_file, pip_user_paths,
+    run_pip_install_dry_run, run_pip_install_prefix, run_pip_install_root, run_pip_install_target,
+    run_pip_install_user, run_pip_uninstall_user,
+};
 
 fn pylock_toml_from_omc_lock(lock: &OmcLock) -> String {
     let mut packages = lock
@@ -659,9 +654,6 @@ fn npm_environment_default_args() -> Vec<String> {
     args
 }
 
-
-
-
 #[cfg(test)]
 thread_local! {
     /// Test-only, thread-scoped override of the npm install-mode environment.
@@ -739,7 +731,6 @@ fn read_npm_cli_config_defaults_file(
     Ok(())
 }
 
-
 fn npm_cli_default_config_key(key: &str) -> bool {
     matches!(
         key,
@@ -782,12 +773,6 @@ fn expand_npm_config_default_value(value: &str) -> Option<String> {
     expanded.push_str(rest);
     Some(expanded.trim().to_owned())
 }
-
-
-
-
-
-
 
 fn shell_like_tokens(value: &str) -> Vec<String> {
     let mut tokens = Vec::new();
@@ -854,13 +839,9 @@ fn scoped_relative_env_path(key: &'static str, base_dir: &Path) -> Option<Scoped
     Some(scoped)
 }
 
-
-
-
 pub(crate) fn absolutize_optional_path(base_dir: &Path, path: &mut Option<PathBuf>) {
     *path = path.take().map(|path| absolutize_path(base_dir, path));
 }
-
 
 pub(crate) fn count_substrings(haystack: &str, needle: &str) -> usize {
     if needle.is_empty() {
@@ -868,9 +849,6 @@ pub(crate) fn count_substrings(haystack: &str, needle: &str) -> usize {
     }
     haystack.match_indices(needle).count()
 }
-
-
-
 
 pub(crate) const NPM_COMPLETION_COMMANDS: &[&str] = &[
     "access",
@@ -981,7 +959,6 @@ const NPM_COMPLETION_PACKAGE_COMMANDS: &[&str] = &[
     "unstar",
     "view",
 ];
-
 
 fn npm_completion_script() -> &'static str {
     r#"###-begin-omc-npm-completion-###
@@ -1300,7 +1277,6 @@ fn npm_globalconfig_path(project_dir: &Path, globalconfig: Option<&Path>) -> Pat
     npm_global_prefix_path().join("etc").join("npmrc")
 }
 
-
 pub(crate) fn cli_bin_name_is_safe(name: &str) -> bool {
     !name.is_empty() && !name.contains('/') && !name.contains('\\') && name != "." && name != ".."
 }
@@ -1318,9 +1294,6 @@ pub(crate) fn remove_cli_path_if_exists(path: &Path) -> Result<(), OmcRegistryEr
     }
     Ok(())
 }
-
-
-
 
 fn split_npm_archive_suffix(value: &str) -> (&str, &str) {
     let suffix_index = [value.find('#'), value.find('?')]
@@ -1352,7 +1325,6 @@ fn expand_cli_local_path(value: &str, base_dir: &Path) -> PathBuf {
         base_dir.join(path)
     }
 }
-
 
 impl NpmConfigLocation {
     fn as_str(self) -> &'static str {
@@ -1404,7 +1376,6 @@ fn delete_npm_config_keys(
     write_npm_config_lines(&path, &lines)
 }
 
-
 fn npm_metadata_url(
     kind: NpmMetadataUrlKind,
     manifest: &serde_json::Value,
@@ -1436,7 +1407,10 @@ fn npm_metadata_url_label(kind: NpmMetadataUrlKind) -> &'static str {
     }
 }
 
-pub(crate) fn npm_manifest_string_field(manifest: &serde_json::Value, field: &str) -> Option<String> {
+pub(crate) fn npm_manifest_string_field(
+    manifest: &serde_json::Value,
+    field: &str,
+) -> Option<String> {
     manifest
         .get(field)
         .and_then(serde_json::Value::as_str)
@@ -1557,8 +1531,6 @@ pub(crate) fn npm_registry_auth_key_prefix(registry: &str) -> Option<String> {
     }
 }
 
-
-
 fn npm_dist_tag_add_package_version(spec: &str) -> Result<(String, String), OmcRegistryError> {
     let spec = parse_package_spec(spec, Some(Ecosystem::Npm))?;
     let version = spec.version.clone().ok_or_else(|| {
@@ -1590,11 +1562,9 @@ fn npm_dist_tag_package_spec(
     Ok(name.to_owned())
 }
 
-
 pub(crate) fn npm_node_modules_path(name: &str) -> String {
     format!("node_modules/{name}")
 }
-
 
 pub(crate) fn npm_installed_package_dir(
     project_dir: &Path,
@@ -1608,9 +1578,6 @@ pub(crate) fn npm_installed_package_dir(
     };
     Ok(project_dir.join("node_modules").join(relative))
 }
-
-
-
 
 pub(crate) fn current_utc_timestamp() -> String {
     let duration = SystemTime::now()
@@ -1688,12 +1655,13 @@ struct NpmExplainPackage {
     dependents: Vec<String>,
 }
 
-
 fn npm_explain_requested_name(spec: &str) -> Result<String, OmcRegistryError> {
     parse_package_spec(spec, Some(Ecosystem::Npm)).map(|spec| spec.name)
 }
 
-pub(crate) fn npm_root_dependency_names(project_dir: &Path) -> Result<BTreeSet<String>, OmcRegistryError> {
+pub(crate) fn npm_root_dependency_names(
+    project_dir: &Path,
+) -> Result<BTreeSet<String>, OmcRegistryError> {
     let mut names = BTreeSet::new();
     let package_json = project_dir.join("package.json");
     if package_json.exists() {
@@ -1732,7 +1700,6 @@ fn npm_lock_package_depends_on(package: &LockedPackage, name: &str) -> bool {
         .chain(package.optional_dependencies.iter())
         .any(|dependency| npm_dependency_name(dependency).as_deref() == Some(name))
 }
-
 
 fn pypi_available_versions_options(
     index_url: Option<String>,
@@ -2565,7 +2532,6 @@ fn npm_package_lock_local_source_entry(
     serde_json::Value::Object(entry)
 }
 
-
 fn npm_package_lock_dependency_map(
     dependencies: &[String],
 ) -> serde_json::Map<String, serde_json::Value> {
@@ -2607,7 +2573,6 @@ fn hex_bytes(hex: &str) -> Option<Vec<u8>> {
     Some(bytes)
 }
 
-
 fn npm_compat_cache_dir(project_dir: &Path, cache_dir: Option<&Path>) -> PathBuf {
     cache_dir
         .map(|path| path.join("_cacache"))
@@ -2631,7 +2596,6 @@ fn remove_npm_cache_entries(cache_dir: &Path, pattern: &str) -> Result<usize, Om
     prune_empty_cache_dirs(cache_dir)?;
     Ok(count)
 }
-
 
 fn npm_doctor_report(
     project_dir: &Path,
@@ -2762,8 +2726,6 @@ fn npm_doctor_access_status(path: &Path) -> &'static str {
     }
 }
 
-
-
 fn npm_pkg_set_default_string(
     package: &mut serde_json::Value,
     path: &str,
@@ -2821,7 +2783,6 @@ fn npm_cache_dir(project_dir: &Path) -> PathBuf {
     project_dir.join(".omc").join("cache").join("npm")
 }
 
-
 fn npm_manifest_from_tarball(bytes: &[u8]) -> Result<serde_json::Value, OmcRegistryError> {
     let decoder = flate2::read::GzDecoder::new(std::io::Cursor::new(bytes));
     let mut archive = tar::Archive::new(decoder);
@@ -2846,7 +2807,9 @@ fn npm_manifest_from_tarball(bytes: &[u8]) -> Result<serde_json::Value, OmcRegis
     ))
 }
 
-pub(crate) fn npm_package_json_name(package: &serde_json::Value) -> Result<String, OmcRegistryError> {
+pub(crate) fn npm_package_json_name(
+    package: &serde_json::Value,
+) -> Result<String, OmcRegistryError> {
     package
         .get("name")
         .and_then(serde_json::Value::as_str)
@@ -3351,7 +3314,6 @@ fn print_lock_only_report(project_dir: &Path) {
     println!("lockfile {}", project_dir.join("omc.lock").display());
 }
 
-
 fn npm_maintenance_command_name(command: NpmMaintenanceCommand) -> &'static str {
     match command {
         NpmMaintenanceCommand::Prune => "prune",
@@ -3459,7 +3421,6 @@ fn extend_npm_installed_removal_with_lock_dependencies(
     }
 }
 
-
 fn npm_project_declared_dependency_names(project_dir: &Path) -> BTreeSet<String> {
     let mut names = BTreeSet::new();
     extend_npm_package_json_dependency_names(&project_dir.join("package.json"), &mut names);
@@ -3489,8 +3450,6 @@ fn extend_npm_package_json_dependency_names(path: &Path, names: &mut BTreeSet<St
         }
     }
 }
-
-
 
 fn remove_npm_installed_package(project_dir: &Path, name: &str) -> Result<bool, OmcRegistryError> {
     let node_modules = project_dir.join("node_modules");
@@ -3817,8 +3776,6 @@ fn print_locked_packages(
     Ok(())
 }
 
-
-
 pub(crate) fn listed_locked_packages(
     project_dir: &Path,
     ecosystem: Option<Ecosystem>,
@@ -3917,7 +3874,6 @@ fn extend_npm_package_json_local_package_paths(
     }
     Ok(())
 }
-
 
 fn npm_package_json_local_directory_path(
     base_dir: &Path,
@@ -4707,7 +4663,6 @@ fn canonicalize_path(path: PathBuf) -> Option<PathBuf> {
     path.canonicalize().ok()
 }
 
-
 fn npm_package_bin_name(package_name: &str) -> &str {
     package_name
         .rsplit_once('/')
@@ -4813,7 +4768,6 @@ fn npm_create_bin_names(bin_dir: &Path) -> Result<Vec<String>, OmcRegistryError>
     names.dedup();
     Ok(names)
 }
-
 
 fn npm_package_env_value(value: &serde_json::Value) -> Option<String> {
     match value {
@@ -4931,18 +4885,11 @@ pub(crate) fn exit_code(code: Option<i32>) -> ExitCode {
         .unwrap_or(ExitCode::FAILURE)
 }
 
-
-
-
-
-
-
 fn npm_maintenance_equals_value_flag(arg: &str) -> bool {
     ["--loglevel=", "--cache="]
         .iter()
         .any(|prefix| arg.starts_with(prefix))
 }
-
 
 fn npm_rebuild_equals_value_flag(arg: &str) -> bool {
     [
@@ -4956,15 +4903,11 @@ fn npm_rebuild_equals_value_flag(arg: &str) -> bool {
     .any(|prefix| arg.starts_with(prefix))
 }
 
-
 fn npm_completion_ignored_equals_flag(arg: &str) -> bool {
     ["--loglevel=", "--cache="]
         .iter()
         .any(|prefix| arg.starts_with(prefix))
 }
-
-
-
 
 fn npm_init_flag_value(
     args: &[String],
@@ -4987,13 +4930,11 @@ fn npm_init_ignored_equals_flag(arg: &str) -> bool {
         .any(|prefix| arg.starts_with(prefix))
 }
 
-
 fn npm_version_ignored_equals_flag(arg: &str) -> bool {
     ["--message=", "--tag-version-prefix="]
         .iter()
         .any(|prefix| arg.starts_with(prefix))
 }
-
 
 fn npm_update_defaults_to_no_save(command: &str) -> bool {
     matches!(command, "update" | "up" | "upgrade" | "udpate")
@@ -5132,8 +5073,6 @@ pub(crate) fn npm_attached_short_value(arg: &str, flag: char) -> Option<&str> {
     }
 }
 
-
-
 fn npm_link_explicit_save(args: &[String]) -> bool {
     args.iter().any(|arg| {
         matches!(
@@ -5155,22 +5094,15 @@ fn npm_link_explicit_save(args: &[String]) -> bool {
     })
 }
 
-
-
 fn npm_doctor_ignored_equals_flag(arg: &str) -> bool {
     ["--loglevel=", "--cache="]
         .iter()
         .any(|prefix| arg.starts_with(prefix))
 }
 
-
 fn npm_cache_equals_value_flag(arg: &str) -> bool {
     ["--loglevel="].iter().any(|prefix| arg.starts_with(prefix))
 }
-
-
-
-
 
 fn npm_dist_tag_ignored_equals_flag(arg: &str) -> bool {
     [
@@ -5196,15 +5128,9 @@ fn npm_dist_tag_flag_value(
         .ok_or_else(|| OmcRegistryError::UnsupportedSpec(format!("{flag} needs a value")))
 }
 
-
-
-
-
-
 pub(crate) fn npm_registry_identity_equals_value_flag(arg: &str) -> bool {
     ["--loglevel="].iter().any(|prefix| arg.starts_with(prefix))
 }
-
 
 fn npm_explain_ignored_equals_flag(arg: &str) -> bool {
     ["--workspace=", "--loglevel="]
@@ -5219,16 +5145,11 @@ fn npm_all_long_short_flag(arg: &str) -> bool {
     !rest.is_empty() && !rest.starts_with('-') && rest.chars().all(|ch| matches!(ch, 'a' | 'l'))
 }
 
-
-
 fn npm_metadata_url_equals_value_flag(arg: &str) -> bool {
     ["--browser=", "--userconfig=", "--loglevel="]
         .iter()
         .any(|prefix| arg.starts_with(prefix))
 }
-
-
-
 
 fn npm_config_assignment(key: &str, value: &str) -> Result<(String, String), OmcRegistryError> {
     let key = key.trim();
@@ -5251,8 +5172,6 @@ pub(crate) struct NpmConfigArgs {
     positionals: Vec<String>,
 }
 
-
-
 #[derive(Debug, PartialEq, Eq)]
 struct NpmRunArgs {
     name: Option<String>,
@@ -5264,13 +5183,11 @@ struct NpmRunArgs {
     include_workspace_root: bool,
 }
 
-
 fn npm_run_equals_value_flag(arg: &str) -> bool {
     ["--loglevel=", "--include-workspace-root="]
         .iter()
         .any(|prefix| arg.starts_with(prefix))
 }
-
 
 #[cfg(windows)]
 fn npm_exec_call_command(call: String) -> (String, Vec<String>) {
@@ -5303,13 +5220,11 @@ fn npm_exec_inferred_bin_name(package: &str) -> Result<String, OmcRegistryError>
     Ok(npm_package_bin_name(name).to_owned())
 }
 
-
 fn npm_explore_equals_value_flag(arg: &str) -> bool {
     ["--shell=", "--loglevel=", "--cache=", "--registry="]
         .iter()
         .any(|prefix| arg.starts_with(prefix))
 }
-
 
 fn npm_edit_equals_value_flag(arg: &str) -> bool {
     ["--editor=", "--loglevel=", "--cache=", "--registry="]
@@ -5908,8 +5823,6 @@ pub(crate) fn ignored_npm_install_preference_equals_flag(arg: &str) -> bool {
     .any(|prefix| arg.starts_with(prefix))
 }
 
-
-
 fn split_first_position(
     command: &str,
     args: &[String],
@@ -5977,4 +5890,3 @@ pub(crate) fn normalize_extra(extra: &str) -> String {
 
 #[cfg(test)]
 mod tests;
-

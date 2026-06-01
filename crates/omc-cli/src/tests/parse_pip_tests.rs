@@ -1,5 +1,5 @@
-use crate::*;
 use super::*;
+use crate::*;
 
 #[test]
 fn parses_pip_install_requirements_and_indexes() {
