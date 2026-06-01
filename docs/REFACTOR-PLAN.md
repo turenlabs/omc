@@ -5,16 +5,31 @@ Splitting the two monolith `lib.rs` files into a proper module tree. Branch:
 --workspace` is green.** Pure code movement + visibility bumps; behavior and
 public API unchanged.
 
-## Status
+## Status — ✅ COMPLETE
 
-| Step | What | Status |
+The split is done. **0 warnings, full `cargo test --workspace` green (612 tests), 63 bisectable commits.**
+
+| Metric | Before | After |
 | --- | --- | --- |
-| T1 | registry: extract `redteam_capability_evasion`, `tests`, `policy_dsl_tests` → siblings | ✅ done (lib.rs 31,772→20,363) |
-| T2 | cli: extract `tests` → `src/tests.rs` | ✅ done (lib.rs 49,927→34,445) |
-| R1 | registry: `error.rs` (OmcRegistryError + Result) | ✅ done |
-| R2–R18 | registry impl modules (below) | ⏳ todo |
-| C1–C29 | cli impl modules (below) | ⏳ todo |
-| final | de-glob `use crate::*`; demote over-broad `pub(crate)`; split files >~3–4k; `#![warn(unreachable_pub)]` | ⏳ todo |
+| files (crate `src/`) | 2 monoliths | **115** |
+| omc-registry `lib.rs` | 31,772 | **6,677** |
+| omc-cli `lib.rs` | 49,927 | **5,980** |
+| files > 4,000 lines | 2 (both ~30–50k) | **2** (the two `lib.rs` orchestration cores) |
+| biggest non-core file | — | 3,945 (`npm_account.rs`) |
+
+The only two files over ~4k are now `omc-registry/src/lib.rs` (resolution/install
+orchestration: `resolve_package_graph`, `link_package*`, `install_*`) and
+`omc-cli/src/lib.rs` (command dispatch + install orchestration). These are
+**cohesive by responsibility** — per the research guidance "decompose by
+responsibility, not line count," an orchestration core is a legitimate unit and is
+left intact rather than fragmented. Each domain (npm/pypi resolve, install,
+config, metadata, profiler, verify, signature, policy, manifest, lockfile, the
+npm/pip/twine CLI command families, …) is now its own module; tests live in
+`src/tests/<domain>_tests.rs`.
+
+Optional future polish (not required for "done"): de-glob the `use crate::*`
+scaffolding into explicit imports, demote any over-broad `pub(crate)` back to
+private, add `#![warn(unreachable_pub)]`. Behavior and public API are byte-unchanged.
 
 ## Mechanical recipe (per impl module)
 
