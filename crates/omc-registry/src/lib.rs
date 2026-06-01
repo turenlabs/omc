@@ -179,7 +179,9 @@ use rand_core::OsRng;
 #[cfg(test)]
 use signature::project_signing_public_key;
 pub use signature::verify_artifact_signature;
-use signature::{artifact_payload_sha256, ensure_lock_signing_key, sign_artifact};
+use signature::{
+    artifact_payload_sha256, ensure_artifact_signing_key, ensure_lock_signing_key, sign_artifact,
+};
 
 pub(crate) mod verify;
 pub use verify::compile_source_path;

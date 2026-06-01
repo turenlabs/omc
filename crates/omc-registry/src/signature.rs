@@ -103,6 +103,14 @@ pub fn verify_artifact_signature(artifact: &OmcArtifact) -> Result<()> {
     })
 }
 
+/// Pre-create the per-project artifact signing key (single-threaded) so the
+/// parallel resolver's workers only ever READ it — the create path below is not
+/// atomic and would race if two workers hit it at once.
+pub(crate) fn ensure_artifact_signing_key(project_dir: &Path) -> Result<()> {
+    read_or_create_artifact_signing_key(project_dir)?;
+    Ok(())
+}
+
 fn read_or_create_artifact_signing_key(project_dir: &Path) -> Result<SigningKey> {
     let key_path = artifact_signing_key_path(project_dir);
     if key_path.exists() {

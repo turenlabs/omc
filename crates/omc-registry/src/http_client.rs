@@ -103,7 +103,10 @@ fn store_global_cache(cache_path: &Path, bytes: &[u8]) {
         .file_name()
         .and_then(|name| name.to_str())
         .unwrap_or("artifact");
-    let tmp = dir.join(format!(".{file_name}.tmp-{:?}", std::thread::current().id()));
+    let tmp = dir.join(format!(
+        ".{file_name}.tmp-{:?}",
+        std::thread::current().id()
+    ));
     if fs::write(&tmp, bytes).is_ok() {
         let _ = fs::rename(&tmp, cache_path);
     }
