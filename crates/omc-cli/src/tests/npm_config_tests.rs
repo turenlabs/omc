@@ -531,122 +531,130 @@ fn npm_cache_remove_missing_pattern_preserves_cache_like_npm() {
 
 #[test]
 fn writes_npm_config_set_and_delete() {
-    let dir = test_dir("npm-config-set-delete");
-    fs::write(
-        dir.join(".npmrc"),
-        "registry=https://old.example.invalid/npm\n# keep this\nlegacy-peer-deps=true\n",
-    )
-    .unwrap();
+    // Hold the env lock and clear the registry override so this file-based test
+    // reads `.npmrc` values deterministically — a concurrent env-precedence test
+    // sets NPM_CONFIG_REGISTRY under the same lock, which would otherwise leak in.
+    with_env_values(
+        &[("NPM_CONFIG_REGISTRY", None), ("npm_config_registry", None)],
+        || {
+            let dir = test_dir("npm-config-set-delete");
+            fs::write(
+                dir.join(".npmrc"),
+                "registry=https://old.example.invalid/npm\n# keep this\nlegacy-peer-deps=true\n",
+            )
+            .unwrap();
 
-    print_npm_config(
-        &dir,
-        NpmConfigAction::Set {
-            assignments: vec![
-                (
-                    "registry".to_owned(),
-                    "https://new.example.invalid/npm".to_owned(),
-                ),
-                (
-                    "@scope:registry".to_owned(),
-                    "https://scope.example.invalid/npm".to_owned(),
-                ),
-            ],
-            location: NpmConfigLocation::Project,
+            print_npm_config(
+                &dir,
+                NpmConfigAction::Set {
+                    assignments: vec![
+                        (
+                            "registry".to_owned(),
+                            "https://new.example.invalid/npm".to_owned(),
+                        ),
+                        (
+                            "@scope:registry".to_owned(),
+                            "https://scope.example.invalid/npm".to_owned(),
+                        ),
+                    ],
+                    location: NpmConfigLocation::Project,
+                },
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+
+            let config = fs::read_to_string(dir.join(".npmrc")).unwrap();
+            assert!(config.contains("registry=https://new.example.invalid/npm\n"));
+            assert!(config.contains("# keep this\n"));
+            assert!(config.contains("@scope:registry=https://scope.example.invalid/npm\n"));
+            let values = npm_config_values(
+                &dir,
+                None,
+                Some(Path::new("empty-user.npmrc")),
+                Some(Path::new("empty-global.npmrc")),
+                NpmConfigLocation::Project,
+            )
+            .unwrap();
+            assert_eq!(
+                values.get("registry").map(String::as_str),
+                Some("https://new.example.invalid/npm/")
+            );
+            assert_eq!(
+                values.get("@scope:registry").map(String::as_str),
+                Some("https://scope.example.invalid/npm/")
+            );
+
+            print_npm_config(
+                &dir,
+                NpmConfigAction::Delete {
+                    keys: vec!["registry".to_owned()],
+                    location: NpmConfigLocation::Project,
+                },
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+            let config = fs::read_to_string(dir.join(".npmrc")).unwrap();
+            assert!(!config.contains("registry=https://new.example.invalid/npm\n"));
+            assert!(config.contains("@scope:registry=https://scope.example.invalid/npm\n"));
+
+            print_npm_config(
+                &dir,
+                NpmConfigAction::Set {
+                    assignments: vec![(
+                        "registry".to_owned(),
+                        "https://ci.example.invalid".to_owned(),
+                    )],
+                    location: NpmConfigLocation::User,
+                },
+                None,
+                Some(Path::new("ci.npmrc")),
+                None,
+            )
+            .unwrap();
+            assert_eq!(
+                fs::read_to_string(dir.join("ci.npmrc")).unwrap(),
+                "registry=https://ci.example.invalid\n"
+            );
+
+            print_npm_config(
+                &dir,
+                NpmConfigAction::Set {
+                    assignments: vec![(
+                        "registry".to_owned(),
+                        "https://global.example.invalid/npm".to_owned(),
+                    )],
+                    location: NpmConfigLocation::Global,
+                },
+                None,
+                None,
+                Some(Path::new("global.npmrc")),
+            )
+            .unwrap();
+            assert_eq!(
+                fs::read_to_string(dir.join("global.npmrc")).unwrap(),
+                "registry=https://global.example.invalid/npm\n"
+            );
+
+            print_npm_config(
+                &dir,
+                NpmConfigAction::Delete {
+                    keys: vec!["registry".to_owned()],
+                    location: NpmConfigLocation::Global,
+                },
+                None,
+                None,
+                Some(Path::new("global.npmrc")),
+            )
+            .unwrap();
+            assert!(!fs::read_to_string(dir.join("global.npmrc"))
+                .unwrap()
+                .contains("registry=https://global.example.invalid/npm\n"));
         },
-        None,
-        None,
-        None,
-    )
-    .unwrap();
-
-    let config = fs::read_to_string(dir.join(".npmrc")).unwrap();
-    assert!(config.contains("registry=https://new.example.invalid/npm\n"));
-    assert!(config.contains("# keep this\n"));
-    assert!(config.contains("@scope:registry=https://scope.example.invalid/npm\n"));
-    let values = npm_config_values(
-        &dir,
-        None,
-        Some(Path::new("empty-user.npmrc")),
-        Some(Path::new("empty-global.npmrc")),
-        NpmConfigLocation::Project,
-    )
-    .unwrap();
-    assert_eq!(
-        values.get("registry").map(String::as_str),
-        Some("https://new.example.invalid/npm/")
     );
-    assert_eq!(
-        values.get("@scope:registry").map(String::as_str),
-        Some("https://scope.example.invalid/npm/")
-    );
-
-    print_npm_config(
-        &dir,
-        NpmConfigAction::Delete {
-            keys: vec!["registry".to_owned()],
-            location: NpmConfigLocation::Project,
-        },
-        None,
-        None,
-        None,
-    )
-    .unwrap();
-    let config = fs::read_to_string(dir.join(".npmrc")).unwrap();
-    assert!(!config.contains("registry=https://new.example.invalid/npm\n"));
-    assert!(config.contains("@scope:registry=https://scope.example.invalid/npm\n"));
-
-    print_npm_config(
-        &dir,
-        NpmConfigAction::Set {
-            assignments: vec![(
-                "registry".to_owned(),
-                "https://ci.example.invalid".to_owned(),
-            )],
-            location: NpmConfigLocation::User,
-        },
-        None,
-        Some(Path::new("ci.npmrc")),
-        None,
-    )
-    .unwrap();
-    assert_eq!(
-        fs::read_to_string(dir.join("ci.npmrc")).unwrap(),
-        "registry=https://ci.example.invalid\n"
-    );
-
-    print_npm_config(
-        &dir,
-        NpmConfigAction::Set {
-            assignments: vec![(
-                "registry".to_owned(),
-                "https://global.example.invalid/npm".to_owned(),
-            )],
-            location: NpmConfigLocation::Global,
-        },
-        None,
-        None,
-        Some(Path::new("global.npmrc")),
-    )
-    .unwrap();
-    assert_eq!(
-        fs::read_to_string(dir.join("global.npmrc")).unwrap(),
-        "registry=https://global.example.invalid/npm\n"
-    );
-
-    print_npm_config(
-        &dir,
-        NpmConfigAction::Delete {
-            keys: vec!["registry".to_owned()],
-            location: NpmConfigLocation::Global,
-        },
-        None,
-        None,
-        Some(Path::new("global.npmrc")),
-    )
-    .unwrap();
-    assert!(!fs::read_to_string(dir.join("global.npmrc"))
-        .unwrap()
-        .contains("registry=https://global.example.invalid/npm\n"));
 }
 
 #[test]
