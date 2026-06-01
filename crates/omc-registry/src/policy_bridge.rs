@@ -436,12 +436,9 @@ pub(crate) fn parse_block_finding(finding: &str) -> Option<GrantNeed> {
 /// what it wants to do (human + raw token + risk), the exact one-run `--allow`
 /// command, and a per-package, version-pinned `omc.policy` block to persist it.
 /// All output is advisory text — it never grants anything.
-pub(crate) fn render_block_guidance(
-    ecosystem: Ecosystem,
-    name: &str,
-    version: &str,
-    findings: &[String],
-) -> String {
+/// Collect the deduplicated grant needs (and any unrecognized finding messages)
+/// for a package's verifier findings.
+fn collect_block_needs(findings: &[String]) -> (Vec<GrantNeed>, Vec<String>) {
     let mut needs: Vec<GrantNeed> = Vec::new();
     let mut unknown: Vec<String> = Vec::new();
     for finding in findings {
@@ -456,19 +453,35 @@ pub(crate) fn render_block_guidance(
             }
         }
     }
+    (needs, unknown)
+}
 
-    let mut out = String::new();
-    out.push_str(&format!("  {name} was blocked. It wants to:\n"));
-    for need in &needs {
+/// The "<name> was blocked. It wants to: …" section (consequence-first lines with
+/// raw tokens + risk markers), shared by the single-package guidance and the
+/// bundled multi-package table.
+fn render_block_wants(name: &str, needs: &[GrantNeed], unknown: &[String]) -> String {
+    let mut out = format!("  {name} was blocked. It wants to:\n");
+    for need in needs {
         let marker = if need.dangerous { "!" } else { " " };
         out.push_str(&format!("    {marker} {}   ({})\n", need.human, need.raw));
         if let Some(risk) = &need.risk {
             out.push_str(&format!("      \u{2514} {risk}\n"));
         }
     }
-    for raw in &unknown {
+    for raw in unknown {
         out.push_str(&format!("    ! {raw}\n"));
     }
+    out
+}
+
+pub(crate) fn render_block_guidance(
+    ecosystem: Ecosystem,
+    name: &str,
+    version: &str,
+    findings: &[String],
+) -> String {
+    let (needs, unknown) = collect_block_needs(findings);
+    let mut out = render_block_wants(name, &needs, &unknown);
 
     if needs.is_empty() {
         return out;
@@ -513,33 +526,33 @@ pub struct BlockSuggestion {
     pub allow: Vec<String>,
     /// Bare data-flow grant tokens (accepted by `parse_flow_rule`).
     pub allow_flow: Vec<String>,
-    /// The consequence-first, plain-language guidance (raw tokens + risk lines).
+    /// The consequence-first, plain-language guidance (raw tokens + risk lines)
+    /// including the per-package "to allow / to trust" footer.
     pub guidance: String,
+    /// Just the "<name> was blocked. It wants to: …" section, for the bundled
+    /// multi-package table (one combined action is offered for the whole set).
+    pub summary: String,
 }
 
 /// Build the structured [`BlockSuggestion`] for a blocked package: the rendered
-/// guidance plus the deduplicated capability/flow grant tokens parsed from its
-/// verifier findings.
+/// guidance + bundle summary, plus the deduplicated capability/flow grant tokens
+/// parsed from its verifier findings.
 pub fn build_block_suggestion(
     ecosystem: Ecosystem,
     name: &str,
     version: &str,
     findings: &[String],
 ) -> BlockSuggestion {
+    let (needs, unknown) = collect_block_needs(findings);
+    let summary = render_block_wants(name, &needs, &unknown);
     let guidance = render_block_guidance(ecosystem, name, version, findings);
     let mut allow = Vec::new();
     let mut allow_flow = Vec::new();
-    let mut seen = std::collections::BTreeSet::new();
-    for finding in findings {
-        if let Some(need) = parse_block_finding(finding) {
-            if !seen.insert(need.cli_flag.clone()) {
-                continue;
-            }
-            if let Some(token) = need.cli_flag.strip_prefix("--allow-flow ") {
-                allow_flow.push(token.to_owned());
-            } else if let Some(token) = need.cli_flag.strip_prefix("--allow ") {
-                allow.push(token.to_owned());
-            }
+    for need in &needs {
+        if let Some(token) = need.cli_flag.strip_prefix("--allow-flow ") {
+            allow_flow.push(token.to_owned());
+        } else if let Some(token) = need.cli_flag.strip_prefix("--allow ") {
+            allow.push(token.to_owned());
         }
     }
     BlockSuggestion {
@@ -549,5 +562,6 @@ pub fn build_block_suggestion(
         allow,
         allow_flow,
         guidance,
+        summary,
     }
 }
