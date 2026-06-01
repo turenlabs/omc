@@ -499,3 +499,55 @@ pub(crate) fn render_block_guidance(
     out.push_str("      }\n");
     out
 }
+
+/// Structured form of a blocked-package explanation: the rendered human guidance
+/// plus the exact minimal grant tokens, so the CLI can offer an interactive
+/// "allow once / allow always" choice and apply it (once = flags this run;
+/// always = a per-package, version-pinned `~/.omc/policy.d` block).
+#[derive(Debug, Clone)]
+pub struct BlockSuggestion {
+    pub ecosystem: Ecosystem,
+    pub name: String,
+    pub version: String,
+    /// Bare capability grant tokens (accepted by `parse_capability_grant`).
+    pub allow: Vec<String>,
+    /// Bare data-flow grant tokens (accepted by `parse_flow_rule`).
+    pub allow_flow: Vec<String>,
+    /// The consequence-first, plain-language guidance (raw tokens + risk lines).
+    pub guidance: String,
+}
+
+/// Build the structured [`BlockSuggestion`] for a blocked package: the rendered
+/// guidance plus the deduplicated capability/flow grant tokens parsed from its
+/// verifier findings.
+pub fn build_block_suggestion(
+    ecosystem: Ecosystem,
+    name: &str,
+    version: &str,
+    findings: &[String],
+) -> BlockSuggestion {
+    let guidance = render_block_guidance(ecosystem, name, version, findings);
+    let mut allow = Vec::new();
+    let mut allow_flow = Vec::new();
+    let mut seen = std::collections::BTreeSet::new();
+    for finding in findings {
+        if let Some(need) = parse_block_finding(finding) {
+            if !seen.insert(need.cli_flag.clone()) {
+                continue;
+            }
+            if let Some(token) = need.cli_flag.strip_prefix("--allow-flow ") {
+                allow_flow.push(token.to_owned());
+            } else if let Some(token) = need.cli_flag.strip_prefix("--allow ") {
+                allow.push(token.to_owned());
+            }
+        }
+    }
+    BlockSuggestion {
+        ecosystem,
+        name: name.to_owned(),
+        version: version.to_owned(),
+        allow,
+        allow_flow,
+        guidance,
+    }
+}

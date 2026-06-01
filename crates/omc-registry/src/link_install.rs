@@ -352,12 +352,12 @@ fn link_package_inner(
     if locked.verdict == Verdict::Blocked && !options.record_blocked {
         return Err(OmcRegistryError::BlockedPackage {
             spec: spec.requested(),
-            guidance: Some(render_block_guidance(
+            suggestion: Some(Box::new(build_block_suggestion(
                 locked.ecosystem,
                 &locked.name,
                 &locked.version,
                 &locked.verifier_findings,
-            )),
+            ))),
         });
     }
 

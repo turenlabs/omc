@@ -192,15 +192,14 @@ use verify::{grants_all_host_capabilities, module_from_profile};
 pub(crate) mod policy_bridge;
 pub(crate) use policy_bridge::{
     allow_benign_runtime_capabilities, dsl_allow_clause, dsl_flow_sink, dsl_flow_src,
-    render_block_guidance,
 };
 pub use policy_bridge::{
-    effective_package_policy, load_policy_document, parse_capability_grant, parse_flow_rule,
-    GrantNeed,
+    build_block_suggestion, effective_package_policy, load_policy_document, parse_capability_grant,
+    parse_flow_rule, BlockSuggestion, GrantNeed,
 };
 // Only the `#[cfg(test)]` sibling modules reach this through `use super::*`.
 #[cfg(test)]
-use policy_bridge::parse_block_finding;
+use policy_bridge::{parse_block_finding, render_block_guidance};
 
 pub(crate) mod link_install;
 pub use link_install::{add_package_graph, link_package, remove_manifest_dependency};
@@ -870,12 +869,12 @@ fn compile_local_source_artifacts(options: &LinkOptions, locked: bool) -> Result
                     input.version,
                     input.source_path.display()
                 ),
-                guidance: Some(render_block_guidance(
+                suggestion: Some(Box::new(build_block_suggestion(
                     input.ecosystem,
                     &input.name,
                     &input.version,
                     &report.artifact.verifier_findings,
-                )),
+                ))),
             });
         }
         let artifact_path = if locked {

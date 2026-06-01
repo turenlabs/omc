@@ -3,10 +3,13 @@ use std::process::ExitCode;
 
 use clap::Parser;
 
+use std::io::{IsTerminal, Write};
+
 use omc_registry::{
     add_manifest_policy_flows, add_manifest_policy_grants, add_package_graph, init_project,
-    install_locked_packages, install_locked_project, install_project, read_lockfile,
-    write_global_package_trust, LinkOptions, OmcRegistryError, PackageSpec,
+    install_locked_packages, install_locked_project, install_project, parse_capability_grant,
+    parse_flow_rule, read_lockfile, write_global_package_trust, LinkOptions, LinkReport,
+    OmcRegistryError, PackageSpec,
 };
 
 use crate::args::{Cli, Command, CompileCommand};
@@ -31,20 +34,96 @@ use crate::{remove_specs, run_pip_compat, run_pip_compat_with_cwd};
 pub fn omc_main() -> ExitCode {
     match run_entry() {
         Ok(code) => code,
-        Err(OmcRegistryError::BlockedPackage { spec, guidance }) => {
+        Err(OmcRegistryError::BlockedPackage { spec, suggestion }) => {
             // Findings + the exact minimal grant go to STDERR (stdout stays clean
             // for piping). This is advisory only; the package is NOT installed and
             // the exit code stays 2 — the deny-by-default contract is unchanged.
             eprintln!("blocked: {spec}");
-            if let Some(guidance) = guidance {
+            if let Some(suggestion) = suggestion {
                 eprintln!();
-                eprint!("{guidance}");
+                eprint!("{}", suggestion.guidance);
             }
             ExitCode::from(2)
         }
         Err(error) => {
             eprintln!("error: {error}");
             ExitCode::from(1)
+        }
+    }
+}
+
+/// Resolve+install one spec, and on an interactive terminal turn a block into a
+/// `[y] allow once / [a] allow always / [N] deny` choice:
+///   - `y` applies the suggested grants to this run only (not persisted);
+///   - `a` writes a per-package, version-pinned block to `~/.omc/policy.d/`
+///     (via `omc trust`), so the trust applies everywhere and never leaks to
+///     other packages or transitive deps;
+///   - anything else (incl. Enter / EOF) denies and keeps the block.
+/// Non-interactive (no TTY, e.g. CI) NEVER prompts — it fails closed (the caller
+/// surfaces the guidance + exit 2), preserving deny-by-default exactly.
+fn add_with_optional_prompt(
+    spec: &PackageSpec,
+    options: &LinkOptions,
+) -> Result<Vec<LinkReport>, OmcRegistryError> {
+    let interactive = std::io::stdin().is_terminal() && std::io::stderr().is_terminal();
+    let mut options = options.clone();
+    loop {
+        match add_package_graph(spec, &options) {
+            Ok(reports) => return Ok(reports),
+            Err(OmcRegistryError::BlockedPackage {
+                spec: blocked_spec,
+                suggestion: Some(suggestion),
+            }) if interactive => {
+                eprintln!();
+                eprint!("{}", suggestion.guidance);
+                eprint!(
+                    "\n  Allow {}? [y] once   [a] always (writes ~/.omc/policy.d)   [N] deny: ",
+                    suggestion.name
+                );
+                let _ = std::io::stderr().flush();
+                let mut line = String::new();
+                let choice = if std::io::stdin().read_line(&mut line).unwrap_or(0) == 0 {
+                    None // EOF / read error → deny
+                } else {
+                    line.trim().to_ascii_lowercase().chars().next()
+                };
+                match choice {
+                    Some('y') => {
+                        for grant in &suggestion.allow {
+                            options
+                                .allowed_capabilities
+                                .push(parse_capability_grant(grant)?);
+                        }
+                        for flow in &suggestion.allow_flow {
+                            options.allowed_flows.push(parse_flow_rule(flow)?);
+                        }
+                        eprintln!("  → allowing {} for this run\n", suggestion.name);
+                    }
+                    Some('a') => {
+                        let path = write_global_package_trust(
+                            suggestion.ecosystem,
+                            &suggestion.name,
+                            &suggestion.version,
+                            &suggestion.allow,
+                            &suggestion.allow_flow,
+                        )?;
+                        eprintln!(
+                            "  → trusted {} (wrote {})\n",
+                            suggestion.name,
+                            path.display()
+                        );
+                    }
+                    _ => {
+                        eprintln!("  → denied; {} not added", suggestion.name);
+                        return Err(OmcRegistryError::BlockedPackage {
+                            spec: blocked_spec,
+                            suggestion: None,
+                        });
+                    }
+                }
+                // loop: retry the resolve with the grant applied (or persisted).
+            }
+            Err(error) => return Err(error),
         }
     }
 }
@@ -110,13 +189,7 @@ fn run() -> Result<ExitCode, OmcRegistryError> {
 
             let mut all_reports = Vec::new();
             for spec in &specs {
-                match add_package_graph(spec, &options) {
-                    Ok(reports) => all_reports.extend(reports),
-                    Err(OmcRegistryError::BlockedPackage { spec, guidance }) => {
-                        return Err(OmcRegistryError::BlockedPackage { spec, guidance });
-                    }
-                    Err(error) => return Err(error),
-                }
+                all_reports.extend(add_with_optional_prompt(spec, &options)?);
             }
             print_link_reports(&all_reports);
             let install = install_locked_packages(&cli.project_dir)?;
