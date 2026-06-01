@@ -15,10 +15,10 @@ pub enum OmcRegistryError {
     #[error("blocked package `{spec}`")]
     BlockedPackage {
         spec: String,
-        /// Pre-rendered, plain-language explanation + the exact minimal grant
-        /// (advisory text only; never grants anything). `None` for aggregate
-        /// blocks that have no single-package finding context.
-        guidance: Option<String>,
+        /// Structured explanation + the exact minimal grant tokens, so the CLI
+        /// can render guidance and offer an interactive allow-once/allow-always
+        /// choice. `None` for aggregate blocks with no single-package context.
+        suggestion: Option<Box<crate::policy_bridge::BlockSuggestion>>,
     },
     #[error("registry response did not include a downloadable artifact for {0}")]
     MissingArtifact(String),

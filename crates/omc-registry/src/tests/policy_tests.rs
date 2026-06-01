@@ -258,6 +258,32 @@ fn rendered_policy_block_parses_and_pins_version() {
 }
 
 #[test]
+fn build_block_suggestion_yields_parseable_grant_tokens() {
+    let findings = vec![
+        "main[1]: env:NPM_TOKEN may not flow to network:evil.com".to_owned(),
+        "main[3]: capability dynamic.eval not granted".to_owned(),
+        "main[0]: capability proc.spawn:* not granted".to_owned(),
+    ];
+    let s = build_block_suggestion(Ecosystem::Npm, "shady", "1.2.3", &findings);
+    assert_eq!(s.name, "shady");
+    assert_eq!(s.version, "1.2.3");
+    // Capability vs flow tokens are split correctly.
+    assert!(s.allow.contains(&"dynamic.eval".to_owned()));
+    assert!(s.allow.contains(&"proc.spawn:*".to_owned()));
+    assert!(s
+        .allow_flow
+        .contains(&"env:NPM_TOKEN->network:evil.com".to_owned()));
+    // Every token must actually parse, so interactive `y`/`a` can never error.
+    for grant in &s.allow {
+        parse_capability_grant(grant).expect("allow token must parse");
+    }
+    for flow in &s.allow_flow {
+        parse_flow_rule(flow).expect("flow token must parse");
+    }
+    assert!(s.guidance.contains("shady was blocked"));
+}
+
+#[test]
 fn locked_reachable_packages_include_transitive_dependencies() {
     let mut root = locked_package_for_test(Ecosystem::Npm, "is-odd", "3.0.1");
     root.dependencies = vec!["npm:is-number@^6.0.0".to_owned()];

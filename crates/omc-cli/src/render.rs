@@ -262,7 +262,7 @@ pub(crate) fn print_audit_report(
     if blocked > 0 {
         return Err(OmcRegistryError::BlockedPackage {
             spec: format!("{blocked} locked package(s)"),
-            guidance: None,
+            suggestion: None,
         });
     }
 
