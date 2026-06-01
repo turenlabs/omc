@@ -106,12 +106,13 @@ def read_artifact(proj, eco, name):
     return None
 
 
-def run_one(omc, eco, name):
+def run_one(omc, eco, name, env):
     d = tempfile.mkdtemp(prefix=f"omc-smoke-{eco}-{name.replace('/', '_')}-")
-    subprocess.run([omc, "init", "--name", "smoke"], cwd=d, capture_output=True)
+    subprocess.run([omc, "init", "--name", "smoke"], cwd=d, capture_output=True, env=env)
     try:
         p = subprocess.run([omc, "add", f"--{eco}", name], cwd=d,
-                           capture_output=True, text=True, timeout=180)
+                           capture_output=True, text=True, timeout=180,
+                           stdin=subprocess.DEVNULL, env=env)
         out = (p.stdout or "") + (p.stderr or "")
         code = p.returncode
     except subprocess.TimeoutExpired:
@@ -163,7 +164,13 @@ def main():
     args = ap.parse_args()
 
     omc = find_omc(args.omc)
+    # Isolate $OMC_HOME to an empty temp dir so the run measures pure
+    # deny-by-default — the operator's real ~/.omc/policy.d trust store and global
+    # config must not skew accepted/blocked counts.
+    env = dict(os.environ)
+    env["OMC_HOME"] = tempfile.mkdtemp(prefix="omc-smoke-home-")
     print(f"omc: {omc}")
+    print(f"isolated OMC_HOME: {env['OMC_HOME']} (empty trust store)")
     print(f"fetching top {args.npm_top} npm + top {args.pypi_top} PyPI ...")
     specs = [("npm", n) for n in top_npm(args.npm_top)] + \
             [("pypi", n) for n in top_pypi(args.pypi_top)]
@@ -171,7 +178,7 @@ def main():
 
     results = []
     with concurrent.futures.ThreadPoolExecutor(max_workers=args.jobs) as ex:
-        futs = {ex.submit(run_one, omc, eco, name): (eco, name) for eco, name in specs}
+        futs = {ex.submit(run_one, omc, eco, name, env): (eco, name) for eco, name in specs}
         for fut in concurrent.futures.as_completed(futs):
             results.append(fut.result())
 
