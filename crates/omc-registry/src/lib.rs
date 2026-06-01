@@ -115,8 +115,8 @@ pub(crate) use pypi_resolve::parse_pypi_name_and_extras;
 #[cfg(test)]
 use pypi_resolve::{evaluate_pypi_marker, PypiMarkerEnvironment};
 use pypi_resolve::{
-    collect_pypi_project_requirement, is_pypi_archive_filename, is_pypi_archive_reference,
-    normalize_pypi_extra, normalize_pypi_find_links_source, normalize_pypi_name,
+    collect_pypi_project_requirement, is_pypi_archive_filename, normalize_pypi_extra,
+    normalize_pypi_find_links_source, normalize_pypi_name,
     normalize_pypi_simple_index_url, normalize_requirements_editable_path,
     parse_pypi_direct_archive_url_reference, parse_pypi_direct_requirement,
     parse_pypi_local_archive_requirement, parse_pypi_local_direct_path_requirement,
@@ -130,7 +130,7 @@ use pypi_resolve::{
     parse_requirements_index_url, parse_requirements_no_deps, parse_requirements_no_index,
     parse_requirements_only_final, parse_requirements_require_hashes,
     parse_requirements_uploaded_prior_to, pypi_direct_file_url_local_directory,
-    pypi_direct_reference_applies, python_vcs_table_reference, PypiProjectRequirement,
+    pypi_direct_reference_applies, python_vcs_table_reference,
 };
 
 pub(crate) mod pypi_config;
@@ -219,6 +219,12 @@ pub(crate) use python_sources::{git_rev_parse_head, is_git_commit_hash};
 // `use super::*`.
 #[cfg(test)]
 use link_install::{policy_from_link_options, write_manifest_dependency};
+
+pub(crate) mod pipfile;
+use pipfile::{
+    collect_pipfile_lock_sources, collect_pipfile_locked_packages, collect_pipfile_packages,
+    collect_pipfile_sources, Pipfile, PipfileLock, PipfileScripts,
+};
 
 pub(crate) const LOCKFILE: &str = "omc.lock";
 pub(crate) const MANIFEST: &str = "omc.toml";
@@ -3148,244 +3154,12 @@ fn read_pipfile_scripts(path: &Path) -> Result<BTreeMap<String, String>> {
     Ok(toml::from_str::<PipfileScripts>(&fs::read_to_string(path)?)?.scripts)
 }
 
-fn collect_pipfile_sources(sources: &[PipfileSource], requirements: &mut ProjectRequirements) {
-    for source in sources {
-        let Some(index_url) = source
-            .url
-            .as_deref()
-            .and_then(normalize_pypi_simple_index_url)
-        else {
-            continue;
-        };
-
-        push_project_pypi_index_url(requirements, index_url);
-    }
-}
-
-fn collect_pipfile_packages(
-    packages: BTreeMap<String, PipfilePackage>,
-    base_dir: &Path,
-    requirements: &mut ProjectRequirements,
-) -> Result<()> {
-    for (name, package) in packages {
-        if let Some(requirement) = pipfile_package_requirement(&name, package, base_dir)? {
-            match requirement {
-                PypiProjectRequirement::Spec(spec, hashes) => {
-                    if !hashes.is_empty() {
-                        requirements
-                            .hashes
-                            .entry(spec.constraint_key())
-                            .or_default()
-                            .extend(hashes);
-                    }
-                    requirements.specs.push(spec);
-                }
-                PypiProjectRequirement::LocalPath(requirement) => {
-                    push_python_local_requirement(requirements, requirement);
-                }
-                PypiProjectRequirement::Vcs(vcs) => {
-                    requirements.python_vcs_requirements.push(vcs);
-                }
-            }
-        }
-    }
-    Ok(())
-}
-
-fn pipfile_package_requirement(
-    name: &str,
-    package: PipfilePackage,
-    base_dir: &Path,
-) -> Result<Option<PypiProjectRequirement>> {
-    match package {
-        PipfilePackage::Version(version) => pipfile_version_requirement(name, &version),
-        PipfilePackage::Table(table) => pipfile_table_requirement(name, *table, base_dir),
-    }
-}
-
-fn pipfile_version_requirement(
-    name: &str,
-    version: &str,
-) -> Result<Option<PypiProjectRequirement>> {
-    let requirement = pipfile_named_requirement(name, version, &[], None);
-    Ok(
-        parse_pypi_requirement_with_extras(&requirement, &BTreeSet::new())
-            .map(|spec| PypiProjectRequirement::Spec(spec, BTreeSet::new())),
-    )
-}
-
-fn pipfile_table_requirement(
-    name: &str,
-    table: PipfilePackageTable,
-    base_dir: &Path,
-) -> Result<Option<PypiProjectRequirement>> {
-    if table
-        .markers
-        .as_deref()
-        .map(|marker| !pypi_marker_applies(marker, &BTreeSet::new()))
-        .unwrap_or(false)
-    {
-        return Ok(None);
-    }
-
-    if let Some(git) = table.git.as_deref() {
-        let reference = python_vcs_table_reference(
-            table.reference.clone(),
-            table.rev.clone(),
-            table.branch.clone(),
-            table.tag.clone(),
-        );
-        let subdirectory = table.subdirectory.as_deref().map(PathBuf::from);
-        let mut vcs = parse_python_vcs_requirement(
-            Some((
-                normalize_pypi_name(name),
-                normalized_pypi_extras(table.extras),
-            )),
-            git,
-            reference,
-            true,
-        )?;
-        if let Some(vcs) = vcs.as_mut() {
-            if vcs.subdirectory.is_none() {
-                vcs.subdirectory = subdirectory;
-            }
-        }
-        return Ok(vcs.map(PypiProjectRequirement::Vcs));
-    }
-
-    if let Some(path) = table.path.as_deref() {
-        let path = resolved_local_path(path, base_dir);
-        if path.is_dir() {
-            return Ok(Some(PypiProjectRequirement::LocalPath(
-                PythonLocalRequirement::new(path, normalized_pypi_extras(table.extras)),
-            )));
-        }
-        if path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .map(is_pypi_archive_filename)
-            .unwrap_or(false)
-        {
-            let url = reqwest::Url::from_file_path(&path)
-                .map_err(|_| OmcRegistryError::UnsupportedRequirement(name.to_owned()))?;
-            return Ok(Some(PypiProjectRequirement::Spec(
-                PackageSpec::with_direct_url(
-                    Ecosystem::Pypi,
-                    normalize_pypi_name(name),
-                    url.to_string(),
-                    normalized_pypi_extras(table.extras),
-                ),
-                BTreeSet::new(),
-            )));
-        }
-        return Err(OmcRegistryError::UnsupportedRequirement(format!(
-            "Pipfile local path `{}` must point to an existing directory, wheel, or sdist archive",
-            path.display()
-        )));
-    }
-
-    if let Some(file) = table.file.as_deref() {
-        return pipfile_file_requirement(name, file, table.extras, base_dir);
-    }
-
-    let version = table.version.as_deref().unwrap_or("*");
-    let requirement = pipfile_named_requirement(name, version, &table.extras, None);
-    Ok(
-        parse_pypi_requirement_with_extras(&requirement, &BTreeSet::new())
-            .map(|spec| PypiProjectRequirement::Spec(spec, BTreeSet::new())),
-    )
-}
-
-fn pipfile_file_requirement(
-    name: &str,
-    file: &str,
-    extras: Vec<String>,
-    base_dir: &Path,
-) -> Result<Option<PypiProjectRequirement>> {
-    let extras = normalized_pypi_extras(extras);
-    if file.contains("://") {
-        if !is_pypi_archive_reference(file) {
-            return Err(OmcRegistryError::UnsupportedRequirement(format!(
-                "Pipfile file dependency `{file}` must be a wheel or sdist archive"
-            )));
-        }
-        return Ok(Some(PypiProjectRequirement::Spec(
-            PackageSpec::with_direct_url(
-                Ecosystem::Pypi,
-                normalize_pypi_name(name),
-                file.to_owned(),
-                extras,
-            ),
-            BTreeSet::new(),
-        )));
-    }
-
-    let path = resolved_local_path(file, base_dir);
-    if !path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .map(is_pypi_archive_filename)
-        .unwrap_or(false)
-    {
-        return Err(OmcRegistryError::UnsupportedRequirement(format!(
-            "Pipfile file dependency `{}` must be a wheel or sdist archive",
-            path.display()
-        )));
-    }
-    let url = reqwest::Url::from_file_path(&path)
-        .map_err(|_| OmcRegistryError::UnsupportedRequirement(file.to_owned()))?;
-    Ok(Some(PypiProjectRequirement::Spec(
-        PackageSpec::with_direct_url(
-            Ecosystem::Pypi,
-            normalize_pypi_name(name),
-            url.to_string(),
-            extras,
-        ),
-        BTreeSet::new(),
-    )))
-}
-
-fn pipfile_named_requirement(
-    name: &str,
-    version: &str,
-    extras: &[String],
-    markers: Option<&str>,
-) -> String {
-    let extras = normalized_pypi_extras(extras.to_vec());
-    let extras = if extras.is_empty() {
-        String::new()
-    } else {
-        format!("[{}]", extras.into_iter().collect::<Vec<_>>().join(","))
-    };
-    let version = version.trim();
-    let version = if version != "*" { version } else { "" };
-    let marker = markers
-        .map(str::trim)
-        .filter(|marker| !marker.is_empty())
-        .map(|marker| format!("; {marker}"))
-        .unwrap_or_default();
-    format!(
-        "{}{}{}{}",
-        normalize_pypi_name(name),
-        extras,
-        version,
-        marker
-    )
-}
-
 fn normalized_pypi_extras(extras: Vec<String>) -> BTreeSet<String> {
     extras
         .into_iter()
         .map(|extra| normalize_pypi_extra(&extra))
         .filter(|extra| !extra.is_empty())
         .collect()
-}
-
-fn collect_pipfile_lock_sources(
-    metadata: &PipfileLockMetadata,
-    requirements: &mut ProjectRequirements,
-) {
-    collect_pipfile_sources(&metadata.sources, requirements);
 }
 
 fn push_project_pypi_index_url(requirements: &mut ProjectRequirements, index_url: String) {
@@ -3406,102 +3180,6 @@ fn push_project_pypi_index_url(requirements: &mut ProjectRequirements, index_url
     requirements.pypi_extra_index_urls.push(index_url);
 }
 
-fn collect_pipfile_locked_packages(
-    packages: BTreeMap<String, PipfileLockedPackage>,
-    base_dir: &Path,
-    requirements: &mut ProjectRequirements,
-) -> Result<()> {
-    for (name, package) in packages {
-        if package
-            .markers
-            .as_deref()
-            .map(|marker| !pypi_marker_applies(marker, &BTreeSet::new()))
-            .unwrap_or(false)
-        {
-            continue;
-        }
-
-        if let Some(path) = package.path.as_deref() {
-            let path = resolved_local_path(path, base_dir);
-            if !path.is_dir() {
-                return Err(OmcRegistryError::UnsupportedRequirement(format!(
-                    "Pipfile.lock local path `{}` must point to an existing directory",
-                    path.display()
-                )));
-            }
-            push_python_local_path(requirements, path);
-            continue;
-        }
-
-        if let Some(git) = package.git.as_deref() {
-            let reference = python_vcs_table_reference(
-                package.reference.clone(),
-                package.rev.clone(),
-                package.branch.clone(),
-                package.tag.clone(),
-            );
-            let subdirectory = package.subdirectory.as_deref().map(PathBuf::from);
-            let mut vcs = parse_python_vcs_requirement(
-                Some((
-                    normalize_pypi_name(&name),
-                    normalized_pypi_extras(package.extras),
-                )),
-                git,
-                reference,
-                true,
-            )?
-            .ok_or_else(|| OmcRegistryError::UnsupportedRequirement(name.clone()))?;
-            if vcs.subdirectory.is_none() {
-                vcs.subdirectory = subdirectory;
-            }
-            requirements.python_vcs_requirements.push(vcs);
-            continue;
-        }
-
-        let name = normalize_pypi_name(&name);
-        let Some(version) = package.version.as_deref().and_then(pipfile_locked_version) else {
-            continue;
-        };
-
-        let extras = package
-            .extras
-            .into_iter()
-            .map(|extra| normalize_pypi_extra(&extra))
-            .filter(|extra| !extra.is_empty())
-            .collect::<BTreeSet<_>>();
-        requirements.specs.push(PackageSpec::with_extras(
-            Ecosystem::Pypi,
-            name.clone(),
-            Some(version.clone()),
-            extras,
-        ));
-
-        let key = format!("pypi:{name}");
-        requirements.constraints.insert(key.clone(), version);
-        for hash in package.hashes {
-            if let Some(hash) = normalize_sha256_hash(&hash) {
-                requirements
-                    .hashes
-                    .entry(key.clone())
-                    .or_default()
-                    .insert(hash);
-            }
-        }
-    }
-    Ok(())
-}
-
-fn pipfile_locked_version(version: &str) -> Option<String> {
-    let version = version.trim();
-    if version.is_empty() || version == "*" {
-        return None;
-    }
-    version
-        .strip_prefix("===")
-        .or_else(|| version.strip_prefix("=="))
-        .map(str::to_owned)
-        .or_else(|| is_exact_pypi_version(version).then_some(version.to_owned()))
-}
 
 fn read_uv_lock_requirements(
     path: &Path,
@@ -9149,85 +8827,6 @@ struct NpmInstalledPackageJson {
 enum NpmBinField {
     String(String),
     Map(BTreeMap<String, String>),
-}
-
-#[derive(Debug, Default, Deserialize)]
-struct Pipfile {
-    #[serde(default)]
-    source: Vec<PipfileSource>,
-    #[serde(default)]
-    packages: BTreeMap<String, PipfilePackage>,
-    #[serde(default, rename = "dev-packages")]
-    dev_packages: BTreeMap<String, PipfilePackage>,
-}
-
-#[derive(Debug, Default, Deserialize)]
-struct PipfileScripts {
-    #[serde(default)]
-    scripts: BTreeMap<String, String>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(untagged)]
-enum PipfilePackage {
-    Version(String),
-    Table(Box<PipfilePackageTable>),
-}
-
-#[derive(Debug, Default, Deserialize)]
-struct PipfilePackageTable {
-    version: Option<String>,
-    path: Option<String>,
-    file: Option<String>,
-    git: Option<String>,
-    #[serde(rename = "ref")]
-    reference: Option<String>,
-    rev: Option<String>,
-    branch: Option<String>,
-    tag: Option<String>,
-    subdirectory: Option<String>,
-    markers: Option<String>,
-    #[serde(default)]
-    extras: Vec<String>,
-}
-
-#[derive(Debug, Default, Deserialize)]
-struct PipfileLock {
-    #[serde(default, rename = "_meta")]
-    metadata: PipfileLockMetadata,
-    #[serde(default)]
-    default: BTreeMap<String, PipfileLockedPackage>,
-    #[serde(default)]
-    develop: BTreeMap<String, PipfileLockedPackage>,
-}
-
-#[derive(Debug, Default, Deserialize)]
-struct PipfileLockMetadata {
-    #[serde(default)]
-    sources: Vec<PipfileSource>,
-}
-
-#[derive(Debug, Default, Deserialize)]
-struct PipfileSource {
-    url: Option<String>,
-}
-
-#[derive(Debug, Default, Deserialize)]
-struct PipfileLockedPackage {
-    version: Option<String>,
-    path: Option<String>,
-    git: Option<String>,
-    #[serde(rename = "ref")]
-    reference: Option<String>,
-    rev: Option<String>,
-    branch: Option<String>,
-    tag: Option<String>,
-    subdirectory: Option<String>,
-    #[serde(default)]
-    hashes: Vec<String>,
-    #[serde(default)]
-    extras: Vec<String>,
-    markers: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
