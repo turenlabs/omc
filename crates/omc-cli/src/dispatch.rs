@@ -508,6 +508,7 @@ fn run() -> Result<ExitCode, OmcRegistryError> {
             )
         }
         Command::Policy { action } => return run_policy_command(&cli.project_dir, action),
+        Command::Agent { json } => return Ok(crate::agent_skill::print_agent_skill(json)),
     }
 
     Ok(ExitCode::SUCCESS)

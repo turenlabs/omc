@@ -38,6 +38,7 @@ use omc_registry::{
 use omc_registry::{LockedPythonVcsDependency, PypiCheckIssue};
 use sha2::{Digest, Sha256};
 
+pub(crate) mod agent_skill;
 pub(crate) mod args;
 pub(crate) mod compile;
 pub(crate) mod direct_compat;

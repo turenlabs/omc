@@ -382,6 +382,11 @@ pub(crate) enum Command {
         #[command(subcommand)]
         action: PolicyCommand,
     },
+    #[command(about = "Print an AI-agent guide to using omc")]
+    Agent {
+        #[arg(long, help = "Emit the guide wrapped as machine-readable JSON")]
+        json: bool,
+    },
 }
 
 /// `omc policy <subcommand>` — inspect and validate the `omc.policy` DSL.

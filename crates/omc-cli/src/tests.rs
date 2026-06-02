@@ -304,6 +304,7 @@ fn temp_test_dir() -> PathBuf {
     path
 }
 
+mod agent_tests;
 mod misc_tests;
 mod npm_compat_tests;
 mod npm_config_tests;
