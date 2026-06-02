@@ -16,7 +16,7 @@ use omc_registry::{
 };
 
 use crate::inspect::{run_inspect, InspectCommand};
-use crate::render::{format_inspect_report, format_link_report_verbose};
+use crate::render::{format_inspect_report_with, format_link_report_verbose};
 
 use omc_registry::{CapabilityFinding, CapabilityKind, OmcArtifact};
 
@@ -297,48 +297,69 @@ fn requests_tree() -> Vec<LinkReport> {
 #[test]
 fn inspect_report_keeps_every_capability_file_and_block_reason() {
     let report = link_report_with_capabilities();
-    let rendered = format_inspect_report(std::slice::from_ref(&report));
+    let one = std::slice::from_ref(&report);
+    let compact = format_inspect_report_with(one, false);
+    let full = format_inspect_report_with(one, true);
 
     // Banner names the package, ecosystem-qualified, with the blocked verdict.
     assert!(
-        rendered.contains("npm:snoop@1.2.3"),
-        "banner is ecosystem-qualified: {rendered}"
+        compact.contains("npm:snoop@1.2.3"),
+        "banner is ecosystem-qualified: {compact}"
     );
     assert!(
-        rendered.contains("BLOCKED"),
-        "banner shows verdict: {rendered}"
+        compact.contains("BLOCKED"),
+        "banner shows verdict: {compact}"
     );
 
-    // Every capability finding's SOURCE FILE survives (grouped, not truncated).
+    // Compact default RETAINS every capability finding's SOURCE FILE (grouped,
+    // not truncated) — that is inspect's reason to exist.
     assert_eq!(report.locked.verdict, Verdict::Blocked);
     for finding in &report.artifact.capabilities {
         assert!(
-            rendered.contains(&finding.source),
-            "capability source file {} present: {rendered}",
+            compact.contains(&finding.source),
+            "capability source file {} present in compact: {compact}",
             finding.source
         );
     }
+    // ...plus a one-line plain reason and the single `omc trust` grant line.
+    assert!(
+        compact.contains("blocked:"),
+        "compact shows a one-line reason: {compact}"
+    );
+    assert!(
+        compact.contains("omc trust npm:snoop@1.2.3"),
+        "compact shows the trust grant line: {compact}"
+    );
+    // Compact stays terse: no per-finding callout block, no run-once dump.
+    assert!(
+        !compact.contains("Blocked because it wants to:"),
+        "compact omits the per-finding callouts: {compact}"
+    );
+    assert!(
+        !compact.contains("omc add npm:snoop@1.2.3"),
+        "compact omits the run-once grant dump: {compact}"
+    );
 
-    // Every block reason maps to a plain-language line, with its raw token kept.
+    // --verbose restores the full per-finding reasons + run-once grant line.
     assert!(
-        rendered.contains("Blocked because it wants to:"),
-        "blocked package shows reasons: {rendered}"
-    );
-    // The exact run-once grant line is present (built from the real grant tokens).
-    assert!(
-        rendered.contains("omc add npm:snoop@1.2.3"),
-        "run-once grant line present: {rendered}"
+        full.contains("Blocked because it wants to:"),
+        "verbose shows per-finding reasons: {full}"
     );
     assert!(
-        rendered.contains("omc trust npm:snoop@1.2.3"),
-        "trust grant line present: {rendered}"
+        full.contains("omc add npm:snoop@1.2.3"),
+        "verbose run-once grant line present: {full}"
+    );
+    assert!(
+        full.contains("omc trust npm:snoop@1.2.3"),
+        "verbose trust grant line present: {full}"
     );
 }
 
 #[test]
 fn inspect_report_renders_full_tree_with_grouped_caps_and_grants() {
     let reports = requests_tree();
-    let r = format_inspect_report(&reports);
+    let r = format_inspect_report_with(&reports, false); // compact default
+    let v = format_inspect_report_with(&reports, true); // --verbose
 
     // Banner + dep count + headline risk (env->network + eval on the root).
     assert!(r.contains("pypi:requests@2.32.5"), "banner: {r}");
@@ -348,9 +369,16 @@ fn inspect_report_renders_full_tree_with_grouped_caps_and_grants() {
         "headline risk sentence present: {r}"
     );
 
-    // Verdict summary is countable: 3 blocked, 2 accepted.
-    assert!(r.contains("3 blocked"), "verdict count blocked: {r}");
-    assert!(r.contains("2 accepted"), "verdict count accepted: {r}");
+    // Blocked count lives in the headline (no separate verdict row), and the
+    // aggregate capability surface is summarized.
+    assert!(
+        r.contains("3 of 5 packages are blocked"),
+        "blocked count in headline: {r}"
+    );
+    assert!(
+        r.contains("Capability surface:"),
+        "capability surface line: {r}"
+    );
 
     // Every resolved package is a tree row with its pinned version + glyph —
     // including the accepted benign deps (nothing in the tree disappears).
@@ -372,13 +400,11 @@ fn inspect_report_renders_full_tree_with_grouped_caps_and_grants() {
     );
 
     // Relation headers reconstruct root -> deps.
-    assert!(r.contains("blocked — root"), "root relation header: {r}");
-    assert!(
-        r.contains("blocked — dep of requests"),
-        "dep relation header: {r}"
-    );
+    assert!(r.contains("— root"), "root relation header: {r}");
+    assert!(r.contains("— dep of requests"), "dep relation header: {r}");
 
-    // EVERY capability source file survives, grouped by kind and comma-joined.
+    // COMPACT RETAINS every capability source file (grouped/comma-joined, or in
+    // the unverifiable-code site line) — no file is lost in the default view.
     for src in [
         "requests/__init__.py",
         "requests/api.py",
@@ -392,69 +418,78 @@ fn inspect_report_renders_full_tree_with_grouped_caps_and_grants() {
         "urllib3/connection.py",
         "urllib3/response.py",
     ] {
-        assert!(r.contains(src), "capability source {src} retained: {r}");
+        assert!(
+            r.contains(src),
+            "capability source {src} retained in compact: {r}"
+        );
     }
 
-    // DynamicEval keeps one line per site with its distinctive evidence verbatim.
+    // Compact one-line reasons cover the notable dangers, plus a trust grant per
+    // blocked package; the package_init[N] index is never surfaced.
     assert!(
-        r.contains("indirect `require` via alias — cannot verify required module"),
-        "eval evidence (requests adapters) retained: {r}"
+        r.contains("send env vars to the network"),
+        "compact reason env->network: {r}"
+    );
+    assert!(r.contains("write files"), "compact reason fs.write: {r}");
+    assert!(
+        r.contains("omc trust pypi:requests@2.32.5"),
+        "compact trust grant (requests): {r}"
     );
     assert!(
-        r.contains("opaque globals()/locals() subscript access — cannot verify"),
-        "eval evidence (requests packages) retained: {r}"
-    );
-    assert!(
-        r.contains("opaque dynamic import (computed target) — cannot verify"),
-        "eval evidence (charset md) retained: {r}"
-    );
-
-    // Every block reason survives as a human line; the unique fs.write reason on
-    // charset and the file->network flow on urllib3 are both present.
-    assert!(
-        r.contains("write arbitrary files"),
-        "charset fs.write reason retained: {r}"
-    );
-    assert!(
-        r.contains("send files it reads to the network"),
-        "urllib3 file->network reason retained: {r}"
-    );
-    // The raw audit token is preserved in parens (package_init[N] index stripped).
-    assert!(
-        r.contains("env:* may not flow to network:*"),
-        "raw flow token retained: {r}"
+        r.contains("omc trust pypi:charset-normalizer@3.4.7"),
+        "compact trust grant (charset): {r}"
     );
     assert!(
         !r.contains("package_init["),
-        "package_init[N] index stripped from displayed reasons: {r}"
+        "package_init[N] index never surfaced: {r}"
+    );
+    // Compact omits the per-finding callouts + run-once dump.
+    assert!(
+        !r.contains("Blocked because it wants to:"),
+        "compact omits per-finding callouts: {r}"
+    );
+    assert!(
+        !r.contains("omc add pypi:requests"),
+        "compact omits run-once grant dump: {r}"
     );
 
-    // Grant hints match the REAL `omc add` builder syntax exactly.
+    // --verbose restores eval evidence verbatim, full human reasons, raw tokens,
+    // and the run-once grant lines in real `omc add` syntax.
     assert!(
-        r.contains("omc add pypi:requests@2.32.5"),
-        "requests run-once grant: {r}"
+        v.contains("indirect `require` via alias — cannot verify required module"),
+        "verbose eval evidence retained: {v}"
     );
     assert!(
-        r.contains("--allow-flow env:*->network:*"),
-        "flow grant token in real syntax: {r}"
+        v.contains("write arbitrary files"),
+        "verbose charset fs.write reason: {v}"
     );
     assert!(
-        r.contains("--allow dynamic.eval"),
-        "capability grant token in real syntax: {r}"
+        v.contains("send files it reads to the network"),
+        "verbose urllib3 file->network reason: {v}"
     );
     assert!(
-        r.contains("omc add pypi:charset-normalizer@3.4.7"),
-        "charset run-once grant: {r}"
+        v.contains("env:* may not flow to network:*"),
+        "verbose raw flow token: {v}"
     );
     assert!(
-        r.contains("--allow fs.write"),
-        "charset fs.write grant token: {r}"
+        v.contains("Blocked because it wants to:"),
+        "verbose per-finding callouts: {v}"
     );
-
-    // Accepted-only deps get NO detail block (nothing to show).
     assert!(
-        !r.contains("idna 3.18\n    Blocked"),
-        "accepted dep has no detail block: {r}"
+        v.contains("omc add pypi:requests@2.32.5"),
+        "verbose run-once grant (requests): {v}"
+    );
+    assert!(
+        v.contains("--allow-flow env:*->network:*"),
+        "flow grant token in real syntax: {v}"
+    );
+    assert!(
+        v.contains("--allow dynamic.eval"),
+        "capability grant token in real syntax: {v}"
+    );
+    assert!(
+        v.contains("--allow fs.write"),
+        "charset fs.write grant token: {v}"
     );
 }
 

@@ -7,8 +7,8 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use omc_registry::{
-    block_needs, read_lockfile, Behavior, CapabilityKind, Ecosystem, InstallReport, LinkReport,
-    LockedLocalSource, LockedPackage, OmcRegistryError, Verdict,
+    block_needs, read_lockfile, Behavior, CapabilityKind, Ecosystem, GrantNeed, InstallReport,
+    LinkReport, LockedLocalSource, LockedPackage, OmcRegistryError, Verdict,
 };
 
 use std::io::IsTerminal;
@@ -594,6 +594,13 @@ pub(crate) fn print_inspect_report(reports: &[LinkReport]) {
 /// Pure formatter for the inspect report, kept separate from the `print!`
 /// wrapper so it can be unit-tested against constructed `LinkReport`s.
 pub(crate) fn format_inspect_report(reports: &[LinkReport]) -> String {
+    format_inspect_report_with(reports, is_verbose())
+}
+
+/// Inner formatter taking `verbose` explicitly so both the compact default and
+/// the full `--verbose` view are unit-testable without touching the
+/// process-global verbosity flag.
+pub(crate) fn format_inspect_report_with(reports: &[LinkReport], verbose: bool) -> String {
     use std::fmt::Write as _;
     if reports.is_empty() {
         return String::new();
@@ -608,7 +615,6 @@ pub(crate) fn format_inspect_report(reports: &[LinkReport]) -> String {
         .iter()
         .filter(|r| r.locked.verdict == Verdict::Blocked)
         .count();
-    let accepted = total - blocked;
 
     let mut out = String::new();
 
@@ -650,101 +656,210 @@ pub(crate) fn format_inspect_report(reports: &[LinkReport]) -> String {
             plural(total)
         );
     }
-    let _ = writeln!(out);
-
-    // Summary block: Tree / Verdict / Capability surface.
     let _ = writeln!(
         out,
-        "  {:<20} {} {}  {}  {}",
-        "Tree",
-        bold(&root.locked.name),
-        root.locked.version,
-        dim("→"),
-        dep_count_word(dep_count)
-    );
-    let _ = writeln!(
-        out,
-        "  {:<20} {} blocked {} {} accepted",
-        "Verdict",
-        blocked,
-        dim("·"),
-        accepted
-    );
-    let _ = writeln!(
-        out,
-        "  {:<20} {}",
-        "Capability surface",
+        "  {} {}",
+        dim("Capability surface:"),
         tree_capability_summary(reports)
     );
     let _ = writeln!(out);
 
-    // The tree itself: root row + one indented row per dependency, each with
-    // its pinned version, verdict glyph, and plain-language capability summary.
-    let _ = writeln!(
-        out,
-        "  {} {}             {}",
-        bold(&root.locked.name),
-        root.locked.version,
-        tree_row_verdict(root)
-    );
-    for (idx, dep) in deps.iter().enumerate() {
-        let connector = if idx + 1 == deps.len() {
-            "└─"
-        } else {
-            "├─"
-        };
-        let _ = writeln!(
-            out,
-            "  {connector} {} {} {}",
-            bold(&dep.locked.name),
-            dep.locked.version,
-            tree_row_verdict(dep)
-        );
-    }
-    let _ = writeln!(out);
+    // The dependency tree (aligned): root + one indented row per dependency,
+    // each with its pinned version, verdict glyph, and plain-language summary.
+    out.push_str(&render_inspect_tree(root, deps));
 
-    // Detail blocks: only blocked packages get an expanded per-finding block.
-    let any_detail = reports.iter().any(|r| r.locked.verdict == Verdict::Blocked);
-    if any_detail {
-        let _ = writeln!(out, "  {}", dim(&"─".repeat(77)));
-        let _ = writeln!(out);
-        for report in reports {
-            if report.locked.verdict == Verdict::Blocked {
-                out.push_str(&format_inspect_detail_block(report, root));
-                let _ = writeln!(out);
-            }
-        }
-    }
-
-    // Footer: countable bottom line + pointer to the raw dump.
-    let _ = writeln!(out, "  {}", dim(&"─".repeat(77)));
+    // Per-blocked-package detail. Compact by default (one-line reason, grouped
+    // capabilities with files, a single trust grant line); the full per-finding
+    // reasons + run-once grant lines are behind `--verbose`.
     if blocked > 0 {
-        let _ = writeln!(
-            out,
-            "  {blocked} of {total} package{} blocked. Nothing was installed. Run any unblock line above",
-            plural(total)
-        );
-        let _ = writeln!(
-            out,
-            "  (review first), or re-run with --verbose for the raw per-finding dump."
-        );
+        let _ = writeln!(out);
+        for report in reports
+            .iter()
+            .filter(|r| r.locked.verdict == Verdict::Blocked)
+        {
+            if verbose {
+                out.push_str(&format_inspect_detail_block(report, root));
+            } else {
+                out.push_str(&format_inspect_detail_block_compact(report, root));
+            }
+            let _ = writeln!(out);
+        }
+        let hint = if verbose {
+            "Each block lists run-once and trust grant lines above. Nothing was installed."
+        } else {
+            "Re-run with -v for every finding + run-once grant lines. Nothing was installed."
+        };
+        let _ = writeln!(out, "  {}", dim(hint));
     } else {
         let _ = writeln!(
             out,
-            "  {total} package{} accepted. Nothing was installed (inspect is read-only).",
-            plural(total)
+            "  {}",
+            dim("Nothing was installed — inspect is read-only.")
         );
     }
 
     out
 }
 
-fn dep_count_word(count: usize) -> String {
-    format!(
-        "{} dependenc{}",
-        count,
-        if count == 1 { "y" } else { "ies" }
-    )
+/// The aligned one-level dependency tree: the root, then each dependency, every
+/// row padded so the verdict column lines up regardless of the `├─`/`└─`
+/// connector or the name/version length.
+fn render_inspect_tree(root: &LinkReport, deps: &[LinkReport]) -> String {
+    let label_len = |connector: &str, r: &LinkReport| {
+        connector.chars().count()
+            + r.locked.name.chars().count()
+            + 1
+            + r.locked.version.chars().count()
+    };
+    let mut width = label_len("", root);
+    for dep in deps {
+        width = width.max(label_len("├─ ", dep));
+    }
+    let mut out = String::new();
+    inspect_tree_row(&mut out, "", root, width);
+    for (idx, dep) in deps.iter().enumerate() {
+        let connector = if idx + 1 == deps.len() {
+            "└─ "
+        } else {
+            "├─ "
+        };
+        inspect_tree_row(&mut out, connector, dep, width);
+    }
+    out
+}
+
+fn inspect_tree_row(out: &mut String, connector: &str, report: &LinkReport, width: usize) {
+    use std::fmt::Write as _;
+    let visible = connector.chars().count()
+        + report.locked.name.chars().count()
+        + 1
+        + report.locked.version.chars().count();
+    let pad = " ".repeat(width.saturating_sub(visible) + 2);
+    let _ = writeln!(
+        out,
+        "  {connector}{} {}{pad}{}",
+        bold(&report.locked.name),
+        report.locked.version,
+        tree_row_verdict(report)
+    );
+}
+
+/// Compact per-blocked-package block: relation header, a one-line plain-language
+/// reason, the grouped runtime capabilities (with files — inspect's reason to
+/// exist), a one-line unverifiable-code site list, and a single `omc trust`
+/// grant line. The exhaustive per-finding callouts + run-once grant variant are
+/// the `--verbose` block instead.
+fn format_inspect_detail_block_compact(report: &LinkReport, root: &LinkReport) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::new();
+    let locked = &report.locked;
+    let relation = if locked.name == root.locked.name && locked.version == root.locked.version {
+        "root".to_owned()
+    } else {
+        format!("dep of {}", root.locked.name)
+    };
+    let _ = writeln!(
+        out,
+        "  {} {} {} {} {relation}",
+        paint("✗", RED),
+        bold(&locked.name),
+        locked.version,
+        dim("—")
+    );
+
+    let (needs, unknown) = block_needs(&locked.verifier_findings);
+    let reason = compact_block_reason(&needs, &unknown);
+    if !reason.is_empty() {
+        let _ = writeln!(out, "    {} {reason}", paint("blocked:", RED));
+    }
+
+    // Grouped runtime capabilities, files comma-joined (no truncation).
+    let runtime = grouped_runtime_capabilities(report);
+    if !runtime.is_empty() {
+        let label_width = runtime.iter().map(|(l, _)| l.len()).max().unwrap_or(0);
+        for (label, files) in &runtime {
+            let _ = writeln!(out, "      {label:<label_width$}  {files}");
+        }
+    }
+
+    // Unverifiable-code sites condensed to one line (per-site evidence is in -v).
+    let mut eval_files: Vec<&str> = Vec::new();
+    let mut eval_sites = 0usize;
+    for finding in &report.artifact.capabilities {
+        if finding.kind == CapabilityKind::DynamicEval {
+            eval_sites += 1;
+            if !eval_files.contains(&finding.source.as_str()) {
+                eval_files.push(finding.source.as_str());
+            }
+        }
+    }
+    if eval_sites > 0 {
+        let _ = writeln!(
+            out,
+            "      {} {} — {eval_sites} site{} in {}",
+            paint("⚠", YELLOW),
+            paint("runs unverifiable code", RED),
+            plural(eval_sites),
+            eval_files.join(", ")
+        );
+    }
+
+    // A single grant line (trust), built from the real `omc add` grant tokens.
+    let flags: Vec<String> = needs.iter().map(|n| n.cli_flag.clone()).collect();
+    if !flags.is_empty() {
+        let _ = writeln!(
+            out,
+            "    {} omc trust {}:{}@{} {}",
+            dim("unblock:"),
+            locked.ecosystem,
+            locked.name,
+            locked.version,
+            flags.join(" ")
+        );
+    }
+
+    out
+}
+
+/// One short clause per distinct danger (deduped, order-preserving), e.g.
+/// "send env vars to the network; run unverifiable code; write files". Falls
+/// back to a generic clause if only unrecognized findings are present, so a
+/// blocked package never shows an empty reason.
+fn compact_block_reason(needs: &[GrantNeed], unknown: &[String]) -> String {
+    let mut clauses: Vec<String> = Vec::new();
+    for need in needs.iter().filter(|n| n.dangerous) {
+        let flag = need.cli_flag.as_str();
+        let clause: &str = if flag.contains("--allow-flow") {
+            if flag.contains("->network") {
+                if flag.contains("env:") {
+                    "send env vars to the network"
+                } else {
+                    "send file contents to the network"
+                }
+            } else if flag.contains("->dynamic_eval") {
+                "feed data to code it can't verify"
+            } else if flag.contains("->file") {
+                "copy file contents between files"
+            } else {
+                need.human.as_str()
+            }
+        } else if flag.contains("dynamic.eval") {
+            "run unverifiable code"
+        } else if flag.contains("fs.write") {
+            "write files"
+        } else if flag.contains("proc") {
+            "spawn processes"
+        } else {
+            need.human.as_str()
+        };
+        if !clauses.iter().any(|c| c == clause) {
+            clauses.push(clause.to_owned());
+        }
+    }
+    if clauses.is_empty() && !unknown.is_empty() {
+        clauses.push("violate the default policy".to_owned());
+    }
+    clauses.join("; ")
 }
 
 /// The headline-risk sentence: a single human sentence describing the most
