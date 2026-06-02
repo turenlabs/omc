@@ -187,6 +187,9 @@ use signature::{
 
 pub(crate) mod verify;
 pub use verify::compile_source_path;
+
+// Optional sound dataflow verification for JS (flagged prototype, default OFF).
+pub(crate) mod sound_verify;
 // Re-exported for the `#[cfg(test)]` sibling modules which reach these through
 // `use super::*`; the link orchestration that used them now lives in
 // `link_install`.

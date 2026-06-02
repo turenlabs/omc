@@ -321,7 +321,7 @@ fn link_package_inner(
     // needs an explicit flow grant).
     let policy = allow_benign_runtime_capabilities(policy);
     let verification = verify_module(&module, &policy);
-    let verifier_findings = verification
+    let mut verifier_findings = verification
         .err()
         .map(|error| {
             error
@@ -331,6 +331,20 @@ fn link_package_inner(
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
+    // OPTIONAL sound dataflow verification (flagged, default OFF). When the flag
+    // is unset this is a no-op (returns empty), so the verdict is byte-identical
+    // to the profiler-only path. When ON, it lowers JS sources with
+    // `omc-frontend-js` and runs the SAME interprocedural taint engine in-cell
+    // uses against the SAME effective install policy; its findings are appended
+    // (never replacing the profiler's), so the verdict can only strengthen
+    // Accepted -> Blocked, never weaken. See docs/SOUND-VERIFY.md.
+    if crate::sound_verify::sound_verify_enabled(false) {
+        verifier_findings.extend(crate::sound_verify::sound_verify_js_archive(
+            &resolved,
+            &archive_bytes,
+            &policy,
+        ));
+    }
     let verdict = if verifier_findings.is_empty() {
         Verdict::Accepted
     } else {

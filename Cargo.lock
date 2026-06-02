@@ -1036,6 +1036,7 @@ dependencies = [
  "hex",
  "omc-cap",
  "omc-format",
+ "omc-frontend-js",
  "omc-policy",
  "omc-verify",
  "rand_core 0.6.4",
