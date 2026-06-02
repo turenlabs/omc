@@ -586,91 +586,99 @@ fn npm_link_installs_local_tarball() {
 
 #[test]
 fn direct_npm_install_resolves_local_paths_from_invocation_cwd() {
-    let project = test_dir("direct-npm-install-local-path-project");
-    let invocation_cwd = project.join("packages/app/src");
-    let local_package = invocation_cwd.join("vendor/local-util");
-    fs::create_dir_all(&local_package).unwrap();
-    fs::write(
-        project.join("package.json"),
-        r#"{"name":"root","version":"1.0.0"}"#,
-    )
-    .unwrap();
-    fs::write(
-        local_package.join("package.json"),
-        r#"{"name":"local-util","version":"1.2.3"}"#,
-    )
-    .unwrap();
-    fs::write(local_package.join("index.js"), "module.exports = 42;\n").unwrap();
-
-    let status = run_npm_compat_with_cwd(
-        &project,
-        &args(&["install", "--package-lock=false", "./vendor/local-util"]),
-        &invocation_cwd,
-    )
-    .unwrap();
-
-    assert_eq!(status, ExitCode::SUCCESS);
-    assert_eq!(
-        fs::read_to_string(project.join("node_modules/local-util/index.js")).unwrap(),
-        "module.exports = 42;\n"
-    );
-    let package_json = read_npm_pkg_json(&project.join("package.json")).unwrap();
-    assert_eq!(
-        package_json["dependencies"]["local-util"],
-        format!(
-            "file:{}",
-            fs::canonicalize(&local_package).unwrap().display()
+    // Hold the env lock: this exercises npm-config-sensitive save behaviour and
+    // reads process env, which races (a data race, wrong/empty values) against
+    // tests that mutate env via `with_env_var`/`without_env_var` under load.
+    with_env_lock(|| {
+        let project = test_dir("direct-npm-install-local-path-project");
+        let invocation_cwd = project.join("packages/app/src");
+        let local_package = invocation_cwd.join("vendor/local-util");
+        fs::create_dir_all(&local_package).unwrap();
+        fs::write(
+            project.join("package.json"),
+            r#"{"name":"root","version":"1.0.0"}"#,
         )
-    );
-    let manifest = read_manifest(project.join("omc.toml")).unwrap();
-    let saved_local_path = invocation_cwd
-        .join("./vendor/local-util")
-        .to_string_lossy()
-        .into_owned();
-    assert_eq!(manifest.npm_local_paths, vec![saved_local_path]);
+        .unwrap();
+        fs::write(
+            local_package.join("package.json"),
+            r#"{"name":"local-util","version":"1.2.3"}"#,
+        )
+        .unwrap();
+        fs::write(local_package.join("index.js"), "module.exports = 42;\n").unwrap();
 
-    let _ = fs::remove_dir_all(project);
+        let status = run_npm_compat_with_cwd(
+            &project,
+            &args(&["install", "--package-lock=false", "./vendor/local-util"]),
+            &invocation_cwd,
+        )
+        .unwrap();
+
+        assert_eq!(status, ExitCode::SUCCESS);
+        assert_eq!(
+            fs::read_to_string(project.join("node_modules/local-util/index.js")).unwrap(),
+            "module.exports = 42;\n"
+        );
+        let package_json = read_npm_pkg_json(&project.join("package.json")).unwrap();
+        assert_eq!(
+            package_json["dependencies"]["local-util"],
+            format!(
+                "file:{}",
+                fs::canonicalize(&local_package).unwrap().display()
+            )
+        );
+        let manifest = read_manifest(project.join("omc.toml")).unwrap();
+        let saved_local_path = invocation_cwd
+            .join("./vendor/local-util")
+            .to_string_lossy()
+            .into_owned();
+        assert_eq!(manifest.npm_local_paths, vec![saved_local_path]);
+
+        let _ = fs::remove_dir_all(project);
+    });
 }
 
 #[test]
 fn direct_npm_exec_package_resolves_local_paths_from_invocation_cwd() {
-    let project = test_dir("direct-npm-exec-local-path-project");
-    let invocation_cwd = project.join("packages/app/src");
-    let local_package = invocation_cwd.join("vendor/local-tool");
-    fs::create_dir_all(&local_package).unwrap();
-    fs::write(
-        local_package.join("package.json"),
-        r#"{"name":"local-tool-pkg","version":"1.0.0","bin":{"local-tool":"cli.js"}}"#,
-    )
-    .unwrap();
-    fs::write(
+    // See the sibling test above: serialize against env-mutating tests.
+    with_env_lock(|| {
+        let project = test_dir("direct-npm-exec-local-path-project");
+        let invocation_cwd = project.join("packages/app/src");
+        let local_package = invocation_cwd.join("vendor/local-tool");
+        fs::create_dir_all(&local_package).unwrap();
+        fs::write(
+            local_package.join("package.json"),
+            r#"{"name":"local-tool-pkg","version":"1.0.0","bin":{"local-tool":"cli.js"}}"#,
+        )
+        .unwrap();
+        fs::write(
             local_package.join("cli.js"),
             "#!/usr/bin/env node\nconst fs = require('fs'); fs.writeFileSync(process.argv[2], 'local-tool-ok\\n');\n",
         )
         .unwrap();
 
-    let status = run_npm_compat_with_cwd(
-        &project,
-        &args(&[
-            "npx",
-            "--package",
-            "./vendor/local-tool",
-            "local-tool",
-            "marker.txt",
-        ]),
-        &invocation_cwd,
-    )
-    .unwrap();
+        let status = run_npm_compat_with_cwd(
+            &project,
+            &args(&[
+                "npx",
+                "--package",
+                "./vendor/local-tool",
+                "local-tool",
+                "marker.txt",
+            ]),
+            &invocation_cwd,
+        )
+        .unwrap();
 
-    assert_eq!(status, ExitCode::SUCCESS);
-    assert_eq!(
-        fs::read_to_string(invocation_cwd.join("marker.txt")).unwrap(),
-        "local-tool-ok\n"
-    );
-    assert!(!project.join("omc.toml").exists());
-    assert!(!project.join("node_modules").exists());
+        assert_eq!(status, ExitCode::SUCCESS);
+        assert_eq!(
+            fs::read_to_string(invocation_cwd.join("marker.txt")).unwrap(),
+            "local-tool-ok\n"
+        );
+        assert!(!project.join("omc.toml").exists());
+        assert!(!project.join("node_modules").exists());
 
-    let _ = fs::remove_dir_all(project);
+        let _ = fs::remove_dir_all(project);
+    });
 }
 
 #[test]
