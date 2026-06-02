@@ -16,7 +16,9 @@ use omc_registry::{
 };
 
 use crate::inspect::{run_inspect, InspectCommand};
-use crate::render::format_link_report_verbose;
+use crate::render::{format_inspect_report, format_link_report_verbose};
+
+use omc_registry::{CapabilityFinding, CapabilityKind, OmcArtifact};
 
 /// Compile a small JS source that reads an env var and spawns a process into a
 /// real `OmcArtifact` (local, no network), then wrap it in a `LinkReport` so the
@@ -83,73 +85,391 @@ fn link_report_with_capabilities() -> LinkReport {
     link_report
 }
 
+/// Build a hand-constructed `LinkReport` for a package with the given verdict,
+/// capability findings, and verifier findings — no compile/network — so the
+/// inspect renderer can be exercised against a controlled multi-package tree
+/// that mirrors the chosen design's `requests` example.
+fn link_report(
+    ecosystem: Ecosystem,
+    name: &str,
+    version: &str,
+    verdict: Verdict,
+    dependencies: Vec<String>,
+    capabilities: Vec<CapabilityFinding>,
+    verifier_findings: Vec<String>,
+) -> LinkReport {
+    let behavior = if capabilities.is_empty() {
+        Behavior::Pure
+    } else {
+        Behavior::HostCapability
+    };
+    let artifact = OmcArtifact {
+        schema: 1,
+        package: omc_registry::ArtifactPackage {
+            ecosystem,
+            name: name.to_owned(),
+            version: version.to_owned(),
+        },
+        source_url: String::new(),
+        source_sha256: String::new(),
+        compiler: "test".to_owned(),
+        microcode: omc_format::Module {
+            id: String::new(),
+            package: name.to_owned(),
+            version: version.to_owned(),
+            declared_behavior: omc_format::BehaviorType::Pure,
+            functions: Vec::new(),
+        },
+        behavior,
+        verdict,
+        grants: Vec::new(),
+        dependencies: dependencies.clone(),
+        optional_dependencies: Vec::new(),
+        peer_dependencies: Vec::new(),
+        files_scanned: 0,
+        capabilities: capabilities.clone(),
+        verifier_findings: verifier_findings.clone(),
+        signature: None,
+    };
+    let locked = LockedPackage {
+        ecosystem,
+        name: name.to_owned(),
+        version: version.to_owned(),
+        source_url: String::new(),
+        archive: format!("cache/{name}-{version}.tgz"),
+        artifact: format!(".omc/artifacts/{name}-{version}.json"),
+        sha256: "0".repeat(64),
+        artifact_sha256: String::new(),
+        behavior,
+        verdict,
+        dependencies,
+        optional_dependencies: Vec::new(),
+        peer_dependencies: Vec::new(),
+        grants: Vec::new(),
+        capabilities,
+        verifier_findings,
+    };
+    LinkReport {
+        locked,
+        artifact,
+        lockfile: PathBuf::from("/scratch/omc.lock"),
+        manifest: PathBuf::from("/scratch/omc.toml"),
+    }
+}
+
+fn cap(kind: CapabilityKind, source: &str, evidence: &str) -> CapabilityFinding {
+    CapabilityFinding {
+        kind,
+        target: "*".to_owned(),
+        source: source.to_owned(),
+        evidence: evidence.to_owned(),
+    }
+}
+
+/// The `requests`-shaped tree from the chosen design: a blocked root with three
+/// blocked deps (one with a unique fs.write reason, one network-flow dep) and
+/// two accepted benign deps. Exercises every retention rule of the renderer.
+fn requests_tree() -> Vec<LinkReport> {
+    let root = link_report(
+        Ecosystem::Pypi,
+        "requests",
+        "2.32.5",
+        Verdict::Blocked,
+        vec![
+            "pypi:charset-normalizer@<4,>=2".to_owned(),
+            "pypi:idna@<4,>=2.5".to_owned(),
+            "pypi:urllib3@<3,>=1.21.1".to_owned(),
+            "pypi:certifi@>=2017.4.17".to_owned(),
+        ],
+        vec![
+            cap(
+                CapabilityKind::HttpRequest,
+                "requests/__init__.py",
+                "request call",
+            ),
+            cap(
+                CapabilityKind::HttpRequest,
+                "requests/api.py",
+                "request call",
+            ),
+            cap(
+                CapabilityKind::HttpRequest,
+                "requests/models.py",
+                "request call",
+            ),
+            cap(
+                CapabilityKind::EnvRead,
+                "requests/sessions.py",
+                "os.environ",
+            ),
+            cap(CapabilityKind::EnvRead, "requests/utils.py", "os.environ"),
+            cap(
+                CapabilityKind::DynamicEval,
+                "requests/adapters.py",
+                "indirect `require` via alias — cannot verify required module",
+            ),
+            cap(
+                CapabilityKind::DynamicEval,
+                "requests/packages.py",
+                "opaque globals()/locals() subscript access — cannot verify",
+            ),
+        ],
+        vec![
+            "package_init[0]: env:* may not flow to network:*".to_owned(),
+            "package_init[1]: capability dynamic.eval not granted".to_owned(),
+            "package_init[2]: env:* may not flow to dynamic_eval".to_owned(),
+        ],
+    );
+    let charset = link_report(
+        Ecosystem::Pypi,
+        "charset-normalizer",
+        "3.4.7",
+        Verdict::Blocked,
+        Vec::new(),
+        vec![
+            cap(
+                CapabilityKind::FsRead,
+                "charset_normalizer/api.py",
+                "open()",
+            ),
+            cap(
+                CapabilityKind::FsWrite,
+                "charset_normalizer/utils.py",
+                "open(w)",
+            ),
+            cap(
+                CapabilityKind::DynamicEval,
+                "charset_normalizer/md.py",
+                "opaque dynamic import (computed target) — cannot verify",
+            ),
+        ],
+        vec![
+            "package_init[0]: capability fs.write:* not granted".to_owned(),
+            "package_init[1]: capability dynamic.eval not granted".to_owned(),
+        ],
+    );
+    let idna = link_report(
+        Ecosystem::Pypi,
+        "idna",
+        "3.18",
+        Verdict::Accepted,
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+    );
+    let urllib3 = link_report(
+        Ecosystem::Pypi,
+        "urllib3",
+        "2.6.3",
+        Verdict::Blocked,
+        Vec::new(),
+        vec![
+            cap(
+                CapabilityKind::HttpRequest,
+                "urllib3/connectionpool.py",
+                "request",
+            ),
+            cap(
+                CapabilityKind::EnvRead,
+                "urllib3/util/ssl_.py",
+                "os.environ",
+            ),
+            cap(CapabilityKind::FsRead, "urllib3/connection.py", "open()"),
+            cap(CapabilityKind::FsRead, "urllib3/response.py", "open()"),
+        ],
+        vec![
+            "package_init[0]: env:* may not flow to network:*".to_owned(),
+            "package_init[1]: file:* may not flow to network:*".to_owned(),
+        ],
+    );
+    let certifi = link_report(
+        Ecosystem::Pypi,
+        "certifi",
+        "2026.5.20",
+        Verdict::Accepted,
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+    );
+    vec![root, charset, idna, urllib3, certifi]
+}
+
 #[test]
-fn verbose_report_includes_full_capability_detail() {
+fn inspect_report_keeps_every_capability_file_and_block_reason() {
     let report = link_report_with_capabilities();
-    let rendered = format_link_report_verbose(&report);
+    let rendered = format_inspect_report(std::slice::from_ref(&report));
 
-    // Header with verdict + ecosystem-qualified name.
+    // Banner names the package, ecosystem-qualified, with the blocked verdict.
     assert!(
-        rendered.contains("snoop@1.2.3"),
-        "report names the package: {rendered}"
+        rendered.contains("npm:snoop@1.2.3"),
+        "banner is ecosystem-qualified: {rendered}"
     );
     assert!(
-        rendered.contains("npm:snoop"),
-        "report is ecosystem-qualified: {rendered}"
+        rendered.contains("BLOCKED"),
+        "banner shows verdict: {rendered}"
     );
 
-    // Artifact + archive + lockfile paths.
-    assert!(rendered.contains("archive"), "report shows archive path");
-    assert!(rendered.contains("artifact"), "report shows artifact path");
-
-    // Every capability finding, with its kind, source file, and evidence.
-    assert!(
-        rendered.contains("capabilities:"),
-        "report has a capabilities section: {rendered}"
-    );
+    // Every capability finding's SOURCE FILE survives (grouped, not truncated).
+    assert_eq!(report.locked.verdict, Verdict::Blocked);
     for finding in &report.artifact.capabilities {
-        assert!(
-            rendered.contains(&finding.kind.to_string()),
-            "capability kind {} present: {rendered}",
-            finding.kind
-        );
         assert!(
             rendered.contains(&finding.source),
             "capability source file {} present: {rendered}",
             finding.source
         );
-        assert!(
-            rendered.contains(&finding.evidence),
-            "capability evidence {} present: {rendered}",
-            finding.evidence
-        );
     }
 
-    // A blocked package must still surface its verifier findings under inspect.
-    assert_eq!(report.locked.verdict, Verdict::Blocked);
+    // Every block reason maps to a plain-language line, with its raw token kept.
     assert!(
-        rendered.contains("verifier findings:"),
-        "blocked package shows verifier findings: {rendered}"
+        rendered.contains("Blocked because it wants to:"),
+        "blocked package shows reasons: {rendered}"
     );
-    for finding in &report.artifact.verifier_findings {
-        assert!(
-            rendered.contains(finding),
-            "verifier finding {finding} present: {rendered}"
-        );
-    }
+    // The exact run-once grant line is present (built from the real grant tokens).
+    assert!(
+        rendered.contains("omc add npm:snoop@1.2.3"),
+        "run-once grant line present: {rendered}"
+    );
+    assert!(
+        rendered.contains("omc trust npm:snoop@1.2.3"),
+        "trust grant line present: {rendered}"
+    );
 }
 
 #[test]
-fn verbose_report_lists_dependencies_when_present() {
-    let mut report = link_report_with_capabilities();
-    report.artifact.dependencies = vec!["npm:left-pad@1.3.0".to_owned()];
-    report.locked.dependencies = report.artifact.dependencies.clone();
+fn inspect_report_renders_full_tree_with_grouped_caps_and_grants() {
+    let reports = requests_tree();
+    let r = format_inspect_report(&reports);
 
-    let rendered = format_link_report_verbose(&report);
+    // Banner + dep count + headline risk (env->network + eval on the root).
+    assert!(r.contains("pypi:requests@2.32.5"), "banner: {r}");
+    assert!(r.contains("+4 deps"), "dep count in banner: {r}");
     assert!(
-        rendered.contains("dependencies: npm:left-pad@1.3.0"),
-        "dependency list rendered: {rendered}"
+        r.contains("Headline risk:") && r.contains("environment variables to the network"),
+        "headline risk sentence present: {r}"
     );
+
+    // Verdict summary is countable: 3 blocked, 2 accepted.
+    assert!(r.contains("3 blocked"), "verdict count blocked: {r}");
+    assert!(r.contains("2 accepted"), "verdict count accepted: {r}");
+
+    // Every resolved package is a tree row with its pinned version + glyph —
+    // including the accepted benign deps (nothing in the tree disappears).
+    for (name, version) in [
+        ("requests", "2.32.5"),
+        ("charset-normalizer", "3.4.7"),
+        ("idna", "3.18"),
+        ("urllib3", "2.6.3"),
+        ("certifi", "2026.5.20"),
+    ] {
+        assert!(
+            r.contains(name) && r.contains(version),
+            "tree row for {name} {version}: {r}"
+        );
+    }
+    assert!(
+        r.contains("no host access"),
+        "accepted benign deps show no host access: {r}"
+    );
+
+    // Relation headers reconstruct root -> deps.
+    assert!(r.contains("blocked — root"), "root relation header: {r}");
+    assert!(
+        r.contains("blocked — dep of requests"),
+        "dep relation header: {r}"
+    );
+
+    // EVERY capability source file survives, grouped by kind and comma-joined.
+    for src in [
+        "requests/__init__.py",
+        "requests/api.py",
+        "requests/models.py",
+        "requests/sessions.py",
+        "requests/utils.py",
+        "charset_normalizer/api.py",
+        "charset_normalizer/utils.py",
+        "urllib3/connectionpool.py",
+        "urllib3/util/ssl_.py",
+        "urllib3/connection.py",
+        "urllib3/response.py",
+    ] {
+        assert!(r.contains(src), "capability source {src} retained: {r}");
+    }
+
+    // DynamicEval keeps one line per site with its distinctive evidence verbatim.
+    assert!(
+        r.contains("indirect `require` via alias — cannot verify required module"),
+        "eval evidence (requests adapters) retained: {r}"
+    );
+    assert!(
+        r.contains("opaque globals()/locals() subscript access — cannot verify"),
+        "eval evidence (requests packages) retained: {r}"
+    );
+    assert!(
+        r.contains("opaque dynamic import (computed target) — cannot verify"),
+        "eval evidence (charset md) retained: {r}"
+    );
+
+    // Every block reason survives as a human line; the unique fs.write reason on
+    // charset and the file->network flow on urllib3 are both present.
+    assert!(
+        r.contains("write arbitrary files"),
+        "charset fs.write reason retained: {r}"
+    );
+    assert!(
+        r.contains("send files it reads to the network"),
+        "urllib3 file->network reason retained: {r}"
+    );
+    // The raw audit token is preserved in parens (package_init[N] index stripped).
+    assert!(
+        r.contains("env:* may not flow to network:*"),
+        "raw flow token retained: {r}"
+    );
+    assert!(
+        !r.contains("package_init["),
+        "package_init[N] index stripped from displayed reasons: {r}"
+    );
+
+    // Grant hints match the REAL `omc add` builder syntax exactly.
+    assert!(
+        r.contains("omc add pypi:requests@2.32.5"),
+        "requests run-once grant: {r}"
+    );
+    assert!(
+        r.contains("--allow-flow env:*->network:*"),
+        "flow grant token in real syntax: {r}"
+    );
+    assert!(
+        r.contains("--allow dynamic.eval"),
+        "capability grant token in real syntax: {r}"
+    );
+    assert!(
+        r.contains("omc add pypi:charset-normalizer@3.4.7"),
+        "charset run-once grant: {r}"
+    );
+    assert!(
+        r.contains("--allow fs.write"),
+        "charset fs.write grant token: {r}"
+    );
+
+    // Accepted-only deps get NO detail block (nothing to show).
+    assert!(
+        !r.contains("idna 3.18\n    Blocked"),
+        "accepted dep has no detail block: {r}"
+    );
+}
+
+#[test]
+fn add_v_raw_dump_is_unchanged() {
+    // `omc add -v` still uses the raw per-package dump verbatim — the redesign is
+    // inspect-only. This pins that the raw dump keeps its archive/artifact/
+    // capabilities/verifier-findings shape.
+    let report = link_report_with_capabilities();
+    let rendered = format_link_report_verbose(&report);
+    assert!(rendered.contains("npm:snoop@1.2.3"));
+    assert!(rendered.contains("archive"));
+    assert!(rendered.contains("artifact"));
+    assert!(rendered.contains("capabilities:"));
+    assert!(rendered.contains("verifier findings:"));
 }
 
 #[test]

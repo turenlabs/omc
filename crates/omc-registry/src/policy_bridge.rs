@@ -456,6 +456,17 @@ fn collect_block_needs(findings: &[String]) -> (Vec<GrantNeed>, Vec<String>) {
     (needs, unknown)
 }
 
+/// Public accessor for a package's parsed grant needs (and any unrecognized raw
+/// finding messages), so callers such as `omc inspect` can render the per-need
+/// human phrase + raw token + risk callout themselves while staying in lock-step
+/// with the wording used by `omc add`'s block guidance. The first element holds
+/// the recognized [`GrantNeed`]s (deduplicated by `cli_flag`); the second holds
+/// raw messages whose shape was not recognized, so nothing is ever silently
+/// dropped.
+pub fn block_needs(findings: &[String]) -> (Vec<GrantNeed>, Vec<String>) {
+    collect_block_needs(findings)
+}
+
 /// The "<name> was blocked. It wants to: …" section (consequence-first lines with
 /// raw tokens + risk markers), shared by the single-package guidance and the
 /// bundled multi-package table.

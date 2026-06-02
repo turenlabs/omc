@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use omc_registry::{
-    read_lockfile, Behavior, CapabilityKind, Ecosystem, InstallReport, LinkReport,
+    block_needs, read_lockfile, Behavior, CapabilityKind, Ecosystem, InstallReport, LinkReport,
     LockedLocalSource, LockedPackage, OmcRegistryError, Verdict,
 };
 
@@ -507,16 +507,10 @@ fn has_kind(report: &LinkReport, kind: CapabilityKind) -> bool {
         .any(|finding| finding.kind == kind)
 }
 
-/// Render every report with the full verbose per-package dump (artifact paths,
-/// dependencies, every capability finding with file + evidence, verifier
-/// findings) regardless of the global `--verbose` flag. Used by `omc inspect`,
-/// which is informational and always shows the complete picture.
-pub(crate) fn print_link_reports_verbose(reports: &[LinkReport]) {
-    for report in reports {
-        print_link_report_verbose(report);
-    }
-}
-
+/// Raw per-package dump (artifact paths, dependencies, every capability finding
+/// with file + evidence, verifier findings). This is the power-user escape hatch
+/// behind `omc add -v`; `omc inspect` uses the readable `format_inspect_report`
+/// instead. Kept verbatim so `add -v` output never changes.
 fn print_link_report_verbose(report: &omc_registry::LinkReport) {
     print!("{}", format_link_report_verbose(report));
 }
@@ -579,6 +573,403 @@ pub(crate) fn format_link_report_verbose(report: &omc_registry::LinkReport) -> S
         }
     }
     out
+}
+
+// ---------------------------------------------------------------------------
+// `omc inspect` report — a dependency-tree-first skim layer with a one-line
+// headline-risk sentence, expanding per-finding detail blocks only for blocked
+// packages. Reuses the plain-language capability vocabulary and color helpers
+// above, and the real `omc add` grant builders (block_needs / cli_flag) so the
+// unblock lines stay in lock-step with what `omc add` would emit. This is the
+// inspect-only renderer; `omc add -v` keeps the raw `format_link_report_verbose`
+// dump untouched.
+// ---------------------------------------------------------------------------
+
+/// Render the inspect report for a resolved package graph and print it. Called
+/// from `omc inspect` instead of the raw verbose dump.
+pub(crate) fn print_inspect_report(reports: &[LinkReport]) {
+    print!("{}", format_inspect_report(reports));
+}
+
+/// Pure formatter for the inspect report, kept separate from the `print!`
+/// wrapper so it can be unit-tested against constructed `LinkReport`s.
+pub(crate) fn format_inspect_report(reports: &[LinkReport]) -> String {
+    use std::fmt::Write as _;
+    if reports.is_empty() {
+        return String::new();
+    }
+
+    // The first resolved report is the requested root; the remainder are its
+    // resolved dependency set (one-level tree, matching the chosen design).
+    let root = &reports[0];
+    let deps = &reports[1..];
+    let total = reports.len();
+    let blocked = reports
+        .iter()
+        .filter(|r| r.locked.verdict == Verdict::Blocked)
+        .count();
+    let accepted = total - blocked;
+
+    let mut out = String::new();
+
+    // Banner: glyph + ecosystem:name@version + verdict word + dep count.
+    let root_blocked = root.locked.verdict == Verdict::Blocked;
+    let (glyph, verdict_word) = if root_blocked {
+        (paint("✗", RED), paint("BLOCKED", RED))
+    } else {
+        (paint("✓", GREEN), paint("OK", GREEN))
+    };
+    let dep_count = deps.len();
+    let dep_suffix = if dep_count > 0 {
+        format!("   {}", dim(&format!("+{dep_count} deps")))
+    } else {
+        String::new()
+    };
+    let _ = writeln!(
+        out,
+        "{glyph} {}:{}@{}  {verdict_word}{dep_suffix}",
+        root.locked.ecosystem, root.locked.name, root.locked.version
+    );
+
+    // One-line bottom-line + headline-risk sentence (only when something is
+    // blocked — an all-accepted tree leads with a benign one-liner instead).
+    if blocked > 0 {
+        let _ = writeln!(
+            out,
+            "  Installing this tree is denied by default. {blocked} of {total} package{} {} blocked.",
+            plural(total),
+            if blocked == 1 { "is" } else { "are" }
+        );
+        if let Some(headline) = headline_risk(root) {
+            let _ = writeln!(out, "  {headline}");
+        }
+    } else {
+        let _ = writeln!(
+            out,
+            "  All {total} package{} are accepted under the deny-by-default policy.",
+            plural(total)
+        );
+    }
+    let _ = writeln!(out);
+
+    // Summary block: Tree / Verdict / Capability surface.
+    let _ = writeln!(
+        out,
+        "  {:<20} {} {}  {}  {}",
+        "Tree",
+        bold(&root.locked.name),
+        root.locked.version,
+        dim("→"),
+        dep_count_word(dep_count)
+    );
+    let _ = writeln!(
+        out,
+        "  {:<20} {} blocked {} {} accepted",
+        "Verdict",
+        blocked,
+        dim("·"),
+        accepted
+    );
+    let _ = writeln!(
+        out,
+        "  {:<20} {}",
+        "Capability surface",
+        tree_capability_summary(reports)
+    );
+    let _ = writeln!(out);
+
+    // The tree itself: root row + one indented row per dependency, each with
+    // its pinned version, verdict glyph, and plain-language capability summary.
+    let _ = writeln!(
+        out,
+        "  {} {}             {}",
+        bold(&root.locked.name),
+        root.locked.version,
+        tree_row_verdict(root)
+    );
+    for (idx, dep) in deps.iter().enumerate() {
+        let connector = if idx + 1 == deps.len() {
+            "└─"
+        } else {
+            "├─"
+        };
+        let _ = writeln!(
+            out,
+            "  {connector} {} {} {}",
+            bold(&dep.locked.name),
+            dep.locked.version,
+            tree_row_verdict(dep)
+        );
+    }
+    let _ = writeln!(out);
+
+    // Detail blocks: only blocked packages get an expanded per-finding block.
+    let any_detail = reports.iter().any(|r| r.locked.verdict == Verdict::Blocked);
+    if any_detail {
+        let _ = writeln!(out, "  {}", dim(&"─".repeat(77)));
+        let _ = writeln!(out);
+        for report in reports {
+            if report.locked.verdict == Verdict::Blocked {
+                out.push_str(&format_inspect_detail_block(report, root));
+                let _ = writeln!(out);
+            }
+        }
+    }
+
+    // Footer: countable bottom line + pointer to the raw dump.
+    let _ = writeln!(out, "  {}", dim(&"─".repeat(77)));
+    if blocked > 0 {
+        let _ = writeln!(
+            out,
+            "  {blocked} of {total} package{} blocked. Nothing was installed. Run any unblock line above",
+            plural(total)
+        );
+        let _ = writeln!(
+            out,
+            "  (review first), or re-run with --verbose for the raw per-finding dump."
+        );
+    } else {
+        let _ = writeln!(
+            out,
+            "  {total} package{} accepted. Nothing was installed (inspect is read-only).",
+            plural(total)
+        );
+    }
+
+    out
+}
+
+fn dep_count_word(count: usize) -> String {
+    format!(
+        "{} dependenc{}",
+        count,
+        if count == 1 { "y" } else { "ies" }
+    )
+}
+
+/// The headline-risk sentence: a single human sentence describing the most
+/// alarming shape the root package exhibits (env→network exfiltration, then
+/// unverifiable code), borrowed from the chosen design. `None` when the root has
+/// nothing notable to lead with.
+fn headline_risk(root: &LinkReport) -> Option<String> {
+    let findings = &root.locked.verifier_findings;
+    let has_env_to_net = findings
+        .iter()
+        .any(|f| f.contains("env:") && f.contains("may not flow to") && f.contains("network:"));
+    let has_eval = has_kind(root, CapabilityKind::DynamicEval);
+    if has_env_to_net && has_eval {
+        return Some(format!(
+            "Headline risk: {} can send your environment variables to the network (the classic credential-exfiltration shape) and runs code OMC can't verify.",
+            root.locked.name
+        ));
+    }
+    if has_env_to_net {
+        return Some(format!(
+            "Headline risk: {} can send your environment variables to the network — the classic credential-exfiltration shape.",
+            root.locked.name
+        ));
+    }
+    if has_eval {
+        return Some(format!(
+            "Headline risk: {} runs dynamically generated code OMC could not statically verify.",
+            root.locked.name
+        ));
+    }
+    None
+}
+
+/// `✗ blocked   <caps>` / `✓ accepted  <caps>` for a tree row, where `<caps>` is
+/// the plain-language capability summary (or "no host access" for benign deps).
+fn tree_row_verdict(report: &LinkReport) -> String {
+    let caps = capability_summary(report);
+    if report.locked.verdict == Verdict::Blocked {
+        format!("{} {}   {caps}", paint("✗", RED), paint("blocked", RED))
+    } else {
+        format!("{} {}  {caps}", paint("✓", GREEN), paint("accepted", GREEN))
+    }
+}
+
+/// The `Capability surface` summary line — the union of every capability class
+/// present anywhere in the tree, plain-language and ` · `-joined, with the
+/// unverifiable-code class flagged ⚠ (it is the one OMC cannot reason about).
+fn tree_capability_summary(reports: &[LinkReport]) -> String {
+    let any = |kind: CapabilityKind| reports.iter().any(|r| has_kind(r, kind));
+    let mut parts: Vec<String> = Vec::new();
+    if any(CapabilityKind::HttpRequest) {
+        parts.push("network".to_owned());
+    }
+    if any(CapabilityKind::EnvRead) {
+        parts.push("reads env".to_owned());
+    }
+    match (any(CapabilityKind::FsRead), any(CapabilityKind::FsWrite)) {
+        (true, true) => parts.push("reads & writes files".to_owned()),
+        (true, false) => parts.push("reads files".to_owned()),
+        (false, true) => parts.push("writes files".to_owned()),
+        (false, false) => {}
+    }
+    if any(CapabilityKind::ProcSpawn) {
+        parts.push("runs programs".to_owned());
+    }
+    if any(CapabilityKind::DynamicEval) {
+        parts.push(format!(
+            "{} {}",
+            paint("⚠", YELLOW),
+            paint("runs unverifiable code", RED)
+        ));
+    }
+    if parts.is_empty() {
+        dim("no host access")
+    } else {
+        parts.join(&format!(" {} ", dim("·")))
+    }
+}
+
+/// One expanded detail block for a blocked package: the relation header, the
+/// plain-language "Blocked because it wants to:" reasons (each with its raw
+/// token + risk callout), the grouped runtime capability rows, the ⚠
+/// unverifiable-code site list, and the exact run-once / trust grant lines built
+/// from the real `omc add` grant tokens.
+fn format_inspect_detail_block(report: &LinkReport, root: &LinkReport) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::new();
+    let locked = &report.locked;
+
+    // Relation header: "root" or "dep of <root-name>", computed from whether
+    // this report IS the root of the inspected graph.
+    let relation = if locked.name == root.locked.name && locked.version == root.locked.version {
+        "root".to_owned()
+    } else {
+        format!("dep of {}", root.locked.name)
+    };
+    let _ = writeln!(
+        out,
+        "  {} {} {}   {} {} {relation}",
+        paint("✗", RED),
+        bold(&locked.name),
+        locked.version,
+        paint("blocked", RED),
+        dim("—")
+    );
+
+    // Block reasons — every verifier finding mapped 1:1 to a human line, with
+    // the raw token preserved in parens and a risk callout below. Unrecognized
+    // findings still print as `! {raw}` so nothing silently vanishes.
+    let (needs, unknown) = block_needs(&locked.verifier_findings);
+    if !needs.is_empty() || !unknown.is_empty() {
+        let _ = writeln!(out, "    Blocked because it wants to:");
+        for need in &needs {
+            let marker = if need.dangerous {
+                paint("!", RED)
+            } else {
+                " ".to_owned()
+            };
+            let _ = writeln!(out, "      {marker} {}   ({})", need.human, dim(&need.raw));
+            if let Some(risk) = &need.risk {
+                let _ = writeln!(out, "        {} {}", dim("└"), dim(risk));
+            }
+        }
+        for raw in &unknown {
+            let _ = writeln!(out, "      {} {}", paint("!", RED), raw);
+        }
+    }
+
+    // Runtime capabilities, grouped by kind, files comma-joined (no truncation,
+    // no "*" target dump). DynamicEval is rendered separately below as the ⚠
+    // callout, keeping one line per site with its distinctive evidence.
+    let runtime = grouped_runtime_capabilities(report);
+    if !runtime.is_empty() {
+        let _ = writeln!(out, "    Can do at runtime:");
+        let label_width = runtime.iter().map(|(l, _)| l.len()).max().unwrap_or(0);
+        for (label, files) in &runtime {
+            let _ = writeln!(out, "      {label:<label_width$}  {files}");
+        }
+    }
+
+    // ⚠ unverifiable-code callout: one line per DynamicEval site, source +
+    // verbatim distinctive evidence. Never collapsed.
+    let eval_sites: Vec<&omc_registry::CapabilityFinding> = report
+        .artifact
+        .capabilities
+        .iter()
+        .filter(|f| f.kind == CapabilityKind::DynamicEval)
+        .collect();
+    if !eval_sites.is_empty() {
+        let _ = writeln!(
+            out,
+            "    {} {} — {} site{} OMC could not statically verify:",
+            paint("⚠", YELLOW),
+            paint("runs unverifiable code", RED),
+            eval_sites.len(),
+            plural(eval_sites.len())
+        );
+        let src_width = eval_sites.iter().map(|f| f.source.len()).max().unwrap_or(0);
+        for site in &eval_sites {
+            let _ = writeln!(out, "      {:<src_width$}   {}", site.source, site.evidence);
+        }
+    }
+
+    // Grant hints, built from the REAL `omc add` grant tokens so they match what
+    // `omc add` would emit exactly. The flags carry the same `--allow` /
+    // `--allow-flow` shapes used by build_block_suggestion.
+    let flags: Vec<String> = needs.iter().map(|n| n.cli_flag.clone()).collect();
+    if !flags.is_empty() {
+        let _ = writeln!(out, "    To allow it for THIS run only:");
+        let _ = writeln!(
+            out,
+            "      omc add {}:{}@{} \\",
+            locked.ecosystem, locked.name, locked.version
+        );
+        let _ = writeln!(out, "        {}", flags.join(" \\\n        "));
+        let _ = writeln!(
+            out,
+            "    To trust {} {} everywhere:",
+            locked.name, locked.version
+        );
+        let _ = writeln!(
+            out,
+            "      omc trust {}:{}@{} {}",
+            locked.ecosystem,
+            locked.name,
+            locked.version,
+            flags.join(" ")
+        );
+    }
+
+    out
+}
+
+/// Group a report's non-eval runtime capability findings by plain-language label,
+/// each with its source files comma-joined (deduplicated, order-preserving). The
+/// uniform "*" target and uniform evidence are dropped — the label encodes them —
+/// but EVERY source file is retained (the design forbids truncation in inspect).
+fn grouped_runtime_capabilities(report: &LinkReport) -> Vec<(&'static str, String)> {
+    let mut rows: Vec<(&'static str, String)> = Vec::new();
+    let mut push = |label: &'static str, kinds: &[CapabilityKind]| {
+        let mut files: Vec<&str> = Vec::new();
+        for finding in &report.artifact.capabilities {
+            if kinds.contains(&finding.kind) && !files.contains(&finding.source.as_str()) {
+                files.push(finding.source.as_str());
+            }
+        }
+        if !files.is_empty() {
+            rows.push((label, files.join(", ")));
+        }
+    };
+    push("network", &[CapabilityKind::HttpRequest]);
+    push("reads env", &[CapabilityKind::EnvRead]);
+    let has_read = has_kind(report, CapabilityKind::FsRead);
+    let has_write = has_kind(report, CapabilityKind::FsWrite);
+    match (has_read, has_write) {
+        (true, true) => {
+            push("reads files", &[CapabilityKind::FsRead]);
+            push("writes files", &[CapabilityKind::FsWrite]);
+        }
+        (true, false) => push("reads files", &[CapabilityKind::FsRead]),
+        (false, true) => push("writes files", &[CapabilityKind::FsWrite]),
+        (false, false) => {}
+    }
+    push("runs programs", &[CapabilityKind::ProcSpawn]);
+    rows
 }
 
 pub(crate) fn verdict_label(verdict: Verdict) -> &'static str {
