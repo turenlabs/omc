@@ -18,6 +18,7 @@ use crate::direct_compat::{
     direct_compat_mode, npx_compat_args, parse_direct_compat_invocation, DirectCompatMode,
 };
 use crate::exec_cell::{run_exec_cell, ExecCellCommand};
+use crate::graph::{run_graph, GraphCommand};
 use crate::inspect::{run_inspect, InspectCommand};
 use crate::install::{install_options, DependencyOmit};
 use crate::manifest::{dependency_kind_from_booleans, ecosystem_hint, parse_package_specs};
@@ -294,6 +295,25 @@ fn run() -> Result<ExitCode, OmcRegistryError> {
                 npm,
                 pypi,
                 specs,
+                allow,
+                allow_flow,
+                allow_all_host,
+            });
+        }
+        Command::Graph {
+            npm,
+            pypi,
+            specs,
+            output,
+            allow,
+            allow_flow,
+            allow_all_host,
+        } => {
+            return run_graph(GraphCommand {
+                npm,
+                pypi,
+                specs,
+                output,
                 allow,
                 allow_flow,
                 allow_all_host,

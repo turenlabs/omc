@@ -44,6 +44,7 @@ pub(crate) mod compile;
 pub(crate) mod direct_compat;
 pub(crate) mod dispatch;
 pub(crate) mod exec_cell;
+pub(crate) mod graph;
 pub(crate) mod inspect;
 pub(crate) mod install;
 pub(crate) mod manifest;
