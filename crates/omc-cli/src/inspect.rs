@@ -16,7 +16,7 @@ use omc_registry::{add_package_graph, LinkOptions, LinkReport, OmcRegistryError,
 
 use crate::manifest::{ecosystem_hint, parse_package_specs};
 use crate::policy_args::apply_cli_policy_options;
-use crate::render::print_link_reports_verbose;
+use crate::render::print_inspect_report;
 
 /// Arguments for `omc inspect`, mirroring the resolve-relevant subset of `add`.
 pub(crate) struct InspectCommand {
@@ -48,7 +48,7 @@ pub(crate) fn run_inspect(command: InspectCommand) -> Result<ExitCode, OmcRegist
     )?;
 
     let reports = resolve_reports(&specs, &options)?;
-    print_link_reports_verbose(&reports);
+    print_inspect_report(&reports);
 
     // Informational command: always exit 0, even if a package would be blocked.
     // The blocked verdict is shown in the verbose report above; inspect does not
