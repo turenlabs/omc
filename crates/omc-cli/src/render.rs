@@ -11,6 +11,21 @@ use omc_registry::{
     LockedPackage, OmcRegistryError, Verdict,
 };
 
+use std::sync::atomic::{AtomicBool, Ordering};
+
+/// Set once from the global `--verbose` flag at startup. `print_link_reports`
+/// reads it (it is called from ~20 deep sites that have no access to the parsed
+/// CLI), and `OMC_VERBOSE` in the environment forces it on as well.
+static VERBOSE: AtomicBool = AtomicBool::new(false);
+
+pub(crate) fn set_verbose(verbose: bool) {
+    VERBOSE.store(verbose, Ordering::Relaxed);
+}
+
+pub(crate) fn is_verbose() -> bool {
+    VERBOSE.load(Ordering::Relaxed) || env::var_os("OMC_VERBOSE").is_some()
+}
+
 pub(crate) fn print_install_report(install: &InstallReport) {
     println!(
         "installed npm={} pypi={} local_artifacts={} npm_bins={} python_scripts={} node_modules={} python_site_packages={}",
@@ -270,49 +285,99 @@ pub(crate) fn print_audit_report(
 }
 
 pub(crate) fn print_link_reports(reports: &[omc_registry::LinkReport]) {
+    if is_verbose() {
+        for report in reports {
+            print_link_report_verbose(report);
+        }
+        return;
+    }
     for report in reports {
+        print_link_report_terse(report);
+    }
+}
+
+/// One line per package: verdict, spec, and a deduped capability-kind summary
+/// (the security-relevant signal). For a clean multi-package install this is a
+/// handful of lines instead of a per-finding wall; `--verbose` restores the full
+/// dump. Blocked packages still list their verifier findings — those are the
+/// actionable part — so terse never hides a denial reason.
+fn print_link_report_terse(report: &omc_registry::LinkReport) {
+    let kinds = unique_capability_kinds(report);
+    let summary = if kinds.is_empty() {
+        String::new()
+    } else {
+        format!("  {}", kinds.join(", "))
+    };
+    println!(
+        "{} {}:{}@{}{summary}",
+        verdict_label(report.locked.verdict),
+        report.locked.ecosystem,
+        report.locked.name,
+        report.locked.version
+    );
+
+    if report.locked.verdict == Verdict::Blocked && !report.artifact.verifier_findings.is_empty() {
+        for finding in &report.artifact.verifier_findings {
+            println!("  ! {finding}");
+        }
+    }
+}
+
+/// Capability kinds present on the package, deduped and in first-seen order
+/// (e.g. `env_read, http_request, dynamic_eval`).
+fn unique_capability_kinds(report: &omc_registry::LinkReport) -> Vec<String> {
+    let mut kinds: Vec<String> = Vec::new();
+    for finding in &report.artifact.capabilities {
+        let kind = finding.kind.to_string();
+        if !kinds.contains(&kind) {
+            kinds.push(kind);
+        }
+    }
+    kinds
+}
+
+fn print_link_report_verbose(report: &omc_registry::LinkReport) {
+    println!(
+        "{} {}:{}@{}",
+        verdict_label(report.locked.verdict),
+        report.locked.ecosystem,
+        report.locked.name,
+        report.locked.version
+    );
+    println!("archive  {}", report.locked.archive);
+    println!("artifact {}", report.locked.artifact);
+    println!("lockfile {}", report.lockfile.display());
+
+    if !report.artifact.dependencies.is_empty() {
+        println!("dependencies: {}", report.artifact.dependencies.join(", "));
+    }
+    if !report.artifact.optional_dependencies.is_empty() {
         println!(
-            "{} {}:{}@{}",
-            verdict_label(report.locked.verdict),
-            report.locked.ecosystem,
-            report.locked.name,
-            report.locked.version
+            "optional dependencies: {}",
+            report.artifact.optional_dependencies.join(", ")
         );
-        println!("archive  {}", report.locked.archive);
-        println!("artifact {}", report.locked.artifact);
-        println!("lockfile {}", report.lockfile.display());
+    }
+    if !report.artifact.peer_dependencies.is_empty() {
+        println!(
+            "peer dependencies: {}",
+            report.artifact.peer_dependencies.join(", ")
+        );
+    }
 
-        if !report.artifact.dependencies.is_empty() {
-            println!("dependencies: {}", report.artifact.dependencies.join(", "));
-        }
-        if !report.artifact.optional_dependencies.is_empty() {
+    if !report.artifact.capabilities.is_empty() {
+        println!("capabilities:");
+        for finding in &report.artifact.capabilities {
             println!(
-                "optional dependencies: {}",
-                report.artifact.optional_dependencies.join(", ")
+                "  - {} {} from {} ({})",
+                finding.kind, finding.target, finding.source, finding.evidence
             );
         }
-        if !report.artifact.peer_dependencies.is_empty() {
-            println!(
-                "peer dependencies: {}",
-                report.artifact.peer_dependencies.join(", ")
-            );
-        }
+    }
 
-        if !report.artifact.capabilities.is_empty() {
-            println!("capabilities:");
-            for finding in &report.artifact.capabilities {
-                println!(
-                    "  - {} {} from {} ({})",
-                    finding.kind, finding.target, finding.source, finding.evidence
-                );
-            }
-        }
-
-        if !report.artifact.verifier_findings.is_empty() {
-            println!("verifier findings:");
-            for finding in &report.artifact.verifier_findings {
-                println!("  - {finding}");
-            }
+    if !report.artifact.verifier_findings.is_empty() {
+        println!("verifier findings:");
+        for finding in &report.artifact.verifier_findings {
+            println!("  - {finding}");
         }
     }
 }

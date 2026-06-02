@@ -20,6 +20,13 @@ use crate::npm_compat::NpmLinkAction;
 pub(crate) struct Cli {
     #[arg(long, global = true, default_value = ".")]
     pub(crate) project_dir: PathBuf,
+    #[arg(
+        short,
+        long,
+        global = true,
+        help = "Print per-package artifact paths and every capability finding (default: a one-line capability-kind summary)"
+    )]
+    pub(crate) verbose: bool,
     #[command(subcommand)]
     pub(crate) command: Command,
 }

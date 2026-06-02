@@ -251,6 +251,7 @@ fn run_entry() -> Result<ExitCode, OmcRegistryError> {
 
 fn run() -> Result<ExitCode, OmcRegistryError> {
     let cli = Cli::parse();
+    crate::render::set_verbose(cli.verbose);
     match cli.command {
         Command::Init { name } => {
             let manifest = init_project(&cli.project_dir, name.as_deref())?;
