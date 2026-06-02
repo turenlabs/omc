@@ -157,6 +157,13 @@ impl SourceProfiler {
         }
 
         self.files_scanned += 1;
+        // Comments never execute, so a URL / env name / `eval` / `child_process`
+        // appearing only in a comment must not become a capability — axios ships a
+        // `// (e.g. ... 'https://evil.com')` example that otherwise looked like a
+        // real network host. Blank comments first (string-literal aware, comment
+        // syntax keyed by extension), then run every text scan on the code only.
+        let code = strip_comments(content, comment_syntax(path));
+        let content = code.as_str();
         let lower = content.to_ascii_lowercase();
 
         let env_targets = extract_env_read_targets(content);
@@ -331,6 +338,120 @@ fn http_url_host_authority(literal: &str) -> Option<String> {
             .map(|port| format!("{host}:{port}"))
             .unwrap_or_else(|| host.to_owned()),
     )
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CommentSyntax {
+    /// `//` line + `/* */` block comments — JS/TS family.
+    CStyle,
+    /// `#` line comments — Python (note `//` is floor-division there, NOT a
+    /// comment, so it must be left intact).
+    Hash,
+}
+
+fn comment_syntax(path: &str) -> Option<CommentSyntax> {
+    match Path::new(path)
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .map(str::to_ascii_lowercase)
+        .as_deref()
+    {
+        Some("js" | "mjs" | "cjs" | "ts" | "tsx" | "jsx") => Some(CommentSyntax::CStyle),
+        Some("py") => Some(CommentSyntax::Hash),
+        _ => None,
+    }
+}
+
+/// Return `content` with comment spans blanked to whitespace (newlines kept) so
+/// the capability text-scan only ever sees executable code. String literals are
+/// copied through verbatim — a `//`, `/*`, or `#` inside a string is not a
+/// comment — and Python triple-quoted strings are handled so a `#` in a docstring
+/// stays string content. `None` syntax (non source files) returns the input as-is.
+fn strip_comments(content: &str, syntax: Option<CommentSyntax>) -> String {
+    let Some(syntax) = syntax else {
+        return content.to_owned();
+    };
+    let c_style = syntax == CommentSyntax::CStyle;
+    let bytes = content.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        let b = bytes[i];
+
+        // String literals — copy verbatim, honoring escapes (and Python triple
+        // quotes). A comment marker inside a string is just string content.
+        if b == b'"' || b == b'\'' || (c_style && b == b'`') {
+            let triple = !c_style && i + 2 < bytes.len() && bytes[i + 1] == b && bytes[i + 2] == b;
+            if triple {
+                out.extend_from_slice(&bytes[i..i + 3]);
+                i += 3;
+                while i < bytes.len() {
+                    if bytes[i] == b && bytes.get(i + 1) == Some(&b) && bytes.get(i + 2) == Some(&b)
+                    {
+                        out.extend_from_slice(&bytes[i..i + 3]);
+                        i += 3;
+                        break;
+                    }
+                    out.push(bytes[i]);
+                    i += 1;
+                }
+            } else {
+                let quote = b;
+                out.push(b);
+                i += 1;
+                while i < bytes.len() {
+                    let c = bytes[i];
+                    out.push(c);
+                    i += 1;
+                    if c == b'\\' && i < bytes.len() {
+                        out.push(bytes[i]);
+                        i += 1;
+                        continue;
+                    }
+                    if c == quote {
+                        break;
+                    }
+                    // A bare newline ends a malformed single/double-quoted string
+                    // (templates may span lines); bail so we never eat the file.
+                    if c == b'\n' && quote != b'`' {
+                        break;
+                    }
+                }
+            }
+            continue;
+        }
+
+        // Line comment: `//` (C-style) or `#` (Python).
+        if (c_style && b == b'/' && bytes.get(i + 1) == Some(&b'/')) || (!c_style && b == b'#') {
+            while i < bytes.len() && bytes[i] != b'\n' {
+                out.push(b' ');
+                i += 1;
+            }
+            continue;
+        }
+
+        // Block comment: `/* ... */` (C-style only).
+        if c_style && b == b'/' && bytes.get(i + 1) == Some(&b'*') {
+            out.push(b' ');
+            out.push(b' ');
+            i += 2;
+            while i < bytes.len() {
+                if bytes[i] == b'*' && bytes.get(i + 1) == Some(&b'/') {
+                    out.push(b' ');
+                    out.push(b' ');
+                    i += 2;
+                    break;
+                }
+                out.push(if bytes[i] == b'\n' { b'\n' } else { b' ' });
+                i += 1;
+            }
+            continue;
+        }
+
+        out.push(b);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 fn quoted_string_literals(content: &str) -> Vec<String> {
