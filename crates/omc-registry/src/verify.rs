@@ -98,7 +98,7 @@ pub fn compile_source_path(options: CompileSourceOptions) -> Result<CompileSourc
         &package.name,
         &package.version,
     )?;
-    let verifier_findings = verify_module(&module, &policy)
+    let mut verifier_findings = verify_module(&module, &policy)
         .err()
         .map(|error| {
             error
@@ -108,6 +108,24 @@ pub fn compile_source_path(options: CompileSourceOptions) -> Result<CompileSourc
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
+    // OPTIONAL sound dataflow verification (flagged, default OFF) — same additive
+    // contract as the install path. No-op unless the flag is set; when ON it
+    // lowers the compiled JS source(s) and folds the sound engine's findings in,
+    // so the verdict can only strengthen. See docs/SOUND-VERIFY.md.
+    if crate::sound_verify::sound_verify_enabled(false) {
+        if source_path.is_dir() {
+            verifier_findings.extend(crate::sound_verify::sound_verify_js_directory(
+                &package,
+                &source_path,
+                &policy,
+            ));
+        } else {
+            let bytes = fs::read(&source_path)?;
+            verifier_findings.extend(crate::sound_verify::sound_verify_js_archive(
+                &package, &bytes, &policy,
+            ));
+        }
+    }
     let verdict = if verifier_findings.is_empty() {
         Verdict::Accepted
     } else {

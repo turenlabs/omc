@@ -39,9 +39,9 @@ pub(crate) fn profile_archive(package: &ResolvedPackage, bytes: &[u8]) -> Result
                 continue;
             }
             let path = entry.path()?.to_string_lossy().into_owned();
-            let mut content = String::new();
-            entry.read_to_string(&mut content).ok();
-            profiler.scan_file(&path, &content);
+            let mut raw = Vec::new();
+            entry.read_to_end(&mut raw).ok();
+            profiler.scan_bytes(&path, &raw);
         }
     } else if package.filename.ends_with(".whl") || package.filename.ends_with(".zip") {
         let reader = Cursor::new(bytes);
@@ -52,13 +52,12 @@ pub(crate) fn profile_archive(package: &ResolvedPackage, bytes: &[u8]) -> Result
                 continue;
             }
             let path = file.name().to_owned();
-            let mut content = String::new();
-            file.read_to_string(&mut content).ok();
-            profiler.scan_file(&path, &content);
+            let mut raw = Vec::new();
+            file.read_to_end(&mut raw).ok();
+            profiler.scan_bytes(&path, &raw);
         }
     } else {
-        let content = String::from_utf8_lossy(bytes);
-        profiler.scan_file(&package.filename, &content);
+        profiler.scan_bytes(&package.filename, bytes);
     }
 
     Ok(profiler.finish())
@@ -76,8 +75,8 @@ pub(crate) fn profile_source_directory(root: &Path) -> Result<ArchiveProfile> {
             continue;
         }
         let relative = source_profile_relative_path(root, entry.path());
-        let content = fs::read_to_string(entry.path()).unwrap_or_default();
-        profiler.scan_file(&relative, &content);
+        let raw = fs::read(entry.path()).unwrap_or_default();
+        profiler.scan_bytes(&relative, &raw);
     }
     Ok(profiler.finish())
 }
@@ -151,6 +150,35 @@ pub(crate) struct SourceProfiler {
 }
 
 impl SourceProfiler {
+    /// Decode raw file bytes and scan them. The bytes are decoded with
+    /// `String::from_utf8_lossy` so a file is ALWAYS scanned best-effort — a
+    /// `read_to_string`-style decode would yield an empty string on the first
+    /// invalid byte, so a one-byte `0xFF` prefix would hide the entire payload
+    /// from the scanner while the file still installed and executed.
+    ///
+    /// FAIL CLOSED on mangling: when a source-like file's bytes are NOT valid
+    /// UTF-8 we additionally emit a `DynamicEval` capability (mirroring
+    /// `detect_opaque_capability_access`) so the package is denied-by-default
+    /// rather than silently Accepted. Real-world JS/Py source is UTF-8; invalid
+    /// bytes in a `.js`/`.py` file are a deliberate evasion signal, not noise.
+    pub(crate) fn scan_bytes(&mut self, path: &str, bytes: &[u8]) {
+        if !is_source_like(path) || is_ignored_source_path(path) || bytes.is_empty() {
+            return;
+        }
+        let content = String::from_utf8_lossy(bytes);
+        if matches!(content, std::borrow::Cow::Owned(_)) {
+            // Lossy replacement happened => the bytes were not valid UTF-8.
+            self.files_scanned += 1;
+            self.add(
+                CapabilityKind::DynamicEval,
+                "*",
+                path,
+                "non-UTF8 bytes in a source file — deliberate mangling, cannot verify",
+            );
+        }
+        self.scan_file(path, &content);
+    }
+
     pub(crate) fn scan_file(&mut self, path: &str, content: &str) {
         if !is_source_like(path) || is_ignored_source_path(path) || content.is_empty() {
             return;
@@ -163,6 +191,13 @@ impl SourceProfiler {
         // real network host. Blank comments first (string-literal aware, comment
         // syntax keyed by extension), then run every text scan on the code only.
         let code = strip_comments(content, comment_syntax(path));
+        // Alias pre-pass: detection keys on literal surface tokens
+        // (`process.env`, `child_process`, `os.environ`, fetch markers, ...), so
+        // binding a capability ROOT to a variable first
+        // (`const proc = process; proc.env.X`, `import os as m; m.environ['X']`)
+        // slips past every layer. Conservatively resolve such aliases back to
+        // the canonical root token so the existing marker scans catch them.
+        let code = resolve_capability_aliases(&code);
         let content = code.as_str();
         let lower = content.to_ascii_lowercase();
 
@@ -273,6 +308,222 @@ impl SourceProfiler {
             capabilities: self.findings.into_iter().collect(),
         }
     }
+}
+
+/// CONSERVATIVE alias pre-pass. Detection downstream keys on literal surface
+/// tokens (`process.env`, `child_process`, `os.environ`, the fetch markers,
+/// etc.), so binding a capability ROOT to a fresh variable first defeats every
+/// layer:
+/// ```text
+/// JS:  const proc = process; proc.env.NPM_TOKEN          // EnvRead missed
+///      const cp = require('child_process'); cp.execSync(x) // ProcSpawn missed
+/// PY:  import os as m; m.environ['X']                     // EnvRead missed
+///      from os import environ as e; e['X']                // EnvRead missed
+/// ```
+/// This walks the (comment-stripped) code, recognises ONLY the simple forms
+/// where the right-hand side is EXACTLY a bare capability root identifier or a
+/// known `require()`/`import` of one, and rewrites every later word-boundary
+/// occurrence of the alias name to the canonical root token so the existing
+/// marker scans fire. It deliberately does NOT alias ordinary code: a member
+/// expression like `const x = obj.process` (where `obj` is not the global), a
+/// call result, or any RHS that is not exactly a recognised root is ignored.
+fn resolve_capability_aliases(code: &str) -> String {
+    let aliases = collect_capability_aliases(code);
+    if aliases.is_empty() {
+        return code.to_owned();
+    }
+    rewrite_identifiers(code, &aliases)
+}
+
+/// Collect `alias_name -> canonical_root_token` bindings. The canonical token is
+/// a literal surface form the downstream marker scans already recognise
+/// (`process`, `child_process`, `fetch`, `os`, `subprocess`, `os.environ`,
+/// `require`). Only exact, unambiguous RHS forms are accepted.
+fn collect_capability_aliases(code: &str) -> std::collections::BTreeMap<String, String> {
+    let mut aliases = std::collections::BTreeMap::new();
+
+    // --- JS/TS: `const|let|var NAME = <root>;`  and
+    //            `const|let|var NAME = require('<mod>');` -----------------------
+    for kw in ["const", "let", "var"] {
+        let mut offset = 0;
+        while let Some(index) = code[offset..].find(kw) {
+            let start = offset + index;
+            let after_kw = start + kw.len();
+            offset = after_kw;
+            // `const` must stand as a whole keyword (boundary before, whitespace
+            // after) so `constant`/`myconst` do not match.
+            if !is_identifier_boundary(code, start) {
+                continue;
+            }
+            let rest = &code[after_kw..];
+            if !rest.starts_with(|c: char| c.is_ascii_whitespace()) {
+                continue;
+            }
+            let rest = rest.trim_start();
+            let (name, after_name) = take_identifier(rest);
+            if name.is_empty() {
+                continue;
+            }
+            let after_eq = after_name.trim_start();
+            let Some(rhs) = after_eq.strip_prefix('=') else {
+                continue;
+            };
+            // Reject `==`/`=>` — not an assignment.
+            if rhs.starts_with('=') || rhs.starts_with('>') {
+                continue;
+            }
+            let rhs = rhs.trim_start();
+            if let Some(canonical) = js_rhs_capability_root(rhs) {
+                aliases.insert(name.to_owned(), canonical);
+            }
+        }
+    }
+
+    // --- Python: `import os as m`  /  `import subprocess as s` ----------------
+    //            `from os import environ as e` ---------------------------------
+    for line in code.lines() {
+        let line = line.trim();
+        if let Some(rest) = line.strip_prefix("import ") {
+            // `import <root> as <alias>` — single module only (a comma list is
+            // not a simple alias we model).
+            if !rest.contains(',') {
+                if let Some((module, alias)) = rest.split_once(" as ") {
+                    let module = module.trim();
+                    let alias = alias.trim();
+                    if is_simple_identifier(alias)
+                        && PY_CAPABILITY_ROOTS.contains(&module.to_ascii_lowercase().as_str())
+                    {
+                        aliases.insert(alias.to_owned(), module.to_ascii_lowercase());
+                    }
+                }
+            }
+        } else if let Some(rest) = line.strip_prefix("from ") {
+            // `from <root> import <name> as <alias>` — map alias to `<root>.<name>`
+            // so e.g. `from os import environ as e` makes `e[...]` scan as
+            // `os.environ[...]`.
+            if let Some((module, imported)) = rest.split_once(" import ") {
+                let module = module.trim().to_ascii_lowercase();
+                if PY_CAPABILITY_ROOTS.contains(&module.as_str()) && !imported.contains(',') {
+                    if let Some((name, alias)) = imported.split_once(" as ") {
+                        let name = name.trim();
+                        let alias = alias.trim();
+                        if is_simple_identifier(alias) && is_simple_identifier(name) {
+                            aliases.insert(alias.to_owned(), format!("{module}.{name}"));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Never alias a name to itself, and drop any alias whose name is itself a
+    // capability root (would be a no-op / could loop).
+    aliases.retain(|name, canonical| name != canonical);
+    aliases
+}
+
+/// Classify a JS assignment right-hand side. Returns the canonical capability
+/// token IFF the RHS is EXACTLY a bare capability root identifier or a
+/// `require('<mod>')` of a known capability module — nothing else. A member
+/// expression (`obj.process`), a property of something, or a call other than the
+/// recognised `require(...)` returns `None`, so ordinary aliasing stays untouched.
+fn js_rhs_capability_root(rhs: &str) -> Option<String> {
+    // Bare root identifier: `process` / `child_process` / `fetch` terminated by
+    // a non-identifier char (`;`, newline, end). `globalThis`/`global` are
+    // containers, not the capability itself, so we do NOT alias them here (their
+    // computed access is handled by the F1 backstop).
+    for root in ["process", "child_process", "fetch"] {
+        if let Some(after) = rhs.strip_prefix(root) {
+            let next = after.chars().next();
+            if next.is_none_or(|ch| !is_identifier_char(ch) && ch != '.' && ch != '[') {
+                return Some((*root).to_owned());
+            }
+        }
+    }
+
+    // `require('<mod>')` / `require("<mod>")` of a capability module.
+    if let Some(after) = rhs.strip_prefix("require") {
+        let after = after.trim_start();
+        if let Some(args) = after.strip_prefix('(') {
+            if let Some((module, _)) = parse_quoted_literal(args.trim_start()) {
+                return match module.as_str() {
+                    "child_process" | "node:child_process" => Some("child_process".to_owned()),
+                    "fs" | "node:fs" | "fs/promises" | "node:fs/promises" => {
+                        Some("require(\"fs\")".to_owned())
+                    }
+                    "http" | "node:http" => Some("require(\"http\")".to_owned()),
+                    "https" | "node:https" => Some("require(\"https\")".to_owned()),
+                    _ => None,
+                };
+            }
+        }
+    }
+    None
+}
+
+/// Replace every word-boundary occurrence of each alias identifier with its
+/// canonical token. Occurrences immediately preceded by `.` (a member name) are
+/// left alone so we only rewrite the alias used as a free identifier.
+fn rewrite_identifiers(code: &str, aliases: &std::collections::BTreeMap<String, String>) -> String {
+    let bytes = code.as_bytes();
+    let mut out = String::with_capacity(code.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        // Start of an identifier at a boundary?
+        let prev = if i == 0 {
+            None
+        } else {
+            code[..i].chars().next_back()
+        };
+        let at_boundary = prev.is_none_or(|ch| !is_identifier_char(ch) && ch != '.');
+        if at_boundary && is_identifier_char(bytes[i] as char) && bytes[i] != b'$' {
+            let (ident, _) = take_identifier(&code[i..]);
+            if !ident.is_empty() {
+                if let Some(canonical) = aliases.get(ident) {
+                    out.push_str(canonical);
+                    i += ident.len();
+                    continue;
+                }
+                // Skip the whole identifier so we don't re-enter mid-token.
+                out.push_str(ident);
+                i += ident.len();
+                continue;
+            }
+        }
+        let ch = code[i..].chars().next().unwrap();
+        out.push(ch);
+        i += ch.len_utf8();
+    }
+    out
+}
+
+/// Take a leading ASCII identifier (`[A-Za-z_$][A-Za-z0-9_$]*`) from `s`,
+/// returning it and the remainder.
+fn take_identifier(s: &str) -> (&str, &str) {
+    let end = s
+        .char_indices()
+        .take_while(|(idx, ch)| {
+            if *idx == 0 {
+                ch.is_ascii_alphabetic() || *ch == '_' || *ch == '$'
+            } else {
+                is_identifier_char(*ch)
+            }
+        })
+        .map(|(idx, ch)| idx + ch.len_utf8())
+        .last()
+        .unwrap_or(0);
+    s.split_at(end)
+}
+
+fn is_simple_identifier(s: &str) -> bool {
+    !s.is_empty()
+        && s.chars().enumerate().all(|(idx, ch)| {
+            if idx == 0 {
+                ch.is_ascii_alphabetic() || ch == '_'
+            } else {
+                ch.is_ascii_alphanumeric() || ch == '_'
+            }
+        })
 }
 
 fn extract_env_read_targets(content: &str) -> BTreeSet<String> {

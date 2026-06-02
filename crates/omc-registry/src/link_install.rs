@@ -19,7 +19,9 @@ pub fn link_package(spec: &PackageSpec, options: &LinkOptions) -> Result<LinkRep
     init_project(&options.project_dir, None)?;
     let options = options_with_manifest_policy(options)?;
 
-    let client = Client::builder().user_agent("omc-prototype/0.1").build()?;
+    let client = Client::builder()
+        .user_agent(concat!("omc/", env!("CARGO_PKG_VERSION")))
+        .build()?;
     let (report, _) = link_package_inner(&client, spec, false, &options, true)?
         .ok_or_else(|| OmcRegistryError::UnsupportedSpec(spec.requested()))?;
     Ok(report)
@@ -29,7 +31,9 @@ pub fn add_package_graph(spec: &PackageSpec, options: &LinkOptions) -> Result<Ve
     init_project(&options.project_dir, None)?;
     let options = options_with_manifest_policy(options)?;
 
-    let client = Client::builder().user_agent("omc-prototype/0.1").build()?;
+    let client = Client::builder()
+        .user_agent(concat!("omc/", env!("CARGO_PKG_VERSION")))
+        .build()?;
     let reports = resolve_package_graph(&client, spec, &options)?;
 
     if options.save_manifest_dependency {
@@ -317,7 +321,7 @@ fn link_package_inner(
     // needs an explicit flow grant).
     let policy = allow_benign_runtime_capabilities(policy);
     let verification = verify_module(&module, &policy);
-    let verifier_findings = verification
+    let mut verifier_findings = verification
         .err()
         .map(|error| {
             error
@@ -327,6 +331,20 @@ fn link_package_inner(
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
+    // OPTIONAL sound dataflow verification (flagged, default OFF). When the flag
+    // is unset this is a no-op (returns empty), so the verdict is byte-identical
+    // to the profiler-only path. When ON, it lowers JS sources with
+    // `omc-frontend-js` and runs the SAME interprocedural taint engine in-cell
+    // uses against the SAME effective install policy; its findings are appended
+    // (never replacing the profiler's), so the verdict can only strengthen
+    // Accepted -> Blocked, never weaken. See docs/SOUND-VERIFY.md.
+    if crate::sound_verify::sound_verify_enabled(false) {
+        verifier_findings.extend(crate::sound_verify::sound_verify_js_archive(
+            &resolved,
+            &archive_bytes,
+            &policy,
+        ));
+    }
     let verdict = if verifier_findings.is_empty() {
         Verdict::Accepted
     } else {

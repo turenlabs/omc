@@ -187,6 +187,9 @@ use signature::{
 
 pub(crate) mod verify;
 pub use verify::compile_source_path;
+
+// Optional sound dataflow verification for JS (flagged prototype, default OFF).
+pub(crate) mod sound_verify;
 // Re-exported for the `#[cfg(test)]` sibling modules which reach these through
 // `use super::*`; the link orchestration that used them now lives in
 // `link_install`.
@@ -741,7 +744,9 @@ pub fn lock_project(options: &LinkOptions) -> Result<Vec<LinkReport>> {
 fn lock_project_options(options: &mut LinkOptions) -> Result<Vec<LinkReport>> {
     let specs = project_requested_specs(options, false)?;
 
-    let client = Client::builder().user_agent("omc-prototype/0.1").build()?;
+    let client = Client::builder()
+        .user_agent(concat!("omc/", env!("CARGO_PKG_VERSION")))
+        .build()?;
     let mut seen_roots = BTreeSet::new();
     let mut retained = BTreeSet::new();
     let mut reports = Vec::new();
@@ -1800,7 +1805,9 @@ pub fn read_pypi_available_versions(
     options.pypi_target_abis = query.target_abis;
     let options = options_with_manifest_policy(&options)?;
     let spec = PackageSpec::parse(&format!("pypi:{package}"))?;
-    let client = Client::builder().user_agent("omc-prototype/0.1").build()?;
+    let client = Client::builder()
+        .user_agent(concat!("omc/", env!("CARGO_PKG_VERSION")))
+        .build()?;
     let target_python = pypi_target_python(&options);
     let wheel_compatibility = pypi_wheel_compatibility(&options);
     let uploaded_prior_to = options
