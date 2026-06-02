@@ -199,7 +199,7 @@ fn pypi_distribution_check_warnings(distribution: &PypiUploadDistribution) -> Ve
 }
 
 fn pypi_upload_client(cert: Option<&Path>, client_cert: Option<&Path>) -> Result<Client> {
-    let mut builder = Client::builder().user_agent("omc-prototype/0.1");
+    let mut builder = Client::builder().user_agent(concat!("omc/", env!("CARGO_PKG_VERSION")));
     if let Some(cert) = cert {
         let bytes = fs::read(cert)?;
         for cert in Certificate::from_pem_bundle(&bytes)? {

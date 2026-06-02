@@ -19,7 +19,9 @@ pub fn link_package(spec: &PackageSpec, options: &LinkOptions) -> Result<LinkRep
     init_project(&options.project_dir, None)?;
     let options = options_with_manifest_policy(options)?;
 
-    let client = Client::builder().user_agent("omc-prototype/0.1").build()?;
+    let client = Client::builder()
+        .user_agent(concat!("omc/", env!("CARGO_PKG_VERSION")))
+        .build()?;
     let (report, _) = link_package_inner(&client, spec, false, &options, true)?
         .ok_or_else(|| OmcRegistryError::UnsupportedSpec(spec.requested()))?;
     Ok(report)
@@ -29,7 +31,9 @@ pub fn add_package_graph(spec: &PackageSpec, options: &LinkOptions) -> Result<Ve
     init_project(&options.project_dir, None)?;
     let options = options_with_manifest_policy(options)?;
 
-    let client = Client::builder().user_agent("omc-prototype/0.1").build()?;
+    let client = Client::builder()
+        .user_agent(concat!("omc/", env!("CARGO_PKG_VERSION")))
+        .build()?;
     let reports = resolve_package_graph(&client, spec, &options)?;
 
     if options.save_manifest_dependency {
