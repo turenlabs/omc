@@ -57,7 +57,9 @@ use lockfile::{
 };
 
 pub(crate) mod http_client;
-use http_client::{artifact_path_for, cache_archive, download_artifact, write_artifact};
+use http_client::{
+    artifact_path_for, cache_archive, download_artifact, metadata_get_cached, write_artifact,
+};
 
 pub(crate) mod npm_resolve;
 #[cfg(test)]
@@ -179,7 +181,9 @@ use rand_core::OsRng;
 #[cfg(test)]
 use signature::project_signing_public_key;
 pub use signature::verify_artifact_signature;
-use signature::{artifact_payload_sha256, ensure_lock_signing_key, sign_artifact};
+use signature::{
+    artifact_payload_sha256, ensure_artifact_signing_key, ensure_lock_signing_key, sign_artifact,
+};
 
 pub(crate) mod verify;
 pub use verify::compile_source_path;
@@ -4360,27 +4364,24 @@ fn resolve_npm(
         }
         Some(requirement) => {
             let url = npm_registry_package_url(registry, &encoded);
-            let root = npm_get(client, &url, &npm_config)
-                .send()?
-                .error_for_status()?
-                .json::<NpmRoot>()?;
+            let body = metadata_get_cached(npm_get(client, &url, &npm_config), &url, false)?
+                .ok_or_else(|| OmcRegistryError::PackageNotFound(spec.requested()))?;
+            let root = serde_json::from_slice::<NpmRoot>(&body)?;
             choose_npm_version(&registry_name, requirement, &root, npm_before)?
         }
         None => {
             let url = npm_registry_package_url(registry, &encoded);
-            let root = npm_get(client, &url, &npm_config)
-                .send()?
-                .error_for_status()?
-                .json::<NpmRoot>()?;
+            let body = metadata_get_cached(npm_get(client, &url, &npm_config), &url, false)?
+                .ok_or_else(|| OmcRegistryError::PackageNotFound(spec.requested()))?;
+            let root = serde_json::from_slice::<NpmRoot>(&body)?;
             choose_npm_version(&registry_name, "latest", &root, npm_before)?
         }
     };
     let url = npm_registry_package_version_url(registry, &encoded, &version);
-    let response = npm_get(client, &url, &npm_config).send()?;
-    if response.status().as_u16() == 404 {
+    let Some(body) = metadata_get_cached(npm_get(client, &url, &npm_config), &url, true)? else {
         return Err(OmcRegistryError::PackageNotFound(spec.requested()));
-    }
-    let version_doc = response.error_for_status()?.json::<NpmVersion>()?;
+    };
+    let version_doc = serde_json::from_slice::<NpmVersion>(&body)?;
     let platform_compatible = npm_platform_compatible(&version_doc)
         && npm_version_engine_compatible(&version_doc, options);
     let dependencies = npm_runtime_dependencies(&version_doc);
@@ -4629,11 +4630,9 @@ fn resolve_pypi(
         Some(requirement) if is_exact_pypi_version(requirement) => requirement.to_owned(),
         Some(requirement) => {
             let url = format!("https://pypi.org/pypi/{encoded}/json");
-            let root = client
-                .get(url)
-                .send()?
-                .error_for_status()?
-                .json::<PypiRoot>()?;
+            let body = metadata_get_cached(client.get(&url), &url, false)?
+                .ok_or_else(|| OmcRegistryError::PackageNotFound(spec.requested()))?;
+            let root = serde_json::from_slice::<PypiRoot>(&body)?;
             choose_pypi_version(
                 &spec.name,
                 requirement,
@@ -4646,11 +4645,9 @@ fn resolve_pypi(
         }
         None => {
             let url = format!("https://pypi.org/pypi/{encoded}/json");
-            let root = client
-                .get(url)
-                .send()?
-                .error_for_status()?
-                .json::<PypiRoot>()?;
+            let body = metadata_get_cached(client.get(&url), &url, false)?
+                .ok_or_else(|| OmcRegistryError::PackageNotFound(spec.requested()))?;
+            let root = serde_json::from_slice::<PypiRoot>(&body)?;
             choose_pypi_version(
                 &spec.name,
                 "*",
@@ -4663,11 +4660,10 @@ fn resolve_pypi(
         }
     };
     let url = format!("https://pypi.org/pypi/{encoded}/{version}/json");
-    let response = client.get(url).send()?;
-    if response.status().as_u16() == 404 {
+    let Some(body) = metadata_get_cached(client.get(&url), &url, true)? else {
         return Err(OmcRegistryError::PackageNotFound(spec.requested()));
-    }
-    let doc = response.error_for_status()?.json::<PypiResponse>()?;
+    };
+    let doc = serde_json::from_slice::<PypiResponse>(&body)?;
     let file = choose_pypi_file(
         &doc,
         target_python.as_deref(),

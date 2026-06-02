@@ -74,64 +74,114 @@ pub fn remove_manifest_dependency(
     Ok(removed)
 }
 
+/// Serializes the lock-file read-modify-write across parallel resolver workers
+/// (the lock is one shared file per project).
+static LOCK_FILE_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Apply `f` to every item, running up to `available_parallelism` calls at once
+/// and returning results in input order. Used to resolve+download+profile a whole
+/// dependency level concurrently. Each result slot is written by exactly one
+/// worker, so the per-slot `Mutex` is uncontended (it just satisfies the borrow
+/// checker for disjoint indices).
+fn parallel_map<T, R>(items: &[T], f: impl Fn(&T) -> R + Sync) -> Vec<R>
+where
+    T: Sync,
+    R: Send,
+{
+    let n = items.len();
+    if n <= 1 {
+        return items.iter().map(&f).collect();
+    }
+    let cap = std::thread::available_parallelism()
+        .map(|p| p.get())
+        .unwrap_or(4)
+        .min(n);
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let slots: Vec<std::sync::Mutex<Option<R>>> =
+        (0..n).map(|_| std::sync::Mutex::new(None)).collect();
+    std::thread::scope(|scope| {
+        for _ in 0..cap {
+            scope.spawn(|| loop {
+                let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                if i >= n {
+                    break;
+                }
+                let value = f(&items[i]);
+                *slots[i].lock().unwrap_or_else(|err| err.into_inner()) = Some(value);
+            });
+        }
+    });
+    slots
+        .into_iter()
+        .map(|slot| {
+            slot.into_inner()
+                .unwrap_or_else(|err| err.into_inner())
+                .expect("every slot is filled by a worker")
+        })
+        .collect()
+}
+
+/// What resolving one package in a BFS level yields: its link report plus the
+/// dependencies to fan out into the next level (`None` when a platform-incompatible
+/// optional dependency is skipped).
+type ResolvedNode = Result<Option<(LinkReport, Vec<PackageDependency>)>>;
+
+/// Resolve the dependency graph of `spec` as a level-parallel breadth-first
+/// search: each BFS level (a package and its siblings) is resolved, downloaded,
+/// and profiled concurrently across cores, then deduplicated by resolved
+/// `eco:name@version` (post-resolution, exactly as the old sequential DFS did)
+/// before fanning out to the next level. Dependency graphs are wide and shallow,
+/// so per-level parallelism captures most of the speedup with no work-stealing.
 pub(crate) fn resolve_package_graph(
     client: &Client,
     spec: &PackageSpec,
     options: &LinkOptions,
 ) -> Result<Vec<LinkReport>> {
+    // Pre-create the per-project signing key so parallel workers only read it.
+    ensure_artifact_signing_key(&options.project_dir)?;
+
     let mut reports = Vec::new();
     let mut seen = BTreeSet::new();
-    add_package_graph_inner(client, spec, false, options, &mut seen, &mut reports)?;
-    Ok(reports)
-}
+    let mut frontier: Vec<(PackageSpec, bool)> = vec![(spec.clone(), false)];
 
-fn add_package_graph_inner(
-    client: &Client,
-    spec: &PackageSpec,
-    optional_dependency: bool,
-    options: &LinkOptions,
-    seen: &mut BTreeSet<String>,
-    reports: &mut Vec<LinkReport>,
-) -> Result<()> {
-    let Some((report, dependencies)) =
-        link_package_inner(client, spec, optional_dependency, options, false)?
-    else {
-        return Ok(());
-    };
-    let resolved_key = format!(
-        "{}:{}@{}",
-        report.locked.ecosystem,
-        spec.name_with_extras(),
-        report.locked.version
-    );
+    while !frontier.is_empty() {
+        let level: Vec<ResolvedNode> = parallel_map(&frontier, |(spec, optional)| {
+            link_package_inner(client, spec, *optional, options, false)
+        });
 
-    if !seen.insert(resolved_key) {
-        return Ok(());
-    }
-
-    let follow_dependencies = should_follow_locked_dependencies(&report.locked, options);
-    reports.push(report);
-
-    if follow_dependencies {
-        for dependency in dependencies {
-            if dependency.optional && !options.include_optional_dependencies {
+        let mut next: Vec<(PackageSpec, bool)> = Vec::new();
+        for ((spec, _optional), result) in frontier.iter().zip(level) {
+            let Some((report, dependencies)) = result? else {
+                continue;
+            };
+            let resolved_key = format!(
+                "{}:{}@{}",
+                report.locked.ecosystem,
+                spec.name_with_extras(),
+                report.locked.version
+            );
+            if !seen.insert(resolved_key) {
                 continue;
             }
-            if dependency.peer && !options.include_peer_dependencies {
-                continue;
+
+            let follow_dependencies = should_follow_locked_dependencies(&report.locked, options);
+            reports.push(report);
+
+            if follow_dependencies {
+                for dependency in dependencies {
+                    if dependency.optional && !options.include_optional_dependencies {
+                        continue;
+                    }
+                    if dependency.peer && !options.include_peer_dependencies {
+                        continue;
+                    }
+                    next.push((dependency.spec, dependency.optional));
+                }
             }
-            add_package_graph_inner(
-                client,
-                &dependency.spec,
-                dependency.optional,
-                options,
-                seen,
-                reports,
-            )?;
         }
+        frontier = next;
     }
-
-    Ok(())
+    Ok(reports)
 }
 
 fn link_package_inner(
@@ -372,10 +422,18 @@ fn link_package_inner(
     }
 
     let lockfile = options.project_dir.join(LOCKFILE);
-    let mut lock = read_lockfile(&lockfile)?;
-    ensure_lock_signing_key(&options.project_dir, &mut lock)?;
-    lock.upsert(locked.clone());
-    fs::write(&lockfile, toml::to_string_pretty(&lock)?)?;
+    {
+        // The lock is a single shared file per project; serialize the
+        // read-modify-write so parallel resolver workers can't clobber each
+        // other's entries (or race the lock signing-key creation).
+        let _guard = LOCK_FILE_MUTEX
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
+        let mut lock = read_lockfile(&lockfile)?;
+        ensure_lock_signing_key(&options.project_dir, &mut lock)?;
+        lock.upsert(locked.clone());
+        fs::write(&lockfile, toml::to_string_pretty(&lock)?)?;
+    }
 
     let manifest_path = options.project_dir.join(MANIFEST);
     Ok(Some((
