@@ -18,6 +18,8 @@ use crate::direct_compat::{
     direct_compat_mode, npx_compat_args, parse_direct_compat_invocation, DirectCompatMode,
 };
 use crate::exec_cell::{run_exec_cell, ExecCellCommand};
+use crate::graph::{run_graph, GraphCommand};
+use crate::inspect::{run_inspect, InspectCommand};
 use crate::install::{install_options, DependencyOmit};
 use crate::manifest::{dependency_kind_from_booleans, ecosystem_hint, parse_package_specs};
 use crate::npm_compat::{run_npm_compat, run_npm_compat_with_cwd};
@@ -281,6 +283,42 @@ fn run() -> Result<ExitCode, OmcRegistryError> {
             println!();
             print_install_report(&install);
         }
+        Command::Inspect {
+            npm,
+            pypi,
+            specs,
+            allow,
+            allow_flow,
+            allow_all_host,
+        } => {
+            return run_inspect(InspectCommand {
+                npm,
+                pypi,
+                specs,
+                allow,
+                allow_flow,
+                allow_all_host,
+            });
+        }
+        Command::Graph {
+            npm,
+            pypi,
+            specs,
+            output,
+            allow,
+            allow_flow,
+            allow_all_host,
+        } => {
+            return run_graph(GraphCommand {
+                npm,
+                pypi,
+                specs,
+                output,
+                allow,
+                allow_flow,
+                allow_all_host,
+            });
+        }
         Command::Compile {
             npm,
             pypi,
@@ -508,6 +546,7 @@ fn run() -> Result<ExitCode, OmcRegistryError> {
             )
         }
         Command::Policy { action } => return run_policy_command(&cli.project_dir, action),
+        Command::Agent { json } => return Ok(crate::agent_skill::print_agent_skill(json)),
     }
 
     Ok(ExitCode::SUCCESS)

@@ -88,6 +88,74 @@ pub(crate) enum Command {
         #[arg(long, help = "Grant all host capabilities for compatibility testing")]
         allow_all_host: bool,
     },
+    #[command(about = "Resolve and show a package's capabilities without installing")]
+    Inspect {
+        #[arg(
+            long,
+            conflicts_with = "pypi",
+            help = "Treat unprefixed specs as npm specs"
+        )]
+        npm: bool,
+        #[arg(
+            long,
+            conflicts_with = "npm",
+            help = "Treat unprefixed specs as PyPI specs"
+        )]
+        pypi: bool,
+        #[arg(
+            required = true,
+            num_args = 1..,
+            help = "Package specs such as npm:left-pad@1.3.0, pypi:idna==3.7, or unprefixed specs with --npm/--pypi"
+        )]
+        specs: Vec<String>,
+        #[arg(
+            long = "allow",
+            help = "Grant a capability to preview how it changes the verdict, e.g. http:api.example.com, env:API_TOKEN, fs-read:*, proc:*"
+        )]
+        allow: Vec<String>,
+        #[arg(
+            long = "allow-flow",
+            help = "Grant a data flow to preview how it changes the verdict, e.g. env:API_TOKEN->network:api.example.com"
+        )]
+        allow_flow: Vec<String>,
+        #[arg(long, help = "Grant all host capabilities for compatibility testing")]
+        allow_all_host: bool,
+    },
+    #[command(about = "Render a PNG of a package's dependency graph and capabilities")]
+    Graph {
+        #[arg(
+            long,
+            conflicts_with = "pypi",
+            help = "Treat unprefixed specs as npm specs"
+        )]
+        npm: bool,
+        #[arg(
+            long,
+            conflicts_with = "npm",
+            help = "Treat unprefixed specs as PyPI specs"
+        )]
+        pypi: bool,
+        #[arg(
+            required = true,
+            num_args = 1..,
+            help = "Package specs such as npm:left-pad@1.3.0, pypi:idna==3.7, or unprefixed specs with --npm/--pypi"
+        )]
+        specs: Vec<String>,
+        #[arg(long, default_value = "omc-graph.png", help = "Output PNG path")]
+        output: PathBuf,
+        #[arg(
+            long = "allow",
+            help = "Grant a capability to preview how it changes the verdict, e.g. http:api.example.com, env:API_TOKEN, fs-read:*, proc:*"
+        )]
+        allow: Vec<String>,
+        #[arg(
+            long = "allow-flow",
+            help = "Grant a data flow to preview how it changes the verdict, e.g. env:API_TOKEN->network:api.example.com"
+        )]
+        allow_flow: Vec<String>,
+        #[arg(long, help = "Grant all host capabilities for compatibility testing")]
+        allow_all_host: bool,
+    },
     #[command(about = "Compile local source into a signed OMC artifact")]
     Compile {
         #[arg(
@@ -381,6 +449,11 @@ pub(crate) enum Command {
     Policy {
         #[command(subcommand)]
         action: PolicyCommand,
+    },
+    #[command(about = "Print an AI-agent guide to using omc")]
+    Agent {
+        #[arg(long, help = "Emit the guide wrapped as machine-readable JSON")]
+        json: bool,
     },
 }
 

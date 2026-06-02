@@ -507,38 +507,65 @@ fn has_kind(report: &LinkReport, kind: CapabilityKind) -> bool {
         .any(|finding| finding.kind == kind)
 }
 
+/// Render every report with the full verbose per-package dump (artifact paths,
+/// dependencies, every capability finding with file + evidence, verifier
+/// findings) regardless of the global `--verbose` flag. Used by `omc inspect`,
+/// which is informational and always shows the complete picture.
+pub(crate) fn print_link_reports_verbose(reports: &[LinkReport]) {
+    for report in reports {
+        print_link_report_verbose(report);
+    }
+}
+
 fn print_link_report_verbose(report: &omc_registry::LinkReport) {
-    println!(
+    print!("{}", format_link_report_verbose(report));
+}
+
+/// Pure formatter for the verbose per-package report. Kept separate from the
+/// `print!` wrapper so it can be unit-tested against constructed `LinkReport`s
+/// without capturing global stdout.
+pub(crate) fn format_link_report_verbose(report: &omc_registry::LinkReport) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::new();
+    let _ = writeln!(
+        out,
         "{} {}:{}@{}",
         verdict_label(report.locked.verdict),
         report.locked.ecosystem,
         report.locked.name,
         report.locked.version
     );
-    println!("archive  {}", report.locked.archive);
-    println!("artifact {}", report.locked.artifact);
-    println!("lockfile {}", report.lockfile.display());
+    let _ = writeln!(out, "archive  {}", report.locked.archive);
+    let _ = writeln!(out, "artifact {}", report.locked.artifact);
+    let _ = writeln!(out, "lockfile {}", report.lockfile.display());
 
     if !report.artifact.dependencies.is_empty() {
-        println!("dependencies: {}", report.artifact.dependencies.join(", "));
+        let _ = writeln!(
+            out,
+            "dependencies: {}",
+            report.artifact.dependencies.join(", ")
+        );
     }
     if !report.artifact.optional_dependencies.is_empty() {
-        println!(
+        let _ = writeln!(
+            out,
             "optional dependencies: {}",
             report.artifact.optional_dependencies.join(", ")
         );
     }
     if !report.artifact.peer_dependencies.is_empty() {
-        println!(
+        let _ = writeln!(
+            out,
             "peer dependencies: {}",
             report.artifact.peer_dependencies.join(", ")
         );
     }
 
     if !report.artifact.capabilities.is_empty() {
-        println!("capabilities:");
+        let _ = writeln!(out, "capabilities:");
         for finding in &report.artifact.capabilities {
-            println!(
+            let _ = writeln!(
+                out,
                 "  - {} {} from {} ({})",
                 finding.kind, finding.target, finding.source, finding.evidence
             );
@@ -546,11 +573,12 @@ fn print_link_report_verbose(report: &omc_registry::LinkReport) {
     }
 
     if !report.artifact.verifier_findings.is_empty() {
-        println!("verifier findings:");
+        let _ = writeln!(out, "verifier findings:");
         for finding in &report.artifact.verifier_findings {
-            println!("  - {finding}");
+            let _ = writeln!(out, "  - {finding}");
         }
     }
+    out
 }
 
 pub(crate) fn verdict_label(verdict: Verdict) -> &'static str {
