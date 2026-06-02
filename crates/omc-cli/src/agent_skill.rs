@@ -45,6 +45,25 @@ omc remove --npm left-pad             # drop a dependency and reinstall the rest
 Spec forms accepted everywhere: prefixed (`npm:left-pad@1.3.0`,
 `pypi:idna==3.7`) or unprefixed with `--npm` / `--pypi` to pick the ecosystem.
 
+### Inspecting before you install
+
+Both resolve and capability-profile the package(s) into a throwaway temp dir —
+nothing is written to the project (no `omc.lock`, manifest, `node_modules`, or
+`site-packages`), so they are safe to run anywhere:
+
+```bash
+omc inspect --pypi requests           # full per-file capability report (every finding, evidence, verdict)
+omc graph --pypi requests             # write a PNG of the dependency tree, nodes colored by risk
+omc graph --npm express --output deps.png   # choose the output path (default ./omc-graph.png)
+```
+
+`omc inspect` is the read-only equivalent of `omc add -v`: use it to see exactly
+what a package and its transitive deps can do before trusting them. `omc graph`
+colors each node by its capabilities — red = runs unverifiable code / writes
+files / spawns processes, yellow = other host access (env/file-read/network),
+grey = no host access. Both accept the same `--allow` / `--allow-flow` /
+`--allow-all-host` grants so you can preview how a grant changes the verdict.
+
 ### Running installed code
 
 omc enforces at install time; at runtime it just puts your real interpreter on

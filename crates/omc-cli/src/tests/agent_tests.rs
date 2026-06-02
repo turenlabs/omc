@@ -14,6 +14,8 @@ fn agent_markdown_contains_core_anchors() {
         "deny-by-default",
         "omc add",
         "omc install",
+        "omc inspect",
+        "omc graph",
         "omc audit",
         "omc trust",
         "omc.policy",
