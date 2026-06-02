@@ -7,10 +7,11 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use omc_registry::{
-    read_lockfile, Behavior, Ecosystem, InstallReport, LinkReport, LockedLocalSource,
-    LockedPackage, OmcRegistryError, Verdict,
+    read_lockfile, Behavior, CapabilityKind, Ecosystem, InstallReport, LinkReport,
+    LockedLocalSource, LockedPackage, OmcRegistryError, Verdict,
 };
 
+use std::io::IsTerminal;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Set once from the global `--verbose` flag at startup. `print_link_reports`
@@ -26,17 +27,98 @@ pub(crate) fn is_verbose() -> bool {
     VERBOSE.load(Ordering::Relaxed) || env::var_os("OMC_VERBOSE").is_some()
 }
 
+const GREEN: &str = "\x1b[32m";
+const YELLOW: &str = "\x1b[33m";
+const RED: &str = "\x1b[31m";
+const BOLD: &str = "\x1b[1m";
+const DIM: &str = "\x1b[2m";
+const RESET: &str = "\x1b[0m";
+
+/// ANSI coloring is applied only when stdout is a real terminal and `NO_COLOR`
+/// is unset, so piped/redirected output and captured test output stay plain.
+fn color_enabled() -> bool {
+    env::var_os("NO_COLOR").is_none() && std::io::stdout().is_terminal()
+}
+fn paint(text: &str, code: &str) -> String {
+    if color_enabled() {
+        format!("{code}{text}{RESET}")
+    } else {
+        text.to_owned()
+    }
+}
+fn bold(text: &str) -> String {
+    paint(text, BOLD)
+}
+fn dim(text: &str) -> String {
+    paint(text, DIM)
+}
+
 pub(crate) fn print_install_report(install: &InstallReport) {
+    if is_verbose() {
+        println!(
+            "installed npm={} pypi={} local_artifacts={} npm_bins={} python_scripts={} node_modules={} python_site_packages={}",
+            install.npm_packages,
+            install.pypi_packages,
+            install.local_source_artifacts,
+            install.npm_bins,
+            install.python_scripts,
+            install.node_modules.display(),
+            install.python_site_packages.display()
+        );
+        return;
+    }
+
+    let total = install.npm_packages + install.pypi_packages + install.local_source_artifacts;
+    if total == 0 {
+        println!("Nothing to install (already up to date).");
+        return;
+    }
+
+    // Name only the targets the install actually wrote to, with the count of
+    // executables/scripts placed on PATH (the part users act on), instead of the
+    // npm=…/pypi=… key dump.
+    let mut targets: Vec<String> = Vec::new();
+    if install.npm_packages > 0 {
+        let bins = if install.npm_bins > 0 {
+            format!(" ({} bin{})", install.npm_bins, plural(install.npm_bins))
+        } else {
+            String::new()
+        };
+        targets.push(format!("{}{bins}", install.node_modules.display()));
+    }
+    if install.pypi_packages > 0 {
+        let scripts = if install.python_scripts > 0 {
+            format!(
+                " ({} script{})",
+                install.python_scripts,
+                plural(install.python_scripts)
+            )
+        } else {
+            String::new()
+        };
+        targets.push(format!(
+            "{}{scripts}",
+            install.python_site_packages.display()
+        ));
+    }
+    let arrow = if targets.is_empty() {
+        String::new()
+    } else {
+        format!("  {} {}", dim("→"), targets.join(", "))
+    };
     println!(
-        "installed npm={} pypi={} local_artifacts={} npm_bins={} python_scripts={} node_modules={} python_site_packages={}",
-        install.npm_packages,
-        install.pypi_packages,
-        install.local_source_artifacts,
-        install.npm_bins,
-        install.python_scripts,
-        install.node_modules.display(),
-        install.python_site_packages.display()
+        "{} Installed {total} package{}{arrow}",
+        paint("✓", GREEN),
+        plural(total)
     );
+}
+
+fn plural(n: usize) -> &'static str {
+    if n == 1 {
+        ""
+    } else {
+        "s"
+    }
 }
 
 pub(crate) fn print_npm_install_json_report(
@@ -284,56 +366,145 @@ pub(crate) fn print_audit_report(
     Ok(ExitCode::SUCCESS)
 }
 
-pub(crate) fn print_link_reports(reports: &[omc_registry::LinkReport]) {
+pub(crate) fn print_link_reports(reports: &[LinkReport]) {
     if is_verbose() {
         for report in reports {
             print_link_report_verbose(report);
         }
         return;
     }
+    print_link_reports_terse(reports);
+}
+
+/// A scannable per-package tree — each package with a plain-language capability
+/// summary — followed by a ⚠ callout naming the packages with security-notable
+/// capabilities (code OMC could not statically verify, file writes, process
+/// spawns). The full per-finding dump with file paths and evidence lives behind
+/// `--verbose`. Blocked packages keep an explicit ✗ line plus their verifier
+/// findings, so terse never hides a denial reason.
+fn print_link_reports_terse(reports: &[LinkReport]) {
+    if reports.is_empty() {
+        return;
+    }
+    let width = reports
+        .iter()
+        .map(|r| r.locked.name.len() + 1 + r.locked.version.len())
+        .max()
+        .unwrap_or(0)
+        .min(32);
+
     for report in reports {
-        print_link_report_terse(report);
+        if report.locked.verdict == Verdict::Blocked {
+            println!(
+                "  {} {} {}  {}",
+                paint("✗", RED),
+                bold(&report.locked.name),
+                report.locked.version,
+                paint("blocked", RED)
+            );
+            for finding in &report.artifact.verifier_findings {
+                println!("      {finding}");
+            }
+            continue;
+        }
+        let raw = format!("{} {}", report.locked.name, report.locked.version);
+        let pad = " ".repeat(width.saturating_sub(raw.len()));
+        println!(
+            "  {} {}{pad}  {}",
+            bold(&report.locked.name),
+            report.locked.version,
+            capability_summary(report)
+        );
     }
+
+    print_risk_callout(reports);
 }
 
-/// One line per package: verdict, spec, and a deduped capability-kind summary
-/// (the security-relevant signal). For a clean multi-package install this is a
-/// handful of lines instead of a per-finding wall; `--verbose` restores the full
-/// dump. Blocked packages still list their verifier findings — those are the
-/// actionable part — so terse never hides a denial reason.
-fn print_link_report_terse(report: &omc_registry::LinkReport) {
-    let kinds = unique_capability_kinds(report);
-    let summary = if kinds.is_empty() {
-        String::new()
+/// Plain-language, ` · `-joined summary of what a package can do at runtime, or
+/// a dimmed "no host access" when it touches nothing. The unverifiable-code
+/// capability is flagged inline with ⚠ because it is the one OMC cannot reason
+/// about; the rest read as a capability list (the ⚠ callout below names the
+/// notable ones across the whole tree).
+fn capability_summary(report: &LinkReport) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    if has_kind(report, CapabilityKind::HttpRequest) {
+        parts.push("network".to_owned());
+    }
+    if has_kind(report, CapabilityKind::EnvRead) {
+        parts.push("reads env".to_owned());
+    }
+    match (
+        has_kind(report, CapabilityKind::FsRead),
+        has_kind(report, CapabilityKind::FsWrite),
+    ) {
+        (true, true) => parts.push("reads & writes files".to_owned()),
+        (true, false) => parts.push("reads files".to_owned()),
+        (false, true) => parts.push("writes files".to_owned()),
+        (false, false) => {}
+    }
+    if has_kind(report, CapabilityKind::ProcSpawn) {
+        parts.push("runs programs".to_owned());
+    }
+    if has_kind(report, CapabilityKind::DynamicEval) {
+        parts.push(format!(
+            "{} {}",
+            paint("⚠", YELLOW),
+            paint("runs unverifiable code", RED)
+        ));
+    }
+    if parts.is_empty() {
+        dim("no host access")
     } else {
-        format!("  {}", kinds.join(", "))
-    };
-    println!(
-        "{} {}:{}@{}{summary}",
-        verdict_label(report.locked.verdict),
-        report.locked.ecosystem,
-        report.locked.name,
-        report.locked.version
-    );
-
-    if report.locked.verdict == Verdict::Blocked && !report.artifact.verifier_findings.is_empty() {
-        for finding in &report.artifact.verifier_findings {
-            println!("  ! {finding}");
-        }
+        parts.join(" · ")
     }
 }
 
-/// Capability kinds present on the package, deduped and in first-seen order
-/// (e.g. `env_read, http_request, dynamic_eval`).
-fn unique_capability_kinds(report: &omc_registry::LinkReport) -> Vec<String> {
-    let mut kinds: Vec<String> = Vec::new();
-    for finding in &report.artifact.capabilities {
-        let kind = finding.kind.to_string();
-        if !kinds.contains(&kind) {
-            kinds.push(kind);
-        }
+/// One ⚠ line per security-notable capability class present anywhere in the
+/// tree, naming the packages. Nothing prints when the whole install is benign.
+fn print_risk_callout(reports: &[LinkReport]) {
+    let names_with = |kind: CapabilityKind| -> Vec<String> {
+        reports
+            .iter()
+            .filter(|r| r.locked.verdict == Verdict::Accepted && has_kind(r, kind))
+            .map(|r| bold(&r.locked.name))
+            .collect()
+    };
+    let eval = names_with(CapabilityKind::DynamicEval);
+    let write = names_with(CapabilityKind::FsWrite);
+    let spawn = names_with(CapabilityKind::ProcSpawn);
+    if eval.is_empty() && write.is_empty() && spawn.is_empty() {
+        return;
     }
-    kinds
+    println!();
+    if !eval.is_empty() {
+        println!(
+            "  {} {} can run code OMC couldn't statically verify (dynamic eval)",
+            paint("⚠", YELLOW),
+            eval.join(", ")
+        );
+    }
+    if !write.is_empty() {
+        println!(
+            "  {} {} can write files",
+            paint("⚠", YELLOW),
+            write.join(", ")
+        );
+    }
+    if !spawn.is_empty() {
+        println!(
+            "  {} {} can run external programs",
+            paint("⚠", YELLOW),
+            spawn.join(", ")
+        );
+    }
+}
+
+fn has_kind(report: &LinkReport, kind: CapabilityKind) -> bool {
+    report
+        .artifact
+        .capabilities
+        .iter()
+        .any(|finding| finding.kind == kind)
 }
 
 fn print_link_report_verbose(report: &omc_registry::LinkReport) {
