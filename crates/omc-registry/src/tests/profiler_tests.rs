@@ -923,3 +923,601 @@ fn js_window_open_is_not_a_file_read() {
         profile.capabilities
     );
 }
+
+// ===========================================================================
+// ROUND-2 corpus false-positive regressions. Each FP-gone case is paired with a
+// genuine-form CONTROL proving the real capability is still detected.
+// ===========================================================================
+
+// FP CLASS — the bare `subprocess`/`child_process` proc markers had no word
+// boundary, so they matched the substring inside an unrelated identifier
+// (execa's `subprocess` JS param, uvicorn's `use_subprocess`, tox's
+// `LocalSubProcessExecutor`, celery's `_track_child_process`).
+#[test]
+fn subprocess_substring_in_identifier_is_not_proc_spawn() {
+    let mut profiler = SourceProfiler::default();
+    profiler.scan_file(
+        "lib/ipc/methods.js",
+        "export const addIpcMethods = (subprocess, {ipc}) => subprocess.send(ipc);\n",
+    );
+    profiler.scan_file(
+        "uvicorn/loops/asyncio.py",
+        "def asyncio_loop_factory(use_subprocess: bool = False):\n    return use_subprocess\n",
+    );
+    profiler.scan_file(
+        "tox/tox_env/python/api.py",
+        "from tox.execute.local_sub_process import LocalSubProcessExecutor\n",
+    );
+    let profile = profiler.finish();
+    assert!(
+        !profile
+            .capabilities
+            .iter()
+            .any(|f| f.kind == CapabilityKind::ProcSpawn),
+        "`subprocess`/`child_process` as an identifier substring must not be ProcSpawn: {:?}",
+        profile.capabilities
+    );
+}
+
+// CONTROL — a genuine `import subprocess` / `subprocess.Popen(...)` and a
+// `from subprocess import Popen` still register ProcSpawn.
+#[test]
+fn genuine_subprocess_module_use_still_proc_spawn() {
+    for (path, src) in [
+        ("tool.py", "import subprocess\nsubprocess.Popen(['ls'])\n"),
+        ("worker.py", "from subprocess import Popen\nPopen(['ls'])\n"),
+    ] {
+        let mut profiler = SourceProfiler::default();
+        profiler.scan_file(path, src);
+        let profile = profiler.finish();
+        assert!(
+            profile
+                .capabilities
+                .iter()
+                .any(|f| f.kind == CapabilityKind::ProcSpawn),
+            "genuine subprocess use must still be ProcSpawn: {src:?} -> {:?}",
+            profile.capabilities
+        );
+    }
+}
+
+// FP CLASS — a greenlet/coroutine `.spawn(` (gevent/eventlet/pool) is in-process
+// green-thread scheduling, not an OS process; and `def spawn(` is a definition.
+#[test]
+fn greenlet_spawn_and_def_spawn_are_not_proc_spawn() {
+    let mut profiler = SourceProfiler::default();
+    profiler.scan_file(
+        "celery/backends/asynchronous.py",
+        "def spawn(self, func):\n    return gevent.spawn(func)\n",
+    );
+    profiler.scan_file(
+        "gunicorn/workers/geventlet.py",
+        "g = pool.spawn(handle, conn)\n",
+    );
+    let profile = profiler.finish();
+    assert!(
+        !profile
+            .capabilities
+            .iter()
+            .any(|f| f.kind == CapabilityKind::ProcSpawn),
+        "gevent/pool.spawn and def spawn must not be ProcSpawn: {:?}",
+        profile.capabilities
+    );
+}
+
+// CONTROL — Node `child_process.spawn(...)` and a bare `spawn(...)` from
+// `const {spawn} = require('child_process')` are genuine OS process spawns.
+#[test]
+fn genuine_child_process_spawn_still_proc_spawn() {
+    for (path, src) in [
+        (
+            "main.js",
+            "const cp = require('child_process');\ncp.spawn('curl', args);\n",
+        ),
+        (
+            "run.js",
+            "const {spawn} = require('node:child_process');\nspawn('sh', ['-c', cmd]);\n",
+        ),
+    ] {
+        let mut profiler = SourceProfiler::default();
+        profiler.scan_file(path, src);
+        let profile = profiler.finish();
+        assert!(
+            profile
+                .capabilities
+                .iter()
+                .any(|f| f.kind == CapabilityKind::ProcSpawn),
+            "genuine child_process spawn must still be ProcSpawn: {src:?} -> {:?}",
+            profile.capabilities
+        );
+    }
+}
+
+// DETECTION-PRESERVED CONTROL — narrowing the coincidental `subprocess`/`spawn(`
+// substrings would have dropped genuine Python process creation that the OLD
+// scanner caught only by accident. These must keep registering ProcSpawn:
+//   * `multiprocessing.get_context('spawn').Process(...)` (uvicorn workers)
+//   * `os.fork()` / `pty.fork()` (gunicorn forking server)
+#[test]
+fn multiprocessing_and_os_fork_are_proc_spawn() {
+    for (path, src) in [
+        (
+            "uvicorn/_subprocess.py",
+            "import multiprocessing\nspawn = multiprocessing.get_context('spawn')\nspawn.Process(target=run)\n",
+        ),
+        ("gunicorn/arbiter.py", "pid = os.fork()\n"),
+        ("server.py", "pid, fd = pty.fork()\n"),
+    ] {
+        let mut profiler = SourceProfiler::default();
+        profiler.scan_file(path, src);
+        let profile = profiler.finish();
+        assert!(
+            profile
+                .capabilities
+                .iter()
+                .any(|f| f.kind == CapabilityKind::ProcSpawn),
+            "multiprocessing/os.fork must register ProcSpawn: {src:?} -> {:?}",
+            profile.capabilities
+        );
+    }
+}
+
+// FP CLASS — a camelCase user function `getEnv(...)` collides with the `getenv(`
+// env marker only AFTER the content is lowercased. The case-sensitive match no
+// longer fires on it (execa `getEnv(options)`).
+#[test]
+fn camelcase_get_env_is_not_env_read() {
+    let mut profiler = SourceProfiler::default();
+    profiler.scan_file(
+        "lib/arguments/options.js",
+        "const getEnv = ({extendEnv}) => extendEnv;\nconst x = getEnv(opts);\n",
+    );
+    let profile = profiler.finish();
+    assert!(
+        !profile
+            .capabilities
+            .iter()
+            .any(|f| f.kind == CapabilityKind::EnvRead),
+        "user `getEnv(` must not be an EnvRead: {:?}",
+        profile.capabilities
+    );
+}
+
+// CONTROL — Python `os.getenv('X')` and a C-style lowercase `getenv(` still read.
+#[test]
+fn genuine_getenv_still_env_read() {
+    let mut profiler = SourceProfiler::default();
+    profiler.scan_file("conf.py", "val = os.getenv('SECRET_KEY')\n");
+    let profile = profiler.finish();
+    assert!(
+        profile
+            .capabilities
+            .iter()
+            .any(|f| f.kind == CapabilityKind::EnvRead),
+        "os.getenv('X') must still be EnvRead: {:?}",
+        profile.capabilities
+    );
+}
+
+// FP CLASS — an `eval(`/`exec(` substring inside a STRING LITERAL never executes:
+// a T-SQL `EXEC('ALTER TABLE ...')` template (knex/alembic), an error message
+// `"method eval() is not implemented"` (redis).
+#[test]
+fn eval_exec_inside_string_literal_is_not_dynamic_eval() {
+    let mut profiler = SourceProfiler::default();
+    profiler.scan_file(
+        "lib/dialects/mssql/schema.js",
+        "const baseQuery = `IF @c IS NOT NULL EXEC('ALTER TABLE ' + @c)`;\n",
+    );
+    profiler.scan_file(
+        "redis/cluster.py",
+        "raise RedisClusterException('method eval() is not implemented')\n",
+    );
+    let profile = profiler.finish();
+    assert!(
+        !profile
+            .capabilities
+            .iter()
+            .any(|f| f.kind == CapabilityKind::DynamicEval),
+        "eval()/EXEC() inside a string literal must not be DynamicEval: {:?}",
+        profile.capabilities
+    );
+}
+
+// CONTROL — a genuine `eval(x)` / `exec(code)` outside any string still fails closed.
+#[test]
+fn genuine_eval_exec_outside_strings_still_dynamic_eval() {
+    for (path, src) in [
+        ("a.js", "const r = eval(userInput);\n"),
+        ("b.py", "exec(code)\n"),
+    ] {
+        let mut profiler = SourceProfiler::default();
+        profiler.scan_file(path, src);
+        let profile = profiler.finish();
+        assert!(
+            profile
+                .capabilities
+                .iter()
+                .any(|f| f.kind == CapabilityKind::DynamicEval),
+            "real eval/exec must still be DynamicEval: {src:?} -> {:?}",
+            profile.capabilities
+        );
+    }
+}
+
+// FP CLASS — a JS dynamic `import(` and a computed `require[`/`compile(` inside a
+// STRING LITERAL (react error messages, pygments raw-string regex lexer data)
+// never execute as code.
+#[test]
+fn opaque_markers_inside_string_literals_are_not_dynamic_eval() {
+    let mut profiler = SourceProfiler::default();
+    profiler.scan_file(
+        "cjs/react.development.js",
+        "var msg = \"lazy: Expected the result of import('./MyComponent')\";\n",
+    );
+    profiler.scan_file(
+        "pygments/lexers/parsers.py",
+        "tokens = [(r'require[ \\t]+[^\\n]+', Other)]\n",
+    );
+    let profile = profiler.finish();
+    assert!(
+        !profile
+            .capabilities
+            .iter()
+            .any(|f| f.kind == CapabilityKind::DynamicEval),
+        "import(/require[ inside a string literal must not be DynamicEval: {:?}",
+        profile.capabilities
+    );
+}
+
+// CONTROL — a real dynamic `import(x)` and a real `require[m]` still fail closed.
+#[test]
+fn genuine_dynamic_import_and_computed_require_still_opaque() {
+    for (path, src) in [
+        ("m.js", "const mod = import('./' + name);\n"),
+        ("r.js", "const r = require['main'];\n"),
+    ] {
+        let mut profiler = SourceProfiler::default();
+        profiler.scan_file(path, src);
+        let profile = profiler.finish();
+        assert!(
+            profile
+                .capabilities
+                .iter()
+                .any(|f| f.kind == CapabilityKind::DynamicEval),
+            "real dynamic import / computed require must still fail closed: {src:?} -> {:?}",
+            profile.capabilities
+        );
+    }
+}
+
+// FP CLASS — JS has no `compile` builtin: `compile(...)` in a .js/.ts file is a
+// user/library function (mongoose schema compiler, morgan's own `compile`),
+// never Python codegen.
+#[test]
+fn js_compile_call_is_not_dynamic_eval() {
+    let mut profiler = SourceProfiler::default();
+    profiler.scan_file(
+        "lib/document.js",
+        "function compile(tree, proto) { return tree; }\nconst d = compile(schema.tree, this);\n",
+    );
+    let profile = profiler.finish();
+    assert!(
+        !profile
+            .capabilities
+            .iter()
+            .any(|f| f.kind == CapabilityKind::DynamicEval),
+        "a JS `compile(...)` call must not be DynamicEval: {:?}",
+        profile.capabilities
+    );
+}
+
+// CONTROL — a Python `compile(src, ...)` builtin call still fails closed.
+#[test]
+fn python_compile_call_still_dynamic_eval() {
+    let mut profiler = SourceProfiler::default();
+    profiler.scan_file("tool.py", "code = compile(src, '<s>', 'exec')\n");
+    let profile = profiler.finish();
+    assert!(
+        profile
+            .capabilities
+            .iter()
+            .any(|f| f.kind == CapabilityKind::DynamicEval),
+        "Python compile() must still be DynamicEval: {:?}",
+        profile.capabilities
+    );
+}
+
+// FP CLASS — `getattr(<root>, '<literal-const>', default)` (Windows/posix-compat
+// probe) and `getattr(<root>.attr, '<literal>', default)` are static, resolvable
+// reads — not opaque reflection on the module surface (Django `getattr(os,
+// 'O_BINARY', 0)`, celery `getattr(os, 'EX_OK', 0)`, tqdm `getattr(sys.stdout,
+// 'flush', ...)`).
+#[test]
+fn getattr_literal_constant_attr_is_not_opaque() {
+    let mut profiler = SourceProfiler::default();
+    profiler.scan_file(
+        "django/core/files/storage.py",
+        "FLAGS = os.O_WRONLY | getattr(os, 'O_BINARY', 0)\n",
+    );
+    profiler.scan_file("celery/platforms.py", "EX_OK = getattr(os, 'EX_OK', 0)\n");
+    profiler.scan_file(
+        "tqdm/std.py",
+        "getattr(sys.stdout, 'flush', lambda: None)()\n",
+    );
+    let profile = profiler.finish();
+    assert!(
+        !profile
+            .capabilities
+            .iter()
+            .any(|f| f.kind == CapabilityKind::DynamicEval),
+        "getattr on a cap root with a benign literal attr must not be opaque: {:?}",
+        profile.capabilities
+    );
+}
+
+// CONTROL — `getattr(os, attr)` with a VARIABLE name, and `getattr(os,
+// 'system')` naming a DANGEROUS member, both still fail closed.
+#[test]
+fn getattr_variable_or_dangerous_member_still_opaque() {
+    for (path, src) in [
+        ("a.py", "f = getattr(os, attr)\n"),
+        ("b.py", "fn = getattr(os, 'system')\n"),
+        ("c.py", "g = getattr(builtins, thing.name)\n"),
+    ] {
+        let mut profiler = SourceProfiler::default();
+        profiler.scan_file(path, src);
+        let profile = profiler.finish();
+        assert!(
+            profile
+                .capabilities
+                .iter()
+                .any(|f| f.kind == CapabilityKind::DynamicEval),
+            "opaque/dangerous getattr must still fail closed: {src:?} -> {:?}",
+            profile.capabilities
+        );
+    }
+}
+
+// FP CLASS — the Node `readFile`/`writeFile` fs markers are JS-only API names;
+// they must not case-fold-match Python `_winapi.ReadFile(`/`WriteFile(` (Windows
+// named-pipe handle IPC, not the filesystem — billiard).
+#[test]
+fn winapi_readfile_writefile_is_not_node_fs() {
+    let mut profiler = SourceProfiler::default();
+    profiler.scan_file(
+        "billiard/connection.py",
+        "_winapi.WriteFile(self._handle, buf)\nn = _winapi.ReadFile(self._handle, 4)\n",
+    );
+    let profile = profiler.finish();
+    assert!(
+        !profile
+            .capabilities
+            .iter()
+            .any(|f| f.kind == CapabilityKind::FsRead || f.kind == CapabilityKind::FsWrite),
+        "_winapi.ReadFile/WriteFile must not be Node fs read/write: {:?}",
+        profile.capabilities
+    );
+}
+
+// CONTROL — genuine Node `fs.readFileSync(...)` / `fs.writeFileSync(...)` in a
+// .js file still register fs_read / fs_write.
+#[test]
+fn genuine_node_fs_read_write_still_detected() {
+    let mut profiler = SourceProfiler::default();
+    profiler.scan_file(
+        "index.js",
+        "fs.readFileSync(p);\nfs.writeFileSync(out, data);\n",
+    );
+    let profile = profiler.finish();
+    assert!(
+        profile
+            .capabilities
+            .iter()
+            .any(|f| f.kind == CapabilityKind::FsRead),
+        "fs.readFileSync must still be FsRead: {:?}",
+        profile.capabilities
+    );
+    assert!(
+        profile
+            .capabilities
+            .iter()
+            .any(|f| f.kind == CapabilityKind::FsWrite),
+        "fs.writeFileSync must still be FsWrite: {:?}",
+        profile.capabilities
+    );
+}
+
+// FP CLASS — a path COMPONENT literal inside a nested `os.path.join(...)` (e.g.
+// 'Australia', which contains 'a') must not be read as an append mode when the
+// real second positional arg is `'rb'` (pytz `open(os.path.join(...), 'rb')`).
+#[test]
+fn open_path_component_is_not_a_write_mode() {
+    let mut profiler = SourceProfiler::default();
+    profiler.scan_file(
+        "pytz/tzfile.py",
+        "fp = open(os.path.join(base, 'Australia', 'Melbourne'), 'rb')\n",
+    );
+    let profile = profiler.finish();
+    assert!(
+        !profile
+            .capabilities
+            .iter()
+            .any(|f| f.kind == CapabilityKind::FsWrite),
+        "a path component literal must not be read as a write mode: {:?}",
+        profile.capabilities
+    );
+}
+
+// CONTROL — a genuine `open(path, 'w')` / `open(path, mode='a')` write is kept.
+#[test]
+fn genuine_open_write_mode_still_detected_round2() {
+    for (path, src) in [
+        ("a.py", "open(os.path.join(d, 'out.txt'), 'w')\n"),
+        ("b.py", "open(p, mode='a')\n"),
+    ] {
+        let mut profiler = SourceProfiler::default();
+        profiler.scan_file(path, src);
+        let profile = profiler.finish();
+        assert!(
+            profile
+                .capabilities
+                .iter()
+                .any(|f| f.kind == CapabilityKind::FsWrite),
+            "genuine open write must still be FsWrite: {src:?} -> {:?}",
+            profile.capabilities
+        );
+    }
+}
+
+// FP CLASS — an ES6 shorthand method DEFINITION (`}async fetch(t){`, `}open(){`)
+// is not a call, so it must not match the `fetch`/`open` builtin markers (glob's
+// lru-cache `fetch`, socket.io's Socket.prototype.open).
+#[test]
+fn es6_shorthand_method_def_is_not_a_builtin_call() {
+    let mut profiler = SourceProfiler::default();
+    profiler.scan_file(
+        "dist/index.min.js",
+        "class C{constructor(){}async fetch(t,o){return t}open(){return this}}\n",
+    );
+    let profile = profiler.finish();
+    assert!(
+        !profile
+            .capabilities
+            .iter()
+            .any(|f| f.kind == CapabilityKind::HttpRequest || f.kind == CapabilityKind::FsRead),
+        "ES6 shorthand `fetch`/`open` method defs must not be http/fs: {:?}",
+        profile.capabilities
+    );
+}
+
+// CONTROL — a genuine global `fetch('https://host')` call still registers http.
+#[test]
+fn genuine_fetch_call_still_http() {
+    let mut profiler = SourceProfiler::default();
+    profiler.scan_file("client.js", "const r = fetch('https://api.example/v1');\n");
+    let profile = profiler.finish();
+    assert!(
+        profile
+            .capabilities
+            .iter()
+            .any(|f| f.kind == CapabilityKind::HttpRequest),
+        "real fetch() call must still be HttpRequest: {:?}",
+        profile.capabilities
+    );
+}
+
+// FP CLASS — a host scraped from a TEMPLATE-LITERAL URL captures the `${...}`
+// placeholder as part of the host (vite ``http://localhost${req.url}``); such a
+// fragment is not a concrete request destination.
+#[test]
+fn template_literal_url_is_not_a_concrete_host() {
+    let mut profiler = SourceProfiler::default();
+    profiler.scan_file(
+        "dist/node.js",
+        "const u = new URL(`http://localhost${req.url}`); fetch(u);\n",
+    );
+    let profile = profiler.finish();
+    assert!(
+        !profile
+            .capabilities
+            .iter()
+            .any(|f| f.kind == CapabilityKind::HttpRequest && f.target.contains("${")),
+        "a template-literal placeholder must not be captured as a host: {:?}",
+        profile.capabilities
+    );
+    // The http capability PRESENCE is still honest (fetch is real) -> target `*`.
+    assert!(
+        profile
+            .capabilities
+            .iter()
+            .any(|f| f.kind == CapabilityKind::HttpRequest && f.target == "*"),
+        "the genuine http capability must still be present as `*`: {:?}",
+        profile.capabilities
+    );
+}
+
+// CONTROL — a concrete static URL host is still captured.
+#[test]
+fn concrete_static_url_host_still_captured_round2() {
+    let mut profiler = SourceProfiler::default();
+    profiler.scan_file("c.js", "fetch('https://api.real.example/v1');\n");
+    let profile = profiler.finish();
+    assert!(
+        profile
+            .capabilities
+            .iter()
+            .any(|f| f.kind == CapabilityKind::HttpRequest && f.target == "api.real.example"),
+        "a concrete static host must still be captured: {:?}",
+        profile.capabilities
+    );
+}
+
+// STRING-AWARE GUARD — the module name inside `require('http')`/`require('fs')`
+// is the string CONTENT, so it must keep matching even though the presence
+// scans run on a string-blanked view (ws ships `const http = require('http')` —
+// a genuine Node import that must stay an http capability). Regression for a
+// near-miss where blanking string bodies dropped these genuine markers.
+#[test]
+fn single_quoted_require_module_still_detected() {
+    let mut profiler = SourceProfiler::default();
+    profiler.scan_file(
+        "lib/websocket.js",
+        "const http = require('http');\nconst fs = require('fs');\n",
+    );
+    let profile = profiler.finish();
+    assert!(
+        profile
+            .capabilities
+            .iter()
+            .any(|f| f.kind == CapabilityKind::HttpRequest),
+        "require('http') must still be an HttpRequest: {:?}",
+        profile.capabilities
+    );
+    assert!(
+        profile
+            .capabilities
+            .iter()
+            .any(|f| f.kind == CapabilityKind::FsRead),
+        "require('fs') must still be an FsRead: {:?}",
+        profile.capabilities
+    );
+}
+
+// FP CLASS — an `httpx.request(...)` that only appears in a docstring example
+// (`>>> response = httpx.request('GET', ...)`) is documentation, not a call, and
+// must not register an http capability (httpx ships these in every _api.py
+// docstring; the real client uses an internal transport).
+#[test]
+fn docstring_only_member_call_is_not_http() {
+    let mut profiler = SourceProfiler::default();
+    profiler.scan_file(
+        "httpx/_api.py",
+        "def request(method, url):\n    \"\"\"Send a request.\n\n    >>> httpx.request('GET', 'https://example/get')\n    \"\"\"\n    return _client().send(method, url)\n",
+    );
+    let profile = profiler.finish();
+    assert!(
+        !profile
+            .capabilities
+            .iter()
+            .any(|f| f.kind == CapabilityKind::HttpRequest),
+        "a docstring-only httpx.request example must not be HttpRequest: {:?}",
+        profile.capabilities
+    );
+}
+
+// CONTROL — a real `httpx.get(url)` call in executable code still registers http.
+#[test]
+fn genuine_httpx_member_call_still_http() {
+    let mut profiler = SourceProfiler::default();
+    profiler.scan_file("app.py", "r = httpx.get(url)\n");
+    let profile = profiler.finish();
+    assert!(
+        profile
+            .capabilities
+            .iter()
+            .any(|f| f.kind == CapabilityKind::HttpRequest),
+        "real httpx.get() must still be HttpRequest: {:?}",
+        profile.capabilities
+    );
+}
