@@ -20,9 +20,14 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: macos-14
+          # Both macOS targets build on macos-latest (Apple Silicon). The
+          # x86_64 build cross-compiles there — omc is pure-Rust (reqwest uses
+          # rustls-tls, no system libs), and the toolchain step installs the
+          # x86_64 std target, so cross-compilation is clean. macos-13 (the EOL
+          # Intel runner) never got allocated and hung every release.
+          - os: macos-latest
             target: aarch64-apple-darwin
-          - os: macos-13
+          - os: macos-latest
             target: x86_64-apple-darwin
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
