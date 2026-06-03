@@ -998,9 +998,12 @@ fn preceded_by_definition_keyword(content: &str, start: usize) -> bool {
 fn is_python_open_mode_token(literal: &str) -> bool {
     !literal.is_empty()
         && literal.len() <= 4
-        && literal
-            .chars()
-            .all(|ch| matches!(ch.to_ascii_lowercase(), 'r' | 'w' | 'a' | 'x' | 'b' | 't' | '+' | 'u'))
+        && literal.chars().all(|ch| {
+            matches!(
+                ch.to_ascii_lowercase(),
+                'r' | 'w' | 'a' | 'x' | 'b' | 't' | '+' | 'u'
+            )
+        })
         && literal
             .chars()
             .any(|ch| matches!(ch.to_ascii_lowercase(), 'r' | 'w' | 'a' | 'x'))

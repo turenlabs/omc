@@ -667,10 +667,7 @@ fn open_mode_arg_is_not_captured_as_read_path() {
 #[test]
 fn genuine_open_literal_path_still_captured() {
     let mut profiler = SourceProfiler::default();
-    profiler.scan_file(
-        "numpy/distutils/cpuinfo.py",
-        "fo = open('/proc/cpuinfo')\n",
-    );
+    profiler.scan_file("numpy/distutils/cpuinfo.py", "fo = open('/proc/cpuinfo')\n");
     let profile = profiler.finish();
     assert!(
         profile
@@ -798,7 +795,10 @@ fn docstring_url_is_not_an_http_host() {
 fn method_named_open_is_not_a_file_builtin() {
     let mut profiler = SourceProfiler::default();
     profiler.scan_file("yaml/__init__.py", "dumper.open()\n");
-    profiler.scan_file("yaml/serializer.py", "class S:\n    def open(self):\n        pass\n");
+    profiler.scan_file(
+        "yaml/serializer.py",
+        "class S:\n    def open(self):\n        pass\n",
+    );
     let profile = profiler.finish();
     assert!(
         !profile
