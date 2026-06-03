@@ -201,7 +201,21 @@ impl SourceProfiler {
         let content = code.as_str();
         let lower = content.to_ascii_lowercase();
 
-        let env_targets = extract_env_read_targets(content);
+        // CONCRETE-TARGET view: a Python docstring (a bare triple-quoted
+        // expression statement) is documentation that never executes, yet it
+        // routinely contains illustrative `open('file.txt')` / `os.environ['X']`
+        // / `>>> ds.open('http://...')` examples. Scraping those quoted literals
+        // as real fs_read/env_read TARGETS (or http hosts) is a pure
+        // false-positive: the code never runs. We therefore blank docstring
+        // bodies for the literal-TARGET extractors ONLY. Capability PRESENCE and
+        // the fail-closed opaque-access scans still see the full `content`, so a
+        // real eval/import/subprocess hidden anywhere keeps failing closed —
+        // this view can never introduce a false negative for a capability, only
+        // refuse to attach a bogus concrete target scraped from a doc example.
+        let targets_code = strip_python_docstrings(content, comment_syntax(path));
+        let targets_content = targets_code.as_str();
+
+        let env_targets = extract_env_read_targets(targets_content);
         if env_targets.is_empty() {
             for pattern in ["process.env", "os.environ", "getenv("] {
                 if lower.contains(pattern) {
@@ -225,7 +239,7 @@ impl SourceProfiler {
         // in-cell guarantee). A genuinely dynamic read path (no literal arg) is
         // opaque, so it falls back to "*" AND trips F1's fail-closed below.
         for marker in ["readfilesync", "readfile", "createreadstream", "open"] {
-            for target in fs_read_call_targets(content, marker) {
+            for target in fs_read_call_targets(targets_content, marker) {
                 self.add(CapabilityKind::FsRead, target, path, marker);
             }
         }
@@ -240,12 +254,12 @@ impl SourceProfiler {
                 self.add(CapabilityKind::FsWrite, "*", path, pattern);
             }
         }
-        if contains_python_file_write(content) {
+        if contains_python_file_write(targets_content) {
             self.add(CapabilityKind::FsWrite, "*", path, "open write mode");
         }
 
         if let Some(evidence) = http_client_usage_evidence(&lower) {
-            let http_hosts = extract_http_hosts(content);
+            let http_hosts = extract_http_hosts(targets_content);
             if http_hosts.is_empty() {
                 self.add(CapabilityKind::HttpRequest, "*", path, evidence);
             } else {
@@ -705,6 +719,95 @@ fn strip_comments(content: &str, syntax: Option<CommentSyntax>) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
+/// Blank the BODY of Python docstrings (bare triple-quoted string expression
+/// statements) to whitespace, preserving newlines and the surrounding quotes so
+/// byte offsets and line numbers are unchanged. A docstring is documentation
+/// that never executes, yet packages routinely embed illustrative
+/// `open('file.txt')`, `os.environ['X']`, and `>>> ds.open('http://...')`
+/// examples inside one; the literal-TARGET extractors would otherwise scrape
+/// those as real fs_read/env_read/http targets. Comments are already blanked by
+/// `strip_comments`; this extends the same "documentation is not code"
+/// discipline to docstrings, but ONLY for the concrete-target scans (callers
+/// pass the full `content` to the capability-PRESENCE and fail-closed scans, so
+/// this can never hide a real capability — only refuse a bogus doc target).
+///
+/// Conservative: a triple-quoted string is treated as a docstring (body blanked)
+/// only when the last non-whitespace byte before its opening quotes is start-of
+/// file, a newline, or a `:` — i.e. it stands as its own expression statement or
+/// directly follows a block header. A triple-quoted string that is the RHS of an
+/// assignment (`x = """..."""`) or an argument (`f("""...""")`) is real data and
+/// is left intact. Non-Python files are returned unchanged.
+fn strip_python_docstrings(content: &str, syntax: Option<CommentSyntax>) -> String {
+    if syntax != Some(CommentSyntax::Hash) {
+        return content.to_owned();
+    }
+    let bytes = content.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    let mut last_significant: Option<u8> = None;
+    while i < bytes.len() {
+        let b = bytes[i];
+        let is_triple = matches!(b, b'"' | b'\'')
+            && bytes.get(i + 1) == Some(&b)
+            && bytes.get(i + 2) == Some(&b);
+        if is_triple {
+            let is_docstring = matches!(last_significant, None | Some(b'\n') | Some(b':'));
+            // Copy the opening quotes verbatim.
+            out.extend_from_slice(&bytes[i..i + 3]);
+            i += 3;
+            while i < bytes.len() {
+                if bytes[i] == b && bytes.get(i + 1) == Some(&b) && bytes.get(i + 2) == Some(&b) {
+                    out.extend_from_slice(&bytes[i..i + 3]);
+                    i += 3;
+                    break;
+                }
+                // Blank docstring body bytes (keep newlines so line numbers and
+                // the comment-stripper's invariants are preserved); copy the
+                // body verbatim for a real (non-docstring) triple-quoted string.
+                if is_docstring {
+                    out.push(if bytes[i] == b'\n' { b'\n' } else { b' ' });
+                } else {
+                    out.push(bytes[i]);
+                }
+                i += 1;
+            }
+            last_significant = Some(b'"');
+            continue;
+        }
+        // Single/double-quoted (non-triple) string: copy verbatim, honoring
+        // escapes, so a `:` or quote inside it does not mis-anchor the next
+        // docstring decision.
+        if matches!(b, b'"' | b'\'') {
+            let quote = b;
+            out.push(b);
+            i += 1;
+            while i < bytes.len() {
+                let c = bytes[i];
+                out.push(c);
+                i += 1;
+                if c == b'\\' && i < bytes.len() {
+                    out.push(bytes[i]);
+                    i += 1;
+                    continue;
+                }
+                if c == quote || c == b'\n' {
+                    break;
+                }
+            }
+            last_significant = Some(b'"');
+            continue;
+        }
+        if !b.is_ascii_whitespace() {
+            last_significant = Some(b);
+        } else if b == b'\n' {
+            last_significant = Some(b'\n');
+        }
+        out.push(b);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
 fn quoted_string_literals(content: &str) -> Vec<String> {
     let mut literals = Vec::new();
     let bytes = content.as_bytes();
@@ -720,6 +823,45 @@ fn quoted_string_literals(content: &str) -> Vec<String> {
         index += 1;
     }
     literals
+}
+
+/// True if `needle` appears in `content` OUTSIDE any quoted string literal.
+/// Used so a dangerous token (`__builtins__`) that only ever appears as a NAME
+/// STRING (e.g. `'__builtins__'` passed to a lookup) does not fire the
+/// fail-closed opaque-access check. String spans honor escapes; triple-quoted
+/// Python strings are skipped as a single span.
+fn contains_token_outside_string_literals(content: &str, needle: &str) -> bool {
+    let bytes = content.as_bytes();
+    let nlen = needle.len();
+    let mut i = 0;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if matches!(b, b'"' | b'\'' | b'`') {
+            // Skip the whole string literal (triple or single).
+            let triple = bytes.get(i + 1) == Some(&b) && bytes.get(i + 2) == Some(&b);
+            if triple {
+                i += 3;
+                while i < bytes.len() {
+                    if bytes[i] == b && bytes.get(i + 1) == Some(&b) && bytes.get(i + 2) == Some(&b)
+                    {
+                        i += 3;
+                        break;
+                    }
+                    i += 1;
+                }
+            } else if let Some((_, consumed)) = parse_quoted_literal(&content[i..]) {
+                i += consumed;
+            } else {
+                i += 1;
+            }
+            continue;
+        }
+        if i + nlen <= bytes.len() && &bytes[i..i + nlen] == needle.as_bytes() {
+            return true;
+        }
+        i += 1;
+    }
+    false
 }
 
 fn parse_quoted_literal(content: &str) -> Option<(String, usize)> {
@@ -761,19 +903,25 @@ fn parse_quoted_literal(content: &str) -> Option<(String, usize)> {
 /// dynamic access to capability ROOTS in `detect_opaque_capability_access`).
 fn fs_read_call_targets(content: &str, marker: &str) -> BTreeSet<String> {
     let lower = content.to_ascii_lowercase();
+    // The Python `open` builtin is a BARE call only. A preceding `.` makes it a
+    // member method (`path.open(...)`, `dumper.open()`, `store.open("w")`,
+    // `HDFStore.open(...)`, browser `window.open(...)`) — never the file
+    // builtin — and a `def `/`class ` before it is a DEFINITION, not a call.
+    // The JS read markers (`fs.readFileSync(...)`) are genuinely member calls,
+    // so they still allow a preceding `.`.
+    let is_open_builtin = marker == "open";
     let mut targets = BTreeSet::new();
     let mut offset = 0;
     while let Some(index) = lower[offset..].find(marker) {
         let start = offset + index;
         let after = start + marker.len();
-        // The marker must start a real identifier OR be a member method name
-        // (`fs.readFileSync(`): allow a preceding `.` so member calls match, but
-        // reject a preceding identifier char (so `myReadFile` does not match
-        // `readfile`). The char after the marker must not continue an identifier.
-        let preceded_ok = lower[..start]
-            .chars()
-            .next_back()
-            .is_none_or(|ch| !is_identifier_char(ch));
+        let prev = lower[..start].chars().next_back();
+        // Reject a preceding identifier char so `myReadFile` does not match
+        // `readfile`. For the bare `open` builtin, also reject a preceding `.`
+        // (member call) and a preceding definition keyword.
+        let preceded_ok = prev.is_none_or(|ch| !is_identifier_char(ch))
+            && !(is_open_builtin
+                && (prev == Some('.') || preceded_by_definition_keyword(content, start)));
         let followed_ok = lower[after..]
             .chars()
             .next()
@@ -782,10 +930,23 @@ fn fs_read_call_targets(content: &str, marker: &str) -> BTreeSet<String> {
             let rest = content[after..].trim_start();
             if let Some(args) = rest.strip_prefix('(') {
                 match parse_quoted_literal(args.trim_start()) {
-                    Some((literal, _)) if !literal.is_empty() => {
+                    // A captured literal is a real read PATH only when it is not
+                    // an open() MODE token (`"w"`/`"rb"`/`"xb"`/...) and not a
+                    // URL (a `http(s)://`/`ftp://` string is never a local file).
+                    // Either of those means we grabbed the wrong argument or a
+                    // doc example, so fall back to the opaque `*` target rather
+                    // than emit a bogus concrete (possibly sensitive) path.
+                    Some((literal, _))
+                        if !literal.is_empty()
+                            && !is_python_open_mode_token(&literal)
+                            && !is_url_literal(&literal) =>
+                    {
                         targets.insert(literal);
                     }
-                    _ => {
+                    Some(_) => {
+                        targets.insert("*".to_owned());
+                    }
+                    None => {
                         // Dynamic path: opaque target, accept-under-grant only.
                         targets.insert("*".to_owned());
                     }
@@ -797,13 +958,79 @@ fn fs_read_call_targets(content: &str, marker: &str) -> BTreeSet<String> {
     targets
 }
 
+/// True if `name` (the matched identifier starting at `start` in `content`) is
+/// immediately preceded — skipping one whitespace run — by a Python/JS
+/// definition keyword (`def `/`class `/`function `). A definition is not a call,
+/// so `def open(self):` / `def compile(...)` must not be treated as one.
+fn preceded_by_definition_keyword(content: &str, start: usize) -> bool {
+    let before = content[..start].trim_end();
+    for kw in ["def", "class", "function"] {
+        if let Some(prefix) = before.strip_suffix(kw) {
+            // The keyword must stand alone (a non-identifier boundary before it,
+            // or start-of-input) and be separated from the name by whitespace
+            // (guaranteed: `before` was trimmed, so the keyword abutted spaces).
+            let boundary = prefix
+                .chars()
+                .next_back()
+                .is_none_or(|ch| !is_identifier_char(ch));
+            // Only count it when there WAS whitespace between keyword and name
+            // (`def open` not `defopen`): start sits after trimmed whitespace, so
+            // require that the original slice had a space at the keyword's end.
+            let had_gap = content[..start]
+                .chars()
+                .next_back()
+                .is_some_and(|ch| ch.is_ascii_whitespace());
+            if boundary && had_gap {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// True if a captured `open(...)` first-argument literal is actually a Python
+/// open() MODE token (`r`/`w`/`a`/`x`/`b`/`t`/`+`/`U`), e.g. `"rb"`, `"w"`,
+/// `"xb"`, `"a+"`. A mode string is never a filesystem PATH — it appears when
+/// the marker matched a member `.open(mode)` (pathlib.Path / file-like). Empty
+/// is not a mode. Requires at least one real mode letter so a one-char filename
+/// like `"r"` used as a path is vanishingly rare and still over-approximated to
+/// `*` (never dropped), which is safe.
+fn is_python_open_mode_token(literal: &str) -> bool {
+    !literal.is_empty()
+        && literal.len() <= 4
+        && literal.chars().all(|ch| {
+            matches!(
+                ch.to_ascii_lowercase(),
+                'r' | 'w' | 'a' | 'x' | 'b' | 't' | '+' | 'u'
+            )
+        })
+        && literal
+            .chars()
+            .any(|ch| matches!(ch.to_ascii_lowercase(), 'r' | 'w' | 'a' | 'x'))
+}
+
+/// True if a literal is a URL (`http://`, `https://`, `ftp://`). A URL is never
+/// a local filesystem path, so an `open('http://...')` capture is a doc example
+/// or a wrong-API match, not a real read target.
+fn is_url_literal(literal: &str) -> bool {
+    let lower = literal.trim_start().to_ascii_lowercase();
+    lower.starts_with("http://") || lower.starts_with("https://") || lower.starts_with("ftp://")
+}
+
 fn contains_python_file_write(content: &str) -> bool {
     let lower = content.to_ascii_lowercase();
     let mut offset = 0;
     while let Some(index) = lower[offset..].find("open") {
         let start = offset + index;
         let after_name = start + "open".len();
-        if is_identifier_boundary(&lower, start)
+        let prev = lower[..start].chars().next_back();
+        // The Python `open` builtin is a bare call: reject a preceding `.`
+        // (member call like `dumper.open()` / `path.open("w")`) and a preceding
+        // `def `/`class ` (a method definition `def open(self):` is not a call).
+        let preceded_ok = prev.is_none_or(|ch| !is_identifier_char(ch))
+            && prev != Some('.')
+            && !preceded_by_definition_keyword(content, start);
+        if preceded_ok
             && lower[after_name..]
                 .chars()
                 .next()
@@ -1082,7 +1309,12 @@ fn detect_opaque_capability_access(content: &str) -> BTreeSet<String> {
         evidence
             .insert("opaque `globals()`/`locals()` subscript access — cannot verify".to_owned());
     }
-    if lower.contains("__builtins__") {
+    // `__builtins__` is dangerous only as a real IDENTIFIER reference
+    // (`__builtins__[...]`, `__builtins__.eval`, a bare global). pydantic ships
+    // `BUILTINS_NAME = 'builtins' if ... else '__builtins__'` — a NAME STRING
+    // passed to mypy's `named_type`, not an access of the builtins mapping. Only
+    // fire when the token appears OUTSIDE a string literal.
+    if contains_token_outside_string_literals(content, "__builtins__") {
         evidence.insert(
             "reference to `__builtins__` — opaque access to builtins, cannot verify".to_owned(),
         );
@@ -1402,6 +1634,10 @@ fn contains_standalone_call(lower: &str, name: &str) -> bool {
                 .chars()
                 .next()
                 .is_none_or(|ch| !is_identifier_char(ch))
+            // A DEFINITION (`def compile(...)`, `def open(...)`,
+            // `function eval(...)`) is not a call: regex/numpy ship methods named
+            // `compile`/`open` that previously tripped this as `compile()`/eval.
+            && !preceded_by_definition_keyword(lower, start)
         {
             let rest = lower[after_name..].trim_start();
             if rest.starts_with('(') {

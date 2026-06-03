@@ -637,3 +637,289 @@ fn protocol_slashes_in_a_real_url_are_not_a_comment() {
         .iter()
         .any(|f| f.kind == CapabilityKind::HttpRequest && f.target == "api.real.example"));
 }
+
+// FALSE-POSITIVE FIX — MODE-AS-PATH. `path.open("rb")` / `lock.open("xb")` are
+// pathlib.Path.open(mode) member calls; the mode token must never be captured
+// as a concrete read PATH (it can never be a filename). The capability is still
+// over-approximated to `*` — we only refuse the bogus concrete target.
+#[test]
+fn open_mode_arg_is_not_captured_as_read_path() {
+    let mut profiler = SourceProfiler::default();
+    profiler.scan_file(
+        "matplotlib/cbook.py",
+        "def f(path):\n    return path.open('rb')\nwith lock_path.open(\"xb\"):\n    pass\n",
+    );
+    let profile = profiler.finish();
+    for bogus in ["rb", "xb", "r", "w", "wb"] {
+        assert!(
+            !profile
+                .capabilities
+                .iter()
+                .any(|f| f.kind == CapabilityKind::FsRead && f.target == bogus),
+            "open() mode `{bogus}` must never be an fs_read path: {:?}",
+            profile.capabilities
+        );
+    }
+}
+
+// CONTROL — a genuine literal read PATH on the bare `open` builtin is still
+// captured (not weakened by the mode-token fix).
+#[test]
+fn genuine_open_literal_path_still_captured() {
+    let mut profiler = SourceProfiler::default();
+    profiler.scan_file("numpy/distutils/cpuinfo.py", "fo = open('/proc/cpuinfo')\n");
+    let profile = profiler.finish();
+    assert!(
+        profile
+            .capabilities
+            .iter()
+            .any(|f| f.kind == CapabilityKind::FsRead && f.target == "/proc/cpuinfo"),
+        "real open('/proc/cpuinfo') must still be captured: {:?}",
+        profile.capabilities
+    );
+}
+
+// FALSE-POSITIVE FIX — URL-AS-FILE. `ds.open('http://www.google.com/')` inside
+// a docstring example must not record a URL as an fs_read path. (Even outside a
+// docstring, a URL is never a local file.)
+#[test]
+fn url_argument_is_not_captured_as_read_path() {
+    let mut profiler = SourceProfiler::default();
+    profiler.scan_file(
+        "numpy/lib/_datasource.py",
+        "gfile = ds.open('http://www.google.com/')\n",
+    );
+    let profile = profiler.finish();
+    assert!(
+        !profile
+            .capabilities
+            .iter()
+            .any(|f| f.kind == CapabilityKind::FsRead && f.target.contains("google.com")),
+        "a URL must never be an fs_read path: {:?}",
+        profile.capabilities
+    );
+}
+
+// FALSE-POSITIVE FIX — DOCSTRING SCRAPE (fs_read + sensitive). An `open(...)`
+// and an `os.environ['FOO']` that appear ONLY inside a Python docstring/doctest
+// are documentation, never executed, and must not become capability targets.
+// The most dangerous case: a `~/.ssh/id_dsa` example inside a docstring must NOT
+// trip the sensitive-read gate.
+#[test]
+fn docstring_open_and_env_examples_are_not_scraped() {
+    let mut profiler = SourceProfiler::default();
+    profiler.scan_file(
+        "numpy/lib/_utils_impl.py",
+        "def safe_eval(s):\n    \"\"\"Evaluate s.\n\n    Examples\n    --------\n    >>> np.safe_eval('open(\"/home/user/.ssh/id_dsa\").read()')\n    >>> ds.open('/home/guido/foobar.txt')\n    >>> os.environ['SECRET_FROM_DOC']\n    \"\"\"\n    return s\n",
+    );
+    let profile = profiler.finish();
+    assert!(
+        !profile
+            .capabilities
+            .iter()
+            .any(|f| f.target.contains(".ssh") || f.target.contains("foobar.txt")),
+        "docstring open() example must not be an fs_read target: {:?}",
+        profile.capabilities
+    );
+    assert!(
+        !profile
+            .capabilities
+            .iter()
+            .any(|f| f.kind == CapabilityKind::EnvRead && f.target == "SECRET_FROM_DOC"),
+        "docstring os.environ example must not be a named env target: {:?}",
+        profile.capabilities
+    );
+}
+
+// CONTROL — a docstring above REAL executable code does not hide that code. The
+// real `os.environ['REAL']` read on the next executable line is still detected.
+#[test]
+fn docstring_does_not_hide_following_executable_code() {
+    let mut profiler = SourceProfiler::default();
+    profiler.scan_file(
+        "client.py",
+        "import os\ndef f():\n    \"\"\"Doc with os.environ['DOC_ONLY'] example.\"\"\"\n    return os.environ['REAL']\n",
+    );
+    let profile = profiler.finish();
+    assert!(
+        profile
+            .capabilities
+            .iter()
+            .any(|f| f.kind == CapabilityKind::EnvRead && f.target == "REAL"),
+        "real env read after a docstring must still be detected: {:?}",
+        profile.capabilities
+    );
+    assert!(
+        !profile
+            .capabilities
+            .iter()
+            .any(|f| f.kind == CapabilityKind::EnvRead && f.target == "DOC_ONLY"),
+        "env name only in the docstring must be ignored: {:?}",
+        profile.capabilities
+    );
+}
+
+// FALSE-POSITIVE FIX — DOCSTRING SCRAPE (http host). A reference URL inside a
+// docstring must not become an HTTP sink. Control: a real fetch in code is still
+// flagged (as the generic `*` host here, since the host is a docstring example).
+#[test]
+fn docstring_url_is_not_an_http_host() {
+    let mut profiler = SourceProfiler::default();
+    profiler.scan_file(
+        "client.py",
+        "import socket\ndef f():\n    \"\"\"See https://reference.invalid/docs for details.\"\"\"\n    return socket.create_connection(addr)\n",
+    );
+    let profile = profiler.finish();
+    assert!(
+        !profile
+            .capabilities
+            .iter()
+            .any(|f| f.target.contains("reference.invalid")),
+        "docstring reference URL must not be an http host: {:?}",
+        profile.capabilities
+    );
+    assert!(
+        profile
+            .capabilities
+            .iter()
+            .any(|f| f.kind == CapabilityKind::HttpRequest),
+        "the real socket call must still be flagged: {:?}",
+        profile.capabilities
+    );
+}
+
+// FALSE-POSITIVE FIX — method-named-open. `dumper.open()` (member call) and
+// `def open(self):` (method definition) are never the Python file builtin, so
+// neither produces an fs_read/fs_write finding.
+#[test]
+fn method_named_open_is_not_a_file_builtin() {
+    let mut profiler = SourceProfiler::default();
+    profiler.scan_file("yaml/__init__.py", "dumper.open()\n");
+    profiler.scan_file(
+        "yaml/serializer.py",
+        "class S:\n    def open(self):\n        pass\n",
+    );
+    let profile = profiler.finish();
+    assert!(
+        !profile
+            .capabilities
+            .iter()
+            .any(|f| matches!(f.kind, CapabilityKind::FsRead | CapabilityKind::FsWrite)),
+        "member/def `open` must not be a filesystem capability: {:?}",
+        profile.capabilities
+    );
+}
+
+// CONTROL — a genuine module-level `open(...,'w')` write is still detected.
+#[test]
+fn genuine_open_write_still_detected() {
+    let mut profiler = SourceProfiler::default();
+    profiler.scan_file(
+        "pycparser/_build_tables.py",
+        "ast_gen.generate(open('c_ast.py', 'w'))\n",
+    );
+    let profile = profiler.finish();
+    assert!(
+        profile
+            .capabilities
+            .iter()
+            .any(|f| f.kind == CapabilityKind::FsWrite),
+        "real open(...,'w') write must still be detected: {:?}",
+        profile.capabilities
+    );
+}
+
+// FALSE-POSITIVE FIX — def-named-compile. `def compile(...)` / a method named
+// `compile` is a DEFINITION, not the builtin `compile()`; it must not emit a
+// DynamicEval. (regex ships `def compile(...)` and was blocked solely by this.)
+#[test]
+fn def_named_compile_is_not_dynamic_eval() {
+    let mut profiler = SourceProfiler::default();
+    profiler.scan_file(
+        "regex/_regex_core.py",
+        "def compile(self, reverse=False, fuzzy=False):\n    return self._compiled\n",
+    );
+    let profile = profiler.finish();
+    assert!(
+        !profile
+            .capabilities
+            .iter()
+            .any(|f| f.kind == CapabilityKind::DynamicEval),
+        "a `def compile(` definition must not be DynamicEval: {:?}",
+        profile.capabilities
+    );
+}
+
+// CONTROL — a genuine `compile(src, ...)` builtin call still fails closed.
+#[test]
+fn genuine_compile_call_still_dynamic_eval() {
+    let mut profiler = SourceProfiler::default();
+    profiler.scan_file("tool.py", "code = compile(src, '<s>', 'exec')\n");
+    let profile = profiler.finish();
+    assert!(
+        profile
+            .capabilities
+            .iter()
+            .any(|f| f.kind == CapabilityKind::DynamicEval),
+        "real compile() call must still be DynamicEval: {:?}",
+        profile.capabilities
+    );
+}
+
+// FALSE-POSITIVE FIX — `__builtins__` as a NAME STRING. pydantic ships
+// `BUILTINS_NAME = '__builtins__'` — a string literal, not an access of the
+// builtins mapping. It must not fail closed.
+#[test]
+fn builtins_name_string_literal_is_not_opaque_access() {
+    let mut profiler = SourceProfiler::default();
+    profiler.scan_file(
+        "pydantic/v1/mypy.py",
+        "BUILTINS_NAME = 'builtins' if MYPY else '__builtins__'\n",
+    );
+    let profile = profiler.finish();
+    assert!(
+        !profile
+            .capabilities
+            .iter()
+            .any(|f| f.kind == CapabilityKind::DynamicEval),
+        "`'__builtins__'` string literal must not be opaque access: {:?}",
+        profile.capabilities
+    );
+}
+
+// CONTROL — a genuine `__builtins__[...]` identifier access still fails closed.
+#[test]
+fn genuine_builtins_subscript_still_opaque() {
+    let mut profiler = SourceProfiler::default();
+    profiler.scan_file("payload.py", "fn = __builtins__['eval']\n");
+    let profile = profiler.finish();
+    assert!(
+        profile
+            .capabilities
+            .iter()
+            .any(|f| f.kind == CapabilityKind::DynamicEval),
+        "real __builtins__[...] access must still fail closed: {:?}",
+        profile.capabilities
+    );
+}
+
+// FALSE-POSITIVE FIX — window.open in bundled JS is browser page navigation, not
+// a filesystem read. The bare `open` builtin is Python-only; a member `.open(`
+// (here `window.open`) is excluded.
+#[test]
+fn js_window_open_is_not_a_file_read() {
+    let mut profiler = SourceProfiler::default();
+    profiler.scan_file(
+        "mpl_tornado.js",
+        "window.open(figure.id + '/download.' + format, '_blank');\n",
+    );
+    let profile = profiler.finish();
+    assert!(
+        !profile
+            .capabilities
+            .iter()
+            .any(|f| f.kind == CapabilityKind::FsRead),
+        "window.open() must not be an fs_read: {:?}",
+        profile.capabilities
+    );
+}
