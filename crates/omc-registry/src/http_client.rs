@@ -93,7 +93,7 @@ fn global_cache_bytes_ok(package: &ResolvedPackage, bytes: &[u8]) -> bool {
 /// and rename a corrupt cache entry into place. The pid disambiguates processes
 /// and the counter disambiguates repeated writes on one thread.
 static TMP_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-fn unique_tmp_suffix() -> String {
+pub(crate) fn unique_tmp_suffix() -> String {
     format!(
         "{}-{:?}-{}",
         std::process::id(),

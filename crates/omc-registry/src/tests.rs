@@ -509,6 +509,7 @@ fn signed_lock_for_test(project_dir: &Path, mut packages: Vec<LockedPackage>) ->
 }
 
 // Per-domain test modules (extracted from the original monolithic tests.rs).
+mod archive_slip_tests;
 mod config_tests;
 mod lockfile_tests;
 mod npm_registry_tests;

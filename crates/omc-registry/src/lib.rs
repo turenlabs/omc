@@ -220,6 +220,8 @@ use util::{
     verify_npm_integrity,
 };
 
+pub(crate) mod store;
+
 pub(crate) mod python_sources;
 pub(crate) use python_sources::{
     python_local_source_compile_inputs, python_vcs_lock_key, resolve_python_local_requirements,
@@ -1429,10 +1431,37 @@ pub(crate) fn global_omc_home() -> Option<PathBuf> {
     if let Some(dir) = env::var_os("OMC_HOME") {
         return Some(PathBuf::from(dir));
     }
-    let home = env::var_os("HOME")
-        .or_else(|| env::var_os("USERPROFILE"))
-        .filter(|h| !h.is_empty())?;
-    Some(PathBuf::from(home).join(".omc"))
+    // Under `cargo test`, a test that doesn't set OMC_HOME explicitly must never
+    // read or write the developer's real `~/.omc` — the shared content store and
+    // caches would otherwise leak across runs and pollute the home directory.
+    // Route to a process-unique temp home instead. (Production builds keep the
+    // real `$HOME/.omc`.)
+    #[cfg(test)]
+    {
+        return Some(test_omc_home());
+    }
+    #[cfg(not(test))]
+    {
+        let home = env::var_os("HOME")
+            .or_else(|| env::var_os("USERPROFILE"))
+            .filter(|h| !h.is_empty())?;
+        Some(PathBuf::from(home).join(".omc"))
+    }
+}
+
+/// A process-unique temporary `$OMC_HOME` used by this crate's tests so they
+/// stay hermetic (no reads or writes against the real `~/.omc`).
+#[cfg(test)]
+fn test_omc_home() -> PathBuf {
+    use std::sync::OnceLock;
+    static TEST_HOME: OnceLock<PathBuf> = OnceLock::new();
+    TEST_HOME
+        .get_or_init(|| {
+            let base = env::temp_dir().join(format!("omc-test-home-{}", std::process::id()));
+            let _ = fs::create_dir_all(&base);
+            base
+        })
+        .clone()
 }
 
 /// The global `~/.omc/omc.toml` is a policy-only baseline: unlike a project

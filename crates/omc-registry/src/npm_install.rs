@@ -25,12 +25,40 @@ pub(crate) fn install_npm_package_to(
     package: &LockedPackage,
     node_modules: &Path,
 ) -> Result<PathBuf> {
-    let bytes = read_locked_archive(project_dir, package)?;
     let target = npm_install_target(node_modules, &package.name);
-    if target.exists() {
-        fs::remove_dir_all(&target)?;
+
+    // Link-mode install: extract the tarball ONCE into the shared content store
+    // (`$OMC_HOME/store/...`), then hard-link its files into this project's
+    // node_modules. N projects sharing a package version keep ~1 physical copy
+    // on disk instead of a full per-project copy (the pnpm / uv model). When no
+    // store is available (no resolvable $OMC_HOME), fall back to extracting the
+    // tarball directly into node_modules.
+    match store::package_store_dir(Ecosystem::Npm, &package.name, &package.sha256) {
+        Some(store_dir) => {
+            if !store_dir.exists() {
+                let bytes = read_locked_archive(project_dir, package)?;
+                store::ensure_npm_extracted(&store_dir, &bytes)?;
+            }
+            store::link_tree_into(&store_dir, &target)?;
+        }
+        None => {
+            let bytes = read_locked_archive(project_dir, package)?;
+            unpack_npm_tarball(&bytes, &target)?;
+        }
     }
-    fs::create_dir_all(&target)?;
+    Ok(target)
+}
+
+/// Extract an npm `.tgz` into `target`, stripping the leading `package/`
+/// component. Deny-by-default against tar-slip: declared paths are validated
+/// with `checked_join` (no `..`, no absolute) and symlink/hardlink entries are
+/// never materialized, so no escaping link can exist for a later entry to be
+/// written through. `target` is recreated fresh.
+pub(crate) fn unpack_npm_tarball(bytes: &[u8], target: &Path) -> Result<()> {
+    if target.exists() {
+        fs::remove_dir_all(target)?;
+    }
+    fs::create_dir_all(target)?;
 
     let decoder = GzDecoder::new(Cursor::new(bytes));
     let mut archive = Archive::new(decoder);
@@ -40,25 +68,34 @@ pub(crate) fn install_npm_package_to(
         if is_ignorable_archive_metadata_path(&raw_path) {
             continue;
         }
+        let entry_type = entry.header().entry_type();
+        // Deny-by-default against tar-slip: never materialize symlink/hardlink
+        // entries from an archive. A symlink that escapes the target dir would
+        // let a *later* entry be written through it (classic path-traversal);
+        // a hardlink could alias a file outside the tree. omc only ever creates
+        // real directories and regular files, so no escaping link can exist on
+        // disk for a subsequent entry to follow.
+        if entry_type.is_symlink() || entry_type.is_hard_link() {
+            continue;
+        }
         let Some(stripped) = strip_first_path_component(Path::new(&raw_path)) else {
-            if entry.header().entry_type().is_dir() {
+            if entry_type.is_dir() {
                 continue;
             }
             return Err(OmcRegistryError::UnsafeArchivePath(raw_path));
         };
-        let output = checked_join(&target, &stripped)?;
+        let output = checked_join(target, &stripped)?;
 
-        if entry.header().entry_type().is_dir() {
+        if entry_type.is_dir() {
             fs::create_dir_all(output)?;
-        } else if entry.header().entry_type().is_file() {
+        } else if entry_type.is_file() {
             if let Some(parent) = output.parent() {
                 fs::create_dir_all(parent)?;
             }
             entry.unpack(output)?;
         }
     }
-
-    Ok(target)
+    Ok(())
 }
 
 pub(crate) fn install_nested_npm_dependencies(

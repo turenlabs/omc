@@ -65,6 +65,133 @@ pub(crate) fn install_pypi_wheel_package(
         ));
     }
 
+    // Link-mode: extract the wheel ONCE into the content store, then hard-link
+    // its files into site-packages (so N environments sharing a wheel keep ~1
+    // physical copy). Startup hooks are filtered at extraction, so the store
+    // never holds a `.pth`/sitecustomize. Falls back to direct extraction when
+    // no store is available.
+    match store::package_store_dir(Ecosystem::Pypi, &package.name, &package.sha256) {
+        Some(store_dir) => {
+            if !store_dir.exists() {
+                let bytes = read_locked_archive(project_dir, package)?;
+                store::ensure_extracted_with(&store_dir, |tmp| extract_wheel_into(&bytes, tmp))?;
+            }
+            link_wheel_store_into_site_packages(
+                &store_dir,
+                site_packages,
+                bin_dir,
+                overwrite_existing,
+                bin_dir_existed,
+            )
+        }
+        None => install_pypi_wheel_directly(
+            project_dir,
+            package,
+            site_packages,
+            bin_dir,
+            overwrite_existing,
+            bin_dir_existed,
+        ),
+    }
+}
+
+/// Extract a wheel zip into `target`, dropping Python startup hooks (F5). Used
+/// to populate the content store; declared paths are validated by `checked_join`.
+fn extract_wheel_into(bytes: &[u8], target: &Path) -> Result<()> {
+    let reader = Cursor::new(bytes);
+    let mut archive = zip::ZipArchive::new(reader)?;
+    for index in 0..archive.len() {
+        let mut file = archive.by_index(index)?;
+        let archive_path = Path::new(file.name());
+        if is_python_startup_hook_path(archive_path) {
+            continue;
+        }
+        let output = checked_join(target, archive_path)?;
+        if file.is_dir() {
+            fs::create_dir_all(output)?;
+        } else {
+            if let Some(parent) = output.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            let mut bytes = Vec::new();
+            file.read_to_end(&mut bytes)?;
+            fs::write(output, bytes)?;
+        }
+    }
+    Ok(())
+}
+
+/// Hard-link a wheel that's already extracted in the store into `site_packages`,
+/// preserving the overwrite / existing-top-level skipping and entry-point
+/// collection of a direct wheel install.
+fn link_wheel_store_into_site_packages(
+    store_dir: &Path,
+    site_packages: &Path,
+    bin_dir: &Path,
+    overwrite_existing: bool,
+    bin_dir_existed: bool,
+) -> Result<usize> {
+    if overwrite_existing {
+        let targets = store_top_level_targets(store_dir)?;
+        remove_existing_python_targets(site_packages, &targets)?;
+    }
+    let existing_top_level = if overwrite_existing {
+        BTreeSet::new()
+    } else {
+        existing_top_level_targets(site_packages)?
+    };
+
+    let mut entry_points = Vec::new();
+    for entry in WalkDir::new(store_dir).into_iter().filter_map(|e| e.ok()) {
+        if !entry.file_type().is_file() {
+            continue;
+        }
+        let relative = entry.path().strip_prefix(store_dir).unwrap_or(entry.path());
+        if !overwrite_existing && wheel_path_has_existing_target(relative, &existing_top_level) {
+            continue;
+        }
+        let output = checked_join(site_packages, relative)?;
+        store::link_or_copy_file(entry.path(), &output)?;
+
+        if relative
+            .to_string_lossy()
+            .ends_with(".dist-info/entry_points.txt")
+        {
+            if let Ok(content) = fs::read_to_string(entry.path()) {
+                entry_points.push(content);
+            }
+        }
+    }
+
+    install_python_entry_points(&entry_points, bin_dir, overwrite_existing, bin_dir_existed)
+}
+
+/// Top-level install targets of a wheel already extracted in the store —
+/// the store's immediate children, excluding `.dist-info`/`.egg-info` metadata.
+/// Mirrors `wheel_install_top_level_targets` over the extracted tree.
+fn store_top_level_targets(store_dir: &Path) -> Result<BTreeSet<String>> {
+    let mut targets = BTreeSet::new();
+    for entry in fs::read_dir(store_dir)? {
+        let entry = entry?;
+        if let Some(name) = entry.file_name().to_str() {
+            if !is_python_metadata_dir(name) {
+                targets.insert(name.to_owned());
+            }
+        }
+    }
+    Ok(targets)
+}
+
+/// The original direct-into-site-packages wheel install, kept as the fallback
+/// when no content store is available.
+fn install_pypi_wheel_directly(
+    project_dir: &Path,
+    package: &LockedPackage,
+    site_packages: &Path,
+    bin_dir: &Path,
+    overwrite_existing: bool,
+    bin_dir_existed: bool,
+) -> Result<usize> {
     let reader = Cursor::new(read_locked_archive(project_dir, package)?);
     let mut archive = zip::ZipArchive::new(reader)?;
     let mut entry_points = Vec::new();
@@ -121,25 +248,43 @@ pub(crate) fn install_pypi_sdist_package(
     overwrite_existing: bool,
     bin_dir_existed: bool,
 ) -> Result<usize> {
-    let source_dir = project_dir
-        .join(".omc")
-        .join("python")
-        .join("sdists")
-        .join(safe_name(&package.name))
-        .join(&package.version);
-    remove_path_if_exists(&source_dir)?;
-    fs::create_dir_all(&source_dir)?;
-
     let archive_path = project_dir.join(&package.archive);
     let archive_filename = archive_path
         .file_name()
         .and_then(|name| name.to_str())
         .ok_or_else(|| OmcRegistryError::UnsupportedInstallArtifact(package.archive.clone()))?;
-    unpack_python_sdist(
-        &read_locked_archive(project_dir, package)?,
-        archive_filename,
-        &source_dir,
-    )?;
+
+    // Link-mode: extract the sdist ONCE into the content store, then hard-link
+    // its import tree into site-packages. Without a store, fall back to a
+    // project-local extraction (still hard-linked into site-packages).
+    let source_dir = match store::package_store_dir(Ecosystem::Pypi, &package.name, &package.sha256)
+    {
+        Some(store_dir) => {
+            if !store_dir.exists() {
+                let bytes = read_locked_archive(project_dir, package)?;
+                store::ensure_extracted_with(&store_dir, |tmp| {
+                    unpack_python_sdist(&bytes, archive_filename, tmp)
+                })?;
+            }
+            store_dir
+        }
+        None => {
+            let dir = project_dir
+                .join(".omc")
+                .join("python")
+                .join("sdists")
+                .join(safe_name(&package.name))
+                .join(&package.version);
+            remove_path_if_exists(&dir)?;
+            fs::create_dir_all(&dir)?;
+            unpack_python_sdist(
+                &read_locked_archive(project_dir, package)?,
+                archive_filename,
+                &dir,
+            )?;
+            dir
+        }
+    };
     let import_root = if source_dir.join("src").is_dir() {
         source_dir.join("src")
     } else {
@@ -232,17 +377,24 @@ pub(crate) fn unpack_python_tar_sdist(bytes: &[u8], target: &Path) -> Result<()>
         if is_ignorable_archive_metadata_path(&raw_path) {
             continue;
         }
+        let entry_type = entry.header().entry_type();
+        // Deny-by-default against tar-slip: never materialize symlink/hardlink
+        // entries (see install_npm_package_to for the full rationale). Skipping
+        // them means no escaping link can exist for a later entry to follow.
+        if entry_type.is_symlink() || entry_type.is_hard_link() {
+            continue;
+        }
         let Some(stripped) = strip_first_path_component(Path::new(&raw_path)) else {
-            if entry.header().entry_type().is_dir() {
+            if entry_type.is_dir() {
                 continue;
             }
             return Err(OmcRegistryError::UnsafeArchivePath(raw_path));
         };
         let output = checked_join(target, &stripped)?;
 
-        if entry.header().entry_type().is_dir() {
+        if entry_type.is_dir() {
             fs::create_dir_all(output)?;
-        } else if entry.header().entry_type().is_file() {
+        } else if entry_type.is_file() {
             if let Some(parent) = output.parent() {
                 fs::create_dir_all(parent)?;
             }
@@ -315,7 +467,11 @@ pub(crate) fn copy_python_sdist_import_tree(
         if let Some(parent) = output.parent() {
             fs::create_dir_all(parent)?;
         }
-        fs::copy(entry.path(), output)?;
+        // Hard-link from the extracted sdist (the content store, or the project
+        // -local extraction in the no-store fallback) rather than copying, so
+        // site-packages shares the store's inode. `source` is always omc-
+        // extracted content (symlinks dropped at unpack), never the user's tree.
+        store::link_or_copy_file(entry.path(), &output)?;
         installed_files.push(relative.to_string_lossy().replace('\\', "/"));
     }
     installed_files.sort();

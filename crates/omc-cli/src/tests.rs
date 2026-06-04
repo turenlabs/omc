@@ -10,7 +10,28 @@ fn os_args(values: &[&str]) -> Vec<OsString> {
     values.iter().map(OsString::from).collect()
 }
 
+/// Point `$OMC_HOME` at a process-unique temp directory exactly once, so the
+/// shared content store / caches that installs write never touch the
+/// developer's real `~/.omc`. One isolated home shared across all (parallel)
+/// tests in this binary is correct because the store is content-addressed
+/// (keyed by artifact sha256) — identical bytes dedup, different bytes never
+/// collide. The set runs under the env lock and only when OMC_HOME is unset, so
+/// it neither races other env mutations nor overrides an explicit override.
+fn isolate_omc_home() {
+    static INIT: std::sync::Once = std::sync::Once::new();
+    INIT.call_once(|| {
+        with_env_lock(|| {
+            if env::var_os("OMC_HOME").is_none() {
+                let home = env::temp_dir().join(format!("omc-cli-home-{}", std::process::id()));
+                let _ = fs::create_dir_all(&home);
+                env::set_var("OMC_HOME", home);
+            }
+        });
+    });
+}
+
 fn test_dir(name: &str) -> PathBuf {
+    isolate_omc_home();
     let nonce = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
