@@ -26,6 +26,32 @@ fn resolves_common_npm_ranges() {
 }
 
 #[test]
+fn resolves_npm_or_ranges() {
+    // OR-ranges (`^3 || ^4`) — js-tokens via loose-envify, hence all React <=18.
+    assert!(npm_version_satisfies("4.0.0", "^3.0.0 || ^4.0.0"));
+    assert!(npm_version_satisfies("3.5.1", "^3.0.0 || ^4.0.0"));
+    assert!(!npm_version_satisfies("5.0.0", "^3.0.0 || ^4.0.0"));
+    // Whitespace around `||` and 3-way alternatives.
+    assert!(npm_version_satisfies("2.4.0", "1.x||2.x || 3.x"));
+    assert!(!npm_version_satisfies("4.0.0", "1.x||2.x || 3.x"));
+}
+
+#[test]
+fn prerelease_only_satisfies_explicit_prerelease_ranges() {
+    // A prerelease must NOT satisfy a plain range: `19.0.0-rc` sorts below
+    // 19.0.0, so without the guard `^18.3.1` wrongly accepted it and react-dom's
+    // `react: ^18.3.1` peer pulled a React 19 release candidate.
+    assert!(!npm_version_satisfies("19.0.0-rc-abc", "^18.3.1"));
+    assert!(!npm_version_satisfies("19.0.0-rc-abc", ">=18.3.1 <19.0.0"));
+    assert!(!npm_version_satisfies("2.0.0-canary", "^1.0.0 || ^2.0.0"));
+    assert!(!npm_version_satisfies("1.5.0-beta", "*"));
+    // …but an explicit prerelease pin still resolves.
+    assert!(npm_version_satisfies("19.0.0-rc-abc", "19.0.0-rc-abc"));
+    // …and stable versions are unaffected.
+    assert!(npm_version_satisfies("18.3.1", "^18.3.1"));
+}
+
+#[test]
 fn resolves_npm_versions_before_publish_time() {
     let root: NpmRoot = serde_json::from_value(serde_json::json!({
             "dist-tags": {

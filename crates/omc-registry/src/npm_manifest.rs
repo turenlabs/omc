@@ -346,8 +346,29 @@ pub(crate) fn npm_version_satisfies(version: &str, requirement: &str) -> bool {
     };
     let requirement = requirement.trim();
 
+    // node-semver prerelease rule (simplified): a prerelease version only
+    // satisfies a requirement that explicitly names a prerelease (contains a
+    // `-`). Without this `^18.3.1` matches `19.0.0-rc-…` — which sorts below
+    // 19.0.0 and so falls inside the caret's `< 19.0.0` upper bound — making
+    // react-dom's `react: ^18.3.1` peer pull a React 19 release candidate.
+    if !version.pre.is_empty() && !requirement.contains('-') {
+        return false;
+    }
+
     if requirement.is_empty() || requirement == "*" || requirement == "latest" {
         return true;
+    }
+    // OR-ranges (`^3.0.0 || ^4.0.0`): satisfied if ANY alternative clause is.
+    // Without this the requirement was split on whitespace and AND-ed, so the
+    // `||` token (not a version) failed the whole range — making every package
+    // with an OR-range dependency (e.g. js-tokens via loose-envify, hence all
+    // React <=18) unresolvable.
+    if requirement.contains("||") {
+        return requirement
+            .split("||")
+            .map(str::trim)
+            .filter(|clause| !clause.is_empty())
+            .any(|clause| npm_version_satisfies(raw_version, clause));
     }
     if let Ok(exact) = Version::parse(requirement) {
         return version == exact;
