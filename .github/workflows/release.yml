@@ -32,7 +32,7 @@ jobs:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - name: Resolve version
         id: version
         shell: bash
@@ -52,7 +52,7 @@ jobs:
         shell: bash
         run: ./scripts/package-release.sh "${{ steps.version.outputs.version }}" "${{ matrix.target }}"
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: artifacts-${{ matrix.target }}
           # The whole dist dir: the tarball (omc + shims), the standalone `omc`
@@ -66,7 +66,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - name: Resolve version
         id: version
         shell: bash
@@ -75,7 +75,7 @@ jobs:
           echo "tag=${ref}" >> "$GITHUB_OUTPUT"
           echo "version=${ref#v}" >> "$GITHUB_OUTPUT"
       - name: Download artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           path: dist
           merge-multiple: true
@@ -93,7 +93,7 @@ jobs:
           fi
           cat SHA256SUMS
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ steps.version.outputs.tag }}
           name: omc ${{ steps.version.outputs.tag }}
@@ -107,7 +107,7 @@ jobs:
     needs: release
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - name: Resolve version
         id: version
         shell: bash
