@@ -710,6 +710,7 @@ pub fn install_project(options: &LinkOptions) -> Result<InstallReport> {
         options.python_target_dir.as_deref(),
         options.python_bin_dir.as_deref(),
         options.python_target_overwrite_existing,
+        InstallMode::ReuseNpmNodeModules,
     )?;
     report.local_source_artifacts += local_source_artifacts;
     report.npm_bins += install_npm_project_links(
@@ -786,6 +787,7 @@ pub fn install_locked_project(options: &LinkOptions) -> Result<InstallReport> {
         options.python_target_dir.as_deref(),
         options.python_bin_dir.as_deref(),
         options.python_target_overwrite_existing,
+        InstallMode::Clean,
     )?;
     report.local_source_artifacts += local_source_artifacts;
     report.npm_bins += install_npm_project_links(
@@ -3408,6 +3410,7 @@ pub fn install_locked_packages_with_python_target(
         Some(python_target_dir.as_ref()),
         None,
         true,
+        InstallMode::Clean,
     )?;
     report.npm_bins += install_npm_project_links(
         project_dir,
@@ -3424,7 +3427,13 @@ pub fn install_locked_packages_with_python_target(
 }
 
 fn install_lock(project_dir: &Path, lock: &OmcLock) -> Result<InstallReport> {
-    install_lock_with_python_target(project_dir, lock, None, None, true)
+    install_lock_with_python_target(project_dir, lock, None, None, true, InstallMode::Clean)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum InstallMode {
+    Clean,
+    ReuseNpmNodeModules,
 }
 
 fn install_lock_with_python_target(
@@ -3433,6 +3442,7 @@ fn install_lock_with_python_target(
     python_target_dir: Option<&Path>,
     python_bin_dir: Option<&Path>,
     overwrite_existing: bool,
+    mode: InstallMode,
 ) -> Result<InstallReport> {
     let node_modules = project_dir.join("node_modules");
     let npm_bin_dir = node_modules.join(".bin");
@@ -3456,7 +3466,14 @@ fn install_lock_with_python_target(
     let python_sdists_dir = project_dir.join(".omc").join("python").join("sdists");
     let python_local_paths = python_local_paths_file_for_site_packages(&python_site_packages)?;
 
-    remove_path_if_exists(&node_modules)?;
+    match mode {
+        InstallMode::Clean => remove_path_if_exists(&node_modules)?,
+        InstallMode::ReuseNpmNodeModules => {
+            ensure_reusable_node_modules_dir(&node_modules)?;
+            remove_path_if_exists(&npm_bin_dir)?;
+            prune_npm_node_modules_to_lock(&node_modules, lock)?;
+        }
+    }
     if python_target_dir.is_none() {
         remove_path_if_exists(&python_site_packages)?;
         remove_path_if_exists(&python_bin_dir)?;
@@ -3519,6 +3536,89 @@ fn install_lock_with_python_target(
     install_nested_npm_dependencies(project_dir, lock, &report.node_modules)?;
 
     Ok(report)
+}
+
+fn ensure_reusable_node_modules_dir(node_modules: &Path) -> Result<()> {
+    match fs::symlink_metadata(node_modules) {
+        Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => Ok(()),
+        Ok(_) => {
+            remove_path_if_exists(node_modules)?;
+            fs::create_dir_all(node_modules)?;
+            Ok(())
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            fs::create_dir_all(node_modules)?;
+            Ok(())
+        }
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn prune_npm_node_modules_to_lock(node_modules: &Path, lock: &OmcLock) -> Result<()> {
+    if !node_modules.exists() {
+        return Ok(());
+    }
+
+    let mut unscoped = BTreeSet::new();
+    let mut scoped: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    for package in lock
+        .packages
+        .iter()
+        .filter(|package| package.ecosystem == Ecosystem::Npm)
+    {
+        if let Some((scope, name)) = package.name.split_once('/') {
+            scoped
+                .entry(scope.to_owned())
+                .or_default()
+                .insert(name.to_owned());
+        } else {
+            unscoped.insert(package.name.clone());
+        }
+    }
+
+    for entry in fs::read_dir(node_modules)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            remove_path_if_exists(&entry.path())?;
+            continue;
+        };
+        if name == ".bin" {
+            continue;
+        }
+
+        if let Some(expected_packages) = scoped.get(name) {
+            prune_npm_scope_dir(&entry.path(), expected_packages)?;
+            continue;
+        }
+        if !unscoped.contains(name) {
+            remove_path_if_exists(&entry.path())?;
+        }
+    }
+    Ok(())
+}
+
+fn prune_npm_scope_dir(scope_dir: &Path, expected_packages: &BTreeSet<String>) -> Result<()> {
+    let metadata = fs::symlink_metadata(scope_dir)?;
+    if !metadata.is_dir() || metadata.file_type().is_symlink() {
+        remove_path_if_exists(scope_dir)?;
+        fs::create_dir_all(scope_dir)?;
+        return Ok(());
+    }
+
+    for entry in fs::read_dir(scope_dir)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        if name
+            .to_str()
+            .map(|name| expected_packages.contains(name))
+            .unwrap_or(false)
+        {
+            continue;
+        }
+        remove_path_if_exists(&entry.path())?;
+    }
+    Ok(())
 }
 
 fn install_python_local_paths(

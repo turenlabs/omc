@@ -169,6 +169,7 @@ fn installs_pure_python_archives_into_target_directory() {
         Some(&target),
         None,
         true,
+        InstallMode::Clean,
     )
     .unwrap();
     assert_eq!(report.pypi_packages, 1);
@@ -245,6 +246,7 @@ fn target_upgrade_removes_stale_wheel_files() {
         Some(&target),
         None,
         true,
+        InstallMode::Clean,
     )
     .unwrap();
     install_lock_with_python_target(
@@ -259,6 +261,7 @@ fn target_upgrade_removes_stale_wheel_files() {
         Some(&target),
         None,
         true,
+        InstallMode::Clean,
     )
     .unwrap();
 
@@ -339,6 +342,7 @@ fn target_no_upgrade_skips_scripts_when_bin_dir_exists() {
         Some(&target),
         None,
         false,
+        InstallMode::Clean,
     )
     .unwrap();
     assert_eq!(report.python_scripts, 1);
@@ -356,6 +360,7 @@ fn target_no_upgrade_skips_scripts_when_bin_dir_exists() {
         Some(&target),
         None,
         false,
+        InstallMode::Clean,
     )
     .unwrap();
 

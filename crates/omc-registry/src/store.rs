@@ -17,6 +17,8 @@
 use crate::*;
 
 use std::fs;
+#[cfg(unix)]
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 
 use walkdir::WalkDir;
@@ -115,6 +117,9 @@ pub(crate) fn ensure_extracted_with(
 /// the store (the extractor drops them), and each destination is validated with
 /// `checked_join`.
 pub(crate) fn link_tree_into(store_dir: &Path, target: &Path) -> Result<()> {
+    if target_already_links_to_store(store_dir, target)? {
+        return Ok(());
+    }
     if target.exists() {
         fs::remove_dir_all(target)?;
     }
@@ -128,6 +133,67 @@ pub(crate) fn link_tree_into(store_dir: &Path, target: &Path) -> Result<()> {
         link_or_copy_file(entry.path(), &dst)?;
     }
     Ok(())
+}
+
+fn target_already_links_to_store(store_dir: &Path, target: &Path) -> Result<bool> {
+    let Ok(target_meta) = fs::symlink_metadata(target) else {
+        return Ok(false);
+    };
+    if !target_meta.is_dir() || target_meta.file_type().is_symlink() {
+        return Ok(false);
+    }
+
+    for entry in WalkDir::new(store_dir).into_iter().filter_map(|e| e.ok()) {
+        if !entry.file_type().is_file() {
+            continue;
+        }
+        let relative = entry.path().strip_prefix(store_dir).unwrap_or(entry.path());
+        let dst = checked_join(target, relative)?;
+        if !files_share_inode(entry.path(), &dst)? {
+            return Ok(false);
+        }
+    }
+
+    for entry in WalkDir::new(target).into_iter().filter_map(|e| e.ok()) {
+        if !entry.file_type().is_file() {
+            continue;
+        }
+        let relative = entry.path().strip_prefix(target).unwrap_or(entry.path());
+        if relative_starts_with_node_modules(relative) {
+            continue;
+        }
+        let src = checked_join(store_dir, relative)?;
+        if !src.exists() {
+            return Ok(false);
+        }
+    }
+
+    Ok(true)
+}
+
+#[cfg(unix)]
+fn files_share_inode(left: &Path, right: &Path) -> Result<bool> {
+    let left = fs::metadata(left)?;
+    let Ok(right_symlink) = fs::symlink_metadata(right) else {
+        return Ok(false);
+    };
+    if !right_symlink.is_file() || right_symlink.file_type().is_symlink() {
+        return Ok(false);
+    }
+    let right = fs::metadata(right)?;
+    Ok(left.dev() == right.dev() && left.ino() == right.ino() && left.len() == right.len())
+}
+
+#[cfg(not(unix))]
+fn files_share_inode(_left: &Path, _right: &Path) -> Result<bool> {
+    Ok(false)
+}
+
+fn relative_starts_with_node_modules(path: &Path) -> bool {
+    path.components()
+        .next()
+        .and_then(|component| component.as_os_str().to_str())
+        == Some("node_modules")
 }
 
 /// Recursive file copy used only as the cross-device fallback when an atomic
@@ -225,6 +291,63 @@ mod tests {
 
         link_or_copy_file(&src, &dst).unwrap();
         assert_eq!(fs::read(&dst).unwrap(), b"new");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn link_tree_into_reuses_existing_hardlinked_tree() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = dir.path().join("store");
+        fs::create_dir_all(store.join("nested")).unwrap();
+        fs::write(store.join("index.js"), b"module.exports = 1;\n").unwrap();
+        fs::write(
+            store.join("nested").join("dep.js"),
+            b"exports.dep = true;\n",
+        )
+        .unwrap();
+        let target = dir.path().join("node_modules").join("pkg");
+
+        link_tree_into(&store, &target).unwrap();
+        let first_inode = fs::metadata(target.join("index.js")).unwrap().ino();
+        fs::create_dir_all(target.join("node_modules").join("dep")).unwrap();
+        fs::write(
+            target.join("node_modules").join("dep").join("index.js"),
+            b"nested dependency\n",
+        )
+        .unwrap();
+
+        link_tree_into(&store, &target).unwrap();
+
+        assert_eq!(
+            first_inode,
+            fs::metadata(target.join("index.js")).unwrap().ino(),
+            "already-linked package files must not be replaced"
+        );
+        assert!(
+            target
+                .join("node_modules")
+                .join("dep")
+                .join("index.js")
+                .exists(),
+            "nested dependency installs are managed separately and must be preserved"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn link_tree_into_relinks_when_target_has_extra_package_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = dir.path().join("store");
+        fs::create_dir_all(&store).unwrap();
+        fs::write(store.join("index.js"), b"module.exports = 1;\n").unwrap();
+        let target = dir.path().join("node_modules").join("pkg");
+
+        link_tree_into(&store, &target).unwrap();
+        fs::write(target.join("extra.js"), b"stale\n").unwrap();
+        link_tree_into(&store, &target).unwrap();
+
+        assert!(!target.join("extra.js").exists());
+        assert!(target.join("index.js").exists());
     }
 
     #[cfg(unix)]

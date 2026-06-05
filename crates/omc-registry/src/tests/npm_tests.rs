@@ -194,6 +194,39 @@ fn ignores_common_archive_metadata_paths() {
 }
 
 #[test]
+fn reused_node_modules_prunes_stale_root_packages() {
+    let dir = tempfile::tempdir().unwrap();
+    let node_modules = dir.path().join("node_modules");
+    fs::create_dir_all(node_modules.join("keep")).unwrap();
+    fs::create_dir_all(node_modules.join("stale")).unwrap();
+    fs::create_dir_all(node_modules.join("@scope").join("keep")).unwrap();
+    fs::create_dir_all(node_modules.join("@scope").join("stale")).unwrap();
+    fs::create_dir_all(node_modules.join(".bin")).unwrap();
+    fs::write(node_modules.join("keep").join("index.js"), "keep\n").unwrap();
+    fs::write(
+        node_modules.join("@scope").join("keep").join("index.js"),
+        "keep\n",
+    )
+    .unwrap();
+
+    let lock = OmcLock {
+        packages: vec![
+            locked_package_for_test(Ecosystem::Npm, "keep", "1.0.0"),
+            locked_package_for_test(Ecosystem::Npm, "@scope/keep", "1.0.0"),
+        ],
+        ..OmcLock::default()
+    };
+
+    prune_npm_node_modules_to_lock(&node_modules, &lock).unwrap();
+
+    assert!(node_modules.join("keep").exists());
+    assert!(!node_modules.join("stale").exists());
+    assert!(node_modules.join("@scope").join("keep").exists());
+    assert!(!node_modules.join("@scope").join("stale").exists());
+    assert!(node_modules.join(".bin").exists());
+}
+
+#[test]
 fn parses_npm_direct_local_tarball_reference() {
     let dir = tempfile::tempdir().unwrap();
     let archive = dir.path().join("local-pkg-1.0.0.tgz");
