@@ -48,14 +48,14 @@ ADDITIVE second opinion.
   profiler verdict used, and returns the rendered findings tagged
   `[sound-verify] <file>: ...`.
 - `sound_verify_js_directory(package, root, policy)` — the directory variant for
-  `omc compile <dir>`.
+  the hidden dev-build compile path.
 
 Both install call sites consult the flag and fold the sound findings into the
 existing `verifier_findings` list:
 
 - `crates/omc-registry/src/link_install.rs` (the `omc add` / install path).
-- `crates/omc-registry/src/verify.rs` `compile_source_path` (the
-  `omc compile` path).
+- `crates/omc-registry/src/verify.rs` `compile_source_path` (the hidden
+  dev-build compile path).
 
 ### The additive contract (why it can never weaken a verdict)
 
@@ -164,7 +164,7 @@ of which the per-file text profiler can match:
 
 ```sh
 OMC_SOUND_VERIFY=1 omc add <package>      # install path
-OMC_SOUND_VERIFY=1 omc compile <dir|file> # compile path
+OMC_SOUND_VERIFY=1 cargo run -p omc-cli --features dev-commands -- compile <dir|file>
 ```
 
 With the flag set, any `[sound-verify] <file>: ...` lines in the artifact's

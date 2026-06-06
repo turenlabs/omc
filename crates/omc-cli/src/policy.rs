@@ -5,7 +5,10 @@ use omc_policy::{
     Block, Cap, EcosystemQualifier, FlowSink, FlowSrc, PackageRule, Stmt, VersionConstraint,
     VersionOp,
 };
-use omc_registry::{GlobalPolicyFile, OmcRegistryError};
+use omc_registry::{
+    add_manifest_policy_flows, add_manifest_policy_grants, write_global_package_trust,
+    GlobalPolicyFile, OmcRegistryError, PackageSpec,
+};
 
 use crate::args::{PolicyCommand, PolicyListScope};
 
@@ -15,6 +18,18 @@ pub(crate) fn run_policy_command(
     action: PolicyCommand,
 ) -> Result<ExitCode, OmcRegistryError> {
     match action {
+        PolicyCommand::Allow { flows, grants } => {
+            run_policy_allow(project_dir, &grants, &flows)?;
+            Ok(ExitCode::SUCCESS)
+        }
+        PolicyCommand::Trust {
+            spec,
+            allow,
+            allow_flow,
+        } => {
+            run_policy_trust(&spec, &allow, &allow_flow)?;
+            Ok(ExitCode::SUCCESS)
+        }
         PolicyCommand::List { scope } => {
             match scope.unwrap_or(PolicyListScope::Global) {
                 PolicyListScope::Global => print!("{}", global_policy_list_text()?),
@@ -65,6 +80,55 @@ pub(crate) fn run_policy_command(
             Ok(ExitCode::SUCCESS)
         }
     }
+}
+
+pub(crate) fn run_policy_allow(
+    project_dir: &Path,
+    grants: &[String],
+    flows: &[String],
+) -> Result<(), OmcRegistryError> {
+    if grants.is_empty() && flows.is_empty() {
+        return Err(OmcRegistryError::UnsupportedSpec(
+            "at least one grant is required".to_owned(),
+        ));
+    }
+    let added = add_manifest_policy_grants(project_dir, grants)?;
+    let added_flows = add_manifest_policy_flows(project_dir, flows)?;
+    if added.is_empty() && added_flows.is_empty() {
+        println!("policy unchanged");
+    } else {
+        for grant in added {
+            println!("allowed {grant}");
+        }
+        for flow in added_flows {
+            println!("allowed flow {flow}");
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn run_policy_trust(
+    spec: &str,
+    allow: &[String],
+    allow_flow: &[String],
+) -> Result<(), OmcRegistryError> {
+    if allow.is_empty() && allow_flow.is_empty() {
+        return Err(OmcRegistryError::UnsupportedSpec(
+            "at least one --allow or --allow-flow is required".to_owned(),
+        ));
+    }
+    let parsed = PackageSpec::parse(spec)?;
+    let version = parsed.version.as_deref().ok_or_else(|| {
+        OmcRegistryError::UnsupportedSpec(format!(
+            "pin an exact version to trust, e.g. {}:{}@<version>",
+            parsed.ecosystem, parsed.name
+        ))
+    })?;
+    let path =
+        write_global_package_trust(parsed.ecosystem, &parsed.name, version, allow, allow_flow)?;
+    println!("trusted {spec}");
+    println!("  wrote {}", path.display());
+    Ok(())
 }
 
 pub(crate) fn global_policy_list_text() -> Result<String, OmcRegistryError> {

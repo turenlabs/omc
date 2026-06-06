@@ -20,6 +20,55 @@ fn policy_list_parses_global_as_default_scope() {
 }
 
 #[test]
+fn policy_allow_and_trust_parse_as_policy_subcommands() {
+    let cli = Cli::try_parse_from(args(&[
+        "omc",
+        "policy",
+        "allow",
+        "--flow",
+        "env:API_TOKEN->network:api.example.com",
+        "http:api.example.com",
+    ]))
+    .unwrap();
+    match cli.command {
+        Command::Policy {
+            action: PolicyCommand::Allow { grants, flows },
+        } => {
+            assert_eq!(grants, vec!["http:api.example.com"]);
+            assert_eq!(flows, vec!["env:API_TOKEN->network:api.example.com"]);
+        }
+        other => panic!("expected policy allow command, got {other:?}"),
+    }
+
+    let cli = Cli::try_parse_from(args(&[
+        "omc",
+        "policy",
+        "trust",
+        "pypi:requests@2.32.5",
+        "--allow",
+        "dynamic.eval",
+        "--allow-flow",
+        "env:*->network:*",
+    ]))
+    .unwrap();
+    match cli.command {
+        Command::Policy {
+            action:
+                PolicyCommand::Trust {
+                    spec,
+                    allow,
+                    allow_flow,
+                },
+        } => {
+            assert_eq!(spec, "pypi:requests@2.32.5");
+            assert_eq!(allow, vec!["dynamic.eval"]);
+            assert_eq!(allow_flow, vec!["env:*->network:*"]);
+        }
+        other => panic!("expected policy trust command, got {other:?}"),
+    }
+}
+
+#[test]
 fn policy_list_global_renders_version_pinned_trust_files() {
     let project = test_dir("policy-list-global");
     let home = test_dir("policy-list-global-home");

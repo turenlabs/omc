@@ -6,6 +6,8 @@ pub type Result<T> = std::result::Result<T, OmcRegistryError>;
 
 #[derive(Debug, Error)]
 pub enum OmcRegistryError {
+    #[error("{0}")]
+    Usage(String),
     #[error("unsupported package spec `{0}`")]
     UnsupportedSpec(String),
     #[error("unsupported requirements entry `{0}`")]

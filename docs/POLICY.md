@@ -200,6 +200,8 @@ restrictive cutoff.
 ## Commands
 
 ```bash
+omc policy allow <grant> [--flow <flow>]          # persist project-wide grants in omc.toml
+omc policy trust <spec> --allow <grant> [...]     # write version-pinned global trust
 omc policy validate                              # parse omc.policy; OK or a located error
 omc policy check <pkg>[@<ver>] [--npm|--pypi]    # print the effective compiled policy
 omc policy list [global]                         # list global accepted package grants

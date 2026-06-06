@@ -1,22 +1,26 @@
 use std::env;
 use std::process::ExitCode;
 
-use clap::Parser;
+use clap::{CommandFactory, Parser};
 
 use std::io::{IsTerminal, Write};
 
 use omc_registry::{
-    add_manifest_policy_flows, add_manifest_policy_grants, add_package_graph,
-    build_block_suggestion, init_project, install_locked_packages, install_locked_project,
-    install_project, parse_capability_grant, parse_flow_rule, read_lockfile,
-    write_global_package_trust, LinkOptions, LinkReport, OmcRegistryError, PackageSpec, Verdict,
+    add_package_graph, build_block_suggestion, init_project, install_locked_packages,
+    install_locked_project, install_project, parse_capability_grant, parse_flow_rule,
+    read_lockfile, write_global_package_trust, LinkOptions, LinkReport, OmcRegistryError,
+    PackageSpec, Verdict,
 };
 
-use crate::args::{Cli, Command, CompileCommand};
+#[cfg(feature = "dev-commands")]
+use crate::args::CompileCommand;
+use crate::args::{Cli, Command};
+#[cfg(feature = "dev-commands")]
 use crate::compile::print_compile_source;
 use crate::direct_compat::{
     direct_compat_mode, npx_compat_args, parse_direct_compat_invocation, DirectCompatMode,
 };
+#[cfg(feature = "dev-commands")]
 use crate::exec_cell::{run_exec_cell, ExecCellCommand};
 use crate::graph::{run_graph, GraphCommand};
 use crate::inspect::{run_inspect, InspectCommand};
@@ -137,7 +141,7 @@ fn resolve_add_with_bundled_prompt(
         // Fail closed: print each package's exact grant commands, restore, exit 2.
         for b in &blocked {
             eprintln!(
-                "  trust {}: omc trust {}:{}@{} {}",
+                "  trust {}: omc policy trust {}:{}@{} {}",
                 b.name,
                 b.ecosystem,
                 b.name,
@@ -319,6 +323,7 @@ fn run() -> Result<ExitCode, OmcRegistryError> {
                 allow_all_host,
             });
         }
+        #[cfg(feature = "dev-commands")]
         Command::Compile {
             npm,
             pypi,
@@ -367,52 +372,6 @@ fn run() -> Result<ExitCode, OmcRegistryError> {
                 false,
                 false,
             )?;
-        }
-        Command::Allow { flows, grants } => {
-            if grants.is_empty() && flows.is_empty() {
-                return Err(OmcRegistryError::UnsupportedSpec(
-                    "at least one grant is required".to_owned(),
-                ));
-            }
-            let added = add_manifest_policy_grants(&cli.project_dir, &grants)?;
-            let added_flows = add_manifest_policy_flows(&cli.project_dir, &flows)?;
-            if added.is_empty() && added_flows.is_empty() {
-                println!("policy unchanged");
-            } else {
-                for grant in added {
-                    println!("allowed {grant}");
-                }
-                for flow in added_flows {
-                    println!("allowed flow {flow}");
-                }
-            }
-        }
-        Command::Trust {
-            spec,
-            allow,
-            allow_flow,
-        } => {
-            if allow.is_empty() && allow_flow.is_empty() {
-                return Err(OmcRegistryError::UnsupportedSpec(
-                    "at least one --allow or --allow-flow is required".to_owned(),
-                ));
-            }
-            let parsed = PackageSpec::parse(&spec)?;
-            let version = parsed.version.as_deref().ok_or_else(|| {
-                OmcRegistryError::UnsupportedSpec(format!(
-                    "pin an exact version to trust, e.g. {}:{}@<version>",
-                    parsed.ecosystem, parsed.name
-                ))
-            })?;
-            let path = write_global_package_trust(
-                parsed.ecosystem,
-                &parsed.name,
-                version,
-                &allow,
-                &allow_flow,
-            )?;
-            println!("trusted {spec}");
-            println!("  wrote {}", path.display());
         }
         Command::Install {
             allow,
@@ -519,6 +478,7 @@ fn run() -> Result<ExitCode, OmcRegistryError> {
         Command::Npm { args } => return run_npm_compat(&cli.project_dir, &args),
         Command::Pip { args } => return run_pip_compat(&cli.project_dir, &args),
         Command::Twine { args } => return run_twine_compat(&cli.project_dir, &args),
+        #[cfg(feature = "dev-commands")]
         Command::ExecCell {
             source,
             name,
@@ -546,8 +506,68 @@ fn run() -> Result<ExitCode, OmcRegistryError> {
             )
         }
         Command::Policy { action } => return run_policy_command(&cli.project_dir, action),
-        Command::Agent { json } => return Ok(crate::agent_skill::print_agent_skill(json)),
+        Command::Help { topic, json } => {
+            return run_help_command(topic, json);
+        }
     }
 
     Ok(ExitCode::SUCCESS)
+}
+
+pub(crate) fn run_help_command(
+    topic: Vec<String>,
+    json: bool,
+) -> Result<ExitCode, OmcRegistryError> {
+    if topic.is_empty() {
+        if json {
+            return Err(OmcRegistryError::Usage(
+                "`omc help --json` is only supported for `omc help agent --json`".to_owned(),
+            ));
+        }
+        let mut command = Cli::command();
+        command.print_long_help()?;
+        println!();
+        return Ok(ExitCode::SUCCESS);
+    }
+
+    if matches!(topic.as_slice(), [only] if only == "agent") {
+        return Ok(crate::agent_skill::print_agent_skill(json));
+    }
+
+    if json {
+        return Err(OmcRegistryError::Usage(
+            "`--json` is only supported for `omc help agent --json`".to_owned(),
+        ));
+    }
+
+    if let Some(hidden) = topic.first().filter(|name| is_hidden_help_topic(name)) {
+        return Err(OmcRegistryError::Usage(format!(
+            "`omc help {hidden}` is not a public help topic"
+        )));
+    }
+
+    let mut command = Cli::command();
+    let target = find_help_command_mut(&mut command, &topic).ok_or_else(|| {
+        OmcRegistryError::Usage(format!("unknown help topic `{}`", topic.join(" ")))
+    })?;
+    target.print_long_help()?;
+    println!();
+    Ok(ExitCode::SUCCESS)
+}
+
+fn is_hidden_help_topic(topic: &str) -> bool {
+    matches!(topic, "allow" | "trust" | "compile" | "exec-cell")
+}
+
+fn find_help_command_mut<'a>(
+    command: &'a mut clap::Command,
+    path: &[String],
+) -> Option<&'a mut clap::Command> {
+    let (head, tail) = path.split_first()?;
+    let subcommand = command.find_subcommand_mut(head)?;
+    if tail.is_empty() {
+        Some(subcommand)
+    } else {
+        find_help_command_mut(subcommand, tail)
+    }
 }

@@ -1,4 +1,4 @@
-//! `omc agent` — emit a self-contained Markdown (or JSON-wrapped) "skill"
+//! `omc help agent` — emit a self-contained Markdown (or JSON-wrapped) "skill"
 //! document that an AI agent can read to drive omc correctly.
 //!
 //! The guide is a compile-time constant kept in lockstep with the real
@@ -83,17 +83,6 @@ subcommands and route them through omc's deny-by-default engine. The standalone
 `node` / `npm` / `pip` / `python` drop-in binaries (opt-in on `PATH`) behave the
 same way.
 
-### Compiling local source
-
-```bash
-omc compile --npm ./my-pkg --name my-pkg --version 1.0.0   # profile local source to a signed artifact
-omc exec-cell ./script.js --arg 3                          # lower JS/Py to microcode + run in the fueled VM
-```
-
-`omc exec-cell` is the experimental capability-gated *execution* path (runs
-package logic inside the verified VM under the project policy), distinct from the
-install-time-only enforcement of every other command.
-
 ## Reading output & verdicts
 
 - A package is either **accepted** or **blocked**. Output is a terse per-package
@@ -102,8 +91,9 @@ install-time-only enforcement of every other command.
   `OMC_VERBOSE=1`.
 - **Exit codes: `0` = accepted, `2` = blocked.** `omc audit` also exits non-zero
   when any locked package is blocked. Script accordingly.
-- When a package is blocked, the message prints the **exact grant** needed to
-  unblock it — copy it verbatim.
+- When a package is blocked, run `omc add <spec>` for the guided `[y] once`,
+  `[a] always`, `[N] deny` prompt. `inspect -v` shows the policy preview before
+  anything is installed.
 
 ## Capability kinds (plain language)
 
@@ -124,8 +114,7 @@ blocked **even under `--allow-all-host`**; grant them by exact path.
 
 ## Granting access
 
-Most commands that resolve packages (`add`, `install`, `ci`, `remove`,
-`compile`, `exec-cell`) accept:
+Most commands that resolve packages (`add`, `install`, `ci`, `remove`) accept:
 
 - `--allow <grant>` — grant a capability. Examples:
   - `--allow http:api.example.com`  (host)
@@ -139,8 +128,8 @@ Most commands that resolve packages (`add`, `install`, `ci`, `remove`,
 
 ### Persisting grants
 
-- `omc allow <grant> [--flow <flow>]` — persist a grant into `omc.toml`'s flat
-  `[policy]` allow-list for the whole project.
+- `omc policy allow <grant> [--flow <flow>]` — persist a grant into
+  `omc.toml`'s flat `[policy]` allow-list for the whole project.
 - **`omc.policy`** (per-package DSL) — drop a file next to `omc.toml` to scope
   grants to *individual* packages: a `default` baseline plus `package` blocks
   that `allow`/`deny` capabilities, declare `flow`s, mark a package `pure`, or
@@ -149,10 +138,11 @@ Most commands that resolve packages (`add`, `install`, `ci`, `remove`,
   - `omc policy validate` — parse `omc.policy`; OK or a located error.
   - `omc policy check <pkg>[@version]` — show the effective compiled policy.
   - `omc policy list` — show global accepted package grants.
-- **Trust store** — `omc trust <spec> --allow <grant> [--allow-flow <flow>]`
-  writes a **version-pinned** drop-in to `~/.omc/policy.d/` that applies in every
-  project but only to that exact package+version. Example:
-  `omc trust pypi:requests@2.32.5 --allow dynamic.eval --allow-flow 'env:*->network:*'`.
+- **Trust store** — `omc policy trust <spec> --allow <grant>
+  [--allow-flow <flow>]` writes a **version-pinned** drop-in to
+  `~/.omc/policy.d/` that applies in every project but only to that exact
+  package+version. Example:
+  `omc policy trust pypi:requests@2.32.5 --allow dynamic.eval --allow-flow 'env:*->network:*'`.
   Delete the file to revoke.
 
 ### Supply-chain freshness

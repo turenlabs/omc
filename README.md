@@ -45,8 +45,7 @@ is allowed to do is auditable.
 > Scope today: pure-Python wheels/sdists and npm packages. Packages that need a
 > **native build** (C extensions like `numpy`/`cryptography` from source) aren't
 > built yet — a sandboxed build chain with secure defaults is the natural next
-> step. Capability-gated *execution* (running package logic inside the verified
-> VM, not just the host) is the experimental `omc exec-cell` path.
+> step.
 
 ## Per-package policy (`omc.policy`)
 
@@ -95,13 +94,13 @@ OMC also reads a **global** user policy at `~/.omc/omc.toml` (override the dir w
 min-release-age = "7d"
 ```
 
-### Trusting a package everywhere (`~/.omc/policy.d/` + `omc trust`)
+### Trusting a package everywhere (`~/.omc/policy.d/` + `omc policy trust`)
 
 When a package is blocked, the message prints the exact grant. To persist it as a
 **per-package, version-pinned** trust that applies in every project, run:
 
 ```bash
-omc trust pypi:requests@2.32.5 --allow-flow 'env:*->network:*' --allow dynamic.eval
+omc policy trust pypi:requests@2.32.5 --allow-flow 'env:*->network:*' --allow dynamic.eval
 ```
 
 This writes a drop-in `~/.omc/policy.d/requests.omc.policy` (a directory of

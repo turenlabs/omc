@@ -531,7 +531,7 @@ pub(crate) fn render_block_guidance(
         "\n  To trust {name} {version} everywhere (writes ~/.omc/policy.d/):\n"
     ));
     out.push_str(&format!(
-        "      omc trust {ecosystem}:{name}@{version} {}\n",
+        "      omc policy trust {ecosystem}:{name}@{version} {}\n",
         flags.join(" ")
     ));
     out.push_str(&format!(

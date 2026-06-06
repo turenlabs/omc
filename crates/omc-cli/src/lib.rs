@@ -40,9 +40,11 @@ use sha2::{Digest, Sha256};
 
 pub(crate) mod agent_skill;
 pub(crate) mod args;
+#[cfg(feature = "dev-commands")]
 pub(crate) mod compile;
 pub(crate) mod direct_compat;
 pub(crate) mod dispatch;
+#[cfg(feature = "dev-commands")]
 pub(crate) mod exec_cell;
 pub(crate) mod graph;
 pub(crate) mod inspect;
@@ -90,7 +92,7 @@ use npm_list_cli::{
 #[cfg(test)]
 pub(crate) use npm_list_cli::{NpmSbomContext, NpmSbomRoot};
 
-#[cfg(test)]
+#[cfg(all(test, feature = "dev-commands"))]
 use compile::{compile_source_default_name, infer_compile_ecosystem};
 
 use crate::twine_compat::run_twine_compat_with_cwd;

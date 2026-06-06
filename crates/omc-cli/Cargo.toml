@@ -50,6 +50,10 @@ name = "twine"
 path = "src/bin/twine.rs"
 test = false
 
+[features]
+default = []
+dev-commands = []
+
 [dependencies]
 base64 = "0.22"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }

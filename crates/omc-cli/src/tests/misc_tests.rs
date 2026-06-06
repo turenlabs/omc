@@ -1,5 +1,62 @@
 use super::*;
-use crate::*;
+
+#[test]
+fn public_help_hides_dev_and_legacy_alias_commands() {
+    use clap::CommandFactory;
+
+    let mut command = Cli::command();
+    let mut help = Vec::new();
+    command.write_long_help(&mut help).unwrap();
+    let help = String::from_utf8(help).unwrap();
+
+    for hidden in ["compile", "exec-cell", "allow", "trust", "agent"] {
+        assert!(
+            !help
+                .lines()
+                .any(|line| line.trim_start().starts_with(hidden)),
+            "top-level help exposes hidden command `{hidden}`:\n{help}"
+        );
+    }
+    for visible in ["policy", "help"] {
+        assert!(
+            help.lines()
+                .any(|line| line.trim_start().starts_with(visible)),
+            "top-level help is missing visible command `{visible}`:\n{help}"
+        );
+    }
+
+    let policy = command.find_subcommand_mut("policy").unwrap();
+    let mut policy_help = Vec::new();
+    policy.write_long_help(&mut policy_help).unwrap();
+    let policy_help = String::from_utf8(policy_help).unwrap();
+    for visible in ["allow", "trust", "list", "check", "validate"] {
+        assert!(
+            policy_help
+                .lines()
+                .any(|line| line.trim_start().starts_with(visible)),
+            "policy help is missing `{visible}`:\n{policy_help}"
+        );
+    }
+}
+
+#[cfg(not(feature = "dev-commands"))]
+#[test]
+fn public_build_rejects_dev_commands_and_legacy_policy_aliases() {
+    for command in ["compile", "exec-cell", "allow", "trust"] {
+        assert!(
+            Cli::try_parse_from(args(&["omc", command, "--help"])).is_err(),
+            "public build accepted top-level `{command}`"
+        );
+        let err = crate::dispatch::run_help_command(vec![command.to_owned()], false).unwrap_err();
+        match err {
+            OmcRegistryError::Usage(message) => assert!(
+                message.contains("not a public help topic"),
+                "unexpected help error for `{command}`: {message}"
+            ),
+            other => panic!("unexpected help error for `{command}`: {other:?}"),
+        }
+    }
+}
 
 #[test]
 fn detects_direct_compat_binaries() {
@@ -37,6 +94,7 @@ fn detects_direct_compat_binaries() {
     );
 }
 
+#[cfg(feature = "dev-commands")]
 #[test]
 fn parses_compile_command_and_infers_source_metadata() {
     let cli = Cli::try_parse_from(args(&[

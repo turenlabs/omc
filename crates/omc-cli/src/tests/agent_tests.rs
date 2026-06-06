@@ -17,7 +17,8 @@ fn agent_markdown_contains_core_anchors() {
         "omc inspect",
         "omc graph",
         "omc audit",
-        "omc trust",
+        "omc policy trust",
+        "omc policy allow",
         "omc.policy",
         "Shai-Hulud",
         "dynamic_eval",
@@ -47,4 +48,27 @@ fn agent_json_wraps_the_markdown() {
     let skill = parsed["skill"].as_str().unwrap();
     assert!(skill.contains("deny-by-default"));
     assert!(skill.contains("dynamic_eval"));
+}
+
+#[test]
+fn help_agent_parses_as_help_topic() {
+    let cli = Cli::try_parse_from(args(&["omc", "help", "agent"])).unwrap();
+    match cli.command {
+        Command::Help { topic, json } => {
+            assert_eq!(topic, vec!["agent"]);
+            assert!(!json);
+        }
+        other => panic!("expected help agent command, got {other:?}"),
+    }
+
+    let cli = Cli::try_parse_from(args(&["omc", "help", "agent", "--json"])).unwrap();
+    match cli.command {
+        Command::Help { topic, json } => {
+            assert_eq!(topic, vec!["agent"]);
+            assert!(json);
+        }
+        other => panic!("expected JSON help agent command, got {other:?}"),
+    }
+
+    assert!(Cli::try_parse_from(args(&["omc", "agent"])).is_err());
 }

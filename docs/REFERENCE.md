@@ -232,8 +232,7 @@ and `requests.get(...)` work exactly as usual.
 **Where the enforcement is.** OMC gates packages at **install time** —
 resolution, source profiling, capability/flow/age verdicts, and *never* running
 install/postinstall scripts — and records the granted capabilities in
-`omc.lock`. The shim path does **not** sandbox host-run code at runtime; that is
-the job of the experimental in-cell path below.
+`omc.lock`. The shim path does **not** sandbox host-run code at runtime.
 
 **Build boundary.** Only pure-Python wheels/sdists and npm packages are installed
 today. Packages requiring a **native build** (C extensions such as `numpy` or
@@ -242,32 +241,12 @@ extension policy are future work (a sandboxed build chain with secure defaults
 is the natural next step). `*.pth`/`sitecustomize.py` startup hooks are excluded
 from installs.
 
-### 5. Run a package *in-cell* under policy (experimental)
-
-`exec-cell` lowers supported JS/Python source to OMC bytecode, verifies it, and
-runs it inside the sandboxed VM — package logic executes under the capability
-policy rather than on the host:
-
-```bash
-echo 'module.exports = function isOdd(n){ return n % 2 === 1; };' > isodd.js
-omc --project-dir myapp exec-cell isodd.js --arg 7          # -> result true
-```
-
-A package that tries to read a secret and post it is rejected by the verifier:
-
-```bash
-omc --project-dir myapp exec-cell leak.js --allow-all-host
-# denied: reading sensitive file `~/.ssh/id_rsa` is denied by default ...
-```
-
-(Unsupported source fails closed; add `--fallback` to defer to the host shim.)
-
-### 6. Inspect & manage
+### 5. Inspect & manage
 
 ```bash
 omc --project-dir myapp list            # locked packages (add --json)
 omc --project-dir myapp audit           # per-package verdicts + capabilities
-omc --project-dir myapp allow http:api.example.com env:API_TOKEN   # persist grants in omc.toml
+omc --project-dir myapp policy allow http:api.example.com env:API_TOKEN   # persist grants in omc.toml
 omc --project-dir myapp remove --npm left-pad
 ```
 
@@ -380,14 +359,14 @@ and every ordered operator fails closed.
 The compiled per-package policy is enforced wherever a package is verified:
 
 - at **install time**, each resolved dependency (and each locally compiled
-  source) is checked against *its* block, not just one global allow-list;
-- on the **in-cell exec path** (`omc exec-cell`), the entry is run under its own
-  compiled policy.
+  source) is checked against *its* block, not just one global allow-list.
 
 ### Commands
 
 ```bash
 omc policy validate            # parse omc.policy; prints OK or a located parse error
+omc policy allow <grant> [--flow <flow>]   # persist project-wide grants in omc.toml
+omc policy trust <spec> --allow <grant> [...]   # write version-pinned global trust
 omc policy check <pkg>[@<ver>] [--npm|--pypi]   # print the effective compiled policy
 omc policy list [global]       # list global accepted package grants
 ```
@@ -454,8 +433,7 @@ The `omc` CLI is the first working slice of a PyPI/npm replacement:
 cargo install --path crates/omc-cli --bins
 
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo init --name demo
-cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo allow http:api.example.com env:API_TOKEN
-cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo compile --npm --name local-date-helper --version 1.0.0 --store ./packages/local-date-helper
+cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo policy allow http:api.example.com env:API_TOKEN
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo add --npm is-odd@3.0.1 left-pad@1.3.0
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo add --npm is-number@7.0.0 --dev
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo node -e "console.log(require('is-odd')(3))"
@@ -783,7 +761,7 @@ allow-flow = ["env:API_TOKEN -> network:api.example.com"]
 You can add the same persistent flow grants from the CLI:
 
 ```bash
-cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo allow \
+cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo policy allow \
   http:api.example.com env:API_TOKEN \
   --flow 'env:API_TOKEN -> network:api.example.com'
 ```
@@ -827,9 +805,9 @@ Supported now:
   simple stack-visible flows
 - interpreter checks the same broker policy at runtime
 - npm and PyPI exact-version resolution
-- local source directory/archive compilation into signed OMC artifact JSON via
-  `omc compile`, using the same source profiler, capability lowering, verifier,
-  and artifact signing path as registry packages
+- local source directory/archive compilation into signed OMC artifact JSON using
+  the same source profiler, capability lowering, verifier, and artifact signing
+  path as registry packages
 - install/ci-time source artifact compilation for npm workspace/local directory
   dependencies and Python editable/local directory dependencies before they are
   linked into `node_modules` or OMC-managed Python import paths
@@ -984,7 +962,7 @@ Supported now:
 - persistent `[policy].allow` / `[policy].allow-flow` grants in `omc.toml`
   and one-shot `--allow` / `--allow-flow` grants on `omc add`, `omc install`,
   `omc ci`, `omc remove`, and npm/pip compatibility installs
-- `omc allow` for editing persistent project capability and flow grants
+- `omc policy allow` for editing persistent project capability and flow grants
 - `omc add`, `omc add --dev`, `omc add --optional`, `omc add --peer`, and
   `omc remove` for one or more OMC-managed dependencies, with `--npm` and
   `--pypi` shorthands for unprefixed specs

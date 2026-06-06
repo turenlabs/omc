@@ -17,6 +17,7 @@ use crate::npm_compat::NpmLinkAction;
 #[command(name = "omc")]
 #[command(about = "OMC package-manager prototype")]
 #[command(version)]
+#[command(disable_help_subcommand = true)]
 pub(crate) struct Cli {
     #[arg(long, global = true, default_value = ".")]
     pub(crate) project_dir: PathBuf,
@@ -156,7 +157,8 @@ pub(crate) enum Command {
         #[arg(long, help = "Grant all host capabilities for compatibility testing")]
         allow_all_host: bool,
     },
-    #[command(about = "Compile local source into a signed OMC artifact")]
+    #[cfg(feature = "dev-commands")]
+    #[command(about = "Compile local source into a signed OMC artifact", hide = true)]
     Compile {
         #[arg(
             long,
@@ -232,30 +234,6 @@ pub(crate) enum Command {
         allow_flow: Vec<String>,
         #[arg(long, help = "Grant all host capabilities for compatibility testing")]
         allow_all_host: bool,
-    },
-    #[command(about = "Persist capability grants in omc.toml policy")]
-    Allow {
-        #[arg(
-            long = "flow",
-            help = "Persist a data-flow grant such as env:API_TOKEN->network:api.example.com"
-        )]
-        flows: Vec<String>,
-        #[arg(help = "Capability grants such as http:api.example.com or env:API_TOKEN")]
-        grants: Vec<String>,
-    },
-    #[command(
-        about = "Trust a package: write a version-pinned grant to ~/.omc/policy.d/ (applies everywhere)"
-    )]
-    Trust {
-        #[arg(help = "Package spec to trust, e.g. npm:lodash@4.18.1 or pypi:requests@2.32.5")]
-        spec: String,
-        #[arg(
-            long = "allow",
-            help = "Capability grant, e.g. dynamic.eval, fs.write:*, env:TOKEN"
-        )]
-        allow: Vec<String>,
-        #[arg(long = "allow-flow", help = "Data-flow grant, e.g. env:*->network:*")]
-        allow_flow: Vec<String>,
     },
     #[command(about = "Resolve omc.toml dependencies and install locked packages")]
     Install {
@@ -400,8 +378,10 @@ pub(crate) enum Command {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
+    #[cfg(feature = "dev-commands")]
     #[command(
-        about = "Lower a supported source file to OMC microcode and execute it in the fueled VM under the project policy"
+        about = "Lower a supported source file to OMC microcode and execute it in the fueled VM under the project policy",
+        hide = true
     )]
     ExecCell {
         #[arg(help = "Path to a supported JS/Python source file to lower and execute")]
@@ -450,16 +430,46 @@ pub(crate) enum Command {
         #[command(subcommand)]
         action: PolicyCommand,
     },
-    #[command(about = "Print an AI-agent guide to using omc")]
-    Agent {
+    #[command(about = "Print help or focused OMC guide topics")]
+    Help {
         #[arg(long, help = "Emit the guide wrapped as machine-readable JSON")]
         json: bool,
+        #[arg(
+            value_name = "COMMAND|TOPIC",
+            num_args = 0..,
+            help = "Command path to explain, or the focused topic `agent`"
+        )]
+        topic: Vec<String>,
     },
 }
 
 /// `omc policy <subcommand>` — inspect and validate the `omc.policy` DSL.
 #[derive(Debug, Subcommand)]
 pub(crate) enum PolicyCommand {
+    #[command(about = "Persist project policy grants in omc.toml")]
+    Allow {
+        #[arg(
+            long = "flow",
+            help = "Persist a data-flow grant such as env:API_TOKEN->network:api.example.com"
+        )]
+        flows: Vec<String>,
+        #[arg(help = "Capability grants such as http:api.example.com or env:API_TOKEN")]
+        grants: Vec<String>,
+    },
+    #[command(
+        about = "Trust a package globally: write a version-pinned grant to ~/.omc/policy.d/"
+    )]
+    Trust {
+        #[arg(help = "Package spec to trust, e.g. npm:lodash@4.18.1 or pypi:requests@2.32.5")]
+        spec: String,
+        #[arg(
+            long = "allow",
+            help = "Capability grant, e.g. dynamic.eval, fs.write:*, env:TOKEN"
+        )]
+        allow: Vec<String>,
+        #[arg(long = "allow-flow", help = "Data-flow grant, e.g. env:*->network:*")]
+        allow_flow: Vec<String>,
+    },
     #[command(about = "List accepted policy grants; defaults to the global trust store")]
     List {
         #[arg(
@@ -1668,6 +1678,7 @@ pub(crate) struct TwinePypirc {
     pub(crate) sections: BTreeMap<String, BTreeMap<String, String>>,
 }
 
+#[cfg(feature = "dev-commands")]
 #[derive(Debug)]
 pub(crate) struct CompileCommand {
     pub(crate) npm: bool,
