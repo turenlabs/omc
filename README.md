@@ -73,6 +73,7 @@ Each dependency is verified against *its* block (deny-by-default: no match means
 ```bash
 omc policy validate                      # parse omc.policy; OK or a located error
 omc policy check stripe@13.1.0           # show the effective compiled policy
+omc policy list                          # list global accepted package grants
 ```
 
 ### Package-age checks (supply-chain freshness)
@@ -107,7 +108,8 @@ This writes a drop-in `~/.omc/policy.d/requests.omc.policy` (a directory of
 per-package `omc.policy` blocks). Each block grants **only** its exact
 package+version, so a trust decision never leaks to other packages or to
 transitive dependencies — unlike a flat project-wide grant. Delete the file to
-revoke. Hand-authored files in `~/.omc/policy.d/` work too.
+revoke. Hand-authored files in `~/.omc/policy.d/` work too. Run `omc policy
+list` (or `omc policy list global`) to inspect those global accepts.
 
 **Every field, statement, capability, flow, version operator, and the
 project/global config — see [docs/POLICY.md](docs/POLICY.md).**

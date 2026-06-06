@@ -9,7 +9,7 @@ use crate::*;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 
 use crate::npm_compat::NpmLinkAction;
 
@@ -460,6 +460,15 @@ pub(crate) enum Command {
 /// `omc policy <subcommand>` — inspect and validate the `omc.policy` DSL.
 #[derive(Debug, Subcommand)]
 pub(crate) enum PolicyCommand {
+    #[command(about = "List accepted policy grants; defaults to the global trust store")]
+    List {
+        #[arg(
+            value_enum,
+            help = "Policy scope to list (defaults to global)",
+            value_name = "SCOPE"
+        )]
+        scope: Option<PolicyListScope>,
+    },
     #[command(
         about = "Show the effective compiled policy for a package, e.g. omc policy check stripe@13.1.0"
     )]
@@ -483,6 +492,11 @@ pub(crate) enum PolicyCommand {
     },
     #[command(about = "Parse omc.policy and report OK, or the parse error with its location")]
     Validate,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub(crate) enum PolicyListScope {
+    Global,
 }
 
 #[derive(Debug, PartialEq, Eq)]

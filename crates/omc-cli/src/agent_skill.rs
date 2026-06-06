@@ -148,6 +148,7 @@ Most commands that resolve packages (`add`, `install`, `ci`, `remove`,
   grants. Inspect it:
   - `omc policy validate` — parse `omc.policy`; OK or a located error.
   - `omc policy check <pkg>[@version]` — show the effective compiled policy.
+  - `omc policy list` — show global accepted package grants.
 - **Trust store** — `omc trust <spec> --allow <grant> [--allow-flow <flow>]`
   writes a **version-pinned** drop-in to `~/.omc/policy.d/` that applies in every
   project but only to that exact package+version. Example:

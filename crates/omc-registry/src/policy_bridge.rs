@@ -12,6 +12,13 @@ use std::path::{Path, PathBuf};
 
 use omc_cap::{Capability, FlowRule, LabelMatcher, Policy, Sink};
 
+#[derive(Debug, Clone)]
+pub struct GlobalPolicyFile {
+    pub path: PathBuf,
+    pub source: String,
+    pub document: omc_policy::PolicyDocument,
+}
+
 /// Load and parse the optional `omc.policy` DSL file from a project directory.
 ///
 /// Returns `Ok(None)` when the file is absent (full back-compat: behaviour is
@@ -84,12 +91,12 @@ pub fn effective_package_policy(
     Ok(policy)
 }
 
-/// Load every drop-in per-package policy from the global trust directory
-/// `$OMC_HOME/policy.d/` (default `~/.omc/policy.d/`). Each `*.omc.policy` /
-/// `*.policy` file is parsed independently (a parse error in any file fails
-/// closed); files are read in sorted order for determinism. Missing dir → empty.
-pub(crate) fn load_global_policy_documents() -> Result<Vec<omc_policy::PolicyDocument>> {
-    let Some(dir) = global_omc_home().map(|home| home.join("policy.d")) else {
+pub fn global_policy_dir() -> Option<PathBuf> {
+    global_omc_home().map(|home| home.join("policy.d"))
+}
+
+pub fn list_global_policy_files() -> Result<Vec<GlobalPolicyFile>> {
+    let Some(dir) = global_policy_dir() else {
         return Ok(Vec::new());
     };
     if !dir.is_dir() {
@@ -107,14 +114,30 @@ pub(crate) fn load_global_policy_documents() -> Result<Vec<omc_policy::PolicyDoc
         }
     }
     paths.sort();
-    let mut documents = Vec::new();
+    let mut files = Vec::new();
     for path in paths {
         // batou:ignore file_read -- drop-in policy files in the operator's own
         // $OMC_HOME/policy.d trust dir; reading them is the explicit purpose.
         let source = fs::read_to_string(&path)?;
-        documents.push(omc_policy::parse(&source)?);
+        let document = omc_policy::parse(&source)?;
+        files.push(GlobalPolicyFile {
+            path,
+            source,
+            document,
+        });
     }
-    Ok(documents)
+    Ok(files)
+}
+
+/// Load every drop-in per-package policy from the global trust directory
+/// `$OMC_HOME/policy.d/` (default `~/.omc/policy.d/`). Each `*.omc.policy` /
+/// `*.policy` file is parsed independently (a parse error in any file fails
+/// closed); files are read in sorted order for determinism. Missing dir → empty.
+pub(crate) fn load_global_policy_documents() -> Result<Vec<omc_policy::PolicyDocument>> {
+    Ok(list_global_policy_files()?
+        .into_iter()
+        .map(|file| file.document)
+        .collect())
 }
 
 /// Auto-accept a package's BENIGN runtime capabilities at the install gate.

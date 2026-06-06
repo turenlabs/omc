@@ -34,6 +34,7 @@ omc --project-dir DIR list                        # locked packages
 omc --project-dir DIR audit                       # per-package verdicts + capabilities
 omc --project-dir DIR policy validate             # parse omc.policy: OK or a located error
 omc --project-dir DIR policy check stripe@13.1.0 --npm   # effective compiled policy for a package
+omc --project-dir DIR policy list                 # global accepted package grants
 omc --project-dir DIR exec-cell entry.js --arg 7  # lower + verify + run in the sandboxed VM (experimental)
 ```
 

@@ -201,8 +201,9 @@ pub(crate) use policy_bridge::{
     allow_benign_runtime_capabilities, dsl_allow_clause, dsl_flow_sink, dsl_flow_src,
 };
 pub use policy_bridge::{
-    block_needs, build_block_suggestion, effective_package_policy, load_policy_document,
-    parse_capability_grant, parse_flow_rule, BlockSuggestion, GrantNeed,
+    block_needs, build_block_suggestion, effective_package_policy, global_policy_dir,
+    list_global_policy_files, load_policy_document, parse_capability_grant, parse_flow_rule,
+    BlockSuggestion, GlobalPolicyFile, GrantNeed,
 };
 // Only the `#[cfg(test)]` sibling modules reach this through `use super::*`.
 #[cfg(test)]

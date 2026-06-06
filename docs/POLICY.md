@@ -14,7 +14,8 @@ The `omc.policy` file is a small declarative language that scopes those grants t
 - **Fail-closed:** a malformed file, unknown keyword, unknown capability, or
   stray token is a hard error with a `line:column`. The parser never yields a
   silently-empty or silently-permissive policy.
-- Validate / inspect: `omc policy validate` and `omc policy check <pkg>[@ver]`.
+- Validate / inspect: `omc policy validate`, `omc policy check <pkg>[@ver]`,
+  and `omc policy list` for the global trust store.
 
 ---
 
@@ -201,12 +202,14 @@ restrictive cutoff.
 ```bash
 omc policy validate                              # parse omc.policy; OK or a located error
 omc policy check <pkg>[@<ver>] [--npm|--pypi]    # print the effective compiled policy
+omc policy list [global]                         # list global accepted package grants
 ```
 
 `omc policy check` defaults to npm and version `0.0.0` when omitted; scoped npm
 names keep their `@` (`omc policy check @acme/widget@2.0.0`). One-shot CLI grants
 on `omc add`/`install` layer on top: `--allow`, `--allow-flow`, `--allow-all-host`,
-`--allow-sensitive`.
+`--allow-sensitive`. `omc policy list` defaults to `global`, which reads the
+drop-in trust store at `$OMC_HOME/policy.d/` (default `~/.omc/policy.d/`).
 
 ---
 

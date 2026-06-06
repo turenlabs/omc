@@ -389,11 +389,13 @@ The compiled per-package policy is enforced wherever a package is verified:
 ```bash
 omc policy validate            # parse omc.policy; prints OK or a located parse error
 omc policy check <pkg>[@<ver>] [--npm|--pypi]   # print the effective compiled policy
+omc policy list [global]       # list global accepted package grants
 ```
 
 `omc policy check` defaults to the npm ecosystem and version `0.0.0` when those
 are omitted. Scoped npm names keep their leading `@` (`omc policy check
-@acme/widget@2.0.0`).
+@acme/widget@2.0.0`). `omc policy list` defaults to the global trust store at
+`$OMC_HOME/policy.d/` (default `~/.omc/policy.d/`).
 
 ### Package-age checks (`min-age` / `min-release-age`)
 

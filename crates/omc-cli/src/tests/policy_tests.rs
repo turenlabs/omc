@@ -1,5 +1,80 @@
 use super::*;
-use crate::*;
+
+#[test]
+fn policy_list_parses_global_as_default_scope() {
+    let cli = Cli::try_parse_from(args(&["omc", "policy", "list"])).unwrap();
+    match cli.command {
+        Command::Policy {
+            action: PolicyCommand::List { scope },
+        } => assert_eq!(scope, None),
+        other => panic!("expected policy list command, got {other:?}"),
+    }
+
+    let cli = Cli::try_parse_from(args(&["omc", "policy", "list", "global"])).unwrap();
+    match cli.command {
+        Command::Policy {
+            action: PolicyCommand::List { scope },
+        } => assert_eq!(scope, Some(PolicyListScope::Global)),
+        other => panic!("expected policy list global command, got {other:?}"),
+    }
+}
+
+#[test]
+fn policy_list_global_renders_version_pinned_trust_files() {
+    let project = test_dir("policy-list-global");
+    let home = test_dir("policy-list-global-home");
+    with_env_var("OMC_HOME", &home, || {
+        let grant = "dynamic.eval".to_owned();
+        let flow = "env:*->network:*".to_owned();
+        let path = omc_registry::write_global_package_trust(
+            Ecosystem::Pypi,
+            "requests",
+            "2.32.5",
+            &[grant],
+            &[flow],
+        )
+        .unwrap();
+
+        let text = crate::policy::global_policy_list_text().unwrap();
+        assert!(
+            text.contains(&format!(
+                "global policy trust store: {}",
+                home.join("policy.d").display()
+            )),
+            "{text}"
+        );
+        let file_name = path.file_name().unwrap().to_string_lossy();
+        assert!(text.contains(file_name.as_ref()), "{text}");
+        assert!(
+            text.contains("package") && text.contains("version") && text.contains("grant"),
+            "{text}"
+        );
+        assert!(
+            text.lines().any(|line| {
+                line.contains("pypi:requests")
+                    && line.contains("==2.32.5")
+                    && line.contains("allow")
+                    && line.contains("eval")
+                    && line.contains("requests.omc.policy")
+            }),
+            "{text}"
+        );
+        assert!(
+            text.lines().any(|line| {
+                line.contains("pypi:requests")
+                    && line.contains("==2.32.5")
+                    && line.contains("flow")
+                    && line.contains(r#"env "*" -> net "*""#)
+                    && line.contains("requests.omc.policy")
+            }),
+            "{text}"
+        );
+        assert!(!text.contains(r#"pypi package "requests""#), "{text}");
+
+        let code = run_policy_command(&project, PolicyCommand::List { scope: None }).unwrap();
+        assert_eq!(code, ExitCode::SUCCESS);
+    });
+}
 
 #[test]
 fn policy_validate_reports_ok_for_a_well_formed_file() {
