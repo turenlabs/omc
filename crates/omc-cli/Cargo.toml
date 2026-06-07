@@ -4,50 +4,11 @@ description = "OMC package-manager prototype CLI"
 edition.workspace = true
 license.workspace = true
 version.workspace = true
+autobins = false
 
 [[bin]]
 name = "omc"
 path = "src/main.rs"
-test = false
-
-[[bin]]
-name = "npm"
-path = "src/bin/npm.rs"
-test = false
-
-[[bin]]
-name = "pip"
-path = "src/bin/pip.rs"
-test = false
-
-[[bin]]
-name = "pip3"
-path = "src/bin/pip3.rs"
-test = false
-
-[[bin]]
-name = "npx"
-path = "src/bin/npx.rs"
-test = false
-
-[[bin]]
-name = "node"
-path = "src/bin/node.rs"
-test = false
-
-[[bin]]
-name = "python"
-path = "src/bin/python.rs"
-test = false
-
-[[bin]]
-name = "python3"
-path = "src/bin/python3.rs"
-test = false
-
-[[bin]]
-name = "twine"
-path = "src/bin/twine.rs"
 test = false
 
 [features]

@@ -95,6 +95,82 @@ fn profiler_ignores_non_executable_assets() {
 }
 
 #[test]
+fn npm_registry_tarball_profiles_only_install_lifecycle_scripts() {
+    let package = ResolvedPackage {
+        ecosystem: Ecosystem::Npm,
+        name: "scripted".to_owned(),
+        version: "1.0.0".to_owned(),
+        source_url: "https://registry.npmjs.org/scripted/-/scripted-1.0.0.tgz".to_owned(),
+        download_url: None,
+        local_path: None,
+        filename: "scripted-1.0.0.tgz".to_owned(),
+        expected_sha256: None,
+        expected_sha1: None,
+        expected_integrity: None,
+        npm_direct_tarball: false,
+        pypi_direct_wheel: false,
+        npm_scripts: std::collections::BTreeMap::from([
+            ("preinstall".to_owned(), "node preinstall.js".to_owned()),
+            ("install".to_owned(), "node install.js".to_owned()),
+            ("postinstall".to_owned(), "node postinstall.js".to_owned()),
+            ("prepare".to_owned(), "node prepare.js".to_owned()),
+            ("prepack".to_owned(), "node prepack.js".to_owned()),
+            ("postpack".to_owned(), "node postpack.js".to_owned()),
+            ("prepublish".to_owned(), "node prepublish.js".to_owned()),
+        ]),
+        platform_compatible: true,
+        dependencies: Vec::new(),
+    };
+    let bytes = npm_tgz_for_test(r#"{"name":"scripted","version":"1.0.0"}"#);
+    let profile = profile_archive(&package, &bytes).unwrap();
+    let script_targets = profile
+        .capabilities
+        .iter()
+        .filter(|finding| finding.kind == CapabilityKind::ProcSpawn)
+        .map(|finding| finding.target.as_str())
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        script_targets,
+        vec![
+            "npm-script:install",
+            "npm-script:postinstall",
+            "npm-script:preinstall",
+        ]
+    );
+}
+
+#[test]
+fn npm_github_source_profiles_prepare_as_install_relevant() {
+    let package = ResolvedPackage {
+        ecosystem: Ecosystem::Npm,
+        name: "github-source".to_owned(),
+        version: "1.0.0".to_owned(),
+        source_url: "https://github.com/acme/github-source/archive/main.tar.gz".to_owned(),
+        download_url: None,
+        local_path: None,
+        filename: "main.tar.gz".to_owned(),
+        expected_sha256: None,
+        expected_sha1: None,
+        expected_integrity: None,
+        npm_direct_tarball: true,
+        pypi_direct_wheel: false,
+        npm_scripts: std::collections::BTreeMap::from([(
+            "prepare".to_owned(),
+            "node prepare.js".to_owned(),
+        )]),
+        platform_compatible: true,
+        dependencies: Vec::new(),
+    };
+    let bytes = npm_tgz_for_test(r#"{"name":"github-source","version":"1.0.0"}"#);
+    let profile = profile_archive(&package, &bytes).unwrap();
+
+    assert!(profile.capabilities.iter().any(|finding| {
+        finding.kind == CapabilityKind::ProcSpawn && finding.target == "npm-script:prepare"
+    }));
+}
+
+#[test]
 fn profiler_distinguishes_regex_exec_from_dynamic_eval() {
     let mut profiler = SourceProfiler::default();
     profiler.scan_file(

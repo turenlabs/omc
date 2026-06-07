@@ -269,6 +269,7 @@ const ARTIFACT_SCHEMA: u32 = 1;
 pub(crate) const ARTIFACT_SIGNING_KEY: &str = "artifact-ed25519.key";
 const MAX_FILE_BYTES: u64 = 2 * 1024 * 1024;
 const DEFAULT_PUBLIC_ENV_READS: &[&str] = &["NODE_DEBUG"];
+const DEFAULT_PUBLIC_NETWORK_ENV_FLOWS: &[&str] = &["NO_PROXY", "no_proxy"];
 const NPM_DIRECT_TARBALL_PLACEHOLDER: &str = "__omc_direct_tarball__";
 const NPM_PROFILE_WRITABLE_KEYS: &[&str] = &[
     "email", "password", "fullname", "homepage", "freenode", "twitter", "github",

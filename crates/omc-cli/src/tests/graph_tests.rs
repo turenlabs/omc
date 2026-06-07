@@ -9,8 +9,7 @@ use super::*;
 use std::path::PathBuf;
 
 use omc_registry::{
-    compile_source_path, CapabilityKind, CompileSourceOptions, Ecosystem, LinkReport,
-    LockedPackage, Verdict,
+    compile_source_path, CapabilityKind, CompileSourceOptions, Ecosystem, LinkReport, LockedPackage,
 };
 
 use crate::graph::{render_graph, run_graph, DependencyGraph, GraphCommand, Risk};

@@ -351,6 +351,12 @@ fn install_gate_demotes_benign_caps_but_keeps_worm_vectors_blocked() {
         source: "index.js".to_owned(),
         evidence: "process.env".to_owned(),
     };
+    let proxy_env = |name: &str| CapabilityFinding {
+        kind: CapabilityKind::EnvRead,
+        target: name.to_owned(),
+        source: "index.js".to_owned(),
+        evidence: format!("process.env.{name}"),
+    };
     let http = || CapabilityFinding {
         kind: CapabilityKind::HttpRequest,
         target: "api.stripe.com".to_owned(),
@@ -401,6 +407,14 @@ fn install_gate_demotes_benign_caps_but_keeps_worm_vectors_blocked() {
     assert!(
         accepts(&[env()]),
         "an env-reading library with no sink must install clean"
+    );
+    assert!(
+        accepts(&[proxy_env("NO_PROXY"), http()]),
+        "NO_PROXY is public proxy config, not a credential exfiltration source"
+    );
+    assert!(
+        accepts(&[proxy_env("no_proxy"), http()]),
+        "lowercase no_proxy is public proxy config, not a credential exfiltration source"
     );
 
     // BLOCKED: install-/malware-relevant behaviours stay deny-by-default.

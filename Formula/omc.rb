@@ -32,11 +32,13 @@ class Omc < Formula
     # `omc` is the safe default that lands on PATH.
     bin.install "target/release/omc"
 
-    # The drop-in node/npm/npx/pip/pip3/python/python3/twine shims route through
-    # OMC's runtime. Installing them onto PATH would shadow the system tools, so
-    # they ship under libexec and are enabled opt-in (see caveats).
+    # The drop-in node/npm/npx/pip/pip3/python/python3/twine shims are symlinks
+    # to the single OMC binary. Installing them onto PATH would shadow the
+    # system tools, so they ship under libexec and are enabled opt-in (see
+    # caveats).
+    (libexec/"shims").mkpath
     %w[npm npx node pip pip3 python python3 twine].each do |shim|
-      (libexec/"shims").install "target/release/#{shim}"
+      (libexec/"shims"/shim).make_symlink bin/"omc"
     end
 
     # Recommended global policy (supply-chain freshness floor + deny-by-default).

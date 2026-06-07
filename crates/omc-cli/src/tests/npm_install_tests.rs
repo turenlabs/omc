@@ -1,5 +1,4 @@
 use super::*;
-use crate::*;
 
 #[test]
 fn npm_environment_defaults_behave_like_global_config_flags() {

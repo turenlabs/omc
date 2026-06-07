@@ -577,7 +577,7 @@ pub(crate) fn format_link_report_verbose(report: &omc_registry::LinkReport) -> S
 
 // ---------------------------------------------------------------------------
 // `omc inspect` report — a dependency-tree-first skim layer with a one-line
-// headline-risk sentence, expanding per-finding detail blocks only for blocked
+// top-risk sentence, expanding per-finding detail blocks only for blocked
 // packages. Reuses the plain-language capability vocabulary and color helpers
 // above, and the real `omc add` grant builders (block_needs / cli_flag) so the
 // unblock lines stay in lock-step with what `omc add` would emit. This is the
@@ -618,9 +618,9 @@ pub(crate) fn format_inspect_report_with(reports: &[LinkReport], verbose: bool) 
 
     let mut out = String::new();
 
-    // Banner: glyph + ecosystem:name@version + verdict word + dep count.
-    let root_blocked = root.locked.verdict == Verdict::Blocked;
-    let (glyph, verdict_word) = if root_blocked {
+    // Banner: glyph + ecosystem:name@version + whole-tree verdict + dep count.
+    let tree_blocked = blocked > 0;
+    let (glyph, verdict_word) = if tree_blocked {
         (paint("✗", RED), paint("BLOCKED", RED))
     } else {
         (paint("✓", GREEN), paint("OK", GREEN))
@@ -637,7 +637,7 @@ pub(crate) fn format_inspect_report_with(reports: &[LinkReport], verbose: bool) 
         root.locked.ecosystem, root.locked.name, root.locked.version
     );
 
-    // One-line bottom-line + headline-risk sentence (only when something is
+    // One-line bottom-line + top-risk sentence (only when something is
     // blocked — an all-accepted tree leads with a benign one-liner instead).
     if blocked > 0 {
         let _ = writeln!(
@@ -646,7 +646,7 @@ pub(crate) fn format_inspect_report_with(reports: &[LinkReport], verbose: bool) 
             plural(total),
             if blocked == 1 { "is" } else { "are" }
         );
-        if let Some(headline) = headline_risk(root) {
+        if let Some(headline) = reports.iter().find_map(headline_risk) {
             let _ = writeln!(out, "  {headline}");
         }
     } else {
@@ -669,8 +669,8 @@ pub(crate) fn format_inspect_report_with(reports: &[LinkReport], verbose: bool) 
     out.push_str(&render_inspect_tree(root, deps));
 
     // Per-blocked-package detail. Compact by default (one-line reason, grouped
-    // capabilities with files, a single trust grant line); the full per-finding
-    // reasons + run-once grant lines are behind `--verbose`.
+    // capabilities with files, and a guided-review pointer); the full
+    // per-finding rows + policy preview are behind `--verbose`.
     if blocked > 0 {
         let _ = writeln!(out);
         for report in reports
@@ -685,9 +685,9 @@ pub(crate) fn format_inspect_report_with(reports: &[LinkReport], verbose: bool) 
             let _ = writeln!(out);
         }
         let hint = if verbose {
-            "Each block lists run-once and trust grant lines above. Nothing was installed."
+            "Use `omc add <spec>` for the guided [y] once / [a] always / [N] deny flow. Nothing was installed."
         } else {
-            "Re-run with -v for every finding + run-once grant lines. Nothing was installed."
+            "Nothing was installed."
         };
         let _ = writeln!(out, "  {}", dim(hint));
     } else {
@@ -744,11 +744,9 @@ fn inspect_tree_row(out: &mut String, connector: &str, report: &LinkReport, widt
     );
 }
 
-/// Compact per-blocked-package block: relation header, a one-line plain-language
-/// reason, the grouped runtime capabilities (with files — inspect's reason to
-/// exist), a one-line unverifiable-code site list, and a single `omc trust`
-/// grant line. The exhaustive per-finding callouts + run-once grant variant are
-/// the `--verbose` block instead.
+/// Compact per-blocked-package block: relation header, short grouped "why"
+/// bullets, runtime evidence files, and a pointer to `-v` for guided approval
+/// details plus the policy preview.
 fn format_inspect_detail_block_compact(report: &LinkReport, root: &LinkReport) -> String {
     use std::fmt::Write as _;
     let mut out = String::new();
@@ -760,22 +758,26 @@ fn format_inspect_detail_block_compact(report: &LinkReport, root: &LinkReport) -
     };
     let _ = writeln!(
         out,
-        "  {} {} {} {} {relation}",
+        "  {} Review {} {} {}",
         paint("✗", RED),
         bold(&locked.name),
         locked.version,
-        dim("—")
+        dim(&format!("({relation})"))
     );
 
     let (needs, unknown) = block_needs(&locked.verifier_findings);
-    let reason = compact_block_reason(&needs, &unknown);
-    if !reason.is_empty() {
-        let _ = writeln!(out, "    {} {reason}", paint("blocked:", RED));
+    let reasons = compact_block_reasons(&needs, &unknown);
+    if !reasons.is_empty() {
+        let _ = writeln!(out, "    {}", paint("Why OMC stopped it:", RED));
+        for reason in reasons {
+            let _ = writeln!(out, "      - {reason}");
+        }
     }
 
     // Grouped runtime capabilities, files comma-joined (no truncation).
     let runtime = grouped_runtime_capabilities(report);
     if !runtime.is_empty() {
+        let _ = writeln!(out, "    {}", dim("Evidence:"));
         let label_width = runtime.iter().map(|(l, _)| l.len()).max().unwrap_or(0);
         for (label, files) in &runtime {
             let _ = writeln!(out, "      {label:<label_width$}  {files}");
@@ -794,6 +796,9 @@ fn format_inspect_detail_block_compact(report: &LinkReport, root: &LinkReport) -
         }
     }
     if eval_sites > 0 {
+        if runtime.is_empty() {
+            let _ = writeln!(out, "    {}", dim("Evidence:"));
+        }
         let _ = writeln!(
             out,
             "      {} {} — {eval_sites} site{} in {}",
@@ -804,65 +809,178 @@ fn format_inspect_detail_block_compact(report: &LinkReport, root: &LinkReport) -
         );
     }
 
-    // A single grant line (trust), built from the real `omc add` grant tokens.
-    let flags: Vec<String> = needs.iter().map(|n| n.cli_flag.clone()).collect();
-    if !flags.is_empty() {
-        let _ = writeln!(
-            out,
-            "    {} omc trust {}:{}@{} {}",
-            dim("unblock:"),
-            locked.ecosystem,
-            locked.name,
-            locked.version,
-            flags.join(" ")
-        );
-    }
+    let _ = writeln!(out, "    {}", dim("Next:"));
+    let _ = writeln!(
+        out,
+        "      omc inspect {}:{}@{} -v   {}",
+        locked.ecosystem,
+        locked.name,
+        locked.version,
+        dim("# guided approval + policy preview")
+    );
 
     out
 }
 
-/// One short clause per distinct danger (deduped, order-preserving), e.g.
-/// "send env vars to the network; run unverifiable code; write files". Falls
-/// back to a generic clause if only unrecognized findings are present, so a
-/// blocked package never shows an empty reason.
-fn compact_block_reason(needs: &[GrantNeed], unknown: &[String]) -> String {
-    let mut clauses: Vec<String> = Vec::new();
+/// A few consequence-first bullets for the compact view. Repeated verifier
+/// findings are intentionally collapsed: users need the risk classes first, then
+/// `-v` for the exact policy preview.
+fn compact_block_reasons(needs: &[GrantNeed], unknown: &[String]) -> Vec<String> {
+    let mut reasons: Vec<String> = Vec::new();
+    let mut env_sinks: Vec<&'static str> = Vec::new();
+    let mut file_sinks: Vec<&'static str> = Vec::new();
+    let mut secret_sinks: Vec<&'static str> = Vec::new();
+    let mut data_sinks: Vec<&'static str> = Vec::new();
+    let mut writes_files = false;
+    let mut spawns_processes = false;
+    let mut spawns_lifecycle = false;
+    let mut dynamic_eval = false;
+    let mut sensitive_read = false;
+
     for need in needs.iter().filter(|n| n.dangerous) {
         let flag = need.cli_flag.as_str();
-        let clause: &str = if flag.contains("--allow-flow") {
-            if flag.contains("->network") {
-                if flag.contains("env:") {
-                    "send env vars to the network"
-                } else {
-                    "send file contents to the network"
-                }
-            } else if flag.contains("->dynamic_eval") {
-                "feed data to code it can't verify"
-            } else if flag.contains("->file") {
-                "copy file contents between files"
-            } else {
-                need.human.as_str()
+        if let Some((src, sink)) = grant_flow(flag) {
+            let sink = flow_sink_label(sink);
+            match flow_source_class(src) {
+                FlowSourceClass::Env => push_unique_str(&mut env_sinks, sink),
+                FlowSourceClass::File => push_unique_str(&mut file_sinks, sink),
+                FlowSourceClass::Secret => push_unique_str(&mut secret_sinks, sink),
+                FlowSourceClass::Data => push_unique_str(&mut data_sinks, sink),
             }
         } else if flag.contains("dynamic.eval") {
-            "run unverifiable code"
+            dynamic_eval = true;
         } else if flag.contains("fs.write") {
-            "write files"
+            writes_files = true;
         } else if flag.contains("proc") {
-            "spawn processes"
+            spawns_processes = true;
+            spawns_lifecycle |= flag.contains("npm-script:");
+        } else if flag.contains("fs.read") {
+            sensitive_read = true;
         } else {
-            need.human.as_str()
-        };
-        if !clauses.iter().any(|c| c == clause) {
-            clauses.push(clause.to_owned());
+            push_unique(&mut reasons, need.human.clone());
         }
     }
-    if clauses.is_empty() && !unknown.is_empty() {
-        clauses.push("violate the default policy".to_owned());
+
+    if writes_files {
+        push_unique(&mut reasons, "can write files".to_owned());
     }
-    clauses.join("; ")
+    if spawns_lifecycle {
+        push_unique(
+            &mut reasons,
+            "can run install-time scripts or spawn processes".to_owned(),
+        );
+    } else if spawns_processes {
+        push_unique(&mut reasons, "can spawn processes".to_owned());
+    }
+    if !env_sinks.is_empty() {
+        push_unique(
+            &mut reasons,
+            format!("can send environment values to {}", join_human(&env_sinks)),
+        );
+    }
+    if !file_sinks.is_empty() {
+        push_unique(
+            &mut reasons,
+            format!("can send file contents to {}", join_human(&file_sinks)),
+        );
+    }
+    if !secret_sinks.is_empty() {
+        push_unique(
+            &mut reasons,
+            format!("can send secrets to {}", join_human(&secret_sinks)),
+        );
+    }
+    if !data_sinks.is_empty() {
+        push_unique(
+            &mut reasons,
+            format!("can send sensitive data to {}", join_human(&data_sinks)),
+        );
+    }
+    if dynamic_eval {
+        push_unique(
+            &mut reasons,
+            "can run dynamically generated code".to_owned(),
+        );
+    }
+    if sensitive_read {
+        push_unique(&mut reasons, "can read sensitive files".to_owned());
+    }
+    if !unknown.is_empty() {
+        let suffix = if unknown.len() == 1 {
+            "1 unrecognized policy violation".to_owned()
+        } else {
+            format!("{} unrecognized policy violations", unknown.len())
+        };
+        push_unique(&mut reasons, format!("{suffix} (see -v)"));
+    }
+    if reasons.is_empty() {
+        reasons.push("violates the default policy".to_owned());
+    }
+    reasons
 }
 
-/// The headline-risk sentence: a single human sentence describing the most
+#[derive(Clone, Copy)]
+enum FlowSourceClass {
+    Env,
+    File,
+    Secret,
+    Data,
+}
+
+fn grant_flow(flag: &str) -> Option<(&str, &str)> {
+    flag.strip_prefix("--allow-flow ")?.split_once("->")
+}
+
+fn flow_source_class(src: &str) -> FlowSourceClass {
+    match src.split_once(':').map(|(kind, _)| kind) {
+        Some("env" | "env.read" | "env-read") => FlowSourceClass::Env,
+        Some("file" | "fs.read" | "fs-read") => FlowSourceClass::File,
+        Some("secret") => FlowSourceClass::Secret,
+        _ => FlowSourceClass::Data,
+    }
+}
+
+fn flow_sink_label(sink: &str) -> &'static str {
+    if matches!(sink, "eval" | "dynamic_eval" | "dynamic.eval") {
+        return "dynamic eval";
+    }
+    match sink.split_once(':').map(|(kind, _)| kind) {
+        Some("network" | "http") => "the network",
+        Some("process" | "proc" | "proc.spawn" | "proc-spawn") => "spawned processes",
+        Some("file" | "fs.write" | "fs-write") => "other files",
+        _ => "external sinks",
+    }
+}
+
+fn push_unique(items: &mut Vec<String>, item: String) {
+    if !items.iter().any(|existing| existing == &item) {
+        items.push(item);
+    }
+}
+
+fn push_unique_str(items: &mut Vec<&'static str>, item: &'static str) {
+    if !items.contains(&item) {
+        items.push(item);
+    }
+}
+
+fn join_human(items: &[&str]) -> String {
+    match items {
+        [] => String::new(),
+        [one] => (*one).to_owned(),
+        [first, second] => format!("{first} and {second}"),
+        _ => {
+            let mut parts = items
+                .iter()
+                .map(|item| (*item).to_owned())
+                .collect::<Vec<_>>();
+            let last = parts.pop().unwrap_or_default();
+            format!("{}, and {last}", parts.join(", "))
+        }
+    }
+}
+
+/// The top-risk sentence: a single human sentence describing the most
 /// alarming shape the root package exhibits (env→network exfiltration, then
 /// unverifiable code), borrowed from the chosen design. `None` when the root has
 /// nothing notable to lead with.
@@ -874,19 +992,19 @@ fn headline_risk(root: &LinkReport) -> Option<String> {
     let has_eval = has_kind(root, CapabilityKind::DynamicEval);
     if has_env_to_net && has_eval {
         return Some(format!(
-            "Headline risk: {} can send your environment variables to the network (the classic credential-exfiltration shape) and runs code OMC can't verify.",
+            "Top risk: {} can send your environment variables to the network (the classic credential-exfiltration shape) and runs code OMC can't verify.",
             root.locked.name
         ));
     }
     if has_env_to_net {
         return Some(format!(
-            "Headline risk: {} can send your environment variables to the network — the classic credential-exfiltration shape.",
+            "Top risk: {} can send your environment variables to the network — the classic credential-exfiltration shape.",
             root.locked.name
         ));
     }
     if has_eval {
         return Some(format!(
-            "Headline risk: {} runs dynamically generated code OMC could not statically verify.",
+            "Top risk: {} runs dynamically generated code OMC could not statically verify.",
             root.locked.name
         ));
     }
@@ -939,11 +1057,9 @@ fn tree_capability_summary(reports: &[LinkReport]) -> String {
     }
 }
 
-/// One expanded detail block for a blocked package: the relation header, the
-/// plain-language "Blocked because it wants to:" reasons (each with its raw
-/// token + risk callout), the grouped runtime capability rows, the ⚠
-/// unverifiable-code site list, and the exact run-once / trust grant lines built
-/// from the real `omc add` grant tokens.
+/// One expanded detail block for a blocked package: the relation header, policy
+/// violation table, runtime capability table, unverifiable-code site table,
+/// guided approval hint, and policy statement preview.
 fn format_inspect_detail_block(report: &LinkReport, root: &LinkReport) -> String {
     use std::fmt::Write as _;
     let mut out = String::new();
@@ -958,50 +1074,41 @@ fn format_inspect_detail_block(report: &LinkReport, root: &LinkReport) -> String
     };
     let _ = writeln!(
         out,
-        "  {} {} {}   {} {} {relation}",
+        "  {} Review {} {} {}",
         paint("✗", RED),
         bold(&locked.name),
         locked.version,
-        paint("blocked", RED),
-        dim("—")
+        dim(&format!("({relation})"))
     );
 
-    // Block reasons — every verifier finding mapped 1:1 to a human line, with
-    // the raw token preserved in parens and a risk callout below. Unrecognized
-    // findings still print as `! {raw}` so nothing silently vanishes.
     let (needs, unknown) = block_needs(&locked.verifier_findings);
     if !needs.is_empty() || !unknown.is_empty() {
-        let _ = writeln!(out, "    Blocked because it wants to:");
-        for need in &needs {
-            let marker = if need.dangerous {
-                paint("!", RED)
-            } else {
-                " ".to_owned()
-            };
-            let _ = writeln!(out, "      {marker} {}   ({})", need.human, dim(&need.raw));
-            if let Some(risk) = &need.risk {
-                let _ = writeln!(out, "        {} {}", dim("└"), dim(risk));
-            }
-        }
-        for raw in &unknown {
-            let _ = writeln!(out, "      {} {}", paint("!", RED), raw);
-        }
+        let _ = writeln!(out, "    Policy violations:");
+        write_table(
+            &mut out,
+            "      ",
+            &[
+                "#",
+                "type",
+                "source/capability",
+                "sink/target",
+                "risk",
+                "grant flag",
+            ],
+            &verbose_violation_rows(&needs, &unknown),
+        );
     }
 
-    // Runtime capabilities, grouped by kind, files comma-joined (no truncation,
-    // no "*" target dump). DynamicEval is rendered separately below as the ⚠
-    // callout, keeping one line per site with its distinctive evidence.
     let runtime = grouped_runtime_capabilities(report);
     if !runtime.is_empty() {
-        let _ = writeln!(out, "    Can do at runtime:");
-        let label_width = runtime.iter().map(|(l, _)| l.len()).max().unwrap_or(0);
-        for (label, files) in &runtime {
-            let _ = writeln!(out, "      {label:<label_width$}  {files}");
-        }
+        let _ = writeln!(out, "    Runtime capabilities:");
+        let rows = runtime
+            .into_iter()
+            .map(|(capability, files)| vec![capability.to_owned(), files])
+            .collect::<Vec<_>>();
+        write_table(&mut out, "      ", &["capability", "files"], &rows);
     }
 
-    // ⚠ unverifiable-code callout: one line per DynamicEval site, source +
-    // verbatim distinctive evidence. Never collapsed.
     let eval_sites: Vec<&omc_registry::CapabilityFinding> = report
         .artifact
         .capabilities
@@ -1009,48 +1116,184 @@ fn format_inspect_detail_block(report: &LinkReport, root: &LinkReport) -> String
         .filter(|f| f.kind == CapabilityKind::DynamicEval)
         .collect();
     if !eval_sites.is_empty() {
-        let _ = writeln!(
-            out,
-            "    {} {} — {} site{} OMC could not statically verify:",
-            paint("⚠", YELLOW),
-            paint("runs unverifiable code", RED),
-            eval_sites.len(),
-            plural(eval_sites.len())
-        );
-        let src_width = eval_sites.iter().map(|f| f.source.len()).max().unwrap_or(0);
-        for site in &eval_sites {
-            let _ = writeln!(out, "      {:<src_width$}   {}", site.source, site.evidence);
-        }
+        let _ = writeln!(out, "    Unverifiable code:");
+        let rows = eval_sites
+            .iter()
+            .map(|site| vec![site.source.clone(), site.evidence.clone()])
+            .collect::<Vec<_>>();
+        write_table(&mut out, "      ", &["source", "evidence"], &rows);
     }
 
-    // Grant hints, built from the REAL `omc add` grant tokens so they match what
-    // `omc add` would emit exactly. The flags carry the same `--allow` /
-    // `--allow-flow` shapes used by build_block_suggestion.
-    let flags: Vec<String> = needs.iter().map(|n| n.cli_flag.clone()).collect();
-    if !flags.is_empty() {
-        let _ = writeln!(out, "    To allow it for THIS run only:");
-        let _ = writeln!(
-            out,
-            "      omc add {}:{}@{} \\",
-            locked.ecosystem, locked.name, locked.version
+    if !needs.is_empty() {
+        let _ = writeln!(out, "    Guided approval:");
+        write_table(
+            &mut out,
+            "      ",
+            &["action", "command / choice", "effect"],
+            &guided_approval_rows(locked),
         );
-        let _ = writeln!(out, "        {}", flags.join(" \\\n        "));
-        let _ = writeln!(
-            out,
-            "    To trust {} {} everywhere:",
-            locked.name, locked.version
-        );
-        let _ = writeln!(
-            out,
-            "      omc trust {}:{}@{} {}",
-            locked.ecosystem,
-            locked.name,
-            locked.version,
-            flags.join(" ")
+
+        let _ = writeln!(out, "    Policy preview:");
+        write_table(
+            &mut out,
+            "      ",
+            &["#", "statement"],
+            &policy_statement_rows(&needs),
         );
     }
 
     out
+}
+
+fn verbose_violation_rows(needs: &[GrantNeed], unknown: &[String]) -> Vec<Vec<String>> {
+    let mut rows = Vec::new();
+    for (idx, need) in needs.iter().enumerate() {
+        let (kind, source, target) = verbose_violation_shape(need);
+        rows.push(vec![
+            (idx + 1).to_string(),
+            kind,
+            source,
+            target,
+            concise_risk(need),
+            need.cli_flag.clone(),
+        ]);
+    }
+    for raw in unknown {
+        rows.push(vec![
+            (rows.len() + 1).to_string(),
+            "unknown".to_owned(),
+            raw.clone(),
+            "-".to_owned(),
+            "see token".to_owned(),
+            "-".to_owned(),
+        ]);
+    }
+    rows
+}
+
+fn verbose_violation_shape(need: &GrantNeed) -> (String, String, String) {
+    if let Some((src, sink)) = grant_flow(&need.cli_flag) {
+        return ("flow".to_owned(), src.to_owned(), sink.to_owned());
+    }
+    if let Some(token) = need.cli_flag.strip_prefix("--allow ") {
+        if let Some((kind, target)) = token.split_once(':') {
+            return ("capability".to_owned(), kind.to_owned(), target.to_owned());
+        }
+        return ("capability".to_owned(), token.to_owned(), "-".to_owned());
+    }
+    ("policy".to_owned(), need.raw.clone(), "-".to_owned())
+}
+
+fn concise_risk(need: &GrantNeed) -> String {
+    let Some(risk) = &need.risk else {
+        return if need.dangerous {
+            "review".to_owned()
+        } else {
+            "low".to_owned()
+        };
+    };
+    if risk.contains("exfiltrate") {
+        "exfil/data flow".to_owned()
+    } else if risk.contains("install-time") {
+        "code execution".to_owned()
+    } else if risk.contains("persistent") {
+        "persistent write".to_owned()
+    } else if risk.contains("static analysis") {
+        "unverifiable code".to_owned()
+    } else if risk.contains("sensitive file") {
+        "sensitive read".to_owned()
+    } else {
+        risk.clone()
+    }
+}
+
+fn guided_approval_rows(locked: &LockedPackage) -> Vec<Vec<String>> {
+    let spec = format!("{}:{}@{}", locked.ecosystem, locked.name, locked.version);
+    vec![
+        vec![
+            "review".to_owned(),
+            format!("omc add {spec}"),
+            "opens [y] once / [a] always / [N] deny prompt".to_owned(),
+        ],
+        vec![
+            "once".to_owned(),
+            "[y]".to_owned(),
+            "applies the required grants only to this install run".to_owned(),
+        ],
+        vec![
+            "always".to_owned(),
+            "[a]".to_owned(),
+            format!(
+                "writes version-pinned policy in ~/.omc/policy.d/{}.omc.policy",
+                locked.name
+            ),
+        ],
+        vec![
+            "deny".to_owned(),
+            "[N]".to_owned(),
+            "restores the pre-add state; nothing is installed".to_owned(),
+        ],
+    ]
+}
+
+fn policy_statement_rows(needs: &[GrantNeed]) -> Vec<Vec<String>> {
+    let mut rows = Vec::new();
+    for need in needs {
+        if rows
+            .iter()
+            .any(|row: &Vec<String>| row.get(1) == Some(&need.policy_stmt))
+        {
+            continue;
+        }
+        rows.push(vec![(rows.len() + 1).to_string(), need.policy_stmt.clone()]);
+    }
+    rows
+}
+
+fn write_table(out: &mut String, indent: &str, headers: &[&str], rows: &[Vec<String>]) {
+    use std::fmt::Write as _;
+    if headers.is_empty() {
+        return;
+    }
+    let mut widths = headers
+        .iter()
+        .map(|header| header.chars().count())
+        .collect::<Vec<_>>();
+    for row in rows {
+        for (idx, cell) in row.iter().enumerate().take(widths.len()) {
+            widths[idx] = widths[idx].max(cell.chars().count());
+        }
+    }
+
+    write_table_row(
+        out,
+        indent,
+        &headers.iter().map(|h| (*h).to_owned()).collect::<Vec<_>>(),
+        &widths,
+    );
+    let separator = widths
+        .iter()
+        .map(|width| "-".repeat(*width))
+        .collect::<Vec<_>>();
+    write_table_row(out, indent, &separator, &widths);
+    for row in rows {
+        write_table_row(out, indent, row, &widths);
+    }
+    let _ = writeln!(out);
+}
+
+fn write_table_row(out: &mut String, indent: &str, cells: &[String], widths: &[usize]) {
+    use std::fmt::Write as _;
+    let _ = write!(out, "{indent}");
+    for (idx, width) in widths.iter().enumerate() {
+        let cell = cells.get(idx).map(String::as_str).unwrap_or("");
+        let _ = write!(out, "{cell}");
+        if idx + 1 < widths.len() {
+            let padding = width.saturating_sub(cell.chars().count());
+            let _ = write!(out, "{}  ", " ".repeat(padding));
+        }
+    }
+    let _ = writeln!(out);
 }
 
 /// Group a report's non-eval runtime capability findings by plain-language label,

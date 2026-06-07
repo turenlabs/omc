@@ -20,12 +20,12 @@ pub(crate) fn profile_archive(package: &ResolvedPackage, bytes: &[u8]) -> Result
     let mut profiler = SourceProfiler::default();
 
     for (name, script) in &package.npm_scripts {
-        if is_npm_lifecycle_script(name) {
+        if is_npm_install_lifecycle_script(package, name) {
             profiler.add(
                 CapabilityKind::ProcSpawn,
                 format!("npm-script:{name}"),
                 "package.json",
-                format!("lifecycle script `{name}` = `{script}`"),
+                format!("install lifecycle script `{name}` = `{script}`"),
             );
         }
     }
@@ -2199,17 +2199,16 @@ fn is_identifier_char(ch: char) -> bool {
     ch.is_ascii_alphanumeric() || ch == '_' || ch == '$'
 }
 
-fn is_npm_lifecycle_script(name: &str) -> bool {
-    matches!(
-        name,
-        "preinstall"
-            | "install"
-            | "postinstall"
-            | "prepare"
-            | "prepublish"
-            | "prepack"
-            | "postpack"
-    )
+fn is_npm_install_lifecycle_script(package: &ResolvedPackage, name: &str) -> bool {
+    matches!(name, "preinstall" | "install" | "postinstall")
+        || (name == "prepare" && npm_source_runs_prepare_before_install(package))
+}
+
+fn npm_source_runs_prepare_before_install(package: &ResolvedPackage) -> bool {
+    package.ecosystem == Ecosystem::Npm
+        && package.npm_direct_tarball
+        && package.source_url.contains("github.com/")
+        && package.source_url.contains("/archive/")
 }
 
 fn is_source_like(path: &str) -> bool {

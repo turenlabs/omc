@@ -430,14 +430,13 @@ min-release-age = "7d"
 The `omc` CLI is the first working slice of a PyPI/npm replacement:
 
 ```bash
-cargo install --path crates/omc-cli --bins
+cargo install --path crates/omc-cli
 
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo init --name demo
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo policy allow http:api.example.com env:API_TOKEN
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo add --npm is-odd@3.0.1 left-pad@1.3.0
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo add --npm is-number@7.0.0 --dev
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo node -e "console.log(require('is-odd')(3))"
-cargo run -p omc-cli --bin node -- --omc-project-dir /tmp/omc-demo -e "console.log(require('is-odd')(3))"
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo script test
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo add pypi:requests==2.32.3 --allow-all-host
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo python -c "import requests; print(requests.__version__)"
@@ -545,8 +544,8 @@ cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm view left-pad 
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm view left-pad time.modified --json
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm view left-pad 'versions[0]' --json
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm repo left-pad --browser=false
-cargo run -p omc-cli --bin npx -- --omc-project-dir /tmp/omc-demo eslint -- .
-cargo run -p omc-cli --bin npx -- --omc-project-dir /tmp/omc-demo --allow-all-host semver@7.6.3 1.2.3
+cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm exec eslint -- .
+cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm exec --allow-all-host semver@7.6.3 1.2.3
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm root
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo npm bin
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip install -r requirements.txt -c constraints.txt
@@ -579,8 +578,8 @@ cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip wheel -r requi
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip wheel -e ../local-package -w wheelhouse --no-deps
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip wheel --no-binary=:all: ./dist/local_pkg-1.0.0.tar.gz -w wheelhouse
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo python -m pip install -e ../local-package
-cargo run -p omc-cli --bin pip3 -- --omc-project-dir /tmp/omc-demo freeze
-cargo run -p omc-cli --bin python3 -- --omc-project-dir /tmp/omc-demo -m pip freeze
+cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip freeze
+cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo python -m pip freeze
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip freeze
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip freeze -r requirements.txt
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo pip freeze -qr requirements.txt
@@ -613,8 +612,8 @@ cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo twine upload --rep
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo twine upload --attestations dist/*
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo twine upload --sign --identity release@example.com dist/*
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo twine upload --repository-url https://private.example/legacy/ --cert certs/ca.pem --client-cert certs/client.pem -u __token__ -p "$PYPI_API_TOKEN" dist/*
-cargo run -p omc-cli --bin twine -- --omc-project-dir /tmp/omc-demo upload --repository-url https://test.pypi.org/legacy/ -u __token__ -p "$TEST_PYPI_API_TOKEN" dist/*
-cargo run -p omc-cli --bin python3 -- --omc-project-dir /tmp/omc-demo -m twine upload dist/*
+cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo twine upload --repository-url https://test.pypi.org/legacy/ -u __token__ -p "$TEST_PYPI_API_TOKEN" dist/*
+cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo python -m twine upload dist/*
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo list
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo list --json
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo audit
@@ -622,13 +621,16 @@ cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo audit --json
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo remove --npm is-odd left-pad
 ```
 
-Installing with `--bins` also provides `node`, `npm`, `npx`, `pip`, `pip3`,
-`python`, `python3`, and `twine` compatibility binaries. They dispatch directly into OMC
-when they are first on `PATH`, so existing scripts can call standard commands
-such as `node`, `npm install`, `npm test`, `npx eslint`, `pip install`,
-`pip3 install`, `pip freeze`, `python -m pip`, `python3 -m pip`,
-`twine check`, `twine upload`, and `python -m twine` without spelling `omc node`, `omc npm`,
-`omc pip`, `omc python`, or `omc twine`. They default to the
+Source installs provide one `omc` binary. Homebrew and release tarballs also
+ship opt-in symlink shims named `node`, `npm`, `npx`, `pip`, `pip3`, `python`,
+`python3`, and `twine`; for source builds, create those names as symlinks to
+`omc` if you want the same direct-command workflow. They dispatch directly into
+OMC when they are first on `PATH`, so existing scripts can call standard
+commands such as `node`, `npm install`, `npm test`, `npx eslint`,
+`pip install`, `pip3 install`, `pip freeze`, `python -m pip`,
+`python3 -m pip`, `twine check`, `twine upload`, and `python -m twine`
+without spelling `omc node`, `omc npm`, `omc pip`, `omc python`, or
+`omc twine`. They default to the
 nearest ancestor with an OMC, npm, or Python project marker; use
 `OMC_PROJECT_DIR=/path/to/project`, `--project-dir PATH`, or
 `--omc-project-dir PATH` for an explicit project root. The Python shims run a
@@ -1137,14 +1139,14 @@ Supported now:
   `pip install ./archive.whl`, `./archive.tar.gz`, and HTTPS archive URL
   installs; editable git/VCS installs such as `pip install -e git+...#egg=name`;
   `omc python -m pip ...` dispatches to the same compatibility path;
-  direct `pip` / `pip3` compatibility binaries; and direct `python` / `python3`
-  compatibility binaries for isolated interpreter use and `python -m pip` flows
+  direct `pip` / `pip3` compatibility shims; and direct `python` / `python3`
+  compatibility shims for isolated interpreter use and `python -m pip` flows
 - isolated `omc python` execution that uses OMC project site-packages and
   OMC-managed Python user site-packages without ambient user/global Python
   site-packages or startup/hook environment variables
 - isolated Node execution wrappers that remove ambient `NODE_PATH` module
   resolution and `NODE_OPTIONS` preloads outside the project install tree,
-  including a direct `node` compatibility binary
+  including a direct `node` compatibility shim
 - runtime source profiling into capability findings
 - static env-read plus URL-host lowering into OMC env-to-network flow checks
 - explicit CLI grants for accepted host authority

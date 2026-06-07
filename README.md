@@ -34,8 +34,8 @@ omc add --npm is-odd@3.0.1
 omc node -e "console.log(require('is-odd')(3))"
 ```
 
-The `omc node` / `omc python` shims (and the drop-in `node`/`npm`/`pip`/`python`
-binaries, opt-in on `PATH`) run your **real** interpreter with an isolated import
+The `omc node` / `omc python` commands (and the drop-in `node`/`npm`/`pip`/`python`
+shim names, opt-in on `PATH`) run your **real** interpreter with an isolated import
 path. So `import requests` and `requests.get(...)` behave exactly like normal —
 **OMC's enforcement happens at install time** (resolution, source profiling,
 capability/flow/age verdicts, no install scripts), not as a runtime sandbox
@@ -96,8 +96,10 @@ min-release-age = "7d"
 
 ### Trusting a package everywhere (`~/.omc/policy.d/` + `omc policy trust`)
 
-When a package is blocked, the message prints the exact grant. To persist it as a
-**per-package, version-pinned** trust that applies in every project, run:
+When a package is blocked, `omc add <spec>` opens a guided prompt:
+`[y] once`, `[a] always`, or `[N] deny`. Choosing always writes a
+**per-package, version-pinned** trust that applies in every project. The manual
+equivalent is:
 
 ```bash
 omc policy trust pypi:requests@2.32.5 --allow-flow 'env:*->network:*' --allow dynamic.eval

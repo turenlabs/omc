@@ -150,17 +150,26 @@ pub(crate) fn load_global_policy_documents() -> Result<Vec<omc_policy::PolicyDoc
 /// lifecycle scripts), `DynamicEval` (eval / unresolved obfuscation), or
 /// `FsWrite` (persistence/backdoor) — those stay deny-by-default. Reads of
 /// SENSITIVE files remain denied even though `FsRead("*")` is granted, because
-/// the sensitive-read guard ignores wildcard grants. Data FLOWS are unaffected
-/// (no flow is granted here), so a package that combines a secret read with a
+/// the sensitive-read guard ignores wildcard grants. Data FLOWS are still
+/// denied by default except for named, non-secret runtime configuration flows
+/// such as `NO_PROXY -> network:*`; a package that combines a secret read with a
 /// sink still needs an explicit flow grant.
 pub(crate) fn allow_benign_runtime_capabilities(policy: Policy) -> Policy {
-    policy
+    let policy = policy
         .allow_capability(Capability::EnvRead("*".to_owned()))
         .allow_capability(Capability::FsRead("*".to_owned()))
         .allow_capability(Capability::HttpHost("*".to_owned()))
         .allow_capability(Capability::DnsHost("*".to_owned()))
         .allow_capability(Capability::TimeNow)
-        .allow_capability(Capability::RandomBytes)
+        .allow_capability(Capability::RandomBytes);
+    DEFAULT_PUBLIC_NETWORK_ENV_FLOWS
+        .iter()
+        .fold(policy, |policy, name| {
+            policy.allow_flow(
+                LabelMatcher::Env((*name).to_owned()),
+                Sink::Network("*".to_owned()),
+            )
+        })
 }
 
 pub fn parse_capability_grant(value: &str) -> Result<Capability> {

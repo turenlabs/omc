@@ -5,9 +5,10 @@
 #
 # Layout inside the tarball (omc-<version>-<target>/):
 #   omc            the package-manager binary (put this on PATH)
-#   shims/         drop-in node/npm/npx/pip/pip3/python/python3/twine that route
-#                  through OMC; OPT-IN — adding them to PATH shadows the system
-#                  tools, so they ship in a subdirectory rather than next to omc.
+#   shims/         symlinks named node/npm/npx/pip/pip3/python/python3/twine
+#                  that route through OMC; OPT-IN — adding them to PATH shadows
+#                  the system tools, so they ship in a subdirectory rather than
+#                  next to omc.
 #   README.md, LICENSE (when present)
 set -euo pipefail
 
@@ -33,7 +34,7 @@ mkdir -p "${OUT}/shims"
 
 install -m 0755 "${BIN_DIR}/omc" "${OUT}/omc"
 for shim in "${SHIMS[@]}"; do
-  install -m 0755 "${BIN_DIR}/${shim}" "${OUT}/shims/${shim}"
+  ln -s ../omc "${OUT}/shims/${shim}"
 done
 
 for extra in README.md LICENSE LICENSE.txt LICENSE-APACHE; do
@@ -46,7 +47,7 @@ OMC ${VERSION} (${TARGET})
 Put 'omc' on your PATH:
   install -m 0755 omc /usr/local/bin/omc
 
-The shims/ directory holds drop-in node/npm/npx/pip/pip3/python/python3/twine
+The shims/ directory holds symlinks named node/npm/npx/pip/pip3/python/python3/twine
 that route through OMC's deny-by-default runtime. They are OPT-IN because adding
 them to PATH shadows the system tools:
   export PATH="\$PWD/shims:\$PATH"

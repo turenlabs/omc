@@ -1,5 +1,4 @@
 use super::*;
-use crate::*;
 
 #[test]
 fn npm_remove_package_lock_only_does_not_touch_install_state() {

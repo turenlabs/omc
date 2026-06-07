@@ -321,14 +321,18 @@ fn inspect_report_keeps_every_capability_file_and_block_reason() {
             finding.source
         );
     }
-    // ...plus a one-line plain reason and the single `omc trust` grant line.
+    // ...plus grouped review bullets and a pointer to the guided approval view.
     assert!(
-        compact.contains("blocked:"),
-        "compact shows a one-line reason: {compact}"
+        compact.contains("Why OMC stopped it:"),
+        "compact shows review bullets: {compact}"
     );
     assert!(
-        compact.contains("omc trust npm:snoop@1.2.3"),
-        "compact shows the trust grant line: {compact}"
+        compact.contains("omc inspect npm:snoop@1.2.3 -v"),
+        "compact points to guided approval details: {compact}"
+    );
+    assert!(
+        !compact.contains("omc trust npm:snoop@1.2.3"),
+        "compact hides the trust grant dump: {compact}"
     );
     // Compact stays terse: no per-finding callout block, no run-once dump.
     assert!(
@@ -340,18 +344,31 @@ fn inspect_report_keeps_every_capability_file_and_block_reason() {
         "compact omits the run-once grant dump: {compact}"
     );
 
-    // --verbose restores the full per-finding reasons + run-once grant line.
+    // --verbose restores the full per-finding data as tables plus the guided
+    // approval choices and the policy statements they would persist.
     assert!(
-        full.contains("Blocked because it wants to:"),
-        "verbose shows per-finding reasons: {full}"
+        full.contains("Policy violations:") && full.contains("source/capability"),
+        "verbose shows the policy violation table: {full}"
+    );
+    assert!(
+        full.contains("Guided approval:") && full.contains("command / choice"),
+        "verbose shows the guided approval table: {full}"
     );
     assert!(
         full.contains("omc add npm:snoop@1.2.3"),
-        "verbose run-once grant line present: {full}"
+        "verbose points to the guided add flow: {full}"
     );
     assert!(
-        full.contains("omc trust npm:snoop@1.2.3"),
-        "verbose trust grant line present: {full}"
+        full.contains("[y]") && full.contains("[a]") && full.contains("[N]"),
+        "verbose shows the once/always/deny choices: {full}"
+    );
+    assert!(
+        full.contains("Policy preview:") && full.contains("statement"),
+        "verbose shows the policy preview table: {full}"
+    );
+    assert!(
+        !full.contains("omc trust npm:snoop@1.2.3"),
+        "verbose omits the old trust command dump: {full}"
     );
 }
 
@@ -361,12 +378,12 @@ fn inspect_report_renders_full_tree_with_grouped_caps_and_grants() {
     let r = format_inspect_report_with(&reports, false); // compact default
     let v = format_inspect_report_with(&reports, true); // --verbose
 
-    // Banner + dep count + headline risk (env->network + eval on the root).
+    // Banner + dep count + top risk (env->network + eval on the root).
     assert!(r.contains("pypi:requests@2.32.5"), "banner: {r}");
     assert!(r.contains("+4 deps"), "dep count in banner: {r}");
     assert!(
-        r.contains("Headline risk:") && r.contains("environment variables to the network"),
-        "headline risk sentence present: {r}"
+        r.contains("Top risk:") && r.contains("environment variables to the network"),
+        "top risk sentence present: {r}"
     );
 
     // Blocked count lives in the headline (no separate verdict row), and the
@@ -400,8 +417,8 @@ fn inspect_report_renders_full_tree_with_grouped_caps_and_grants() {
     );
 
     // Relation headers reconstruct root -> deps.
-    assert!(r.contains("— root"), "root relation header: {r}");
-    assert!(r.contains("— dep of requests"), "dep relation header: {r}");
+    assert!(r.contains("(root)"), "root relation header: {r}");
+    assert!(r.contains("(dep of requests)"), "dep relation header: {r}");
 
     // COMPACT RETAINS every capability source file (grouped/comma-joined, or in
     // the unverifiable-code site line) — no file is lost in the default view.
@@ -424,20 +441,27 @@ fn inspect_report_renders_full_tree_with_grouped_caps_and_grants() {
         );
     }
 
-    // Compact one-line reasons cover the notable dangers, plus a trust grant per
-    // blocked package; the package_init[N] index is never surfaced.
+    // Compact grouped reasons cover the notable dangers, and policy details are
+    // only pointed to via -v; the package_init[N] index is never surfaced.
     assert!(
-        r.contains("send env vars to the network"),
+        r.contains("can send environment values to the network"),
         "compact reason env->network: {r}"
     );
-    assert!(r.contains("write files"), "compact reason fs.write: {r}");
     assert!(
-        r.contains("omc trust pypi:requests@2.32.5"),
-        "compact trust grant (requests): {r}"
+        r.contains("can write files"),
+        "compact reason fs.write: {r}"
     );
     assert!(
-        r.contains("omc trust pypi:charset-normalizer@3.4.7"),
-        "compact trust grant (charset): {r}"
+        r.contains("omc inspect pypi:requests@2.32.5 -v"),
+        "compact guided approval pointer (requests): {r}"
+    );
+    assert!(
+        r.contains("omc inspect pypi:charset-normalizer@3.4.7 -v"),
+        "compact guided approval pointer (charset): {r}"
+    );
+    assert!(
+        !r.contains("omc trust pypi:requests@2.32.5"),
+        "compact hides trust grant dump: {r}"
     );
     assert!(
         !r.contains("package_init["),
@@ -453,43 +477,99 @@ fn inspect_report_renders_full_tree_with_grouped_caps_and_grants() {
         "compact omits run-once grant dump: {r}"
     );
 
-    // --verbose restores eval evidence verbatim, full human reasons, raw tokens,
-    // and the run-once grant lines in real `omc add` syntax.
+    // --verbose restores eval evidence verbatim, full violation rows, guided
+    // approval, and the policy DSL preview.
     assert!(
         v.contains("indirect `require` via alias — cannot verify required module"),
         "verbose eval evidence retained: {v}"
     );
     assert!(
-        v.contains("write arbitrary files"),
-        "verbose charset fs.write reason: {v}"
+        v.contains("fs.write") && v.contains("persistent write"),
+        "verbose charset fs.write row: {v}"
     );
     assert!(
-        v.contains("send files it reads to the network"),
-        "verbose urllib3 file->network reason: {v}"
+        v.contains("file:*") && v.contains("network:*"),
+        "verbose urllib3 file->network row: {v}"
     );
     assert!(
-        v.contains("env:* may not flow to network:*"),
-        "verbose raw flow token: {v}"
+        v.contains("source/capability") && v.contains("sink/target"),
+        "verbose table columns: {v}"
     );
     assert!(
-        v.contains("Blocked because it wants to:"),
-        "verbose per-finding callouts: {v}"
+        v.contains("Policy violations:"),
+        "verbose per-finding table: {v}"
     );
     assert!(
         v.contains("omc add pypi:requests@2.32.5"),
-        "verbose run-once grant (requests): {v}"
+        "verbose guided add pointer (requests): {v}"
     );
     assert!(
         v.contains("--allow-flow env:*->network:*"),
-        "flow grant token in real syntax: {v}"
+        "flow grant token remains auditable in the violation table: {v}"
     );
     assert!(
         v.contains("--allow dynamic.eval"),
-        "capability grant token in real syntax: {v}"
+        "capability grant token remains auditable in the violation table: {v}"
     );
     assert!(
         v.contains("--allow fs.write"),
-        "charset fs.write grant token: {v}"
+        "charset fs.write grant token remains auditable: {v}"
+    );
+    assert!(
+        v.contains("Policy preview:") && v.contains("flow env \"*\" -> net \"*\""),
+        "policy preview contains the flow DSL: {v}"
+    );
+    assert!(
+        v.contains("allow eval") && v.contains("allow write \"*\""),
+        "policy preview contains capability DSL: {v}"
+    );
+    assert!(
+        !v.contains("omc trust pypi:requests@2.32.5"),
+        "verbose omits the old trust command dump: {v}"
+    );
+}
+
+#[test]
+fn inspect_report_marks_tree_blocked_when_dependency_blocks() {
+    let root = link_report(
+        Ecosystem::Npm,
+        "client",
+        "1.0.0",
+        Verdict::Accepted,
+        vec!["npm:helper@1.0.0".to_owned()],
+        vec![cap(CapabilityKind::HttpRequest, "index.js", "fetch")],
+        Vec::new(),
+    );
+    let dep = link_report(
+        Ecosystem::Npm,
+        "helper",
+        "1.0.0",
+        Verdict::Blocked,
+        Vec::new(),
+        vec![cap(CapabilityKind::FsWrite, "postinstall.js", "writeFile")],
+        vec!["package_init[0]: capability fs.write:* not granted".to_owned()],
+    );
+    let rendered = format_inspect_report_with(&[root, dep], false);
+
+    assert!(
+        rendered.contains("✗ npm:client@1.0.0  BLOCKED"),
+        "banner must reflect the whole install tree: {rendered}"
+    );
+    assert!(
+        rendered.contains("1 of 2 packages is blocked"),
+        "blocked dependency count present: {rendered}"
+    );
+    assert!(
+        rendered.contains("client 1.0.0") && rendered.contains("✓ accepted"),
+        "root row keeps its package-level accepted verdict: {rendered}"
+    );
+    assert!(
+        rendered.contains("helper 1.0.0") && rendered.contains("✗ blocked"),
+        "dependency row keeps its package-level blocked verdict: {rendered}"
+    );
+    assert!(
+        !rendered.contains("npm:client@1.0.0  OK"),
+        "blocked tree must not be labeled OK: {rendered}"
     );
 }
 

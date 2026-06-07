@@ -1,5 +1,4 @@
 use super::*;
-use crate::*;
 
 #[test]
 fn parses_twine_upload_compat_flags() {

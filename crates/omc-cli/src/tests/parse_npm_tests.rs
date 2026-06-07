@@ -1,5 +1,4 @@
 use super::*;
-use crate::*;
 
 #[test]
 fn parses_npm_install_compat_flags() {
