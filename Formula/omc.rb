@@ -1,43 +1,63 @@
 # Homebrew formula for OMC.
 #
-# Install (public tap):
+# Install (public tap) — downloads the prebuilt binary, no compile:
 #   brew install turenlabs/tap/omc
-# or build the latest main:
+# Build the latest main from source instead:
 #   brew install --HEAD turenlabs/tap/omc
 #
-# The release workflow keeps `url`/`sha256`/`version` below in sync with each
-# tagged release (see scripts/update-homebrew-formula.sh). The in-repo values
-# are a template: they are regenerated when the formula is published to the tap.
+# The default install pours the prebuilt `omc` from the GitHub Release for your
+# platform (the CI release workflow builds it). The release workflow regenerates
+# the per-platform `url`/`sha256` and `version` below for each tag (see
+# scripts/update-homebrew-formula.sh).
 class Omc < Formula
   desc "Deny-by-default npm/PyPI replacement that compiles packages to verified bytecode"
   homepage "https://github.com/turenlabs/omc"
   license "Apache-2.0"
-  head "https://github.com/turenlabs/omc.git", branch: "main"
-
-  url "https://github.com/turenlabs/omc/archive/refs/tags/v0.1.1.tar.gz"
-  sha256 "894083025ac3fe9a9f838b225c10cb3f510fe11712f9806d2a23f0f908361dae"
   version "0.1.1"
 
-  depends_on "rust" => :build
+  on_macos do
+    on_arm do
+      url "https://github.com/turenlabs/omc/releases/download/v0.1.1/omc-0.1.1-aarch64-apple-darwin.tar.gz"
+      sha256 "bca613efc7f71540be102ee959cd7fb78af53fbe21e80c6112b18f37f750d6ff"
+    end
+    on_intel do
+      url "https://github.com/turenlabs/omc/releases/download/v0.1.1/omc-0.1.1-x86_64-apple-darwin.tar.gz"
+      sha256 "0f6b4d1bf810aa12494698bd4e73ea6cfeda8ae7d97e865c5739b78c46172e86"
+    end
+  end
+
+  on_linux do
+    on_intel do
+      url "https://github.com/turenlabs/omc/releases/download/v0.1.1/omc-0.1.1-x86_64-unknown-linux-gnu.tar.gz"
+      sha256 "5ff6ae900038f10de37c88b4acf7b88b60112ef2045eba22a838e31042e05c2e"
+    end
+  end
+
+  # `brew install --HEAD` builds the latest main from source instead of pouring
+  # a release binary; only then is a Rust toolchain needed.
+  head do
+    url "https://github.com/turenlabs/omc.git", branch: "main"
+    depends_on "rust" => :build
+  end
 
   def install
-    system "cargo", "build", "--release", "--locked", "--package", "omc-cli"
-
-    # `omc` is the safe default that lands on PATH.
-    bin.install "target/release/omc"
+    if build.head?
+      system "cargo", "build", "--release", "--locked", "--package", "omc-cli"
+      bin.install "target/release/omc"
+      # Recommended global policy ships in the source tree (HEAD only).
+      (share/"omc").install "examples/omc.global.toml"
+    else
+      # Prebuilt release tarball: `omc` sits at the extracted root next to shims/.
+      bin.install "omc"
+    end
 
     # The drop-in node/npm/npx/pip/pip3/python/python3/twine shims are symlinks
-    # to the single OMC binary. Installing them onto PATH would shadow the
-    # system tools, so they ship under libexec and are enabled opt-in (see
-    # caveats).
+    # to the single OMC binary. Installing them onto PATH would shadow the system
+    # tools, so they ship under libexec and are enabled opt-in (see caveats).
     (libexec/"shims").mkpath
     %w[npm npx node pip pip3 python python3 twine].each do |shim|
       (libexec/"shims"/shim).make_symlink bin/"omc"
     end
-
-    # Recommended global policy (supply-chain freshness floor + deny-by-default).
-    # Copy to ~/.omc/omc.toml to apply it under every project. See caveats.
-    (share/"omc").install "examples/omc.global.toml"
   end
 
   def caveats
@@ -55,14 +75,9 @@ class Omc < Formula
       credentials) is denied by default even under broad grants. Grant an exact
       `fs.read:<path>` to allow one file, or pass `--allow-sensitive` to override.
 
-      A recommended global policy (supply-chain freshness floor + deny-by-default)
-      is installed at:
-
-        #{opt_share}/omc/omc.global.toml
-
-      Apply it under every project by copying it into place:
-
-        mkdir -p ~/.omc && cp #{opt_share}/omc/omc.global.toml ~/.omc/omc.toml
+      A supply-chain freshness floor (`min-release-age`) of 14 days is on by
+      default. A recommended global policy lives at examples/omc.global.toml in
+      the repo; copy it to ~/.omc/omc.toml to tune org-wide defaults.
     EOS
   end
 

@@ -36,12 +36,14 @@ a `tag` input, without pushing a tag.
 
 ## Homebrew
 
-`Formula/omc.rb` is the in-repo template; the published formula lives in the
+`Formula/omc.rb` is a **binary** formula — `brew install` downloads the prebuilt
+`omc` release tarball for the user's platform and installs it (no compile, no
+Rust toolchain). It's the in-repo template; the published formula lives in the
 public tap `turenlabs/homebrew-tap`. Users install via:
 
 ```bash
-brew install turenlabs/tap/omc
-# or track main:
+brew install turenlabs/tap/omc          # prebuilt binary, installs in seconds
+# or build the latest main from source (needs Rust):
 brew install --HEAD turenlabs/tap/omc
 ```
 
@@ -61,9 +63,10 @@ To have releases push the updated formula to a separate
 - Repository **variable** `HOMEBREW_TAP_REPO` = `turenlabs/homebrew-tap`
 - Repository **secret** `HOMEBREW_TAP_TOKEN` = a PAT with write access to that tap
 
-The `update-homebrew` job computes the tagged source tarball's sha256, rewrites
-`Formula/omc.rb`'s `url`/`sha256`/`version`, and commits it to the tap. Without
-those settings the job logs and exits 0, so releases never fail on a missing tap.
+The `update-homebrew` job fetches the release `SHA256SUMS`, rewrites each
+platform's prebuilt-tarball `url`/`sha256` and the `version` in `Formula/omc.rb`,
+and commits it to the tap. Without those settings the job logs and exits 0, so
+releases never fail on a missing tap.
 
 ## Local dry run
 
