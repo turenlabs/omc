@@ -14,16 +14,19 @@ Bump it, commit, then tag.
 
 ## Cutting a release
 
-1. Bump `[workspace.package].version` in `Cargo.toml` (e.g. `0.1.1` → `0.2.0`),
+1. Update `CHANGELOG.md`: rename the `## [Unreleased]` heading to
+   `## [<version>] - <YYYY-MM-DD>` (and add a fresh empty `## [Unreleased]`
+   above it). The Release workflow uses this section as the GitHub Release body.
+2. Bump `[workspace.package].version` in `Cargo.toml` (e.g. `0.1.1` → `0.2.0`),
    update `Cargo.lock` (`cargo update -p omc-cli` or `cargo build`), and commit.
-2. Tag and push:
+3. Tag and push:
 
    ```bash
    git tag v0.2.0
    git push origin v0.2.0
    ```
 
-3. The **Release** workflow (`.github/workflows/release.yml`) then:
+4. The **Release** workflow (`.github/workflows/release.yml`) then:
    - builds `--release` binaries for `aarch64-apple-darwin`,
      `x86_64-apple-darwin`, and `x86_64-unknown-linux-gnu`;
    - packages each into `omc-<version>-<target>.tar.gz` (with `omc` at the root
@@ -38,7 +41,7 @@ Bump it, commit, then tag.
 You can also trigger it manually from the Actions tab (`workflow_dispatch`) with
 a `tag` input, without pushing a tag.
 
-4. Bump the Homebrew formula in `turenlabs/homebrew-tap` (see below).
+5. Bump the Homebrew formula in `turenlabs/homebrew-tap` (see below).
 
 ## Homebrew
 

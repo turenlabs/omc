@@ -1,0 +1,64 @@
+# Changelog
+
+All notable changes to OMC are documented here. The format is based on
+[Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and OMC follows
+[Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [Unreleased]
+
+### Changed
+
+- **Homebrew is now a binary install.** `brew install turenlabs/tap/omc`
+  downloads the prebuilt `omc` release binary for your platform and installs it
+  in seconds — no compile, no Rust toolchain. `brew install --HEAD` still builds
+  from source. The formula now lives solely in the `turenlabs/homebrew-tap` repo;
+  this repo only builds the binaries and publishes the GitHub Release.
+
+## [0.1.1] - 2026-06-08
+
+### Added
+
+- **Supply-chain freshness on by default.** A built-in 14-day `min-release-age`
+  floor now applies even with no configuration: a package version must have been
+  published at least 14 days ago to install (defends against malware published
+  moments before you install, e.g. account-takeover worms). Override per package
+  (`omc.policy` `min-age`), per project (`omc.toml`), or globally
+  (`~/.omc/omc.toml`); set `0` at any layer to disable it.
+
+### Fixed
+
+- CI `cargo fmt --check` failure on the CLI-cleanup edits (formatting only).
+
+### Docs
+
+- Richer terminal demo (`docs/demo.gif`) in the README.
+
+## [0.1.0] - 2026-06-08
+
+Initial public release.
+
+### Added
+
+- **Deny-by-default package manager for npm and PyPI.** Resolves dependencies,
+  profiles their source, and verifies them against a capability/data-flow policy
+  before locking — and **never runs install/postinstall scripts** (or Python
+  `.pth`/`sitecustomize` startup hooks).
+- **Capability + data-flow enforcement.** Env reads, file reads/writes, network,
+  process spawn, and dynamic eval are denied by default; data-flow rules (e.g.
+  `env -> network`) require explicit grants. Reading sensitive files (`~/.ssh`,
+  `.env`, keys, `.npmrc`/`.pypirc` tokens, cloud creds) stays blocked even under
+  `--allow-all-host`.
+- **Per-package policy.** An optional `omc.policy` DSL scopes grants to individual
+  packages (allow/deny/flow/pure/min-age), alongside project and global
+  `omc.toml` policy. Grants are explicit and recorded in `omc.lock`.
+- **npm / pip / twine compatibility** surfaces and opt-in drop-in shims, plus the
+  native `omc add` / `install` / `ci` / `remove` commands.
+- **Read-only `omc inspect`** capability X-ray (text report or `--format png`
+  dependency graph) and `omc audit` as a CI gate.
+- **Distribution:** Homebrew via the public `turenlabs/homebrew-tap`, plus
+  per-platform release binaries (macOS arm64/x86_64, Linux x86_64) with
+  `SHA256SUMS`.
+
+[Unreleased]: https://github.com/turenlabs/omc/compare/v0.1.1...HEAD
+[0.1.1]: https://github.com/turenlabs/omc/compare/v0.1.0...v0.1.1
+[0.1.0]: https://github.com/turenlabs/omc/releases/tag/v0.1.0

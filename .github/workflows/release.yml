@@ -100,11 +100,26 @@ jobs:
             shasum -a 256 $assets > SHA256SUMS
           fi
           cat SHA256SUMS
+      - name: Extract changelog for this version
+        shell: bash
+        run: |
+          ver="${{ steps.version.outputs.version }}"
+          # Pull the "## [<version>]" section from CHANGELOG.md (up to the next
+          # "## [" header) for the release body; action-gh-release appends the
+          # auto-generated commit notes after it. Missing section => empty body
+          # (degrades to the auto notes), never a failed release.
+          awk -v ver="$ver" '
+            $0 ~ "^## \\[" ver "\\]" { flag = 1; next }
+            flag && /^## \[/ { exit }
+            flag { print }
+          ' CHANGELOG.md > RELEASE_NOTES.md
+          echo "--- release notes ---"; cat RELEASE_NOTES.md
       - name: Create GitHub Release
         uses: softprops/action-gh-release@b4309332981a82ec1c5618f44dd2e27cc8bfbfda # v3
         with:
           tag_name: ${{ steps.version.outputs.tag }}
           name: omc ${{ steps.version.outputs.tag }}
+          body_path: RELEASE_NOTES.md
           generate_release_notes: true
           # Tarballs (omc + shims), standalone `omc-<target>` single binaries,
           # their .sha256 sidecars, and the combined SHA256SUMS.
