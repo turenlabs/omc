@@ -9,7 +9,7 @@ seriously and welcome reports of vulnerabilities.
 
 Report vulnerabilities privately through GitHub Security Advisories:
 
-1. Go to <https://github.com/turenio/omc/security/advisories>
+1. Go to <https://github.com/turenlabs/omc/security/advisories>
 2. Click **Report a vulnerability**
 3. Provide as much detail as you can: affected version, reproduction steps,
    and the impact you observed.

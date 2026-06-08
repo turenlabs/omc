@@ -100,10 +100,7 @@ illegal.
 Via Homebrew (installs `omc`; does not shadow your system `node`/`npm`/`pip`):
 
 ```bash
-# turenio/omc is private, so let Homebrew authenticate first:
-export HOMEBREW_GITHUB_API_TOKEN=ghp_...   # token with repo: read
-brew tap turenio/omc https://github.com/turenio/omc
-brew install omc
+brew install turenlabs/tap/omc
 omc --version
 ```
 
@@ -117,13 +114,13 @@ export PATH="$(brew --prefix omc)/libexec/shims:$PATH"
 
 ### Download a single binary
 
-Every [GitHub Release](https://github.com/turenio/omc/releases) attaches a
+Every [GitHub Release](https://github.com/turenlabs/omc/releases) attaches a
 standalone `omc` binary per platform (`omc-<target>`) plus full tarballs (which
 also include the opt-in shims). To grab just the `omc` binary:
 
 ```bash
 # pick your target: aarch64-apple-darwin | x86_64-apple-darwin | x86_64-unknown-linux-gnu
-curl -fsSL https://github.com/turenio/omc/releases/download/v0.1.0/omc-aarch64-apple-darwin -o omc
+curl -fsSL https://github.com/turenlabs/omc/releases/download/v0.1.0/omc-aarch64-apple-darwin -o omc
 chmod +x omc
 ./omc --version
 ```

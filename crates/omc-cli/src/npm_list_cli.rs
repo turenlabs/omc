@@ -644,7 +644,7 @@ pub(crate) fn npm_cyclonedx_sbom(context: &NpmSbomContext) -> serde_json::Value 
             "timestamp": context.timestamp,
             "lifecycles": [{ "phase": "build" }],
             "tools": [{
-                "vendor": "turenio",
+                "vendor": "turenlabs",
                 "name": "omc",
                 "version": env!("CARGO_PKG_VERSION"),
             }],

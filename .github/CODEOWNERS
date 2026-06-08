@@ -2,6 +2,6 @@
 #
 # The org owner is assigned to the whole repository by default. Adjust the
 # handle below to the real maintainer (a specific user or team, e.g.
-# @turenio/maintainers) as the project's ownership solidifies.
+# @turenlabs/maintainers) as the project's ownership solidifies.
 
-* @turenio
+* @turenlabs/maintainers

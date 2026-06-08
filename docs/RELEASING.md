@@ -36,13 +36,13 @@ a `tag` input, without pushing a tag.
 
 ## Homebrew
 
-The canonical formula lives at `Formula/omc.rb`. Users install via a tap:
+`Formula/omc.rb` is the in-repo template; the published formula lives in the
+public tap `turenlabs/homebrew-tap`. Users install via:
 
 ```bash
-brew tap turenio/omc https://github.com/turenio/omc
-brew install omc
+brew install turenlabs/tap/omc
 # or track main:
-brew install --HEAD turenio/omc/omc
+brew install --HEAD turenlabs/tap/omc
 ```
 
 `brew install omc` installs only `omc` onto the PATH; it does **not** shadow the
@@ -58,7 +58,7 @@ export PATH="$(brew --prefix omc)/libexec/shims:$PATH"
 To have releases push the updated formula to a separate
 `owner/homebrew-tap` repo, set in this repo's settings:
 
-- Repository **variable** `HOMEBREW_TAP_REPO` = `turenio/homebrew-tap`
+- Repository **variable** `HOMEBREW_TAP_REPO` = `turenlabs/homebrew-tap`
 - Repository **secret** `HOMEBREW_TAP_TOKEN` = a PAT with write access to that tap
 
 The `update-homebrew` job computes the tagged source tarball's sha256, rewrites

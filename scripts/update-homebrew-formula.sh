@@ -5,7 +5,9 @@
 #   VERSION             release version without the leading v (e.g. 0.1.0)
 #   TAG                 release tag (e.g. v0.1.0)
 #   HOMEBREW_TAP_TOKEN  PAT with write access to the tap repo (optional)
-#   TAP_REPO            tap repo as owner/repo (e.g. turenio/homebrew-tap)
+#   TAP_REPO            tap repo as owner/repo (e.g. turenlabs/homebrew-tap)
+#   SRC_REPO            source repo as owner/repo (defaults to $GITHUB_REPOSITORY,
+#                       then turenlabs/omc) — the tagged tarball is fetched from it
 #
 # It computes the sha256 of the tagged source tarball, regenerates the formula
 # from Formula/omc.rb with the new url/sha256/version, and commits it to the tap.
@@ -22,7 +24,8 @@ if [ -z "${HOMEBREW_TAP_TOKEN:-}" ] || [ -z "${TAP_REPO:-}" ]; then
   exit 0
 fi
 
-SRC_URL="https://github.com/turenio/omc/archive/refs/tags/${TAG}.tar.gz"
+SRC_REPO="${SRC_REPO:-${GITHUB_REPOSITORY:-turenlabs/omc}}"
+SRC_URL="https://github.com/${SRC_REPO}/archive/refs/tags/${TAG}.tar.gz"
 echo "Fetching source tarball: ${SRC_URL}"
 curl -fsSL "${SRC_URL}" -o source.tar.gz
 SHA256="$(sha256sum source.tar.gz | awk '{print $1}')"
@@ -40,8 +43,13 @@ open("Formula/omc.rb", "w").write(text)
 print(f"Formula updated to {version}")
 PY
 
+# Keep the token OUT of any URL (it could leak in error output). The tap is a
+# public repo, so clone over plain HTTPS, and authenticate the push with a
+# short-lived Authorization header passed via `git -c http.extraheader` — the
+# same mechanism actions/checkout uses. The token is never written to disk
+# (.git/config) or echoed in a remote URL.
 tmp="$(mktemp -d)"
-git clone "https://x-access-token:${HOMEBREW_TAP_TOKEN}@github.com/${TAP_REPO}.git" "$tmp"
+git clone --depth 1 "https://github.com/${TAP_REPO}.git" "$tmp"
 mkdir -p "$tmp/Formula"
 cp Formula/omc.rb "$tmp/Formula/omc.rb"
 cd "$tmp"
@@ -52,6 +60,7 @@ if git diff --cached --quiet; then
   echo "Formula already up to date."
 else
   git commit -m "omc ${VERSION}"
-  git push origin HEAD
+  auth_header="AUTHORIZATION: basic $(printf 'x-access-token:%s' "${HOMEBREW_TAP_TOKEN}" | base64 | tr -d '\n')"
+  git -c http.extraheader="${auth_header}" push origin HEAD
   echo "Pushed omc ${VERSION} formula to ${TAP_REPO}."
 fi

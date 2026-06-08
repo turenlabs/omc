@@ -12,6 +12,10 @@ on:
 env:
   CARGO_TERM_COLOR: always
 
+# Least privilege by default; only the publish job below opts into contents:write.
+permissions:
+  contents: read
+
 jobs:
   build:
     name: build ${{ matrix.target }}
@@ -32,7 +36,7 @@ jobs:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
       - name: Resolve version
         id: version
         shell: bash
@@ -41,18 +45,18 @@ jobs:
           echo "tag=${ref}" >> "$GITHUB_OUTPUT"
           echo "version=${ref#v}" >> "$GITHUB_OUTPUT"
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
           targets: ${{ matrix.target }}
       - name: Cache cargo
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
       - name: Build release binaries
         run: cargo build --release --locked --package omc-cli --target ${{ matrix.target }}
       - name: Package
         shell: bash
         run: ./scripts/package-release.sh "${{ steps.version.outputs.version }}" "${{ matrix.target }}"
       - name: Upload artifact
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: artifacts-${{ matrix.target }}
           # The whole dist dir: the tarball (omc + shims), the standalone `omc`
@@ -66,7 +70,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
       - name: Resolve version
         id: version
         shell: bash
@@ -75,7 +79,7 @@ jobs:
           echo "tag=${ref}" >> "$GITHUB_OUTPUT"
           echo "version=${ref#v}" >> "$GITHUB_OUTPUT"
       - name: Download artifacts
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           path: dist
           merge-multiple: true
@@ -93,7 +97,7 @@ jobs:
           fi
           cat SHA256SUMS
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v3
+        uses: softprops/action-gh-release@b4309332981a82ec1c5618f44dd2e27cc8bfbfda # v3
         with:
           tag_name: ${{ steps.version.outputs.tag }}
           name: omc ${{ steps.version.outputs.tag }}
@@ -107,7 +111,7 @@ jobs:
     needs: release
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
       - name: Resolve version
         id: version
         shell: bash
@@ -121,7 +125,7 @@ jobs:
           # (logs and exits 0) when the secret is absent, so releases never fail
           # just because the tap is not yet configured.
           HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
-          # Tap repo in `owner/repo` form, e.g. turenio/homebrew-tap.
+          # Tap repo in `owner/repo` form, e.g. turenlabs/homebrew-tap.
           TAP_REPO: ${{ vars.HOMEBREW_TAP_REPO }}
           VERSION: ${{ steps.version.outputs.version }}
           TAG: ${{ steps.version.outputs.tag }}

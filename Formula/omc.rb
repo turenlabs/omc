@@ -1,28 +1,22 @@
 # Homebrew formula for OMC.
 #
-# Install:
-#   brew tap turenio/omc https://github.com/turenio/omc
-#   brew install omc
+# Install (public tap):
+#   brew install turenlabs/tap/omc
 # or build the latest main:
-#   brew install --HEAD turenio/omc/omc
-#
-# NOTE: turenio/omc is currently a PRIVATE repo, so Homebrew must be able to
-# authenticate to fetch the source. Export a token with read access first:
-#   export HOMEBREW_GITHUB_API_TOKEN=ghp_...   # (repo: read)
-# Public distribution (no token) requires making the repo public or hosting the
-# tarballs on a public release channel.
+#   brew install --HEAD turenlabs/tap/omc
 #
 # The release workflow keeps `url`/`sha256`/`version` below in sync with each
-# tagged release (see scripts/update-homebrew-formula.sh).
+# tagged release (see scripts/update-homebrew-formula.sh). The in-repo values
+# are a template: they are regenerated when the formula is published to the tap.
 class Omc < Formula
   desc "Deny-by-default npm/PyPI replacement that compiles packages to verified bytecode"
-  homepage "https://github.com/turenio/omc"
+  homepage "https://github.com/turenlabs/omc"
   license "Apache-2.0"
-  head "https://github.com/turenio/omc.git", branch: "main"
+  head "https://github.com/turenlabs/omc.git", branch: "main"
 
-  url "https://github.com/turenio/omc/archive/refs/tags/v0.5.0.tar.gz"
+  url "https://github.com/turenlabs/omc/archive/refs/tags/v0.7.0.tar.gz"
   sha256 "894083025ac3fe9a9f838b225c10cb3f510fe11712f9806d2a23f0f908361dae"
-  version "0.5.0"
+  version "0.7.0"
 
   depends_on "rust" => :build
 
@@ -75,9 +69,10 @@ class Omc < Formula
   test do
     assert_match version.to_s, shell_output("#{bin}/omc --version")
 
-    # A pure micro-package lowers, verifies, and executes in-cell.
-    (testpath/"isodd.js").write("module.exports = function isOdd(n) { return n % 2 === 1; };")
-    output = shell_output("#{bin}/omc --project-dir #{testpath} exec-cell #{testpath}/isodd.js --arg 7")
-    assert_match "result true", output
+    # Smoke-test the public surface offline: `init` scaffolds the project files.
+    # (exec-cell is a dev-only command not built into release binaries.)
+    # batou:ignore BATOU-RUBYAST-002 -- array-form system() (no shell), all args are literals/Homebrew testpath, not user input
+    system bin/"omc", "--project-dir", testpath, "init", "--name", "smoke"
+    assert_predicate testpath/"omc.toml", :exist?
   end
 end

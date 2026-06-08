@@ -92,8 +92,7 @@ steps:
 
   - name: Install OMC
     run: |
-      brew tap turenio/omc https://github.com/turenio/omc
-      brew install omc
+      brew install turenlabs/tap/omc
 
   - name: Install from the lockfile (no registry resolution, no scripts)
     run: omc ci            # installs omc.lock exactly; never runs install scripts
@@ -119,7 +118,7 @@ in [`examples/omc.global.toml`](../examples/omc.global.toml).
 ## Recipe: a developer device
 
 ```bash
-brew tap turenio/omc https://github.com/turenio/omc && brew install omc
+brew install turenlabs/tap/omc
 
 # 1. One-time global baseline: org-wide freshness floor + deny-by-default.
 mkdir -p ~/.omc && cp "$(brew --prefix omc)/share/omc/omc.global.toml" ~/.omc/omc.toml

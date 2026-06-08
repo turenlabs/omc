@@ -5,7 +5,7 @@
 Packages don't execute as JavaScript or Python when you install them. OMC resolves them, compiles their code to a small **verified bytecode**, and denies anything dangerous **by default** — reading env vars, files, the network, spawning processes. Reading sensitive files (`~/.ssh`, `.env`, keys, tokens) stays blocked *even with* `--allow-all-host`. Access is granted explicitly, per package, and recorded.
 
 ```bash
-brew tap turenio/omc https://github.com/turenio/omc && brew install omc
+brew install turenlabs/tap/omc
 
 omc init --name myapp                  # new project
 omc add --npm left-pad@1.3.0           # resolve + verify — no install scripts run
@@ -142,5 +142,3 @@ is live but not yet yanked. Pinned by regression tests
 - 🤖 Agent skill: [SKILL.md](SKILL.md)
 - 🏗️ Architecture: [docs/oss-microcode-runtime.md](docs/oss-microcode-runtime.md)
 - 📦 Releasing: [docs/RELEASING.md](docs/RELEASING.md)
-
-> Private repo: `brew install` and release downloads need `export HOMEBREW_GITHUB_API_TOKEN=…` (or `gh release download`).

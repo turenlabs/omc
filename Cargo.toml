@@ -20,8 +20,8 @@ resolver = "2"
 edition = "2021"
 license = "Apache-2.0"
 version = "0.7.0"
-repository = "https://github.com/turenio/omc"
-homepage = "https://github.com/turenio/omc"
+repository = "https://github.com/turenlabs/omc"
+homepage = "https://github.com/turenlabs/omc"
 
 # Optimized release profile for shipped binaries: smaller, faster, stripped.
 [profile.release]
