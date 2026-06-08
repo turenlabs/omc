@@ -5,11 +5,11 @@ Output docs/demo.gif
 Require omc
 
 Set Shell "bash"
-Set FontSize 14
-Set Width 1180
-Set Height 940
+Set FontSize 13
+Set Width 1200
+Set Height 1000
 Set Padding 22
-Set TypingSpeed 45ms
+Set TypingSpeed 40ms
 Set Theme "Dracula"
 
 # --- setup (hidden): isolated throwaway project + a clean prompt ---
@@ -21,17 +21,28 @@ Show
 
 Sleep 600ms
 
-# 1. Start a deny-by-default project
-Type "# a drop-in npm/pip — packages can't touch your machine unless you allow it" Sleep 400ms Enter
+# A drop-in npm + pip that never runs install scripts.
 Type "omc init --name demo" Sleep 250ms Enter
-Sleep 1.2s
+Sleep 1s
 
-# 2. A pure package installs frictionlessly — zero host access, no scripts run
-Type "# safe packages just install — no install scripts, no host access" Sleep 400ms Enter
+# Safe packages just install — no scripts, no host access — npm AND pip.
+Type "# safe deps install with zero host access — no install scripts run" Sleep 300ms Enter
 Type "omc add --npm is-odd@3.0.1" Sleep 250ms Enter
-Sleep 2.2s
+Sleep 1.8s
+Type "omc add --pypi idna==3.7" Sleep 250ms Enter
+Sleep 2s
 
-# 3. Preview a risky package BEFORE installing (read-only) — OMC blocks it
-Type "# now preview a risky one, read-only, before it ever runs" Sleep 400ms Enter
+# The money shot: preview a risky package, read-only, before it ever runs.
+Type "# now X-ray a risky one BEFORE installing — read-only" Sleep 300ms Enter
 Type "omc inspect --npm esbuild@0.19.12" Sleep 250ms Enter
 Sleep 5s
+
+# You're in control: allow it explicitly, and the grant is recorded.
+Type "# not a brick wall — allow it on purpose, and it's recorded" Sleep 300ms Enter
+Type "omc add --npm esbuild@0.19.12 --allow-all-host" Sleep 250ms Enter
+Sleep 2.5s
+
+# Everything you allowed is auditable — a clean CI gate.
+Type "# audit the whole tree — a CI gate that fails on anything unreviewed" Sleep 300ms Enter
+Type "omc audit" Sleep 250ms Enter
+Sleep 3.5s
