@@ -610,14 +610,7 @@ fn inspect_defaults_to_text_and_parses_png_with_output() {
 
     // --format png with an explicit --output path.
     let cli = Cli::try_parse_from(args(&[
-        "omc",
-        "inspect",
-        "--npm",
-        "express",
-        "--format",
-        "png",
-        "--output",
-        "deps.png",
+        "omc", "inspect", "--npm", "express", "--format", "png", "--output", "deps.png",
     ]))
     .unwrap();
     match cli.command {

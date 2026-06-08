@@ -347,16 +347,12 @@ pub(crate) enum Command {
         #[arg(long, help = "Grant all host capabilities for compatibility testing")]
         allow_all_host: bool,
     },
-    #[command(
-        about = "CI gate: list locked packages and exit non-zero (2) if any are blocked"
-    )]
+    #[command(about = "CI gate: list locked packages and exit non-zero (2) if any are blocked")]
     Audit {
         #[arg(long, help = "Emit machine-readable JSON")]
         json: bool,
     },
-    #[command(
-        about = "Show the inventory of locked packages (read-only; always exits 0)"
-    )]
+    #[command(about = "Show the inventory of locked packages (read-only; always exits 0)")]
     List {
         #[arg(long, help = "Emit machine-readable JSON")]
         json: bool,

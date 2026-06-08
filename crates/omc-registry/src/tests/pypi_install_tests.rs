@@ -205,7 +205,11 @@ fn target_install_does_not_recursively_delete_external_local_paths_dir() {
     // must survive the install.
     let marker_dir = target.join(".omc-local-paths");
     fs::create_dir_all(marker_dir.join("inner")).unwrap();
-    fs::write(marker_dir.join("inner").join("victim.txt"), "do not delete\n").unwrap();
+    fs::write(
+        marker_dir.join("inner").join("victim.txt"),
+        "do not delete\n",
+    )
+    .unwrap();
 
     let bytes = python_sdist_for_test(&[
         (

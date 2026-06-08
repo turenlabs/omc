@@ -8,12 +8,13 @@ use std::io::{IsTerminal, Write};
 use omc_registry::{
     add_package_graph, build_block_suggestion, init_project, install_locked_packages,
     install_locked_project, install_locked_project_in_place, install_project,
-    parse_capability_grant, parse_flow_rule, read_lockfile, write_global_package_trust, LinkOptions,
-    LinkReport, OmcRegistryError, PackageSpec, Verdict,
+    parse_capability_grant, parse_flow_rule, read_lockfile, write_global_package_trust,
+    LinkOptions, LinkReport, OmcRegistryError, PackageSpec, Verdict,
 };
 
 #[cfg(feature = "dev-commands")]
 use crate::args::CompileCommand;
+use crate::args::InspectFormat;
 use crate::args::{Cli, Command};
 #[cfg(feature = "dev-commands")]
 use crate::compile::print_compile_source;
@@ -22,7 +23,6 @@ use crate::direct_compat::{
 };
 #[cfg(feature = "dev-commands")]
 use crate::exec_cell::{run_exec_cell, ExecCellCommand};
-use crate::args::InspectFormat;
 use crate::inspect::{run_inspect, InspectCommand};
 use crate::install::{install_options, DependencyOmit};
 use crate::manifest::{dependency_kind_from_booleans, ecosystem_hint, parse_package_specs};
