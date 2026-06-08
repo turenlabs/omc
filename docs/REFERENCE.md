@@ -387,11 +387,16 @@ you install). It is enforced at version resolution — too-new versions are
 filtered out (the newest old-enough version is chosen), for both npm (via the
 registry `time` field) and PyPI (via `upload_time`).
 
-Durations are `Nd` (days), `Nh` (hours), `Nm` (minutes), `Nw` (weeks), `Ns`
-(seconds), or a bare `N` (days). `0` means no requirement. A malformed duration
-is a hard error (it never silently disables the floor).
+The gate is **on by default**: when nothing configures it, OMC applies a
+built-in **14-day** floor. You don't have to set anything to get protection;
+configure a value to tighten or loosen it, and set `0` at any layer to disable
+it for that scope.
 
-Three places set it, most-specific wins:
+Durations are `Nd` (days), `Nh` (hours), `Nm` (minutes), `Nw` (weeks), `Ns`
+(seconds), or a bare `N` (days). `0` means no requirement (disables the floor).
+A malformed duration is a hard error (it never silently disables the floor).
+
+Four layers set it, most-specific wins (the last is always present):
 
 1. **Per package** in `omc.policy`: a `min-age "<dur>"` statement in a `default`
    or `package` block. A package block can tighten (`min-age "30d"`) or exempt
@@ -400,11 +405,13 @@ Three places set it, most-specific wins:
    `min-age` in `default` or name-only blocks.
 2. **Per project** in `omc.toml`: `[policy] min-release-age = "14d"`.
 3. **Globally** in `~/.omc/omc.toml` (see below).
+4. **Built-in default**: when none of the above set a value, a `14d` floor
+   applies. An explicit `0` at any layer relaxes it.
 
 The effective age for a package is its `omc.policy` `min-age` if stated,
-otherwise the project floor, otherwise the global floor. It combines with an
-explicit `--before` / `--uploaded-prior-to` by taking the more restrictive
-cutoff.
+otherwise the project floor, otherwise the global floor, otherwise the built-in
+14-day default. It combines with an explicit `--before` / `--uploaded-prior-to`
+by taking the more restrictive cutoff.
 
 ### Global policy (`~/.omc/omc.toml`)
 
@@ -415,11 +422,14 @@ project:
 
 - `allow` / `allow-flow` grants are **unioned under** the project's grants (the
   project adds to, and never loses, the global baseline).
-- `min-release-age` is the **fallback floor**, which a project's own
-  `min-release-age` (or an `omc.policy` `min-age`) overrides.
+- `min-release-age` is a **fallback floor**, which a project's own
+  `min-release-age` (or an `omc.policy` `min-age`) overrides. If the global file
+  is absent or omits `min-release-age`, the built-in **14-day** default applies
+  as the final fallback (set `0` anywhere to disable it).
 
 A present-but-malformed global file is a hard error, exactly like a project
-`omc.toml`. When the file is absent, behaviour is exactly as before.
+`omc.toml`. When the file is absent, the built-in 14-day freshness floor still
+applies unless a project `omc.toml` or `omc.policy` sets its own value.
 
 ```toml
 # ~/.omc/omc.toml — applies to every project on this machine

@@ -79,16 +79,16 @@ omc policy list                          # list global accepted package grants
 
 ### Package-age checks (supply-chain freshness)
 
-To block just-published malware, require a minimum **release age** — a version must have been published at least that long ago to install. Set it per-package in `omc.policy` (`min-age`), or project-wide in `omc.toml`:
+To block just-published malware, OMC enforces a minimum **release age** — a version must have been published at least that long ago to install. This is **on out of the box**: with zero config there's a built-in **14-day floor**. Override it per-package in `omc.policy` (`min-age`), project-wide in `omc.toml`, or globally in `~/.omc/omc.toml`; set `0` at any layer to disable it for that scope.
 
 ```toml
 [policy]
-min-release-age = "14d"     # 14d / 12h / 2w / 7 (days) / 0 (off)
+min-release-age = "30d"     # 14d / 12h / 2w / 7 (days) / 0 (off); built-in default is 14d
 ```
 
 ### Global policy (`~/.omc/omc.toml`)
 
-OMC also reads a **global** user policy at `~/.omc/omc.toml` (override the dir with `$OMC_HOME`). Its `[policy]` grants are unioned under every project as a baseline, and its `min-release-age` is the fallback floor a project can override. Use it to set an org-wide freshness floor or default grants once:
+OMC also reads a **global** user policy at `~/.omc/omc.toml` (override the dir with `$OMC_HOME`). Its `[policy]` grants are unioned under every project as a baseline, and its `min-release-age` overrides the built-in 14-day floor (and is itself overridable per project). Precedence, most specific first: `omc.policy` `min-age` (per package) → project `omc.toml` → global `~/.omc/omc.toml` → built-in **14-day default**. Use it to set an org-wide freshness floor or default grants once:
 
 ```toml
 # ~/.omc/omc.toml
@@ -127,8 +127,9 @@ imports a package to install it — it compiles the source and computes the verd
 by *reading* it. A lifecycle hook surfaces as a blocked `proc.spawn`; obfuscated
 triggers as `dynamic.eval`; reads of `~/.npmrc`/`~/.aws` stay blocked even under
 `fs.read:*`; and any secret → network **flow** is denied without an explicit
-grant. Add a `min-release-age` floor to skip the window where a malicious release
-is live but not yet yanked. Pinned by regression tests
+grant. A built-in 14-day `min-release-age` floor (on by default, tunable or
+disabled with `0`) skips the window where a malicious release is live but not yet
+yanked. Pinned by regression tests
 (`shai_hulud_worm_is_blocked_at_install`).
 
 **Threat model, CI recipe (`omc ci` + `omc audit`), and dev setup — see

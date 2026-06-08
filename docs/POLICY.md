@@ -136,6 +136,10 @@ installed (a supply-chain freshness gate against just-published malware).
 Enforced at version resolution for npm and PyPI; too-new versions are filtered
 and the newest old-enough version is chosen.
 
+This gate is **on by default**: with no `min-age` and no `min-release-age`
+configured anywhere, a built-in **14-day floor** applies out of the box. Set an
+explicit `"0"` at any scope to relax or disable it (see precedence below).
+
 | Duration | Meaning |
 |---|---|
 | `"14d"` | 14 days |
@@ -144,7 +148,7 @@ and the newest old-enough version is chosen.
 | `"2w"` | 2 weeks |
 | `"45s"` | 45 seconds |
 | `"7"` | bare number = days |
-| `"0"` | no requirement (explicit exempt) |
+| `"0"` | no requirement (explicit exempt — disables the floor for this scope) |
 
 `min-age` is evaluated by package **name** — a version constraint on the block
 does *not* scope it, so put `min-age` in `default` or name-only `package` blocks.
@@ -186,14 +190,16 @@ min-release-age = "14d"                                  # project-wide age floo
 defaults to `$HOME/.omc`) applies to **every** project:
 
 - `allow` / `allow-flow` are **unioned under** the project's grants.
-- `min-release-age` is the **fallback floor**; a project's `omc.toml` value, or an
+- `min-release-age` is a **fallback floor**; a project's `omc.toml` value, or an
   `omc.policy` `min-age`, overrides it.
-- Absent ⇒ behaviour unchanged; malformed ⇒ hard error.
+- Absent ⇒ the built-in 14-day default applies; malformed ⇒ hard error.
 
 **Effective min-age precedence** (most specific wins): `omc.policy` `min-age`
-→ project `omc.toml` `min-release-age` → global `~/.omc/omc.toml`. It combines
-with an explicit `--before` / `--uploaded-prior-to` by taking the more
-restrictive cutoff.
+→ project `omc.toml` `min-release-age` → global `~/.omc/omc.toml`
+`min-release-age` → **built-in 14-day default**. The gate is therefore **on by
+default** (14 days) even with zero config; an explicit `"0"` at any layer relaxes
+or disables it for that scope. It combines with an explicit `--before` /
+`--uploaded-prior-to` by taking the more restrictive cutoff.
 
 ---
 

@@ -66,17 +66,32 @@ policy — which is when a human looks.
 
 Worm releases are usually yanked within hours of discovery. Requiring a minimum
 **release age** sidesteps that entire window — a version must have been public at
-least that long to install:
+least that long to install.
+
+**This floor is on by default.** With zero configuration OMC applies a built-in
+**14-day** freshness floor, so a fresh malicious release is held back out of the
+box. You don't have to opt in; you tune or disable it. To set a different floor
+explicitly:
 
 ```toml
 # ~/.omc/omc.toml  (or a project's omc.toml)
 [policy]
-min-release-age = "14d"
+min-release-age = "14d"   # this is also the built-in default if unset
 ```
 
-Set it once globally and it applies under every project; a project can lower it
-for a specific dependency (`min-age "0"` in `omc.policy`) when it genuinely needs
-a fresh release.
+Durations accept `14d` / `12h` / `2w` / `7` (a bare number means days) / `0`
+(off). The floor is resolved most-specific-first, falling back to the built-in
+default:
+
+1. `omc.policy` `min-age` — per package;
+2. project `omc.toml` `[policy] min-release-age`;
+3. global `~/.omc/omc.toml` `min-release-age`;
+4. **built-in 14-day default** — applied when none of the above is set.
+
+An explicit `0` at any layer relaxes the floor for that scope: `min-release-age =
+"0"` in an `omc.toml`, or `min-age "0"` in `omc.policy`, disables it (e.g. for a
+specific dependency that genuinely needs a fresh release). Set a larger value
+once globally and it applies under every project.
 
 ---
 
@@ -108,12 +123,14 @@ steps:
   **exits non-zero if anything is blocked**, so a dependency that needs a grant
   fails the build loudly instead of silently running.
 - Updating dependencies is a deliberate, reviewable step (`omc add …` / `omc
-  install`) that happens in a PR, where the new grants and the `min-release-age`
-  floor are visible in the diff — not on every CI run.
+  install`) that happens in a PR, where the new grants and any `min-release-age`
+  override are visible in the diff — not on every CI run. The 14-day freshness
+  floor applies by default even with no `[policy]` block.
 
-Commit a global floor into the runner image (or set `$OMC_HOME` to a checked-in
-config) so every job inherits the same freshness and grant baseline. A starter is
-in [`examples/omc.global.toml`](../examples/omc.global.toml).
+The built-in 14-day floor already applies on every runner. Commit a global
+`omc.toml` into the runner image (or set `$OMC_HOME` to a checked-in config) when
+you want to raise that floor or pin the same grant baseline across jobs. A starter
+is in [`examples/omc.global.toml`](../examples/omc.global.toml).
 
 ## Recipe: a developer device
 

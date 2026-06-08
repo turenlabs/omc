@@ -152,7 +152,18 @@ fn effective_min_age_layers_dsl_over_project() {
 fn effective_npm_before_combines_age_and_explicit() {
     let dir = tempfile::tempdir().unwrap();
     let mut options = LinkOptions::new(dir.path());
-    // No cutoff at all.
+    // No explicit config => the built-in 14-day default freshness floor applies,
+    // so the cutoff is ~14 days ago (not None).
+    let before = effective_npm_before(&options, "x").unwrap().unwrap();
+    let parsed = parse_npm_before(&before).unwrap();
+    let default_expected = Utc::now() - Duration::days(14);
+    assert!(
+        (parsed - default_expected).num_seconds().abs() < 120,
+        "default 14d floor, got {before}"
+    );
+
+    // An explicit `0` relaxes the floor back to no cutoff.
+    options.min_release_age_secs = Some(0);
     assert_eq!(effective_npm_before(&options, "x").unwrap(), None);
 
     // A 7-day min-age yields a cutoff ~7 days ago.

@@ -1515,16 +1515,27 @@ fn parse_min_release_age(value: Option<&str>) -> Result<Option<i64>> {
     }
 }
 
+/// Built-in default supply-chain freshness floor, applied when nothing else
+/// configures one: a package version must be at least this old to be installed.
+/// Defends by default against malware published moments before you install
+/// (account-takeover worms mass-publishing fresh versions, e.g. Shai-Hulud).
+/// Overridable per project/global via `min-release-age` in `omc.toml`, or per
+/// package via `min-age` in `omc.policy`; an explicit `0` anywhere relaxes it.
+pub const DEFAULT_MIN_RELEASE_AGE_SECS: i64 = 14 * 24 * 60 * 60; // 14 days
+
 /// The effective minimum release age (seconds) for a package by name: the
 /// `omc.policy` DSL's `min-age` for the package (most specific, and able to
 /// relax to 0) when stated, otherwise the project/global `min-release-age`
-/// floor. `None`/`Some(0)` means no age requirement.
+/// floor, otherwise the built-in 14-day [`DEFAULT_MIN_RELEASE_AGE_SECS`].
+/// `Some(0)` (an explicit `0` in any layer) means no age requirement; only a
+/// fully-unset chain falls through to the default.
 fn effective_min_age_secs(options: &LinkOptions, ecosystem: Ecosystem, name: &str) -> Option<i64> {
     let dsl = options
         .policy_document
         .as_ref()
         .and_then(|doc| doc.min_age_for_name(policy_ecosystem(ecosystem), name));
     dsl.or(options.min_release_age_secs)
+        .or(Some(DEFAULT_MIN_RELEASE_AGE_SECS))
         .filter(|secs| *secs > 0)
 }
 

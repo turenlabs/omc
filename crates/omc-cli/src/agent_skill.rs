@@ -150,10 +150,12 @@ Most commands that resolve packages (`add`, `install`, `ci`, `remove`) accept:
 
 ### Supply-chain freshness
 
-Set a minimum release age so a just-published (possibly malicious) version is
-refused until it has been live long enough: `min-release-age = "14d"` in
-`omc.toml` `[policy]` or the global `~/.omc/omc.toml`, or `min-age "14d"` per
-package in `omc.policy` (`14d` / `12h` / `2w` / `7` days / `0` = off).
+A minimum release age refuses a just-published (possibly malicious) version
+until it has been live long enough. This is **on by default**: with no config a
+built-in **14-day floor** applies to every install. Override it with
+`min-release-age` in `omc.toml` `[policy]` or the global `~/.omc/omc.toml`, or
+`min-age` per package in `omc.policy` (`14d` / `12h` / `2w` / `7` days / `0` =
+off; an explicit `0` at any layer disables it for that scope).
 
 ## Knobs an agent may set
 

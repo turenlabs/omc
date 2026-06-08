@@ -2,15 +2,21 @@
 # (override the directory with $OMC_HOME).
 #
 # OMC reads this file under EVERY project on the machine. Its [policy] grants are
-# unioned in as a baseline and its `min-release-age` is the fallback freshness
-# floor a project can override. Use it to set org-wide supply-chain defaults once.
+# unioned in as a baseline and its `min-release-age` sets the org-wide freshness
+# floor a project can override. Note OMC already ships a built-in 14-day freshness
+# floor that applies even with NO config, so this file is for CHANGING that floor
+# org-wide (or documenting it explicitly) — not for turning it on. Use it to set
+# org-wide supply-chain defaults once.
 #
 # Why these defaults stop a Shai-Hulud-class worm:
 #   * OMC never runs install/postinstall scripts, so the worm's trigger never
 #     fires — a postinstall hook surfaces as a blocked `proc.spawn` capability.
 #   * `min-release-age` rejects a version until it has been public long enough for
 #     a malicious release to be caught and yanked. Most worm releases are pulled
-#     within hours; a 14-day floor sidesteps that entire window.
+#     within hours; the 14-day floor sidesteps that entire window. OMC enforces
+#     this 14-day floor by default with no config; the value below just restates
+#     it so the org-wide policy is explicit (raise it to tighten, lower to loosen,
+#     "0" to disable).
 #   * Deny-by-default means a freshly-compromised dependency that newly reads your
 #     env/credentials or opens a secret -> network flow is blocked until you
 #     explicitly grant it — the grant is the review checkpoint.
@@ -20,6 +26,15 @@
 [policy]
 # A version must have been published at least this long ago to install.
 # Accepts 14d / 12h / 2w / 7 (bare number = days) / 0 (disabled).
+# "14d" here MATCHES OMC's built-in default: omitting this key still gives a
+# 14-day floor. Set it lower to loosen, higher to tighten, or "0" to disable.
+# Precedence (most specific wins), with the built-in default as the final
+# fallback:
+#   omc.policy `min-age` (per package)
+#     -> project omc.toml [policy] `min-release-age`
+#     -> this global `min-release-age`
+#     -> built-in 14-day default.
+# An explicit "0" at any layer relaxes/disables the floor for that scope.
 min-release-age = "14d"
 
 # No baseline host grants: every package starts with ZERO capabilities and must
