@@ -72,10 +72,13 @@ fn resolves_prerelease_anchored_caret_ranges() {
     // the caret base dropped its prerelease, so `1.0.0-beta.2 >= 1.0.0` was false.
     assert!(npm_version_satisfies("1.0.0-beta.2", "^1.0.0-beta.2"));
     assert!(npm_version_satisfies("1.0.0-beta.3", "^1.0.0-beta.2"));
-    assert!(!npm_version_satisfies("1.0.0-beta.1", "^1.0.0-beta.2")); // below the anchor
-    assert!(npm_version_satisfies("1.0.0", "^1.0.0-beta.2")); // stable >= the prerelease
-    assert!(!npm_version_satisfies("2.0.0", "^1.0.0-beta.2")); // outside the caret
-    // A `>=` comparator anchored on a prerelease compares within the tuple.
+    // below the anchor prerelease
+    assert!(!npm_version_satisfies("1.0.0-beta.1", "^1.0.0-beta.2"));
+    // a stable release outranks the prerelease anchor
+    assert!(npm_version_satisfies("1.0.0", "^1.0.0-beta.2"));
+    // outside the caret's major
+    assert!(!npm_version_satisfies("2.0.0", "^1.0.0-beta.2"));
+    // a `>=` comparator anchored on a prerelease compares within the tuple
     assert!(npm_version_satisfies("1.0.0-beta.2", ">=1.0.0-beta.1"));
     // …but prereleases must NOT leak into PLAIN ranges (the prior guard holds).
     assert!(!npm_version_satisfies("1.3.0-beta", "^1.2.3"));
