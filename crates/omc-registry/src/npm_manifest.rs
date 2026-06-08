@@ -243,13 +243,20 @@ pub(crate) fn npm_engine_requirement_satisfied(version: &Version, requirement: &
         .split("||")
         .map(str::trim)
         .filter(|part| !part.is_empty())
-        .any(|part| npm_version_satisfies(&version, &normalize_npm_engine_requirement(part)))
+        .any(|part| npm_version_satisfies(&version, &normalize_npm_comparators(part)))
 }
 
-fn normalize_npm_engine_requirement(requirement: &str) -> String {
+/// Normalize an npm version requirement's comparator spacing: glue a comparison
+/// operator to the version that follows it (so `>= 2.1.2` parses like `>=2.1.2`)
+/// and treat commas as AND-separators like whitespace (`^1.1.0,1.1.3`). Applies
+/// to both `engines` requirements and dependency ranges.
+fn normalize_npm_comparators(requirement: &str) -> String {
     let mut normalized = String::new();
     let mut previous_was_operator = false;
-    for token in requirement.split_whitespace() {
+    for token in requirement
+        .split(|c: char| c.is_whitespace() || c == ',')
+        .filter(|token| !token.is_empty())
+    {
         if previous_was_operator {
             normalized.push_str(token);
             previous_was_operator = false;
@@ -373,8 +380,11 @@ pub(crate) fn npm_version_satisfies(version: &str, requirement: &str) -> bool {
     if let Ok(exact) = Version::parse(requirement) {
         return version == exact;
     }
+    // Glue operators to their version (`>= 2.1.2` -> `>=2.1.2`) and treat commas
+    // as AND-separators, so spaced/comma comparators parse like their glued form.
+    let normalized = normalize_npm_comparators(requirement);
+    let requirement = normalized.as_str();
     let parts = requirement
-        .replace(',', " ")
         .split_whitespace()
         .map(str::to_owned)
         .collect::<Vec<_>>();
@@ -440,11 +450,25 @@ fn npm_comparator_satisfied(version: &Version, comparator: &str) -> bool {
 }
 
 pub(crate) fn parse_partial_npm_version(raw: &str) -> Option<Version> {
-    let mut parts = raw.trim().split('.');
+    let raw = raw.trim();
+    // Strip build metadata, then split off any prerelease so the numeric core
+    // (major[.minor[.patch]]) parses while the prerelease (`-beta.2`) is kept:
+    // npm allows ranges anchored on a prerelease, e.g. `^1.0.0-beta.2`. Dropping
+    // it would set the caret's lower bound to `1.0.0`, and `1.0.0-beta.2 >= 1.0.0`
+    // is false in semver — so the only published version would never match.
+    let without_build = raw.split('+').next().unwrap_or(raw);
+    let (core, pre) = without_build
+        .split_once('-')
+        .map_or((without_build, ""), |(core, pre)| (core, pre));
+    let mut parts = core.split('.');
     let major = parts.next()?.parse().ok()?;
     let minor = parts.next().and_then(|part| part.parse().ok()).unwrap_or(0);
     let patch = parts.next().and_then(|part| part.parse().ok()).unwrap_or(0);
-    Some(Version::new(major, minor, patch))
+    let mut version = Version::new(major, minor, patch);
+    if !pre.is_empty() {
+        version.pre = semver::Prerelease::new(pre).ok()?;
+    }
+    Some(version)
 }
 
 pub fn compare_npm_versions(left: &str, right: &str) -> std::cmp::Ordering {

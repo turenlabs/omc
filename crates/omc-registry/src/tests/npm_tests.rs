@@ -52,6 +52,37 @@ fn prerelease_only_satisfies_explicit_prerelease_ranges() {
 }
 
 #[test]
+fn resolves_whitespace_separated_and_ranges() {
+    // safer-buffer's `>= 2.1.2 < 3` (spaces AFTER the operators) used to fail
+    // because `>=` and `2.1.2` split into separate tokens — blocking real npm
+    // trees (Express, eslint, ...).
+    assert!(npm_version_satisfies("2.1.2", ">= 2.1.2 < 3"));
+    assert!(npm_version_satisfies("2.9.9", ">= 2.1.2 < 3"));
+    assert!(!npm_version_satisfies("2.1.1", ">= 2.1.2 < 3"));
+    assert!(!npm_version_satisfies("3.0.0", ">= 2.1.2 < 3"));
+    // The glued form (no spaces) and a single spaced operator keep working.
+    assert!(npm_version_satisfies("2.5.0", ">=2.1.2 <3.0.0"));
+    assert!(npm_version_satisfies("2.5.0", ">= 2.1.2"));
+    assert!(!npm_version_satisfies("2.0.0", "> 2.1.2"));
+}
+
+#[test]
+fn resolves_prerelease_anchored_caret_ranges() {
+    // gensync's `^1.0.0-beta.2` (only 1.0.0-beta.x is published) used to fail:
+    // the caret base dropped its prerelease, so `1.0.0-beta.2 >= 1.0.0` was false.
+    assert!(npm_version_satisfies("1.0.0-beta.2", "^1.0.0-beta.2"));
+    assert!(npm_version_satisfies("1.0.0-beta.3", "^1.0.0-beta.2"));
+    assert!(!npm_version_satisfies("1.0.0-beta.1", "^1.0.0-beta.2")); // below the anchor
+    assert!(npm_version_satisfies("1.0.0", "^1.0.0-beta.2")); // stable >= the prerelease
+    assert!(!npm_version_satisfies("2.0.0", "^1.0.0-beta.2")); // outside the caret
+    // A `>=` comparator anchored on a prerelease compares within the tuple.
+    assert!(npm_version_satisfies("1.0.0-beta.2", ">=1.0.0-beta.1"));
+    // …but prereleases must NOT leak into PLAIN ranges (the prior guard holds).
+    assert!(!npm_version_satisfies("1.3.0-beta", "^1.2.3"));
+    assert!(!npm_version_satisfies("2.0.0-rc.1", "^1.2.3"));
+}
+
+#[test]
 fn resolves_npm_versions_before_publish_time() {
     let root: NpmRoot = serde_json::from_value(serde_json::json!({
             "dist-tags": {

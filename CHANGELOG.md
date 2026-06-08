@@ -6,6 +6,14 @@ All notable changes to OMC are documented here. The format is based on
 
 ## [Unreleased]
 
+### Fixed
+
+- **npm version-range resolution** for two common forms that broke real
+  dependency trees (Express, React/Vite resolved to "could not resolve a
+  version"): whitespace-separated comparators with a space after the operator
+  (`>= 2.1.2 < 3`), and caret ranges anchored on a prerelease (`^1.0.0-beta.2`,
+  whose prerelease was dropped so the only published version never matched).
+
 ### Changed
 
 - **Homebrew is now a binary install.** `brew install turenlabs/tap/omc`
