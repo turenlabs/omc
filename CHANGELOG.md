@@ -6,6 +6,8 @@ All notable changes to OMC are documented here. The format is based on
 
 ## [Unreleased]
 
+## [0.1.2] - 2026-06-08
+
 ### Fixed
 
 - **npm version-range resolution** for two common forms that broke real
@@ -67,6 +69,7 @@ Initial public release.
   per-platform release binaries (macOS arm64/x86_64, Linux x86_64) with
   `SHA256SUMS`.
 
-[Unreleased]: https://github.com/turenlabs/omc/compare/v0.1.1...HEAD
+[Unreleased]: https://github.com/turenlabs/omc/compare/v0.1.2...HEAD
+[0.1.2]: https://github.com/turenlabs/omc/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/turenlabs/omc/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/turenlabs/omc/releases/tag/v0.1.0
