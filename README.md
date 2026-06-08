@@ -8,6 +8,8 @@ Packages don't execute as JavaScript or Python when you install them. OMC resolv
 
 ```bash
 brew install turenlabs/tap/omc
+# Recent Homebrew gates third-party taps. If you hit "Refusing to load formula
+# … from untrusted tap", run `brew trust turenlabs/tap` and re-run the install.
 
 omc init --name myapp                  # new project
 omc add --npm left-pad@1.3.0           # resolve + verify — no install scripts run
