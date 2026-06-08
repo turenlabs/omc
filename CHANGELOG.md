@@ -63,7 +63,7 @@ Initial public release.
   `omc.toml` policy. Grants are explicit and recorded in `omc.lock`.
 - **npm / pip / twine compatibility** surfaces and opt-in drop-in shims, plus the
   native `omc add` / `install` / `ci` / `remove` commands.
-- **Read-only `omc inspect`** capability X-ray (text report or `--format png`
+- **Read-only `omc inspect`** capability report (text, or `--format png`
   dependency graph) and `omc audit` as a CI gate.
 - **Distribution:** Homebrew via the public `turenlabs/homebrew-tap`, plus
   per-platform release binaries (macOS arm64/x86_64, Linux x86_64) with

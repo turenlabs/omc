@@ -2,7 +2,7 @@
 
 **A drop-in `npm`/`pip` that never runs install scripts and won't let packages touch your secrets.**
 
-![OMC in action — npm and pip packages install with no host access and no install scripts; then a risky one is X-rayed and blocked with the credential-exfiltration reason before it ever runs](docs/demo.gif)
+![OMC in action — npm and pip packages install with no host access and no install scripts; then a risky one is inspected and blocked with the credential-exfiltration reason before it ever runs](docs/demo.gif)
 
 Packages don't execute as JavaScript or Python when you install them. OMC resolves them, compiles their code to a small **verified bytecode**, and denies anything dangerous **by default** — reading env vars, files, the network, spawning processes. Reading sensitive files (`~/.ssh`, `.env`, keys, tokens) stays blocked *even with* `--allow-all-host`. Access is granted explicitly, per package, and recorded.
 
