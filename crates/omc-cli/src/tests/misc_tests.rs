@@ -29,7 +29,7 @@ fn public_help_hides_dev_and_legacy_alias_commands() {
     let mut policy_help = Vec::new();
     policy.write_long_help(&mut policy_help).unwrap();
     let policy_help = String::from_utf8(policy_help).unwrap();
-    for visible in ["allow", "trust", "list", "check", "validate"] {
+    for visible in ["allow", "grant", "list", "check", "validate"] {
         assert!(
             policy_help
                 .lines()
@@ -37,6 +37,13 @@ fn public_help_hides_dev_and_legacy_alias_commands() {
             "policy help is missing `{visible}`:\n{policy_help}"
         );
     }
+    // `trust` is now a hidden alias of `grant` and must not show in policy help.
+    assert!(
+        !policy_help
+            .lines()
+            .any(|line| line.trim_start().starts_with("trust")),
+        "policy help exposes hidden alias `trust`:\n{policy_help}"
+    );
 }
 
 #[cfg(not(feature = "dev-commands"))]

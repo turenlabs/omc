@@ -199,9 +199,15 @@ keys, tokens, cloud creds) stays denied unless you grant the exact path
 cd existing-project
 omc install                # full install
 omc install --omit-dev     # production
-omc install --locked       # offline, validate against omc.lock
-omc ci                     # clean lockfile-only install (for CI)
+omc install --locked       # in-place locked install (reuse and prune node_modules; no registry resolution)
+omc ci                     # clean install for CI: wipe the OMC-managed install trees, then install strictly from omc.lock
 ```
+
+`omc install --locked` is an **in-place** locked install: it reuses and prunes an
+existing `node_modules` instead of wiping it. `omc ci` is the **from-scratch
+clean** install: it wipes the OMC-managed install trees (`node_modules`,
+`.omc/python/{site-packages,bin,sdists,vcs}`, local-paths) and then installs
+strictly from `omc.lock`. Use `omc ci` when you want a guaranteed clean wipe.
 
 ### 4. Run code (drop-in shims, opt-in)
 
@@ -244,8 +250,8 @@ from installs.
 ### 5. Inspect & manage
 
 ```bash
-omc --project-dir myapp list            # locked packages (add --json)
-omc --project-dir myapp audit           # per-package verdicts + capabilities
+omc --project-dir myapp list            # inventory of locked packages (read-only; always exits 0; add --json)
+omc --project-dir myapp audit           # CI gate: per-package verdicts + capabilities; exits non-zero (2) if any are blocked
 omc --project-dir myapp policy allow http:api.example.com env:API_TOKEN   # persist grants in omc.toml
 omc --project-dir myapp remove --npm left-pad
 ```
@@ -366,7 +372,7 @@ The compiled per-package policy is enforced wherever a package is verified:
 ```bash
 omc policy validate            # parse omc.policy; prints OK or a located parse error
 omc policy allow <grant> [--flow <flow>]   # persist project-wide grants in omc.toml
-omc policy trust <spec> --allow <grant> [...]   # write version-pinned global trust
+omc policy grant <spec> --allow <grant> [...]   # write version-pinned global trust
 omc policy check <pkg>[@<ver>] [--npm|--pypi]   # print the effective compiled policy
 omc policy list [global]       # list global accepted package grants
 ```
@@ -620,6 +626,13 @@ cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo audit
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo audit --json
 cargo run -p omc-cli --bin omc -- --project-dir /tmp/omc-demo remove --npm is-odd left-pad
 ```
+
+In the examples above, `install --locked` is an **in-place** locked install
+(reuse and prune the existing `node_modules`; no registry resolution), while
+`ci` is the **clean install for CI**: it wipes the OMC-managed install trees and
+then installs strictly from `omc.lock`. Likewise, `list` is the read-only
+inventory of locked packages (always exits 0), and `audit` is the CI gate that
+exits non-zero (2) if any locked package is blocked.
 
 Source installs provide one `omc` binary. Homebrew and release tarballs also
 ship opt-in symlink shims named `node`, `npm`, `npx`, `pip`, `pip3`, `python`,
@@ -979,7 +992,9 @@ Supported now:
   `omc install --locked` and `omc ci`
 - Python git/VCS source archive cache used to restore pinned locked checkouts
   when the live checkout is missing
-- `omc ci` as a lockfile-only install command for clean/CI workflows
+- `omc ci` as the clean install for CI: wipe the OMC-managed install trees, then
+  install strictly from `omc.lock` (unlike the in-place `omc install --locked`,
+  which reuses and prunes the existing `node_modules`)
 - install-time sha256 verification for cached archives before package extraction
 - text and JSON `omc list` output for locked packages
 - text and JSON `omc list` / `omc audit` visibility for install-compiled

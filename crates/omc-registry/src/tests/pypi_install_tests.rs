@@ -189,6 +189,97 @@ fn installs_pure_python_archives_into_target_directory() {
     assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "target-ok");
 }
 
+/// SECURITY regression: with `pip install --target <ABS>`, the python local-paths
+/// marker resolves to `<ABS>/.omc-local-paths`. If a *directory* already exists
+/// there (pre-existing user content), the pre-install marker cleanup must NOT
+/// recursively delete it — only an OMC-written marker FILE is ever removed. Before
+/// the fix this used `remove_path_if_exists`, which would `remove_dir_all` the
+/// colliding directory and let `--target` wipe content under the user's dir.
+#[test]
+fn target_install_does_not_recursively_delete_external_local_paths_dir() {
+    let dir = tempfile::tempdir().unwrap(); // project_dir
+    let target_root = tempfile::tempdir().unwrap(); // external --target, OUTSIDE project_dir
+    let target = target_root.path().to_path_buf();
+
+    // A user directory colliding with the OMC marker name, holding content that
+    // must survive the install.
+    let marker_dir = target.join(".omc-local-paths");
+    fs::create_dir_all(marker_dir.join("inner")).unwrap();
+    fs::write(marker_dir.join("inner").join("victim.txt"), "do not delete\n").unwrap();
+
+    let bytes = python_sdist_for_test(&[
+        (
+            "pyproject.toml",
+            r#"
+                [project]
+                name = "ext-target"
+                version = "1.0.0"
+                "#,
+        ),
+        ("src/exttarget/__init__.py", "VALUE = 'ext-ok'\n"),
+    ]);
+    let archive = dir
+        .path()
+        .join(".omc")
+        .join("cache")
+        .join("ext-target-1.0.0.tar.gz");
+    fs::create_dir_all(archive.parent().unwrap()).unwrap();
+    fs::write(&archive, &bytes).unwrap();
+
+    let mut package = locked_package_for_test(Ecosystem::Pypi, "ext-target", "1.0.0");
+    package.source_url = "https://example.invalid/ext-target-1.0.0.tar.gz".to_owned();
+    package.archive = relative_path(dir.path(), &archive);
+    package.sha256 = sha256_hex(&bytes);
+    package.artifact_sha256 = write_signed_artifact_for_test(dir.path(), &package);
+
+    install_lock_with_python_target(
+        dir.path(),
+        &OmcLock {
+            version: 1,
+            signing_key: Some(project_signing_public_key(dir.path()).unwrap()),
+            packages: vec![package],
+            local_sources: Vec::new(),
+            python_vcs: Vec::new(),
+        },
+        Some(&target),
+        None,
+        true,
+        InstallMode::Clean,
+    )
+    .unwrap();
+
+    // The package still installed into the external target...
+    assert!(target.join("exttarget").join("__init__.py").exists());
+    // ...and the pre-existing user directory at the marker path is UNTOUCHED.
+    assert!(
+        marker_dir.join("inner").join("victim.txt").exists(),
+        "content under an external .omc-local-paths directory must not be recursively deleted by --target"
+    );
+}
+
+/// Unit test of the marker-removal invariant: removes regular files, never
+/// recurses into a directory, and is a no-op when absent.
+#[test]
+fn remove_marker_file_if_present_never_recurses_into_directories() {
+    let dir = tempfile::tempdir().unwrap();
+
+    // A regular-file marker is removed.
+    let file_marker = dir.path().join("local-paths");
+    fs::write(&file_marker, "x").unwrap();
+    remove_marker_file_if_present(&file_marker).unwrap();
+    assert!(!file_marker.exists());
+
+    // A directory at the marker path is left intact (never recursively deleted).
+    let dir_marker = dir.path().join(".omc-local-paths");
+    fs::create_dir_all(dir_marker.join("inner")).unwrap();
+    fs::write(dir_marker.join("inner").join("keep.txt"), "keep").unwrap();
+    remove_marker_file_if_present(&dir_marker).unwrap();
+    assert!(dir_marker.join("inner").join("keep.txt").exists());
+
+    // A missing path is a no-op.
+    remove_marker_file_if_present(&dir.path().join("absent")).unwrap();
+}
+
 #[test]
 fn target_upgrade_removes_stale_wheel_files() {
     let dir = tempfile::tempdir().unwrap();

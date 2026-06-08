@@ -182,7 +182,7 @@ pub fn write_global_package_trust(
     }
 
     let mut block = String::new();
-    block.push_str("# Written by `omc policy trust`: a per-package, version-pinned grant.\n");
+    block.push_str("# Written by `omc policy grant`: a per-package, version-pinned grant.\n");
     block.push_str("# Delete this file to revoke. Applies to this exact version only.\n");
     block.push_str(&format!("{ecosystem} package {name:?} =={version} {{\n"));
     for grant in grants {

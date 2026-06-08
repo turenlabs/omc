@@ -94,7 +94,7 @@ OMC also reads a **global** user policy at `~/.omc/omc.toml` (override the dir w
 min-release-age = "7d"
 ```
 
-### Trusting a package everywhere (`~/.omc/policy.d/` + `omc policy trust`)
+### Granting a package everywhere (`~/.omc/policy.d/` + `omc policy grant`)
 
 When a package is blocked, `omc add <spec>` opens a guided prompt:
 `[y] once`, `[a] always`, or `[N] deny`. Choosing always writes a
@@ -102,7 +102,7 @@ When a package is blocked, `omc add <spec>` opens a guided prompt:
 equivalent is:
 
 ```bash
-omc policy trust pypi:requests@2.32.5 --allow-flow 'env:*->network:*' --allow dynamic.eval
+omc policy grant pypi:requests@2.32.5 --allow-flow 'env:*->network:*' --allow dynamic.eval
 ```
 
 This writes a drop-in `~/.omc/policy.d/requests.omc.policy` (a directory of
@@ -136,6 +136,7 @@ is live but not yet yanked. Pinned by regression tests
 ---
 
 - 📖 **[Quickstart & full reference →](docs/REFERENCE.md)**
+- 🧭 **Command surface: native vs compat, and which verb to use: [docs/CLI-SURFACE.md](docs/CLI-SURFACE.md)**
 - 🛡️ **Policy DSL (`omc.policy`) — complete reference: [docs/POLICY.md](docs/POLICY.md)**
 - 🪱 **Supply-chain worm defense + CI/dev recipes: [docs/SUPPLY-CHAIN.md](docs/SUPPLY-CHAIN.md)**
 - 🤖 Agent skill: [SKILL.md](SKILL.md)

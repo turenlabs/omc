@@ -22,12 +22,12 @@ pub(crate) fn run_policy_command(
             run_policy_allow(project_dir, &grants, &flows)?;
             Ok(ExitCode::SUCCESS)
         }
-        PolicyCommand::Trust {
+        PolicyCommand::Grant {
             spec,
             allow,
             allow_flow,
         } => {
-            run_policy_trust(&spec, &allow, &allow_flow)?;
+            run_policy_grant(&spec, &allow, &allow_flow)?;
             Ok(ExitCode::SUCCESS)
         }
         PolicyCommand::List { scope } => {
@@ -107,7 +107,7 @@ pub(crate) fn run_policy_allow(
     Ok(())
 }
 
-pub(crate) fn run_policy_trust(
+pub(crate) fn run_policy_grant(
     spec: &str,
     allow: &[String],
     allow_flow: &[String],
@@ -120,13 +120,13 @@ pub(crate) fn run_policy_trust(
     let parsed = PackageSpec::parse(spec)?;
     let version = parsed.version.as_deref().ok_or_else(|| {
         OmcRegistryError::UnsupportedSpec(format!(
-            "pin an exact version to trust, e.g. {}:{}@<version>",
+            "pin an exact version to grant, e.g. {}:{}@<version>",
             parsed.ecosystem, parsed.name
         ))
     })?;
     let path =
         write_global_package_trust(parsed.ecosystem, &parsed.name, version, allow, allow_flow)?;
-    println!("trusted {spec}");
+    println!("granted {spec}");
     println!("  wrote {}", path.display());
     Ok(())
 }

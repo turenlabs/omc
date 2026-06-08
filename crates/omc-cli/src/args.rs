@@ -89,7 +89,9 @@ pub(crate) enum Command {
         #[arg(long, help = "Grant all host capabilities for compatibility testing")]
         allow_all_host: bool,
     },
-    #[command(about = "Resolve and show a package's capabilities without installing")]
+    #[command(
+        about = "Resolve and show a package's capabilities without installing (text report, or --format png graph)"
+    )]
     Inspect {
         #[arg(
             long,
@@ -110,6 +112,18 @@ pub(crate) enum Command {
         )]
         specs: Vec<String>,
         #[arg(
+            long,
+            value_enum,
+            default_value = "text",
+            help = "Output format: text (default, full capability report) or png (a dependency-graph image)"
+        )]
+        format: InspectFormat,
+        #[arg(
+            long,
+            help = "PNG output path used with --format png (default omc-graph.png); ignored for text"
+        )]
+        output: Option<PathBuf>,
+        #[arg(
             long = "allow",
             help = "Grant a capability to preview how it changes the verdict, e.g. http:api.example.com, env:API_TOKEN, fs-read:*, proc:*"
         )]
@@ -122,7 +136,10 @@ pub(crate) enum Command {
         #[arg(long, help = "Grant all host capabilities for compatibility testing")]
         allow_all_host: bool,
     },
-    #[command(about = "Render a PNG of a package's dependency graph and capabilities")]
+    #[command(
+        about = "Hidden deprecated alias for `inspect --format png`: render a dependency-graph PNG",
+        hide = true
+    )]
     Graph {
         #[arg(
             long,
@@ -276,12 +293,17 @@ pub(crate) enum Command {
         omit_optional: bool,
         #[arg(long = "omit-peer", help = "Skip npm peer dependency inputs")]
         omit_peer: bool,
-        #[arg(long, help = "Install from omc.lock without registry resolution")]
+        #[arg(
+            long,
+            help = "Install in place from omc.lock without registry resolution (reuse and prune node_modules; use `omc ci` for a clean wipe)"
+        )]
         locked: bool,
         #[arg(long, help = "Grant all host capabilities for compatibility testing")]
         allow_all_host: bool,
     },
-    #[command(about = "Install from omc.lock without registry resolution")]
+    #[command(
+        about = "Clean install for CI: wipe the OMC-managed install trees, then install strictly from omc.lock"
+    )]
     Ci {
         #[arg(
             long = "allow",
@@ -325,12 +347,16 @@ pub(crate) enum Command {
         #[arg(long, help = "Grant all host capabilities for compatibility testing")]
         allow_all_host: bool,
     },
-    #[command(about = "Summarize locked packages and fail if any are blocked")]
+    #[command(
+        about = "CI gate: list locked packages and exit non-zero (2) if any are blocked"
+    )]
     Audit {
         #[arg(long, help = "Emit machine-readable JSON")]
         json: bool,
     },
-    #[command(about = "List locked packages without changing install state")]
+    #[command(
+        about = "Show the inventory of locked packages (read-only; always exits 0)"
+    )]
     List {
         #[arg(long, help = "Emit machine-readable JSON")]
         json: bool,
@@ -457,10 +483,11 @@ pub(crate) enum PolicyCommand {
         grants: Vec<String>,
     },
     #[command(
-        about = "Trust a package globally: write a version-pinned grant to ~/.omc/policy.d/"
+        about = "Grant a package globally: write a version-pinned grant to ~/.omc/policy.d/",
+        alias = "trust"
     )]
-    Trust {
-        #[arg(help = "Package spec to trust, e.g. npm:lodash@4.18.1 or pypi:requests@2.32.5")]
+    Grant {
+        #[arg(help = "Package spec to grant, e.g. npm:lodash@4.18.1 or pypi:requests@2.32.5")]
         spec: String,
         #[arg(
             long = "allow",
@@ -507,6 +534,14 @@ pub(crate) enum PolicyCommand {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub(crate) enum PolicyListScope {
     Global,
+}
+
+/// Output format for `omc inspect`: a text capability report (default) or a
+/// dependency-graph PNG (the surface formerly exposed as `omc graph`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub(crate) enum InspectFormat {
+    Text,
+    Png,
 }
 
 #[derive(Debug, PartialEq, Eq)]

@@ -12,7 +12,9 @@ use omc_registry::{
     compile_source_path, CapabilityKind, CompileSourceOptions, Ecosystem, LinkReport, LockedPackage,
 };
 
-use crate::graph::{render_graph, run_graph, DependencyGraph, GraphCommand, Risk};
+use crate::args::InspectFormat;
+use crate::graph::{render_graph, DependencyGraph, Risk};
+use crate::inspect::{run_inspect, InspectCommand};
 
 /// Compile a small source file (local, no network) into a `LinkReport` named
 /// `name`, declaring `deps` (already-qualified spec strings) as its production
@@ -175,20 +177,22 @@ fn render_writes_a_valid_png() {
     let _ = fs::remove_dir_all(out.parent().unwrap());
 }
 
-/// READ-ONLY guarantee mirror of inspect: a graph invocation that fails before
-/// any registry resolution (an unparseable spec) must not write into the cwd,
-/// and must not contact the network.
+/// READ-ONLY guarantee mirror of inspect: a `--format png` invocation (the
+/// surface behind the hidden `graph` alias) that fails before any registry
+/// resolution (an unparseable spec) must not write into the cwd, and must not
+/// contact the network.
 #[test]
 fn graph_never_writes_into_cwd_on_error_path() {
     let cwd = test_dir("graph-cwd-untouched");
     let result = with_env_lock(|| {
         let previous = env::current_dir().ok();
         env::set_current_dir(&cwd).unwrap();
-        let result = run_graph(GraphCommand {
+        let result = run_inspect(InspectCommand {
             npm: false,
             pypi: false,
             specs: vec!["bogus-ecosystem:not-a-real-thing@9.9.9".to_owned()],
-            output: cwd.join("omc-graph.png"),
+            format: InspectFormat::Png,
+            output: Some(cwd.join("omc-graph.png")),
             allow: Vec::new(),
             allow_flow: Vec::new(),
             allow_all_host: false,

@@ -20,7 +20,7 @@ fn policy_list_parses_global_as_default_scope() {
 }
 
 #[test]
-fn policy_allow_and_trust_parse_as_policy_subcommands() {
+fn policy_allow_and_grant_parse_as_policy_subcommands() {
     let cli = Cli::try_parse_from(args(&[
         "omc",
         "policy",
@@ -43,7 +43,7 @@ fn policy_allow_and_trust_parse_as_policy_subcommands() {
     let cli = Cli::try_parse_from(args(&[
         "omc",
         "policy",
-        "trust",
+        "grant",
         "pypi:requests@2.32.5",
         "--allow",
         "dynamic.eval",
@@ -54,7 +54,7 @@ fn policy_allow_and_trust_parse_as_policy_subcommands() {
     match cli.command {
         Command::Policy {
             action:
-                PolicyCommand::Trust {
+                PolicyCommand::Grant {
                     spec,
                     allow,
                     allow_flow,
@@ -64,7 +64,31 @@ fn policy_allow_and_trust_parse_as_policy_subcommands() {
             assert_eq!(allow, vec!["dynamic.eval"]);
             assert_eq!(allow_flow, vec!["env:*->network:*"]);
         }
-        other => panic!("expected policy trust command, got {other:?}"),
+        other => panic!("expected policy grant command, got {other:?}"),
+    }
+}
+
+/// Back-compat: the old `omc policy trust` spelling is kept as a hidden clap
+/// alias and must still parse to `PolicyCommand::Grant`.
+#[test]
+fn policy_trust_alias_still_parses_as_grant() {
+    let cli = Cli::try_parse_from(args(&[
+        "omc",
+        "policy",
+        "trust",
+        "npm:lodash@4.18.1",
+        "--allow",
+        "dynamic.eval",
+    ]))
+    .unwrap();
+    match cli.command {
+        Command::Policy {
+            action: PolicyCommand::Grant { spec, allow, .. },
+        } => {
+            assert_eq!(spec, "npm:lodash@4.18.1");
+            assert_eq!(allow, vec!["dynamic.eval"]);
+        }
+        other => panic!("expected `trust` alias to parse as policy grant, got {other:?}"),
     }
 }
 

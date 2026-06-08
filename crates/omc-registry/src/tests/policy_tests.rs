@@ -111,7 +111,7 @@ fn pinned_trust_block_grants_only_matching_version() {
         .contains(&Capability::DynamicEval));
 }
 
-// End-to-end: `omc policy trust` writes a per-package pinned block to
+// End-to-end: `omc policy grant` writes a per-package pinned block to
 // $OMC_HOME/policy.d/, the loader picks it up, and effective_package_policy
 // grants it for that exact package+version — but NOT a different version.
 

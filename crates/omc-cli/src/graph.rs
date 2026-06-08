@@ -1,9 +1,8 @@
-//! `omc graph` — resolve a package's dependency graph (read-only, into a
-//! throwaway temp dir exactly like `omc inspect`) and render a PNG visualizing
-//! it with a PURE-RUST renderer (tiny-skia + a tiny built-in bitmap font). No
-//! graphviz / `dot` / system tools are invoked, and nothing is written into the
-//! user's project: resolution lands in a sandboxed scratch dir, and the only
-//! file we write is the requested PNG.
+//! Dependency-graph PNG renderer for `omc inspect --format png` (the surface
+//! formerly exposed as `omc graph`). The actual resolution — into a throwaway
+//! temp dir, read-only — lives in `inspect.rs`; this module owns only the
+//! pure-Rust rendering (tiny-skia + a tiny built-in bitmap font). No graphviz /
+//! `dot` / system tools are invoked.
 //!
 //! Nodes are packages (label: "name version" plus a short capability summary);
 //! edges are "depends on" relations derived from each report's
@@ -12,70 +11,11 @@
 //!   * RED    — dynamic_eval OR fs_write OR proc_spawn (code execution / writes)
 //!   * YELLOW — other host capabilities (env_read / fs_read / http_request)
 //!   * GREY   — no host access
-//!
-//! Like inspect, this is informational: blocked packages are recorded (not
-//! thrown on) so the whole tree renders.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
-use std::path::{Path, PathBuf};
-use std::process::ExitCode;
 
-use omc_registry::{add_package_graph, CapabilityKind, LinkOptions, LinkReport, OmcRegistryError};
+use omc_registry::{CapabilityKind, LinkReport};
 use tiny_skia::{Color, Paint, PathBuilder, Pixmap, Rect, Stroke, Transform};
-
-use crate::manifest::{ecosystem_hint, parse_package_specs};
-use crate::policy_args::apply_cli_policy_options;
-
-/// Arguments for `omc graph`, mirroring the resolve-relevant subset of `add`
-/// plus the PNG output path.
-pub(crate) struct GraphCommand {
-    pub(crate) npm: bool,
-    pub(crate) pypi: bool,
-    pub(crate) specs: Vec<String>,
-    pub(crate) output: PathBuf,
-    pub(crate) allow: Vec<String>,
-    pub(crate) allow_flow: Vec<String>,
-    pub(crate) allow_all_host: bool,
-}
-
-pub(crate) fn run_graph(command: GraphCommand) -> Result<ExitCode, OmcRegistryError> {
-    let specs = parse_package_specs(&command.specs, ecosystem_hint(command.npm, command.pypi))?;
-
-    // Resolve into a unique throwaway directory so NOTHING is written to the
-    // user's project (matches `omc inspect`'s read-only contract).
-    let scratch = ScratchDir::new()?;
-
-    let mut options = LinkOptions::new(scratch.path());
-    // Record (don't throw on) blocked packages so a blocked dependency is still
-    // graphed rather than aborting the whole render.
-    options.record_blocked = true;
-    apply_cli_policy_options(
-        &mut options,
-        &command.allow,
-        &command.allow_flow,
-        command.allow_all_host,
-    )?;
-
-    let mut reports = Vec::new();
-    for spec in &specs {
-        reports.extend(add_package_graph(spec, &options)?);
-    }
-
-    let graph = DependencyGraph::from_reports(&reports);
-    let pixmap = render_graph(&graph);
-    pixmap
-        .save_png(&command.output)
-        .map_err(|err| OmcRegistryError::UnsupportedSpec(format!("failed to write PNG: {err}")))?;
-
-    println!(
-        "wrote {} ({} nodes, {} edges)",
-        command.output.display(),
-        graph.nodes.len(),
-        graph.edges.len()
-    );
-
-    Ok(ExitCode::SUCCESS)
-}
 
 /// Risk tier used to color a node.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -513,34 +453,5 @@ fn glyph_bitmap(ch: char) -> [u8; 7] {
         '[' => [0x0E, 0x08, 0x08, 0x08, 0x08, 0x08, 0x0E],
         ']' => [0x0E, 0x02, 0x02, 0x02, 0x02, 0x02, 0x0E],
         _ => [0x00, 0x1F, 0x11, 0x11, 0x11, 0x1F, 0x00], // box for unknown
-    }
-}
-
-/// A unique temporary directory that is best-effort removed on drop. Used purely
-/// as a sandboxed `LinkOptions::project_dir` so `omc graph` never writes into the
-/// user's project.
-struct ScratchDir {
-    path: PathBuf,
-}
-
-impl ScratchDir {
-    fn new() -> Result<Self, OmcRegistryError> {
-        let nonce = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0);
-        let path = std::env::temp_dir().join(format!("omc-graph-{}-{nonce}", std::process::id()));
-        std::fs::create_dir_all(&path)?;
-        Ok(Self { path })
-    }
-
-    fn path(&self) -> &Path {
-        &self.path
-    }
-}
-
-impl Drop for ScratchDir {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.path);
     }
 }

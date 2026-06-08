@@ -28,10 +28,10 @@ omc --project-dir DIR init --name myapp          # new project (omc.toml, omc.lo
 omc --project-dir DIR add --npm left-pad@1.3.0   # resolve + verify (no scripts run)
 omc --project-dir DIR add --pypi requests==2.32.3 --allow net "*"
 omc --project-dir DIR install                    # from package.json / requirements.txt / omc.toml
-omc --project-dir DIR install --locked           # offline, verify against omc.lock
-omc --project-dir DIR ci                          # clean lockfile-only install
-omc --project-dir DIR list                        # locked packages
-omc --project-dir DIR audit                       # per-package verdicts + capabilities
+omc --project-dir DIR install --locked           # in-place locked install (reuse + prune node_modules)
+omc --project-dir DIR ci                          # clean install: wipe OMC-managed trees, install strictly from omc.lock
+omc --project-dir DIR list                        # inventory of locked packages (read-only; always exits 0)
+omc --project-dir DIR audit                       # CI gate: list locked packages, exit non-zero (2) if any blocked
 omc --project-dir DIR policy validate             # parse omc.policy: OK or a located error
 omc --project-dir DIR policy check stripe@13.1.0 --npm   # effective compiled policy for a package
 omc --project-dir DIR policy list                 # global accepted package grants

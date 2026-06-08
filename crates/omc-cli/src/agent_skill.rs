@@ -36,9 +36,10 @@ omc init --name myapp                 # create omc.toml, omc.lock, .omc/
 omc add --npm left-pad@1.3.0          # resolve + verify + lock + install one package
 omc add --pypi idna==3.7              # PyPI; or use prefixes: omc add npm:left-pad@1.3.0
 omc install                           # resolve omc.toml/package.json/requirements.txt and install locked
-omc ci                                # install strictly from omc.lock, no registry resolution
-omc list                              # list locked packages (--json)
-omc audit                             # summarize locked packages; non-zero exit if any blocked (--json)
+omc install --locked                  # install in place strictly from omc.lock (reuse + prune node_modules)
+omc ci                                # clean install for CI: wipe install trees, then install strictly from omc.lock
+omc list                              # inventory of locked packages, read-only (--json)
+omc audit                             # CI gate: non-zero exit if any locked package is blocked (--json)
 omc remove --npm left-pad             # drop a dependency and reinstall the rest
 ```
 
@@ -52,17 +53,19 @@ nothing is written to the project (no `omc.lock`, manifest, `node_modules`, or
 `site-packages`), so they are safe to run anywhere:
 
 ```bash
-omc inspect --pypi requests           # full per-file capability report (every finding, evidence, verdict)
-omc graph --pypi requests             # write a PNG of the dependency tree, nodes colored by risk
-omc graph --npm express --output deps.png   # choose the output path (default ./omc-graph.png)
+omc inspect --pypi requests                  # full per-file capability report (every finding, evidence, verdict)
+omc inspect --pypi requests --format png     # write a PNG of the dependency tree, nodes colored by risk
+omc inspect --npm express --format png --output deps.png   # choose the output path (default ./omc-graph.png)
 ```
 
 `omc inspect` is the read-only equivalent of `omc add -v`: use it to see exactly
-what a package and its transitive deps can do before trusting them. `omc graph`
-colors each node by its capabilities — red = runs unverifiable code / writes
+what a package and its transitive deps can do before trusting them. `--format
+png` colors each node by its capabilities — red = runs unverifiable code / writes
 files / spawns processes, yellow = other host access (env/file-read/network),
-grey = no host access. Both accept the same `--allow` / `--allow-flow` /
+grey = no host access. Every format accepts the same `--allow` / `--allow-flow` /
 `--allow-all-host` grants so you can preview how a grant changes the verdict.
+(`omc graph` is kept as a hidden, deprecated alias for `omc inspect --format
+png`.)
 
 ### Running installed code
 
@@ -138,12 +141,12 @@ Most commands that resolve packages (`add`, `install`, `ci`, `remove`) accept:
   - `omc policy validate` — parse `omc.policy`; OK or a located error.
   - `omc policy check <pkg>[@version]` — show the effective compiled policy.
   - `omc policy list` — show global accepted package grants.
-- **Trust store** — `omc policy trust <spec> --allow <grant>
+- **Global grant store** — `omc policy grant <spec> --allow <grant>
   [--allow-flow <flow>]` writes a **version-pinned** drop-in to
   `~/.omc/policy.d/` that applies in every project but only to that exact
   package+version. Example:
-  `omc policy trust pypi:requests@2.32.5 --allow dynamic.eval --allow-flow 'env:*->network:*'`.
-  Delete the file to revoke.
+  `omc policy grant pypi:requests@2.32.5 --allow dynamic.eval --allow-flow 'env:*->network:*'`.
+  Delete the file to revoke. (`omc policy trust` is kept as a hidden alias.)
 
 ### Supply-chain freshness
 

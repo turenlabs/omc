@@ -596,6 +596,53 @@ fn behavior_label_round_trips() {
     let _ = Capability::FsRead("*".to_owned()); // ensure omc_cap is linked in test scope
 }
 
+#[test]
+fn inspect_defaults_to_text_and_parses_png_with_output() {
+    // No --format: defaults to the text capability report.
+    let cli = Cli::try_parse_from(args(&["omc", "inspect", "--pypi", "requests"])).unwrap();
+    match cli.command {
+        Command::Inspect { format, output, .. } => {
+            assert_eq!(format, InspectFormat::Text);
+            assert_eq!(output, None);
+        }
+        other => panic!("expected inspect command, got {other:?}"),
+    }
+
+    // --format png with an explicit --output path.
+    let cli = Cli::try_parse_from(args(&[
+        "omc",
+        "inspect",
+        "--npm",
+        "express",
+        "--format",
+        "png",
+        "--output",
+        "deps.png",
+    ]))
+    .unwrap();
+    match cli.command {
+        Command::Inspect { format, output, .. } => {
+            assert_eq!(format, InspectFormat::Png);
+            assert_eq!(output, Some(PathBuf::from("deps.png")));
+        }
+        other => panic!("expected inspect png command, got {other:?}"),
+    }
+}
+
+#[test]
+fn graph_is_a_hidden_alias_that_still_parses() {
+    // The deprecated `omc graph` command stays parseable (hidden in help) so old
+    // invocations keep working; dispatch routes it to inspect --format png.
+    let cli = Cli::try_parse_from(args(&[
+        "omc", "graph", "--pypi", "requests", "--output", "g.png",
+    ]))
+    .unwrap();
+    match cli.command {
+        Command::Graph { output, .. } => assert_eq!(output, PathBuf::from("g.png")),
+        other => panic!("expected graph alias command, got {other:?}"),
+    }
+}
+
 /// READ-ONLY guarantee: an inspect invocation that fails before any registry
 /// resolution (here, an unparseable spec) must not create `omc.lock` or
 /// `node_modules` in the user's current working directory. This exercises the
@@ -612,6 +659,8 @@ fn inspect_never_writes_into_cwd_on_error_path() {
             npm: false,
             pypi: false,
             specs: vec!["bogus-ecosystem:not-a-real-thing@9.9.9".to_owned()],
+            format: InspectFormat::Text,
+            output: None,
             allow: Vec::new(),
             allow_flow: Vec::new(),
             allow_all_host: false,

@@ -1,12 +1,14 @@
 //! `omc inspect` — resolve and capability-profile one or more registry packages
-//! and print the full verbose per-package report, WITHOUT touching the user's
-//! project (no omc.lock, omc.toml, node_modules, or site-packages writes).
+//! and either print the full per-package report (`--format text`, the default)
+//! or render a dependency-graph PNG (`--format png`, the surface formerly
+//! exposed as `omc graph`), WITHOUT touching the user's project (no omc.lock,
+//! omc.toml, node_modules, or site-packages writes).
 //!
 //! Inspect is informational: it resolves the dependency graph into a throwaway
 //! temporary directory (used only as `LinkOptions::project_dir`), records blocked
-//! packages instead of aborting on the first denial, renders the verbose report,
-//! and exits 0 even when a package would be blocked — the deny-by-default verdict
-//! is still shown in full, it is just not enforced as a non-zero exit here because
+//! packages instead of aborting on the first denial, renders the report, and
+//! exits 0 even when a package would be blocked — the deny-by-default verdict is
+//! still shown in full, it is just not enforced as a non-zero exit here because
 //! nothing is being installed.
 
 use std::path::PathBuf;
@@ -14,15 +16,24 @@ use std::process::ExitCode;
 
 use omc_registry::{add_package_graph, LinkOptions, LinkReport, OmcRegistryError, PackageSpec};
 
+use crate::args::InspectFormat;
+use crate::graph::{render_graph, DependencyGraph};
 use crate::manifest::{ecosystem_hint, parse_package_specs};
 use crate::policy_args::apply_cli_policy_options;
 use crate::render::print_inspect_report;
 
-/// Arguments for `omc inspect`, mirroring the resolve-relevant subset of `add`.
+/// Default PNG path used by `--format png` when `--output` is omitted (matches
+/// the legacy `omc graph` default).
+const DEFAULT_GRAPH_OUTPUT: &str = "omc-graph.png";
+
+/// Arguments for `omc inspect`, mirroring the resolve-relevant subset of `add`
+/// plus the output format and (for `--format png`) the PNG path.
 pub(crate) struct InspectCommand {
     pub(crate) npm: bool,
     pub(crate) pypi: bool,
     pub(crate) specs: Vec<String>,
+    pub(crate) format: InspectFormat,
+    pub(crate) output: Option<PathBuf>,
     pub(crate) allow: Vec<String>,
     pub(crate) allow_flow: Vec<String>,
     pub(crate) allow_all_host: bool,
@@ -48,12 +59,38 @@ pub(crate) fn run_inspect(command: InspectCommand) -> Result<ExitCode, OmcRegist
     )?;
 
     let reports = resolve_reports(&specs, &options)?;
-    print_inspect_report(&reports);
+
+    match command.format {
+        InspectFormat::Text => print_inspect_report(&reports),
+        InspectFormat::Png => render_inspect_png(&reports, command.output)?,
+    }
 
     // Informational command: always exit 0, even if a package would be blocked.
-    // The blocked verdict is shown in the verbose report above; inspect does not
-    // install anything, so there is no deny-by-default action to fail.
+    // The blocked verdict is shown in the report above; inspect does not install
+    // anything, so there is no deny-by-default action to fail.
     Ok(ExitCode::SUCCESS)
+}
+
+/// Render the resolved reports to a dependency-graph PNG at `output` (or the
+/// default path). This is the body of the former `omc graph` command, now
+/// reached via `omc inspect --format png`.
+fn render_inspect_png(
+    reports: &[LinkReport],
+    output: Option<PathBuf>,
+) -> Result<(), OmcRegistryError> {
+    let output = output.unwrap_or_else(|| PathBuf::from(DEFAULT_GRAPH_OUTPUT));
+    let graph = DependencyGraph::from_reports(reports);
+    let pixmap = render_graph(&graph);
+    pixmap
+        .save_png(&output)
+        .map_err(|err| OmcRegistryError::UnsupportedSpec(format!("failed to write PNG: {err}")))?;
+    println!(
+        "wrote {} ({} nodes, {} edges)",
+        output.display(),
+        graph.nodes.len(),
+        graph.edges.len()
+    );
+    Ok(())
 }
 
 fn resolve_reports(

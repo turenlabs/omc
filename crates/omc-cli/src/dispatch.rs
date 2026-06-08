@@ -7,9 +7,9 @@ use std::io::{IsTerminal, Write};
 
 use omc_registry::{
     add_package_graph, build_block_suggestion, init_project, install_locked_packages,
-    install_locked_project, install_project, parse_capability_grant, parse_flow_rule,
-    read_lockfile, write_global_package_trust, LinkOptions, LinkReport, OmcRegistryError,
-    PackageSpec, Verdict,
+    install_locked_project, install_locked_project_in_place, install_project,
+    parse_capability_grant, parse_flow_rule, read_lockfile, write_global_package_trust, LinkOptions,
+    LinkReport, OmcRegistryError, PackageSpec, Verdict,
 };
 
 #[cfg(feature = "dev-commands")]
@@ -22,7 +22,7 @@ use crate::direct_compat::{
 };
 #[cfg(feature = "dev-commands")]
 use crate::exec_cell::{run_exec_cell, ExecCellCommand};
-use crate::graph::{run_graph, GraphCommand};
+use crate::args::InspectFormat;
 use crate::inspect::{run_inspect, InspectCommand};
 use crate::install::{install_options, DependencyOmit};
 use crate::manifest::{dependency_kind_from_booleans, ecosystem_hint, parse_package_specs};
@@ -141,7 +141,7 @@ fn resolve_add_with_bundled_prompt(
         // Fail closed: print each package's exact grant commands, restore, exit 2.
         for b in &blocked {
             eprintln!(
-                "  trust {}: omc policy trust {}:{}@{} {}",
+                "  grant {}: omc policy grant {}:{}@{} {}",
                 b.name,
                 b.ecosystem,
                 b.name,
@@ -291,6 +291,8 @@ fn run() -> Result<ExitCode, OmcRegistryError> {
             npm,
             pypi,
             specs,
+            format,
+            output,
             allow,
             allow_flow,
             allow_all_host,
@@ -299,11 +301,16 @@ fn run() -> Result<ExitCode, OmcRegistryError> {
                 npm,
                 pypi,
                 specs,
+                format,
+                output,
                 allow,
                 allow_flow,
                 allow_all_host,
             });
         }
+        // `graph` is a hidden, deprecated alias for `inspect --format png`: it
+        // routes through the same handler with the PNG format preset and its
+        // (required, defaulted) output path threaded through.
         Command::Graph {
             npm,
             pypi,
@@ -313,11 +320,12 @@ fn run() -> Result<ExitCode, OmcRegistryError> {
             allow_flow,
             allow_all_host,
         } => {
-            return run_graph(GraphCommand {
+            return run_inspect(InspectCommand {
                 npm,
                 pypi,
                 specs,
-                output,
+                format: InspectFormat::Png,
+                output: Some(output),
                 allow,
                 allow_flow,
                 allow_all_host,
@@ -397,8 +405,10 @@ fn run() -> Result<ExitCode, OmcRegistryError> {
                     peer: omit_peer,
                 },
             )?;
+            // `--locked` installs in place from omc.lock (reuse + prune
+            // node_modules); `omc ci` is the from-scratch clean variant.
             let install = if locked {
-                install_locked_project(&options)?
+                install_locked_project_in_place(&options)?
             } else {
                 install_project(&options)?
             };

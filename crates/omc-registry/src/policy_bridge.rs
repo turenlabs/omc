@@ -537,10 +537,10 @@ pub(crate) fn render_block_guidance(
         flags.join(" \\\n        ")
     ));
     out.push_str(&format!(
-        "\n  To trust {name} {version} everywhere (writes ~/.omc/policy.d/):\n"
+        "\n  To grant {name} {version} everywhere (writes ~/.omc/policy.d/):\n"
     ));
     out.push_str(&format!(
-        "      omc policy trust {ecosystem}:{name}@{version} {}\n",
+        "      omc policy grant {ecosystem}:{name}@{version} {}\n",
         flags.join(" ")
     ));
     out.push_str(&format!(
@@ -570,7 +570,7 @@ pub struct BlockSuggestion {
     /// Bare data-flow grant tokens (accepted by `parse_flow_rule`).
     pub allow_flow: Vec<String>,
     /// The consequence-first, plain-language guidance (raw tokens + risk lines)
-    /// including the per-package "to allow / to trust" footer.
+    /// including the per-package "to allow / to grant" footer.
     pub guidance: String,
     /// Just the "<name> was blocked. It wants to: …" section, for the bundled
     /// multi-package table (one combined action is offered for the whole set).

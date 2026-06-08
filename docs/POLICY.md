@@ -201,7 +201,7 @@ restrictive cutoff.
 
 ```bash
 omc policy allow <grant> [--flow <flow>]          # persist project-wide grants in omc.toml
-omc policy trust <spec> --allow <grant> [...]     # write version-pinned global trust
+omc policy grant <spec> --allow <grant> [...]     # write version-pinned global trust
 omc policy validate                              # parse omc.policy; OK or a located error
 omc policy check <pkg>[@<ver>] [--npm|--pypi]    # print the effective compiled policy
 omc policy list [global]                         # list global accepted package grants
@@ -212,6 +212,9 @@ names keep their `@` (`omc policy check @acme/widget@2.0.0`). One-shot CLI grant
 on `omc add`/`install` layer on top: `--allow`, `--allow-flow`, `--allow-all-host`,
 `--allow-sensitive`. `omc policy list` defaults to `global`, which reads the
 drop-in trust store at `$OMC_HOME/policy.d/` (default `~/.omc/policy.d/`).
+
+> `omc policy grant` was previously named `omc policy trust`; `omc policy trust`
+> remains a hidden alias for back-compat.
 
 ---
 

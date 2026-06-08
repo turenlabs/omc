@@ -770,7 +770,23 @@ fn lock_project_options(options: &mut LinkOptions) -> Result<Vec<LinkReport>> {
     Ok(reports)
 }
 
+/// Install strictly from `omc.lock`, wiping the OMC-managed `node_modules` first
+/// (a from-scratch clean install). Backs `omc ci` and the npm-compat `ci` path.
 pub fn install_locked_project(options: &LinkOptions) -> Result<InstallReport> {
+    install_locked_project_with_mode(options, InstallMode::Clean)
+}
+
+/// Install strictly from `omc.lock`, reusing and pruning an existing
+/// `node_modules` in place rather than wiping it first. Backs `omc install
+/// --locked`; `install_locked_project` (clean) backs `omc ci`.
+pub fn install_locked_project_in_place(options: &LinkOptions) -> Result<InstallReport> {
+    install_locked_project_with_mode(options, InstallMode::ReuseNpmNodeModules)
+}
+
+fn install_locked_project_with_mode(
+    options: &LinkOptions,
+    mode: InstallMode,
+) -> Result<InstallReport> {
     init_project(&options.project_dir, None)?;
 
     let mut options = options.clone();
@@ -789,7 +805,7 @@ pub fn install_locked_project(options: &LinkOptions) -> Result<InstallReport> {
         options.python_target_dir.as_deref(),
         options.python_bin_dir.as_deref(),
         options.python_target_overwrite_existing,
-        InstallMode::Clean,
+        mode,
     )?;
     report.local_source_artifacts += local_source_artifacts;
     report.npm_bins += install_npm_project_links(
@@ -3481,7 +3497,11 @@ fn install_lock_with_python_target(
         remove_path_if_exists(&python_bin_dir)?;
     }
     remove_path_if_exists(&python_sdists_dir)?;
-    remove_path_if_exists(&python_local_paths)?;
+    // File-only removal: the local-paths marker is always an OMC-written file, and
+    // under `--target <DIR>` it resolves inside the user-named DIR. Using a
+    // directory-recursing delete here would let `--target` wipe a pre-existing
+    // directory under DIR; see remove_marker_file_if_present.
+    remove_marker_file_if_present(&python_local_paths)?;
     let python_bin_dir_existed = python_bin_dir.exists();
 
     fs::create_dir_all(&node_modules)?;
@@ -3965,6 +3985,31 @@ pub(crate) fn remove_path_if_exists(path: &Path) -> Result<()> {
         Ok(_) => {
             fs::remove_file(path)?;
         }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+    Ok(())
+}
+
+/// Remove an OMC marker file (the python `local-paths` / `.omc-local-paths`
+/// sentinel) if present, using FILE-only semantics — it never recursively
+/// removes a directory.
+///
+/// OMC only ever writes these markers with `fs::write` (a regular file), so a
+/// real directory at the marker path is not ours. It can only appear when
+/// `pip install --target <DIR>` points the install at a user directory that
+/// already contains an entry of that name; recursively deleting it would let a
+/// `--target` install wipe pre-existing content under <DIR>. Refusing to remove
+/// a directory here keeps OMC's own marker cleanup working in every location
+/// (project-local and inside a `--target`/`--prefix` dir) while making it
+/// impossible for the marker delete to escape into and recursively erase a
+/// user-owned directory. A symlink at the path is removed link-only (it matches
+/// the non-directory arm), so it can never be followed to delete elsewhere.
+fn remove_marker_file_if_present(path: &Path) -> Result<()> {
+    match fs::symlink_metadata(path) {
+        // A real directory at the marker path is not an OMC sentinel — leave it.
+        Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {}
+        Ok(_) => fs::remove_file(path)?,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => return Err(error.into()),
     }

@@ -4,3 +4,4 @@
 .DS_Store
 .batou/
 /dist/
+.mcp.json
