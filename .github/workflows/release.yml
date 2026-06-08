@@ -1,5 +1,9 @@
 name: Release
 
+# Builds the per-platform binaries and publishes the GitHub Release. The Homebrew
+# formula lives in the turenlabs/homebrew-tap repo and is bumped there per release
+# (see that repo's bump.sh); this workflow never touches the tap — no tap token.
+
 on:
   push:
     tags: ["v*.*.*"]
@@ -105,29 +109,3 @@ jobs:
           # Tarballs (omc + shims), standalone `omc-<target>` single binaries,
           # their .sha256 sidecars, and the combined SHA256SUMS.
           files: dist/*
-
-  update-homebrew:
-    name: update homebrew tap
-    needs: release
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
-      - name: Resolve version
-        id: version
-        shell: bash
-        run: |
-          ref="${{ github.event.inputs.tag || github.ref_name }}"
-          echo "tag=${ref}" >> "$GITHUB_OUTPUT"
-          echo "version=${ref#v}" >> "$GITHUB_OUTPUT"
-      - name: Bump and publish formula
-        env:
-          # Optional: a PAT with write access to the tap repo. The step no-ops
-          # (logs and exits 0) when the secret is absent, so releases never fail
-          # just because the tap is not yet configured.
-          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
-          # Tap repo in `owner/repo` form, e.g. turenlabs/homebrew-tap.
-          TAP_REPO: ${{ vars.HOMEBREW_TAP_REPO }}
-          VERSION: ${{ steps.version.outputs.version }}
-          TAG: ${{ steps.version.outputs.tag }}
-        shell: bash
-        run: ./scripts/update-homebrew-formula.sh

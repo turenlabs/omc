@@ -2,7 +2,9 @@
 
 OMC ships as the `omc` binary plus opt-in `node`/`npm`/`npx`/`pip`/`pip3`/
 `python`/`python3`/`twine` compatibility shims. Releases are versioned with
-SemVer and published to GitHub Releases + a Homebrew tap.
+SemVer and published to GitHub Releases. This repo builds the binaries and
+publishes the Release; the Homebrew formula lives in the separate
+`turenlabs/homebrew-tap` repo and is bumped there per release.
 
 ## Versioning
 
@@ -12,7 +14,7 @@ Bump it, commit, then tag.
 
 ## Cutting a release
 
-1. Bump `[workspace.package].version` in `Cargo.toml` (e.g. `0.1.0` → `0.2.0`),
+1. Bump `[workspace.package].version` in `Cargo.toml` (e.g. `0.1.1` → `0.2.0`),
    update `Cargo.lock` (`cargo update -p omc-cli` or `cargo build`), and commit.
 2. Tag and push:
 
@@ -28,18 +30,23 @@ Bump it, commit, then tag.
      and the shims under `shims/`) AND a standalone `omc-<target>` single binary
      for direct download, each with a `.sha256`;
    - creates the GitHub Release with the tarballs, the standalone binaries, and a
-     combined `SHA256SUMS` file;
-   - updates the Homebrew tap formula (only if configured — see below).
+     combined `SHA256SUMS` file.
+
+   No token or extra secret is needed — the workflow only builds binaries and
+   publishes the GitHub Release.
 
 You can also trigger it manually from the Actions tab (`workflow_dispatch`) with
 a `tag` input, without pushing a tag.
 
+4. Bump the Homebrew formula in `turenlabs/homebrew-tap` (see below).
+
 ## Homebrew
 
-`Formula/omc.rb` is a **binary** formula — `brew install` downloads the prebuilt
-`omc` release tarball for the user's platform and installs it (no compile, no
-Rust toolchain). It's the in-repo template; the published formula lives in the
-public tap `turenlabs/homebrew-tap`. Users install via:
+The Homebrew formula is a **binary** formula — `brew install` downloads the
+prebuilt `omc` release tarball for the user's platform and installs it (no
+compile, no Rust toolchain). The formula lives in the separate
+`turenlabs/homebrew-tap` repo, not here; this repo only builds the binaries and
+publishes the GitHub Release. Users install via:
 
 ```bash
 brew install turenlabs/tap/omc          # prebuilt binary, installs in seconds
@@ -55,24 +62,19 @@ system `node`/`npm`/`pip`/`python`. The shims are installed under the formula's
 export PATH="$(brew --prefix omc)/libexec/shims:$PATH"
 ```
 
-### Auto-publishing the formula to a dedicated tap (optional)
+### Bumping the formula after a release
 
-To have releases push the updated formula to a separate
-`owner/homebrew-tap` repo, set in this repo's settings:
-
-- Repository **variable** `HOMEBREW_TAP_REPO` = `turenlabs/homebrew-tap`
-- Repository **secret** `HOMEBREW_TAP_TOKEN` = a PAT with write access to that tap
-
-The `update-homebrew` job fetches the release `SHA256SUMS`, rewrites each
-platform's prebuilt-tarball `url`/`sha256` and the `version` in `Formula/omc.rb`,
-and commits it to the tap. Without those settings the job logs and exits 0, so
-releases never fail on a missing tap.
+The formula is bumped in the `turenlabs/homebrew-tap` repo, manually, after the
+GitHub Release exists. From a checkout of that tap, run its `bump-omc.sh` with
+the new version; it fetches the release's `SHA256SUMS`, rewrites each platform's
+prebuilt-tarball `url`/`sha256` and the `version`, and commits. No token or CI
+job in this repo is involved.
 
 ## Local dry run
 
 ```bash
 cargo build --release --locked --package omc-cli
-scripts/package-release.sh 0.2.0 "$(rustc -vV | sed -n 's/host: //p')"
+scripts/package-release.sh 0.2.0 "$(rustc -vV | sed -n 's/host: //p')"  # use the version you're cutting
 ls dist/
 ```
 

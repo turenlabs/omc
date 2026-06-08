@@ -116,9 +116,11 @@ package "no-clock" { deny time, random }         # deny removes a default/earlie
 
 ### Package-age checks (`min-age`)
 
+A **14-day** `min-age` floor is built in and **on by default** — even with no
+`omc.policy`/`omc.toml`, a version published less than 14 days ago is rejected.
 Require a version to be at least N old. Durations: `Nd` days, `Nh` hours,
-`Nm` minutes, `Nw` weeks, `Ns` seconds, bare `N` = days, `0` = no requirement.
-**`min-age` is keyed by package NAME** — a version constraint on the block does
+`Nm` minutes, `Nw` weeks, `Ns` seconds, bare `N` = days, `0` = disable the
+requirement (at any layer). **`min-age` is keyed by package NAME** — a version constraint on the block does
 NOT scope it; put `min-age` in `default` or name-only blocks. A package block can
 tighten (`min-age "30d"`) or exempt (`min-age "0"`) vs. the `default`.
 
@@ -130,14 +132,15 @@ Non-DSL knobs live in `[policy]`:
 [policy]
 allow      = ["http:api.example.com", "env:API_TOKEN"]     # flat grants (capability strings)
 allow-flow = ["env:API_TOKEN -> network:api.example.com"]
-min-release-age = "14d"                                    # project-wide age floor
+min-release-age = "14d"                                    # project-wide age floor (built-in default; "0" disables)
 ```
 
 A **global** policy at `~/.omc/omc.toml` (override dir via `$OMC_HOME`) applies to
 every project: its `allow`/`allow-flow` are unioned **under** the project's, and
-its `min-release-age` is the fallback floor a project overrides. Effective
-min-age precedence (most specific wins): `omc.policy` `min-age` → project
-`omc.toml` → global `~/.omc/omc.toml`.
+its `min-release-age` overrides the built-in 14-day default for every project (a
+project's own `min-release-age` overrides it in turn). Effective min-age
+precedence (most specific wins): `omc.policy` `min-age` → project `omc.toml` →
+global `~/.omc/omc.toml` → built-in 14-day default.
 
 ## Rules for an agent
 

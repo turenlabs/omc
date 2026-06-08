@@ -97,12 +97,20 @@ illegal.
 
 ## Install
 
-Via Homebrew (installs `omc`; does not shadow your system `node`/`npm`/`pip`):
+Via Homebrew (installs the prebuilt `omc` binary; does not shadow your system
+`node`/`npm`/`pip`):
 
 ```bash
-brew install turenlabs/tap/omc
+brew install turenlabs/tap/omc        # downloads the prebuilt release binary
 omc --version
 ```
+
+`brew install turenlabs/tap/omc` is a **binary install** — it downloads the
+prebuilt `omc` binary from the GitHub Release and does not compile anything. To
+build from source instead, use `brew install --HEAD turenlabs/tap/omc`. The
+Homebrew formula lives in the separate
+[`turenlabs/homebrew-tap`](https://github.com/turenlabs/homebrew-tap) repository;
+this repository only builds the binaries and publishes the GitHub Release.
 
 The drop-in `node`/`npm`/`npx`/`pip`/`pip3`/`python`/`python3`/`twine` shims are
 installed under the formula's `libexec/shims` and are opt-in (adding them to
@@ -120,7 +128,7 @@ also include the opt-in shims). To grab just the `omc` binary:
 
 ```bash
 # pick your target: aarch64-apple-darwin | x86_64-apple-darwin | x86_64-unknown-linux-gnu
-curl -fsSL https://github.com/turenlabs/omc/releases/download/v0.1.0/omc-aarch64-apple-darwin -o omc
+curl -fsSL https://github.com/turenlabs/omc/releases/download/v0.1.1/omc-aarch64-apple-darwin -o omc
 chmod +x omc
 ./omc --version
 ```
@@ -422,10 +430,10 @@ project:
 
 - `allow` / `allow-flow` grants are **unioned under** the project's grants (the
   project adds to, and never loses, the global baseline).
-- `min-release-age` is a **fallback floor**, which a project's own
-  `min-release-age` (or an `omc.policy` `min-age`) overrides. If the global file
-  is absent or omits `min-release-age`, the built-in **14-day** default applies
-  as the final fallback (set `0` anywhere to disable it).
+- `min-release-age` sets the floor when the project doesn't; a project's own
+  `min-release-age` (or an `omc.policy` `min-age`) overrides it. If the global
+  file is absent or omits `min-release-age`, the built-in **14-day** default
+  applies (set `0` at any layer to disable it).
 
 A present-but-malformed global file is a hard error, exactly like a project
 `omc.toml`. When the file is absent, the built-in 14-day freshness floor still

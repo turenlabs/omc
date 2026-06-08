@@ -16,10 +16,13 @@ Every step depends on step 0: *the package's code ran during install.*
 ## OMC removes step 0
 
 **OMC never runs a package's install scripts and never imports the package to
-install it.** It resolves the package, downloads the archive, and compiles the
-source to a small capability-typed bytecode. The verdict is computed by *reading*
-the code, not running it. Concretely, for a Shai-Hulud-shaped package OMC blocks
-on **any** of these, deny-by-default:
+install it.** It resolves the package, downloads the archive, and statically
+profiles the source for capability findings — the verdict is computed by
+*reading* the code, never by running it. That static profiler is best-effort
+(see [SECURITY.md](../SECURITY.md) for the precise threat model), but the two
+defenses it backs are absolute: install/lifecycle scripts are *never* executed,
+and a flagged capability is denied by default. Concretely, for a Shai-Hulud-shaped
+package OMC blocks on **any** of these, deny-by-default:
 
 | Worm behaviour | What OMC sees | Default verdict |
 | --- | --- | --- |

@@ -190,9 +190,10 @@ min-release-age = "14d"                                  # project-wide age floo
 defaults to `$HOME/.omc`) applies to **every** project:
 
 - `allow` / `allow-flow` are **unioned under** the project's grants.
-- `min-release-age` is a **fallback floor**; a project's `omc.toml` value, or an
-  `omc.policy` `min-age`, overrides it.
-- Absent ⇒ the built-in 14-day default applies; malformed ⇒ hard error.
+- `min-release-age` is the **lowest-precedence floor**; a project's `omc.toml`
+  value, or an `omc.policy` `min-age`, overrides it.
+- Absent ⇒ the built-in **14-day** floor still applies (the gate is on by
+  default); malformed ⇒ hard error.
 
 **Effective min-age precedence** (most specific wins): `omc.policy` `min-age`
 → project `omc.toml` `min-release-age` → global `~/.omc/omc.toml`
