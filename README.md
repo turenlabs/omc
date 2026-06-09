@@ -10,11 +10,53 @@ Packages don't execute as JavaScript or Python when you install them. OMC resolv
 brew install turenlabs/tap/omc
 # Recent Homebrew gates third-party taps. If you hit "Refusing to load formula
 # … from untrusted tap", run `brew trust turenlabs/tap` and re-run the install.
-
-omc init --name myapp                  # new project
-omc add --npm left-pad@1.3.0           # resolve + verify — no install scripts run
-omc install                            # or: install straight from package.json / requirements.txt
 ```
+
+## From zero to a running app
+
+Two complete walkthroughs — scaffold a project, install its dependencies under
+OMC's deny-by-default gate, then run it with your **normal** dev tools. Every
+command below is real.
+
+### React + Vite (npm)
+
+```bash
+omc npm create vite@latest myapp -- --template react   # scaffold — runs under OMC, no install scripts
+cd myapp
+
+omc install                    # ✋ stops on React: it uses NODE_ENV-gated `eval`, denied by default,
+                               #    and prints the exact grant so you allow it consciously
+omc install --allow-all-host   # review, then allow + record  →  ✓ Installed 136 packages (13 bins)
+
+npm run dev                    # ▶ your normal Vite dev server  →  http://localhost:5173
+```
+
+`npm run dev` uses the **real** `npm`/`node` against the `node_modules` OMC built
+(hardlinked from a content-addressed store, with a populated `.bin/`), so nothing
+special is needed to run. The one rule: **don't re-run `npm install`** — the real
+npm would re-resolve the tree and execute every postinstall script OMC skipped.
+
+### FastAPI + Uvicorn (Python)
+
+```bash
+omc init --name myapi
+omc add --pypi fastapi uvicorn --allow-all-host   # a web server does network → allow + record
+
+cat > main.py <<'EOF'
+from fastapi import FastAPI
+app = FastAPI()
+
+@app.get("/")
+def root():
+    return {"ok": True}
+EOF
+
+omc python -m uvicorn main:app --port 8000        # ▶ http://localhost:8000  →  {"ok":true}
+```
+
+OMC installs Python deps into `./.omc/python/site-packages` (**not** the standard
+location), so run with **`omc python`** (or the opt-in `python` shim). That's the
+one difference from npm, where plain `npm run dev` finds `./node_modules` itself.
 
 A package that wants host access is **blocked** until you allow it:
 
