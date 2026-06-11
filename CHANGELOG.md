@@ -6,6 +6,8 @@ All notable changes to OMC are documented here. The format is based on
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-06-11
+
 ### Added
 
 - **Linux arm64 and fully static musl release binaries.** The release matrix
