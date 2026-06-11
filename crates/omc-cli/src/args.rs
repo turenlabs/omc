@@ -174,6 +174,52 @@ pub(crate) enum Command {
         #[arg(long, help = "Grant all host capabilities for compatibility testing")]
         allow_all_host: bool,
     },
+    #[command(
+        about = "Read-only scan of an existing project: capability-verdict every package its manifests and lockfiles declare (exit 2 if any would be blocked)"
+    )]
+    Scan {
+        #[arg(long, help = "Output machine-readable JSON instead of the text report")]
+        json: bool,
+        #[arg(long, help = "Skip development dependencies declared by the project")]
+        omit_dev: bool,
+        #[arg(
+            long = "allow",
+            help = "Grant a capability to preview how it changes the verdicts, e.g. http:api.example.com, env:API_TOKEN, fs-read:*, proc:*"
+        )]
+        allow: Vec<String>,
+        #[arg(
+            long = "allow-flow",
+            help = "Grant a data flow to preview how it changes the verdicts, e.g. env:API_TOKEN->network:api.example.com"
+        )]
+        allow_flow: Vec<String>,
+        #[arg(long, help = "Grant all host capabilities for compatibility testing")]
+        allow_all_host: bool,
+    },
+    #[command(
+        about = "Compare two package versions: capability, dependency, and verdict changes between old and new (read-only)"
+    )]
+    Diff {
+        #[arg(
+            long,
+            conflicts_with = "pypi",
+            help = "Treat unprefixed specs as npm specs"
+        )]
+        npm: bool,
+        #[arg(
+            long,
+            conflicts_with = "npm",
+            help = "Treat unprefixed specs as PyPI specs"
+        )]
+        pypi: bool,
+        #[arg(help = "Old package spec, e.g. npm:lodash@4.17.20 or pypi:idna==3.6")]
+        old_spec: String,
+        #[arg(
+            help = "New package spec, e.g. npm:lodash@4.17.21 (omit the version to diff against latest)"
+        )]
+        new_spec: String,
+        #[arg(long, help = "Output machine-readable JSON instead of the text report")]
+        json: bool,
+    },
     #[cfg(feature = "dev-commands")]
     #[command(about = "Compile local source into a signed OMC artifact", hide = true)]
     Compile {

@@ -11,6 +11,8 @@ use omc_registry::{
     LinkReport, LockedLocalSource, LockedPackage, OmcRegistryError, Verdict,
 };
 
+use crate::diff::{DiffSide, PackageDiff};
+
 use std::io::IsTerminal;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -462,6 +464,14 @@ fn capability_summary(report: &LinkReport) -> String {
 /// One ⚠ line per security-notable capability class present anywhere in the
 /// tree, naming the packages. Nothing prints when the whole install is benign.
 fn print_risk_callout(reports: &[LinkReport]) {
+    print!("{}", format_risk_callout(reports));
+}
+
+/// Pure formatter behind `print_risk_callout`, shared with the scan report.
+/// Empty when the whole set is benign; otherwise a leading blank line plus the
+/// ⚠ rows.
+fn format_risk_callout(reports: &[LinkReport]) -> String {
+    use std::fmt::Write as _;
     let names_with = |kind: CapabilityKind| -> Vec<String> {
         reports
             .iter()
@@ -473,30 +483,35 @@ fn print_risk_callout(reports: &[LinkReport]) {
     let write = names_with(CapabilityKind::FsWrite);
     let spawn = names_with(CapabilityKind::ProcSpawn);
     if eval.is_empty() && write.is_empty() && spawn.is_empty() {
-        return;
+        return String::new();
     }
-    println!();
+    let mut out = String::new();
+    let _ = writeln!(out);
     if !eval.is_empty() {
-        println!(
+        let _ = writeln!(
+            out,
             "  {} {} can run code OMC couldn't statically verify (dynamic eval)",
             paint("⚠", YELLOW),
             eval.join(", ")
         );
     }
     if !write.is_empty() {
-        println!(
+        let _ = writeln!(
+            out,
             "  {} {} can write files",
             paint("⚠", YELLOW),
             write.join(", ")
         );
     }
     if !spawn.is_empty() {
-        println!(
+        let _ = writeln!(
+            out,
             "  {} {} can run external programs",
             paint("⚠", YELLOW),
             spawn.join(", ")
         );
     }
+    out
 }
 
 fn has_kind(report: &LinkReport, kind: CapabilityKind) -> bool {
@@ -678,9 +693,9 @@ pub(crate) fn format_inspect_report_with(reports: &[LinkReport], verbose: bool) 
             .filter(|r| r.locked.verdict == Verdict::Blocked)
         {
             if verbose {
-                out.push_str(&format_inspect_detail_block(report, root));
+                out.push_str(&format_inspect_detail_block(report, Some(root)));
             } else {
-                out.push_str(&format_inspect_detail_block_compact(report, root));
+                out.push_str(&format_inspect_detail_block_compact(report, Some(root)));
             }
             let _ = writeln!(out);
         }
@@ -744,25 +759,21 @@ fn inspect_tree_row(out: &mut String, connector: &str, report: &LinkReport, widt
     );
 }
 
-/// Compact per-blocked-package block: relation header, short grouped "why"
-/// bullets, runtime evidence files, and a pointer to `-v` for guided approval
-/// details plus the policy preview.
-fn format_inspect_detail_block_compact(report: &LinkReport, root: &LinkReport) -> String {
+/// Compact per-blocked-package block: relation header (when the block is part
+/// of a rooted inspect tree; scan passes `None`), short grouped "why" bullets,
+/// runtime evidence files, and a pointer to `-v` for guided approval details
+/// plus the policy preview.
+fn format_inspect_detail_block_compact(report: &LinkReport, root: Option<&LinkReport>) -> String {
     use std::fmt::Write as _;
     let mut out = String::new();
     let locked = &report.locked;
-    let relation = if locked.name == root.locked.name && locked.version == root.locked.version {
-        "root".to_owned()
-    } else {
-        format!("dep of {}", root.locked.name)
-    };
     let _ = writeln!(
         out,
-        "  {} Review {} {} {}",
+        "  {} Review {} {}{}",
         paint("✗", RED),
         bold(&locked.name),
         locked.version,
-        dim(&format!("({relation})"))
+        relation_note(report, root)
     );
 
     let (needs, unknown) = block_needs(&locked.verifier_findings);
@@ -1057,28 +1068,379 @@ fn tree_capability_summary(reports: &[LinkReport]) -> String {
     }
 }
 
-/// One expanded detail block for a blocked package: the relation header, policy
-/// violation table, runtime capability table, unverifiable-code site table,
-/// guided approval hint, and policy statement preview.
-fn format_inspect_detail_block(report: &LinkReport, root: &LinkReport) -> String {
+// ---------------------------------------------------------------------------
+// `omc scan` report — the whole-project, no-single-root sibling of the inspect
+// report: a banner naming the scanned directory and manifests, the same
+// summary/capability-surface lines, a flat aligned package list (blocked
+// first), and the inspect detail blocks for every blocked package.
+// ---------------------------------------------------------------------------
+
+/// Render the scan report and print it.
+pub(crate) fn print_scan_report(
+    project_dir: &Path,
+    manifests: &[String],
+    reports: &[LinkReport],
+    skipped_python_vcs: usize,
+) {
+    print!(
+        "{}",
+        format_scan_report(
+            project_dir,
+            manifests,
+            reports,
+            skipped_python_vcs,
+            is_verbose()
+        )
+    );
+}
+
+/// Pure formatter for the scan report, unit-testable against constructed
+/// `LinkReport`s like the inspect formatter.
+pub(crate) fn format_scan_report(
+    project_dir: &Path,
+    manifests: &[String],
+    reports: &[LinkReport],
+    skipped_python_vcs: usize,
+    verbose: bool,
+) -> String {
     use std::fmt::Write as _;
     let mut out = String::new();
-    let locked = &report.locked;
+    let total = reports.len();
+    let blocked: Vec<&LinkReport> = reports
+        .iter()
+        .filter(|r| r.locked.verdict == Verdict::Blocked)
+        .collect();
 
-    // Relation header: "root" or "dep of <root-name>", computed from whether
-    // this report IS the root of the inspected graph.
+    let (glyph, verdict_word) = if blocked.is_empty() {
+        (paint("✓", GREEN), paint("OK", GREEN))
+    } else {
+        (paint("✗", RED), paint("BLOCKED", RED))
+    };
+    let _ = writeln!(
+        out,
+        "{glyph} scan of {}  {verdict_word}   {}",
+        bold(&project_dir.display().to_string()),
+        dim(&format!(
+            "{total} package{} from {}",
+            plural(total),
+            manifests.join(", ")
+        ))
+    );
+
+    if total == 0 {
+        let _ = writeln!(
+            out,
+            "  The detected manifests declare no registry packages."
+        );
+        let _ = writeln!(
+            out,
+            "  {}",
+            dim("Read-only scan — nothing was installed or modified.")
+        );
+        return out;
+    }
+
+    if blocked.is_empty() {
+        let _ = writeln!(
+            out,
+            "  All {total} package{} are accepted under the deny-by-default policy.",
+            plural(total)
+        );
+    } else {
+        let _ = writeln!(
+            out,
+            "  Installing this project through OMC would be denied. {} of {total} package{} {} blocked.",
+            blocked.len(),
+            plural(total),
+            if blocked.len() == 1 { "is" } else { "are" }
+        );
+    }
+    let _ = writeln!(
+        out,
+        "  {} {}",
+        dim("Capability surface:"),
+        tree_capability_summary(reports)
+    );
+    if skipped_python_vcs > 0 {
+        let _ = writeln!(
+            out,
+            "  {} {skipped_python_vcs} git/VCS requirement{} skipped — scan does not clone repositories",
+            paint("⚠", YELLOW),
+            plural(skipped_python_vcs)
+        );
+    }
+    let _ = writeln!(out);
+
+    // Flat aligned package list: blocked packages first so the reason the scan
+    // failed is on screen, then accepted, each group alphabetical.
+    let mut ordered: Vec<&LinkReport> = reports.iter().collect();
+    ordered.sort_by(|a, b| {
+        (
+            a.locked.verdict == Verdict::Accepted,
+            &a.locked.name,
+            &a.locked.version,
+        )
+            .cmp(&(
+                b.locked.verdict == Verdict::Accepted,
+                &b.locked.name,
+                &b.locked.version,
+            ))
+    });
+    let width = ordered
+        .iter()
+        .map(|r| r.locked.name.chars().count() + 1 + r.locked.version.chars().count())
+        .max()
+        .unwrap_or(0);
+    for report in &ordered {
+        inspect_tree_row(&mut out, "", report, width);
+    }
+
+    if blocked.is_empty() {
+        out.push_str(&format_risk_callout(reports));
+    } else {
+        let _ = writeln!(out);
+        for report in &blocked {
+            if verbose {
+                out.push_str(&format_inspect_detail_block(report, None));
+            } else {
+                out.push_str(&format_inspect_detail_block_compact(report, None));
+            }
+            let _ = writeln!(out);
+        }
+    }
+    let _ = writeln!(
+        out,
+        "  {}",
+        dim("Read-only scan — nothing was installed or modified.")
+    );
+    out
+}
+
+// ---------------------------------------------------------------------------
+// `omc diff` report — old → new banner, per-side verdict/package/surface rows,
+// then the capability and dependency deltas. The lead line answers the one
+// question the command exists for: does the new version request anything the
+// old one couldn't already do?
+// ---------------------------------------------------------------------------
+
+/// Render the diff report and print it.
+pub(crate) fn print_diff_report(
+    diff: &PackageDiff,
+    old_reports: &[LinkReport],
+    new_reports: &[LinkReport],
+) {
+    print!("{}", format_diff_report(diff, old_reports, new_reports));
+}
+
+/// Pure formatter for the diff report.
+pub(crate) fn format_diff_report(
+    diff: &PackageDiff,
+    old_reports: &[LinkReport],
+    new_reports: &[LinkReport],
+) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::new();
+
+    let _ = writeln!(
+        out,
+        "{} {} {}",
+        bold(&diff.old.resolved),
+        dim("→"),
+        bold(&diff.new.resolved)
+    );
+    let _ = writeln!(out);
+
+    let verdict = |side: &DiffSide| {
+        if side.blocked == 0 {
+            paint("✓ accepted", GREEN)
+        } else {
+            paint(
+                &format!("✗ {} of {} blocked", side.blocked, side.packages),
+                RED,
+            )
+        }
+    };
+    let _ = writeln!(
+        out,
+        "  {}  {} {} {}",
+        dim("verdict "),
+        verdict(&diff.old),
+        dim("→"),
+        verdict(&diff.new)
+    );
+    let mut deltas = Vec::new();
+    if !diff.added_packages.is_empty() {
+        deltas.push(format!("+{} added", diff.added_packages.len()));
+    }
+    if !diff.removed_packages.is_empty() {
+        deltas.push(format!("-{} removed", diff.removed_packages.len()));
+    }
+    if !diff.changed_packages.is_empty() {
+        deltas.push(format!(
+            "{} version change{}",
+            diff.changed_packages.len(),
+            plural(diff.changed_packages.len())
+        ));
+    }
+    let delta_note = if deltas.is_empty() {
+        String::new()
+    } else {
+        format!("   {}", dim(&format!("({})", deltas.join(", "))))
+    };
+    let _ = writeln!(
+        out,
+        "  {}  {} {} {}{delta_note}",
+        dim("packages"),
+        diff.old.packages,
+        dim("→"),
+        diff.new.packages
+    );
+    let _ = writeln!(
+        out,
+        "  {}  {}  {}  {}",
+        dim("surface "),
+        tree_capability_summary(old_reports),
+        dim("→"),
+        tree_capability_summary(new_reports)
+    );
+    let _ = writeln!(out);
+
+    if !diff.escalates() {
+        let _ = writeln!(
+            out,
+            "  {} No new capabilities: the new version cannot do anything the old one couldn't.",
+            paint("✓", GREEN)
+        );
+    }
+    if !diff.added_capabilities.is_empty() {
+        let _ = writeln!(
+            out,
+            "  {} New capabilities ({}):",
+            paint("⚠", YELLOW),
+            diff.added_capabilities.len()
+        );
+        for change in &diff.added_capabilities {
+            let _ = writeln!(
+                out,
+                "    + {}  {} {}   {}",
+                paint(capability_kind_label(change.kind), RED),
+                bold(&change.package),
+                change.version,
+                dim(&format!(
+                    "{}:{} — {}",
+                    change.kind, change.target, change.source
+                ))
+            );
+        }
+    }
+    if diff.new.blocked > diff.old.blocked {
+        let _ = writeln!(
+            out,
+            "  {} The new tree has {} blocked package{} (old: {}). Run `omc inspect {} -v` for the full report.",
+            paint("✗", RED),
+            diff.new.blocked,
+            plural(diff.new.blocked),
+            diff.old.blocked,
+            diff.new.resolved
+        );
+    }
+    if !diff.removed_capabilities.is_empty() {
+        let _ = writeln!(
+            out,
+            "  {} Removed capabilities ({}):",
+            paint("✓", GREEN),
+            diff.removed_capabilities.len()
+        );
+        for change in &diff.removed_capabilities {
+            let _ = writeln!(
+                out,
+                "    - {}  {} {}   {}",
+                capability_kind_label(change.kind),
+                bold(&change.package),
+                change.version,
+                dim(&format!("{}:{}", change.kind, change.target))
+            );
+        }
+    }
+
+    if !diff.added_packages.is_empty()
+        || !diff.removed_packages.is_empty()
+        || !diff.changed_packages.is_empty()
+    {
+        let _ = writeln!(out);
+        let _ = writeln!(out, "  Dependency changes:");
+        for (name, version) in &diff.added_packages {
+            let summary = new_reports
+                .iter()
+                .find(|r| &r.locked.name == name)
+                .map(capability_summary)
+                .unwrap_or_default();
+            let _ = writeln!(out, "    + {} {}   {summary}", bold(name), version);
+        }
+        for (name, version) in &diff.removed_packages {
+            let _ = writeln!(out, "    - {} {}", bold(name), version);
+        }
+        for change in &diff.changed_packages {
+            let _ = writeln!(
+                out,
+                "    ~ {} {} {} {}",
+                bold(&change.name),
+                change.old_version,
+                dim("→"),
+                change.new_version
+            );
+        }
+    }
+
+    let _ = writeln!(out);
+    let _ = writeln!(out, "  {}", dim("Read-only diff — nothing was installed."));
+    out
+}
+
+/// Plain-language label for a capability kind, matching the vocabulary of
+/// `capability_summary`.
+fn capability_kind_label(kind: CapabilityKind) -> &'static str {
+    match kind {
+        CapabilityKind::HttpRequest => "network",
+        CapabilityKind::EnvRead => "reads env",
+        CapabilityKind::FsRead => "reads files",
+        CapabilityKind::FsWrite => "writes files",
+        CapabilityKind::ProcSpawn => "runs programs",
+        CapabilityKind::DynamicEval => "runs unverifiable code",
+    }
+}
+
+/// `" (root)"` / `" (dep of <root>)"` suffix for a blocked-package review
+/// header, or nothing when the block is not part of a rooted inspect tree
+/// (`omc scan` has no single root).
+fn relation_note(report: &LinkReport, root: Option<&LinkReport>) -> String {
+    let Some(root) = root else {
+        return String::new();
+    };
+    let locked = &report.locked;
     let relation = if locked.name == root.locked.name && locked.version == root.locked.version {
         "root".to_owned()
     } else {
         format!("dep of {}", root.locked.name)
     };
+    format!(" {}", dim(&format!("({relation})")))
+}
+
+/// One expanded detail block for a blocked package: the relation header, policy
+/// violation table, runtime capability table, unverifiable-code site table,
+/// guided approval hint, and policy statement preview.
+fn format_inspect_detail_block(report: &LinkReport, root: Option<&LinkReport>) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::new();
+    let locked = &report.locked;
+
     let _ = writeln!(
         out,
-        "  {} Review {} {} {}",
+        "  {} Review {} {}{}",
         paint("✗", RED),
         bold(&locked.name),
         locked.version,
-        dim(&format!("({relation})"))
+        relation_note(report, root)
     );
 
     let (needs, unknown) = block_needs(&locked.verifier_findings);

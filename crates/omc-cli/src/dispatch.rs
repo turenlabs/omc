@@ -18,6 +18,7 @@ use crate::args::InspectFormat;
 use crate::args::{Cli, Command};
 #[cfg(feature = "dev-commands")]
 use crate::compile::print_compile_source;
+use crate::diff::{run_diff, DiffCommand};
 use crate::direct_compat::{
     direct_compat_mode, npx_compat_args, parse_direct_compat_invocation, DirectCompatMode,
 };
@@ -32,6 +33,7 @@ use crate::policy_args::{apply_cli_policy_options, CliPolicyArgs};
 use crate::render::{
     behavior_label, print_audit_report, print_install_report, print_link_reports, verdict_label,
 };
+use crate::scan::{run_scan, ScanCommand};
 use crate::script::run_package_script;
 use crate::shim::{run_node, run_node_in_cwd, run_project_command, run_python, run_python_in_cwd};
 use crate::twine_compat::{run_twine_compat, run_twine_compat_with_cwd};
@@ -329,6 +331,39 @@ fn run() -> Result<ExitCode, OmcRegistryError> {
                 allow,
                 allow_flow,
                 allow_all_host,
+            });
+        }
+        Command::Scan {
+            json,
+            omit_dev,
+            allow,
+            allow_flow,
+            allow_all_host,
+        } => {
+            return run_scan(
+                &cli.project_dir,
+                ScanCommand {
+                    json,
+                    omit_dev,
+                    allow,
+                    allow_flow,
+                    allow_all_host,
+                },
+            );
+        }
+        Command::Diff {
+            npm,
+            pypi,
+            old_spec,
+            new_spec,
+            json,
+        } => {
+            return run_diff(DiffCommand {
+                npm,
+                pypi,
+                old_spec,
+                new_spec,
+                json,
             });
         }
         #[cfg(feature = "dev-commands")]

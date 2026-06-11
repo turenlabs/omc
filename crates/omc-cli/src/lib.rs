@@ -42,6 +42,7 @@ pub(crate) mod agent_skill;
 pub(crate) mod args;
 #[cfg(feature = "dev-commands")]
 pub(crate) mod compile;
+pub(crate) mod diff;
 pub(crate) mod direct_compat;
 pub(crate) mod dispatch;
 #[cfg(feature = "dev-commands")]
@@ -69,6 +70,8 @@ pub(crate) mod pip_render;
 pub(crate) mod policy;
 pub(crate) mod policy_args;
 pub(crate) mod render;
+pub(crate) mod scan;
+pub(crate) mod scratch;
 pub(crate) mod script;
 pub(crate) mod shim;
 pub(crate) mod temp_project;

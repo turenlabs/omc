@@ -21,6 +21,7 @@ use crate::graph::{render_graph, DependencyGraph};
 use crate::manifest::{ecosystem_hint, parse_package_specs};
 use crate::policy_args::apply_cli_policy_options;
 use crate::render::print_inspect_report;
+use crate::scratch::ScratchDir;
 
 /// Default PNG path used by `--format png` when `--output` is omitted (matches
 /// the legacy `omc graph` default).
@@ -45,7 +46,7 @@ pub(crate) fn run_inspect(command: InspectCommand) -> Result<ExitCode, OmcRegist
     // Resolve into a unique throwaway directory so NOTHING is written to the
     // user's cwd/project: any omc.lock, omc.toml, archives, or artifacts that
     // resolution materializes land here and are removed when we return.
-    let scratch = ScratchDir::new()?;
+    let scratch = ScratchDir::new("omc-inspect")?;
 
     let mut options = LinkOptions::new(scratch.path());
     // Record (don't throw on) blocked packages so a blocked dependency is still
@@ -102,33 +103,4 @@ fn resolve_reports(
         reports.extend(add_package_graph(spec, options)?);
     }
     Ok(reports)
-}
-
-/// A unique temporary directory that is best-effort removed on drop. Used purely
-/// as a sandboxed `LinkOptions::project_dir` so inspection never writes into the
-/// user's project.
-struct ScratchDir {
-    path: PathBuf,
-}
-
-impl ScratchDir {
-    fn new() -> Result<Self, OmcRegistryError> {
-        let nonce = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0);
-        let path = std::env::temp_dir().join(format!("omc-inspect-{}-{nonce}", std::process::id()));
-        std::fs::create_dir_all(&path)?;
-        Ok(Self { path })
-    }
-
-    fn path(&self) -> &std::path::Path {
-        &self.path
-    }
-}
-
-impl Drop for ScratchDir {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.path);
-    }
 }

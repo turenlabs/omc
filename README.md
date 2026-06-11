@@ -94,6 +94,40 @@ is allowed to do is auditable.
 > built yet. A sandboxed build chain with secure defaults is the natural next
 > step.
 
+## Try it on a project you already have
+
+You don't have to migrate anything to see what OMC thinks of your dependencies.
+`omc scan` reads the manifests and lockfiles your project already has
+(`package.json`, `package-lock.json`, `requirements.txt`, `uv.lock`, `Pipfile.lock`,
+and friends), profiles every package, and prints the verdicts. It never writes
+to your project and never installs anything:
+
+```bash
+cd my-existing-app
+omc scan            # ✓ or ✗ per package, with the evidence
+omc scan --json     # machine-readable, for CI
+```
+
+The exit code is the same gate as the rest of OMC: `0` when everything is
+accepted, `2` when something would be blocked. That means you can drop
+`omc scan` straight into CI on a project that still installs with plain
+npm or pip.
+
+## Check an upgrade before you take it
+
+Most supply-chain attacks ship inside an upgrade of a package you already
+trust. `omc diff` profiles two versions and tells you what the new one can do
+that the old one could not:
+
+```bash
+omc diff npm:lodash@4.17.20 npm:lodash@4.17.21
+omc diff pypi:requests==2.31.0 pypi:requests==2.32.3 --json
+```
+
+The report covers new and removed capabilities (with the file that triggers
+each one), dependency additions and removals, and verdict changes. The JSON
+output has an `escalation` field you can gate a dependency-bump PR on.
+
 ## Per-package policy (`omc.policy`)
 
 `omc.toml`'s `[policy]` block is one flat allow-list for the whole project. Drop an optional **`omc.policy`** file next to it to scope grants to *individual* packages. It has a `default` baseline plus `package` blocks that `allow`/`deny` capabilities, declare `flow`s, mark a package `pure`, or lift the sensitive-read guard:

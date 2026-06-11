@@ -770,6 +770,97 @@ fn lock_project_options(options: &mut LinkOptions) -> Result<Vec<LinkReport>> {
     Ok(reports)
 }
 
+/// The result of a read-only project scan: one capability-profiled report per
+/// resolved package, plus a count of requirements the scan cannot resolve.
+pub struct ProjectScan {
+    pub reports: Vec<LinkReport>,
+    /// Python VCS requirements (`git+…`) present in the project's manifests.
+    /// Resolving them means cloning repositories, which a read-only scan does
+    /// not do; callers must surface this count so a scan that skipped inputs is
+    /// never mistaken for full coverage.
+    pub skipped_python_vcs: usize,
+}
+
+/// Read-only project scan: discover everything `source_dir`'s manifests and
+/// lockfiles declare (package.json, package-lock.json, requirements.txt,
+/// Pipfile.lock, uv.lock, …) exactly like `omc install` would, then resolve and
+/// capability-profile those requirements — but with every lockfile, manifest,
+/// archive, and artifact write landing under `options.project_dir`. Pass a
+/// throwaway directory there and the scanned project is never touched.
+pub fn scan_project_dir(
+    source_dir: impl AsRef<Path>,
+    options: &LinkOptions,
+) -> Result<ProjectScan> {
+    let source_dir = source_dir.as_ref();
+    let mut options = options.clone();
+    let mut specs = Vec::new();
+
+    // An OMC project's own manifest contributes its declared dependencies and
+    // config, same as `omc install`; non-OMC projects simply skip this block.
+    let manifest_path = source_dir.join(MANIFEST);
+    if manifest_path.exists() {
+        let manifest = read_manifest(&manifest_path)?;
+        apply_manifest_config(&manifest, &mut options)?;
+        for (key, requirement) in manifest.dependencies {
+            specs.push(parse_manifest_dependency(&key, &requirement)?);
+        }
+        if options.include_optional_dependencies {
+            for (key, requirement) in manifest.optional_dependencies {
+                specs.push(parse_manifest_dependency(&key, &requirement)?);
+            }
+        }
+        if options.include_peer_dependencies {
+            for (key, requirement) in manifest.peer_dependencies {
+                specs.push(parse_manifest_dependency(&key, &requirement)?);
+            }
+        }
+        if options.include_dev_dependencies {
+            for (key, requirement) in manifest.dev_dependencies {
+                specs.push(parse_manifest_dependency(&key, &requirement)?);
+            }
+        }
+    }
+
+    let discovered = discover_project_requirements_with_selection(
+        source_dir,
+        &options.project_extras,
+        DependencySelection::from_options(&options),
+    )?;
+    apply_project_requirements_to_options(&mut options, &mut specs, discovered);
+
+    if !options.npm_discovered_local_paths.is_empty() {
+        specs.extend(resolve_npm_discovered_local_path_requirements(
+            &mut options,
+        )?);
+    }
+    if !options.python_local_requirements.is_empty() {
+        let requirements = resolve_python_local_requirements(
+            &options.python_local_requirements,
+            options.pypi_include_dependencies,
+        )?;
+        apply_project_requirements_to_options(&mut options, &mut specs, requirements);
+    }
+    let skipped_python_vcs = options.python_vcs_requirements.len();
+
+    init_project(&options.project_dir, None)?;
+    let client = Client::builder()
+        .user_agent(concat!("omc/", env!("CARGO_PKG_VERSION")))
+        .build()?;
+    let mut seen_roots = BTreeSet::new();
+    let mut reports = Vec::new();
+    for spec in specs {
+        if !seen_roots.insert(spec.requested()) {
+            continue;
+        }
+        reports.extend(resolve_package_graph(&client, &spec, &options)?);
+    }
+
+    Ok(ProjectScan {
+        reports,
+        skipped_python_vcs,
+    })
+}
+
 /// Install strictly from `omc.lock`, wiping the OMC-managed `node_modules` first
 /// (a from-scratch clean install). Backs `omc ci` and the npm-compat `ci` path.
 pub fn install_locked_project(options: &LinkOptions) -> Result<InstallReport> {

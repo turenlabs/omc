@@ -326,6 +326,7 @@ fn temp_test_dir() -> PathBuf {
 }
 
 mod agent_tests;
+mod diff_tests;
 mod graph_tests;
 mod inspect_tests;
 mod misc_tests;
@@ -337,4 +338,5 @@ mod parse_pip_tests;
 mod pip_compat_tests;
 mod pip_config_tests;
 mod policy_tests;
+mod scan_tests;
 mod twine_tests;

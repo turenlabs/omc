@@ -6,6 +6,22 @@ All notable changes to OMC are documented here. The format is based on
 
 ## [Unreleased]
 
+### Added
+
+- **`omc scan`**: read-only capability scan of an existing project, no
+  migration needed. It reads the manifests and lockfiles the project already
+  has (package.json, package-lock.json, yarn.lock, pnpm-lock.yaml,
+  requirements.txt, Pipfile.lock, uv.lock, poetry.lock, pyproject.toml, and
+  more), profiles every declared package through the deny-by-default engine,
+  and reports the verdicts without writing anything to the project. Exits `2`
+  when any package would be blocked, so it works as a CI gate on projects that
+  still install with plain npm or pip. Supports `--json` and `--omit-dev`.
+- **`omc diff <old> <new>`**: the upgrade escalation check. Profiles two
+  package versions and reports what changed: capabilities added or removed
+  (with the evidence file for each), dependencies added, removed, or
+  version-changed, and the verdict on each side. `--json` output includes an
+  `escalation` boolean for gating dependency-bump PRs.
+
 ## [0.1.2] - 2026-06-08
 
 ### Fixed

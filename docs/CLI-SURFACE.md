@@ -90,6 +90,8 @@ profiling happen in a throwaway temp dir — no `omc.lock`, manifest,
 |---|---|
 | `omc inspect <spec…>` | Resolve and show a package's capabilities without installing (text report, or `--format png` graph) |
 | `omc inspect <spec…> --format png` | (same command; `--format` selects output) Output format: text (default, full capability report) or png (a dependency-graph image) |
+| `omc scan` | Read-only scan of an existing project: capability-verdict every package its manifests and lockfiles declare (exit 2 if any would be blocked) |
+| `omc diff <old> <new>` | Compare two package versions: capability, dependency, and verdict changes between old and new (read-only) |
 | `omc policy check <pkg>[@ver]` | Show the effective compiled policy for a package, e.g. `omc policy check stripe@13.1.0` |
 
 - **`omc inspect <spec>`** (default `--format text`) — the full per-file
@@ -99,14 +101,37 @@ profiling happen in a throwaway temp dir — no `omc.lock`, manifest,
 - **`omc inspect <spec> --format png [--output FILE]`** — render the dependency
   tree as a PNG, nodes colored by risk (default output `omc-graph.png`). Use
   this for a quick visual of the dependency graph's risk shape.
+- **`omc scan`** — the project-level sibling of inspect. It takes no specs:
+  it reads the manifests and lockfiles already in the project directory
+  (package.json, package-lock.json, yarn.lock, pnpm-lock.yaml,
+  requirements.txt, Pipfile.lock, uv.lock, poetry.lock, pyproject.toml, …),
+  resolves and profiles every declared package in a throwaway temp dir, and
+  reports the verdicts. No omc.toml is required and nothing is written to the
+  project. Unlike inspect, scan IS a gate: it exits `2` when any scanned
+  package would be blocked, so it can sit in CI on a project that does not use
+  OMC to install. `--json` for machine-readable output, `--omit-dev` to skip
+  development dependencies. Python `git+…` requirements are not resolved; the
+  report says how many were skipped.
+- **`omc diff <old> <new>`** — resolve and profile two package versions (each
+  in its own throwaway dir) and report the delta: capabilities added/removed
+  by (package, kind, target) with evidence files, dependencies
+  added/removed/version-changed, and the verdict on each side. This is the
+  upgrade escalation check: "can the new version do anything the old one
+  couldn't?" Informational like inspect (always exit 0); `--json` output has
+  an `escalation` boolean to gate dependency-bump PRs on.
 - **`omc policy check <pkg>`** — show the *effective compiled policy* for a
   package: the grants that actually apply after merging defaults, `omc.policy`,
   and the global store. Use this to answer "what is this package allowed to do
   under my policy?" rather than "what does this package want to do?".
 
-All `inspect` forms accept the same `--allow` / `--allow-flow` /
+`inspect` and `scan` accept the same `--allow` / `--allow-flow` /
 `--allow-all-host` grants so you can preview how a grant would change the
-verdict.
+verdict(s).
+
+Inspect-vs-scan-vs-diff: `inspect` takes registry **specs**, `scan` takes the
+**project directory** (via the global `--project-dir`, default `.`), and
+`diff` takes **two specs** to compare. All three are read-only and resolve
+into throwaway temp dirs.
 
 > `omc graph <spec>` is a hidden, deprecated alias for `omc inspect <spec>
 > --format png`. Prefer `omc inspect --format png`.
