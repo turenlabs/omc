@@ -128,6 +128,47 @@ The report covers new and removed capabilities (with the file that triggers
 each one), dependency additions and removals, and verdict changes. The JSON
 output has an `escalation` field you can gate a dependency-bump PR on.
 
+## Docker and CI
+
+OMC needs no runtime sandbox, no privileged mode, and no kernel features:
+enforcement happens at install time as static analysis. In a container it is
+one binary plus network access to the registries, so the deny-by-default gate
+works in `docker build` exactly like it does locally. A blocked package exits
+`2` and fails the build.
+
+Releases ship Linux binaries for both `x86_64` and `aarch64` (so Docker on
+Apple Silicon works without emulation), in two flavors: `gnu` for
+glibc bases like `debian`/`ubuntu`, and fully static `musl` builds that run on
+Alpine and even `FROM scratch`.
+
+```dockerfile
+FROM node:22-slim
+# Pin the binary by checksum. Get the value from the release's SHA256SUMS file.
+ADD --chmod=755 \
+    --checksum=sha256:<sha256 of omc-x86_64-unknown-linux-gnu from SHA256SUMS> \
+    https://github.com/turenlabs/omc/releases/download/v0.3.0/omc-x86_64-unknown-linux-gnu \
+    /usr/local/bin/omc
+WORKDIR /app
+COPY package.json omc.toml omc.lock ./
+# Clean install from omc.lock, then fail the build if anything is blocked.
+RUN --mount=type=cache,target=/root/.omc omc ci && omc audit
+COPY . .
+CMD ["node", "server.js"]
+```
+
+Notes for container use:
+
+- Containers are non-interactive, so OMC fails closed: there is no approval
+  prompt. Commit the grants a package needs (`omc.toml` `[policy]` or
+  `omc.policy`) before the build.
+- The cache mount on `/root/.omc` (or set `$OMC_HOME`) keeps the
+  content-addressed store warm across rebuilds without baking it into layers.
+- The running container does not need omc: installs land in normal trees
+  (`node_modules`, `.omc/python/site-packages`), so `node server.js` just
+  works. Keep omc in the image only if you want `omc run` or the shims.
+- For a project that does not use OMC to install yet, `omc scan` is the same
+  gate without any migration.
+
 ## Per-package policy (`omc.policy`)
 
 `omc.toml`'s `[policy]` block is one flat allow-list for the whole project. Drop an optional **`omc.policy`** file next to it to scope grants to *individual* packages. It has a `default` baseline plus `package` blocks that `allow`/`deny` capabilities, declare `flow`s, mark a package `pure`, or lift the sensitive-read guard:

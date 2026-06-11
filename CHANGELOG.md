@@ -6,6 +6,22 @@ All notable changes to OMC are documented here. The format is based on
 
 ## [Unreleased]
 
+### Added
+
+- **Linux arm64 and fully static musl release binaries.** The release matrix
+  now also builds `aarch64-unknown-linux-gnu` (native, on the GitHub arm
+  runner), `x86_64-unknown-linux-musl`, and `aarch64-unknown-linux-musl`. The
+  musl builds are fully static: they run on Alpine and in `FROM scratch`
+  images with no glibc. Docker on Apple Silicon no longer needs amd64
+  emulation.
+- **Docker and CI docs**: a README section with a checksum-pinned Dockerfile
+  recipe (`omc ci && omc audit` as the build gate, `$OMC_HOME` cache mount,
+  fail-closed policy notes).
+- The Release workflow gained a `dry_run` dispatch input that builds and
+  packages every target without publishing, for validating matrix changes
+  before tagging.
+- The Homebrew formula now covers Linux arm64 (bumped in the tap repo).
+
 ## [0.2.0] - 2026-06-11
 
 ### Added

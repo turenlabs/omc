@@ -28,7 +28,11 @@ Bump it, commit, then tag.
 
 4. The **Release** workflow (`.github/workflows/release.yml`) then:
    - builds `--release` binaries for `aarch64-apple-darwin`,
-     `x86_64-apple-darwin`, and `x86_64-unknown-linux-gnu`;
+     `x86_64-apple-darwin`, `x86_64-unknown-linux-gnu`,
+     `aarch64-unknown-linux-gnu` (native, on the GitHub arm runner), and the
+     fully static `x86_64-unknown-linux-musl` and `aarch64-unknown-linux-musl`
+     (for Alpine and `FROM scratch` containers; pure-Rust deps + ring, so
+     `musl-tools` is the only extra toolchain piece);
    - packages each into `omc-<version>-<target>.tar.gz` (with `omc` at the root
      and the shims under `shims/`) AND a standalone `omc-<target>` single binary
      for direct download, each with a `.sha256`;
@@ -39,7 +43,13 @@ Bump it, commit, then tag.
    publishes the GitHub Release.
 
 You can also trigger it manually from the Actions tab (`workflow_dispatch`) with
-a `tag` input, without pushing a tag.
+a `tag` input, without pushing a tag. Check the `dry_run` box to build and
+package every target but skip publishing; use this to validate matrix changes
+before tagging a real release:
+
+```bash
+gh workflow run release.yml -f tag=v0.3.0 -f dry_run=true
+```
 
 5. Bump the Homebrew formula in `turenlabs/homebrew-tap` (see below).
 
