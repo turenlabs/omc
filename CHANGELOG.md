@@ -6,6 +6,8 @@ All notable changes to OMC are documented here. The format is based on
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-06-11
+
 ### Added
 
 - **`omc scan`**: read-only capability scan of an existing project, no
